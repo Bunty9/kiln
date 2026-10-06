@@ -4,5 +4,8 @@
   "type": "module",
   "dependencies": {
     "pg": "^8.11.0"
+  },
+  "scripts": {
+    "test": "node --test test.js"
   }
 }

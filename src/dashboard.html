@@ -2,759 +2,1116 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <title>kiln</title>
+<link rel="icon" id="fav" href="data:,">
 <style>
-:root{
-  --bg:#171a20;--panel:#1e222a;--sunk:#13161b;--line:#2d333d;--fg:#dde2ea;--mute:#949cab;
-  --accent:#7cb7e8;--ok:#5cc79a;--warn:#e2b75e;--bad:#ef7a73;--idle:#8a93a3;
-  --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
+:root{color-scheme:dark light;
+ --bg:#16130F;--surface:#1E1A16;--raised:#26211C;--sunk:#110E0B;
+ --line:#332C25;--line-strong:#463D34;
+ --fg:#EDE6DD;--fg-2:#B3A99D;--fg-3:#968B7F;
+ --ember:#F59E4C;--on-ember:#16130F;
+ --ok:#5DBE8A;--fail:#F07068;--queued:#93A6C2;--warn:#E2C35A;
+ --tint:14%;--focus:0 0 0 2px var(--bg),0 0 0 4px var(--ember);
+ --pop:0 12px 32px -8px rgb(0 0 0/.55),0 0 0 1px var(--line-strong);
+ --sans:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
+ --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+ --ease:120ms cubic-bezier(.2,0,0,1);--tabh:calc(56px + env(safe-area-inset-bottom));
 }
 @media (prefers-color-scheme:light){:root{
-  --bg:#f3f5f8;--panel:#fff;--sunk:#eef1f5;--line:#d6dbe3;--fg:#1b2230;--mute:#566072;
-  --accent:#1f62b8;--ok:#13804e;--warn:#8f6200;--bad:#c0322b;--idle:#5f6878;
+ --bg:#F6F5F3;--surface:#FFF;--raised:#FFF;--sunk:#EFEDEA;
+ --line:#E2DED8;--line-strong:#CBC5BC;
+ --fg:#1C1813;--fg-2:#5E564C;--fg-3:#6E655B;
+ --ember:#A34B07;--on-ember:#FFF;
+ --ok:#136A40;--fail:#C02F27;--queued:#4D6890;--warn:#8A6100;
+ --tint:10%;--pop:0 12px 32px -12px rgb(40 30 20/.25),0 0 0 1px var(--line-strong);
 }}
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans)}
-body{min-height:100vh}
-a{color:var(--accent)}
-h1,h2,h3{margin:0;font-weight:600}
-h2{font-size:15px}h3{font-size:13px;color:var(--mute);margin:14px 0 6px}
-code,.mono{font-family:var(--mono);font-size:12.5px}
-.mute{color:var(--mute)}.err{color:var(--bad);white-space:pre-wrap;word-break:break-word}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%}
+h1,h2,h3,p,ul,dl,dd{margin:0}
+a{color:inherit}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:0;box-shadow:var(--focus)}
+[hidden]{display:none!important}
+.mono{font-family:var(--mono)}.fg2{color:var(--fg-2)}.fg3{color:var(--fg-3)}.sm{font-size:12px}.sp{flex:1}
+.ok{color:var(--ok)}.fail{color:var(--fail)}.warn{color:var(--warn)}.q{color:var(--queued)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-header{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
-header h1{font-size:16px;letter-spacing:.02em}
-nav{display:flex;gap:2px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
-nav a{color:var(--mute);text-decoration:none;padding:6px 10px;border-radius:6px;white-space:nowrap}
-nav a:hover{color:var(--fg)}
-nav a[aria-current=page]{color:var(--fg);background:var(--sunk);box-shadow:inset 0 -2px var(--accent)}
-main{max-width:1280px;margin:0 auto;padding:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px;min-width:0}
-.head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
-.grid>.card{margin:0}
-.split{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr);gap:14px;align-items:start}
-.split.wide{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}
-@media (max-width:860px){.split,.split.wide{grid-template-columns:minmax(0,1fr)}}
-button{font:inherit;font-size:13px;color:var(--fg);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
-button:hover:not(:disabled){border-color:var(--accent)}
-button:disabled{opacity:.55;cursor:default}
-button.primary{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
-button.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 50%,var(--line))}
-button.link{background:none;border:0;padding:0;color:var(--accent);text-align:left}
-input{font:inherit;color:var(--fg);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:5px 8px;min-width:0}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.row input{flex:1}
-.scroll{overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th{text-align:left;font-weight:500;color:var(--mute);padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-tr[data-vm]{cursor:pointer}
-tr[data-vm]:hover td,tr.sel td{background:var(--sunk)}
-td.nw{white-space:nowrap}
-.badge{display:inline-block;font-size:12px;padding:0 7px;border-radius:9px;border:1px solid currentColor;white-space:nowrap;line-height:18px}
-.b-ok{color:var(--ok)}.b-bad{color:var(--bad)}.b-warn{color:var(--warn)}.b-run{color:var(--accent)}.b-off{color:var(--idle)}
-.pills{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:14px;background:var(--panel);border:1px solid var(--line);font-size:13px;max-width:100%}
-.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--idle);flex:none}
-.pill.ok::before{background:var(--ok)}.pill.bad::before{background:var(--bad)}.pill.warn::before{background:var(--warn)}
-.pill.bad{color:var(--bad)}
-.spin{width:10px;height:10px;border:2px solid var(--warn);border-right-color:transparent;border-radius:50%;animation:sp 1s linear infinite;display:inline-block}
-@keyframes sp{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.spin{animation:none}}
-.meter{margin:8px 0}
-.meter-l{display:flex;justify-content:space-between;gap:8px;font-size:13px}
-.bar{height:6px;background:var(--sunk);border-radius:3px;overflow:hidden;margin-top:4px}
-.bar span{display:block;height:100%;background:var(--accent)}
-.bar.warn span{background:var(--warn)}.bar.bad span{background:var(--bad)}
-.slots{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px}
-.slot{width:74px;height:54px;border-radius:6px;border:1px dashed var(--line);display:flex;flex-direction:column;justify-content:center;align-items:center;font-size:12px}
-.slot:not(.on){color:var(--mute)}
-button.slot{padding:0;background:none}
-.slot.on{border-style:solid;border-color:currentColor;background:color-mix(in srgb,currentColor 12%,transparent)}
-.slot b{font-family:var(--mono);font-weight:500;font-size:11px;color:var(--fg);max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0;font-size:13px}
-dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;word-break:break-word}
-pre.log,pre.snip{background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0 0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all;overflow:auto}
-pre.log{height:min(60vh,520px)}
-pre.log:empty::before{content:"No output yet.";color:var(--mute)}
-pre.snip{white-space:pre}
-.tabs{display:flex;gap:4px;margin-top:12px}
-.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent)}
-ol.start{margin:6px 0 0;padding-left:22px}ol.start li{margin:8px 0}
-ol.start li.done{color:var(--mute)}ol.start li.done::marker{content:"✓  ";color:var(--ok)}
-ul.list{list-style:none;margin:0 0 10px;padding:0}
-ul.list li{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
-ul.list li button.link{flex:1;color:var(--fg);padding:3px 4px;border-radius:4px;font-family:var(--mono);font-size:12.5px;word-break:break-all}
-ul.list li button.link[aria-current=true]{background:var(--sunk);color:var(--accent)}
-.steps{margin:4px 0 0;padding:0;list-style:none;font-size:12.5px}
-.steps li{display:flex;gap:8px;padding:2px 0}
-.job{padding:8px 0;border-top:1px dashed var(--line)}
-.job:first-child{border-top:0}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--idle);margin-right:6px}
-.dot.on{background:var(--ok)}
-.out{display:block;margin-top:4px;color:var(--mute);word-break:break-word}
-form.cfg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 14px}
-form.cfg label{display:flex;flex-direction:column;gap:3px;font-size:12.5px;color:var(--mute)}
-form.cfg .full{grid-column:1/-1}
-#conn{margin-left:auto}
-#toast{position:fixed;right:16px;bottom:16px;left:16px;margin-left:auto;max-width:440px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:6px;padding:10px 12px;box-shadow:0 6px 24px rgba(0,0,0,.35);white-space:pre-wrap;word-break:break-word;z-index:9}
-#toast.bad{border-left-color:var(--bad)}
+.top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line)}
+.top>div{max-width:1120px;margin:0 auto;padding:0 16px;height:52px;display:flex;align-items:center;gap:24px}
+.logo{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:650;text-decoration:none}
+.nav{display:flex;gap:4px;flex:1}
+.nav a{padding:6px 12px;border-radius:6px;color:var(--fg-2);text-decoration:none;font-size:13px;transition:background var(--ease),color var(--ease)}
+.nav a:hover{color:var(--fg);background:var(--raised)}
+.nav a[aria-current]{color:var(--fg);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line)}
+.cdot{width:8px;height:8px;border-radius:50%;background:var(--ok);margin-left:auto}
+.cdot.bad{background:var(--warn)}
+#conn{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:30;width:min(560px,calc(100vw - 32px))}
+#conn .bn{margin:0;box-shadow:var(--pop);background:color-mix(in srgb,var(--c) 18%,var(--surface))}
+body.down main{opacity:.6}
+main{max-width:1120px;margin:0 auto;padding:24px 16px 48px;transition:opacity var(--ease)}
+.ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin-bottom:16px}
+.ph h1{font-size:20px;font-weight:600;line-height:1.3}
+.back{display:inline-block;margin-bottom:12px;color:var(--fg-2);font-size:13px;text-decoration:none}
+.back:hover{color:var(--fg)}
+.ov{display:grid;gap:24px 32px;grid-template-columns:minmax(0,1fr)}
+@media(min-width:960px){.ov{grid-template-columns:minmax(0,1fr) 280px}.ov>aside{position:sticky;top:76px}}
+.sec{margin-top:32px}.sec:first-child{margin-top:0}
+.sec>h2,.card h2{font-size:16px;font-weight:600;margin-bottom:12px;display:flex;align-items:baseline;gap:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}
+@media(min-width:768px){.card{padding:20px}}
+.card+.card{margin-top:16px}
+.hair>*+*{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+#ov-st{margin-bottom:16px}
+.stline{color:var(--fg-2);font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:16px}
+.stline .d{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.bn{--c:var(--warn);display:flex;align-items:center;gap:16px;min-height:44px;padding:8px 16px;margin-bottom:8px;border-left:3px solid var(--c);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--c) var(--tint),var(--surface));font-size:13px}
+.bn>span:first-child{flex:1;min-width:0;overflow-wrap:anywhere}
+.bn .btn{flex:none}
+.ph-steps{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:2px;color:var(--fg-2);font-size:12px}
+.ph-steps b{color:var(--fg)}
+.chs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.ch{height:64px;border:1px dashed var(--line-strong);border-radius:10px;display:flex;align-items:center;padding:0 16px;color:var(--fg-2);font-size:13px;text-decoration:none}
+a.ch{border:1px solid var(--line);border-top:2px solid var(--queued);background:var(--surface);color:var(--fg);gap:12px;transition:background var(--ease)}
+a.ch:hover{background:var(--raised)}
+a.ch.run{border-top-color:var(--ember)}
+.ch .tx{flex:1;min-width:0}.ch .tx>*{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ch .tm{font-size:16px;font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+@media(min-width:720px){.stats{grid-template-columns:repeat(4,1fr)}}
+.stat{background:var(--surface);padding:16px;min-height:72px;text-decoration:none;display:block}
+.stat .l{font-size:12px;color:var(--fg-2)}.stat .v{font-size:32px;font-weight:600;line-height:1.2}
+a.stat:hover{background:var(--raised)}
+.foot{margin-top:8px;font-size:12px;color:var(--fg-2)}
+.lnk{background:none;border:0;padding:0;cursor:pointer;color:inherit;text-decoration:underline;text-underline-offset:2px}
+.meter{padding:0}.meter .l{display:flex;justify-content:space-between;font-size:13px}
+.meter .b{height:6px;background:var(--sunk);border-radius:3px;margin-top:6px;overflow:hidden}
+.meter .b i{display:block;height:100%;background:var(--fg-2);transition:width var(--ease)}
+.meter.hot .b i{background:var(--warn)}
+.list{list-style:none;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.list>li{position:relative;border-top:1px solid var(--line)}.list>li:first-child{border-top:0}
+.row{display:grid;grid-template-columns:96px minmax(0,1fr) 110px 80px;align-items:center;gap:0 12px;min-height:48px;padding:8px 16px;font-size:13px;text-decoration:none;transition:background var(--ease)}
+a.row:hover,li:hover>.row{background:var(--raised)}
+.row[aria-current]{box-shadow:inset 2px 0 var(--ember)}
+.row .tt{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.row .tt .r{color:var(--fg-2)}.row .id{display:block;font:12px var(--mono);color:var(--fg-3)}
+.row .w{color:var(--fg-2)}.row .d{text-align:right}.row .m{display:none}
+@media(max-width:719px){
+ .row{grid-template-columns:84px minmax(0,1fr);grid-template-areas:"b t" "b m";gap:2px 12px;min-height:56px}
+ .row .bd{grid-area:b;align-self:start;padding-top:2px}.row .t{grid-area:t}.row .m{grid-area:m;display:block;font-size:12px;color:var(--fg-2)}
+ .row .w,.row .d,.row .id{display:none}
+}
+.rr{grid-template-columns:minmax(0,1fr) 160px 96px 80px}
+.rr .nm{font-weight:500;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rr .nm::after{content:"";position:absolute;inset:0}
+.rr .rt,.rr .lr,.rr .qn{position:relative;z-index:1}
+.rr .qn{text-align:right;color:var(--queued)}
+@media(max-width:719px){.rr{grid-template-areas:"n n" "r l";grid-template-columns:auto auto;justify-content:start;gap:4px 12px}.rr .nm{grid-area:n}.rr .rt{grid-area:r}.rr .lr{grid-area:l}.rr .qn{display:none}}
+.sn{padding:0 16px 16px}
+@media(max-width:719px){.row.flat{grid-template-areas:none!important}.row.flat>*{grid-area:auto!important}.row.flat .id{display:block}.row.flat.bf{grid-template-columns:auto minmax(0,1fr) auto!important}}
+.pr{grid-template-columns:minmax(0,1fr) 190px 90px 80px;grid-template-areas:"n c s p" "g g g g"}
+.pr .pc{grid-area:c}.pr .ps{grid-area:s}
+@media(max-width:719px){.pr{grid-template-areas:"n p" "c c" "s s" "g g";grid-template-columns:minmax(0,1fr) auto}.pr .id{display:block}}
+.pg{margin-top:4px;font:12px var(--mono);color:var(--fg-2);grid-area:g;white-space:pre-wrap;overflow-wrap:anywhere}
+.bdg{--c:var(--fg-2);display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:4px;font:500 12px/20px var(--sans);color:var(--c);background:color-mix(in srgb,var(--c) var(--tint),var(--surface));white-space:nowrap}
+.bdg::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.s-running{--c:var(--ember)}.s-booting,.s-waiting,.s-queued{--c:var(--queued)}.s-passed,.s-ok{--c:var(--ok)}.s-failed{--c:var(--fail)}.s-lost,.s-warn{--c:var(--warn)}
+.s-running::before,.dot.run{animation:br 1.6s ease-in-out infinite alternate}
+@keyframes br{from{opacity:.55}to{opacity:1}}
+.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;border:1px solid var(--line-strong);font-size:13px}
+.chip button{background:none;border:0;padding:0;cursor:pointer;color:var(--fg-2);line-height:1}
+.tag{font-size:12px;color:var(--warn);margin-left:8px}
+.btn{height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--line-strong);background:var(--raised);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap;transition:border-color var(--ease),background var(--ease)}
+.btn:hover{border-color:var(--fg-3)}
+.btn.pri{background:var(--ember);color:var(--on-ember);border-color:transparent;font-weight:600}
+.btn.dng{color:var(--fail)}.btn.dng.fill{background:var(--fail);color:var(--on-ember);border-color:transparent}
+.btn[disabled]{opacity:.5;cursor:default}
+@media(max-width:719px){.btn{height:40px}}
+input[type=text],input[type=number],input[type=password],select{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line-strong);background:var(--sunk);min-width:0;max-width:100%}
+input::placeholder{color:var(--fg-3)}
+@media(max-width:719px){input[type=text],input[type=number],input[type=password],select{height:40px;font-size:16px}}
+input[role=switch]{appearance:none;flex:none;width:32px;height:18px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer;margin:0;transition:background var(--ease)}
+input[role=switch]::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fg);transition:transform var(--ease)}
+input[role=switch]:checked{background:var(--ember)}input[role=switch]:checked::after{transform:translateX(14px);background:var(--on-ember)}
+input[role=switch]:disabled{opacity:.5;cursor:default}
+.seg{display:inline-flex;background:var(--sunk);border-radius:6px;padding:2px;gap:2px}
+.seg button{height:28px;padding:0 12px;border:0;border-radius:4px;background:none;color:var(--fg-2);cursor:pointer;font-size:13px;transition:background var(--ease)}
+.seg button[aria-checked=true]{background:var(--raised);color:var(--fg)}.seg button[disabled]{color:var(--fg-3);cursor:default}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:16px}
+.cal{--c:var(--fail);padding:12px 16px;border-left:3px solid var(--c);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--c) var(--tint),var(--surface));font-size:13px;overflow-wrap:anywhere;margin:16px 0}
+.cal.neu{--c:var(--fg-2)}.cal.w{--c:var(--warn)}.cal.o{--c:var(--ok)}
+.empty{padding:24px 0;display:flex;flex-direction:column;align-items:flex-start;gap:12px;color:var(--fg-2)}
+.empty p{max-width:52ch}
+.jh{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.jh h1{font-size:20px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.jm{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 16px;font-size:12px;color:var(--fg-2)}
+.tl{display:flex;gap:1px;height:8px;border-radius:4px;overflow:hidden;background:var(--sunk)}
+.tl i{display:block;min-width:4px;background:var(--queued)}
+.tl .q{opacity:.5}.tl .w{background:var(--line-strong)}.tl .j-ok{background:var(--ok)}.tl .j-fail{background:var(--fail)}.tl .j-run{background:var(--ember)}
+.tll{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}
+.tll span{font-size:12px;color:var(--fg-2)}.tll b{display:block;font-size:13px;font-weight:500;color:var(--fg)}
+.lv{margin-top:16px;scroll-margin-top:64px}
+.row:focus-visible{box-shadow:inset 0 0 0 2px var(--ember)}
+.lt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.lt .btn{height:32px;padding:0 10px}.lt .btn[aria-pressed=true]{background:var(--sunk);border-color:var(--fg-3)}
+.lw{position:relative}
+.lv pre{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:12px;font:12.5px/1.55 var(--mono);height:clamp(320px,calc(100dvh - 340px),720px);overflow:auto;white-space:pre;tab-size:4}
+.lv.wrap pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.lv pre:empty::before{content:"No output yet.";color:var(--fg-3)}
+.lv .jump{position:absolute;right:16px;bottom:16px;box-shadow:var(--pop);background:var(--raised);cursor:pointer}
+.tsp{display:none;color:var(--fg-3)}.lv.ts pre .tsp{display:inline}
+.grp{font-weight:600}.er{color:var(--fail)}
+.a1{font-weight:600}.a2{opacity:.7}.a30,.a90{color:var(--fg-3)}.a31,.a91{color:var(--fail)}.a32,.a92{color:var(--ok)}.a33,.a93{color:var(--warn)}.a34,.a36,.a94,.a96{color:var(--queued)}.a35,.a95{color:var(--ember)}.a37,.a97{color:var(--fg)}
+@media(max-width:719px){.lt .seg{width:100%}.lt .seg button{flex:1}.lt .sp{display:none}.lv pre{height:calc(100dvh - 220px)}.lt .lbl{display:none}.lt .btn{width:40px;height:40px;padding:0}}
+.set{display:grid;gap:32px;grid-template-columns:200px minmax(0,1fr)}
+.sub{display:flex;flex-direction:column;gap:2px;position:sticky;top:76px;align-self:start}
+.sub a{padding:6px 12px;border-radius:6px;color:var(--fg-2);text-decoration:none;font-size:13px}
+.sub a:hover{background:var(--raised);color:var(--fg)}.sub a[aria-current]{background:var(--raised);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line)}
+#gsel{display:none;width:100%;margin-bottom:16px}
+@media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel{display:block}}
+.fld{display:grid;grid-template-columns:200px minmax(0,1fr);gap:4px 16px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.fld:first-child{border-top:0;padding-top:0}
+.fld label,.fld .lb{font-size:13px}.fld .h{grid-column:2;font-size:12px;color:var(--fg-2)}
+.fld input[type=number]{width:120px}.fld input[type=text],.fld input[type=password]{width:100%;max-width:360px}
+@media(max-width:719px){.fld{grid-template-columns:minmax(0,1fr)}.fld .h{grid-column:1}}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.sw{display:flex;align-items:center;gap:12px}
+#dbar{position:sticky;bottom:12px;z-index:10;margin-top:16px;display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:10px;background:var(--raised);box-shadow:var(--pop)}
+@media(max-width:719px){#dbar{bottom:calc(var(--tabh) + 8px)}}
+.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 24px;font-size:13px}.kv dt{color:var(--fg-2)}.kv dd{overflow-wrap:anywhere}
+details{margin-top:16px}summary{cursor:pointer;color:var(--fg-2);font-size:13px}
+details pre.raw{margin:8px 0 0;background:var(--sunk);padding:12px;border-radius:6px;font:12px/1.5 var(--mono);overflow:auto;max-height:320px}
+pre.snip{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:12px;font:12.5px/1.55 var(--mono);overflow:auto}
+.stp{list-style:none;padding:0;margin:0}
+.stp>li{position:relative;padding:0 0 24px 40px;min-height:24px}
+.stp>li::before{content:"";position:absolute;left:11.5px;top:28px;bottom:4px;width:1px;background:var(--line)}.stp>li:last-child::before{display:none}
+.mk{position:absolute;left:0;top:0;width:24px;height:24px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;font-size:12px;font-weight:600;color:var(--fg-2)}
+.mk.cur{background:var(--ember);border-color:var(--ember);color:var(--on-ember)}.mk.done{background:var(--ok);border-color:var(--ok);color:var(--bg)}
+.stp h3{font-size:14px;font-weight:600;line-height:24px;display:flex;gap:12px;align-items:center}
+.stp .bd2{margin-top:12px;display:flex;flex-direction:column;align-items:flex-start;gap:12px;max-width:560px}
+.stp form{display:flex;gap:8px;width:100%;flex-wrap:wrap}.stp form input{flex:1;min-width:200px}
+#toasts{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}
+@media(max-width:719px){#toasts{left:16px;bottom:calc(var(--tabh) + 12px);align-items:stretch}}
+.toast{--c:var(--ok);pointer-events:auto;background:var(--raised);box-shadow:var(--pop);border-radius:10px;border-left:3px solid var(--c);padding:10px 16px;max-width:400px;font-size:13px;overflow-wrap:anywhere;animation:in 180ms cubic-bezier(.2,0,0,1)}
+.toast.bad{--c:var(--fail)}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+dialog{width:min(440px,100vw - 32px);border:0;border-radius:14px;padding:24px;background:var(--raised);color:var(--fg);box-shadow:var(--pop)}
+dialog::backdrop{background:rgb(0 0 0/.5)}dialog[open]{animation:in 180ms cubic-bezier(.2,0,0,1)}
+dialog h2{font-size:16px;font-weight:600;margin-bottom:8px}dialog p{color:var(--fg-2)}dialog p b{color:var(--fg);font-weight:500}
+dialog .act{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}
+dialog input{width:100%;margin-top:16px}
+.kbd{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin-top:16px;font-size:13px}.kbd kbd{font:12px var(--mono);background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+.pop{position:fixed;z-index:50;background:var(--raised);border-radius:10px;box-shadow:var(--pop);padding:12px;width:240px}
+.pop form{display:flex;flex-direction:column;gap:8px}.pop label{font-size:12px;color:var(--fg-2)}
+.tabs{display:none}
+@media(max-width:719px){
+ .nav{display:none}main{padding-bottom:calc(var(--tabh) + 24px)}
+ .tabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;height:var(--tabh);padding-bottom:env(safe-area-inset-bottom);background:var(--surface);border-top:1px solid var(--line)}
+ .tabs a{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--fg-2);font-size:11px;text-decoration:none}
+ .tabs a[aria-current]{color:var(--fg)}.tabs a[aria-current]::before{content:"";position:absolute;top:-1px;left:25%;right:25%;height:2px;background:var(--ember)}
+ .tabs .n{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--ember);color:var(--on-ember);font-size:11px;font-weight:600;line-height:16px;text-align:center}
+ .top>div{gap:12px}
+}
+.sk{border-radius:6px;background:linear-gradient(90deg,var(--sunk),var(--raised),var(--sunk));background-size:200% 100%;animation:sh 1.4s linear infinite}
+@keyframes sh{to{background-position:-200% 0}}
+.full{max-width:520px;margin:96px auto;padding:0 16px}.full h1{font-size:20px;font-weight:600;margin-bottom:8px}
+@media(prefers-reduced-motion:reduce){*,::before,::after{animation-duration:0s!important;animation-iteration-count:1!important;transition-duration:0s!important}.sk{animation:none}}
 </style>
 </head>
 <body>
-<header>
-  <h1>kiln</h1>
-  <nav aria-label="Sections">
-    <a href="#overview">Overview</a><a href="#repos">Repos</a><a href="#vms">VMs</a><a href="#tailscale">Tailscale</a><a href="#settings">Settings</a>
-  </nav>
-  <span id="conn" class="pill">connecting</span>
-</header>
-<main>
-<section id="overview">
-  <div id="ov-health" class="pills"></div>
-  <div id="ov-start"></div>
-  <div class="grid">
-    <div class="card" id="ov-cap"></div>
-    <div class="card" id="ov-host"></div>
-    <div class="card" id="ov-queue"></div>
-  </div>
-  <div class="card" style="margin-top:14px"><div class="head"><h2>Recent VMs</h2><a href="#vms">All VMs</a></div><div id="ov-vms"></div></div>
-</section>
-
-<section id="repos" hidden>
-  <div class="split">
-    <div class="card">
-      <h2>Repositories</h2>
-      <ul id="repo-list" class="list" style="margin-top:8px"></ul>
-      <form id="repo-add" class="row"><label class="sr" for="repo-in">Repository to add</label><input id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button>Add</button></form>
-    </div>
-    <div>
-      <div class="card" id="repo-pane">
-        <div class="head"><h2 id="repo-title" class="mono"></h2><button data-act="repo-refresh">Refresh</button></div>
-        <h3>Workflows</h3><div id="wfs"></div>
-        <h3>Recent runs</h3><div id="runs"></div>
-      </div>
-      <div class="card" id="joblog" hidden>
-        <div class="head"><h2 id="joblog-title"></h2><button data-act="joblog-close">Close</button></div>
-        <div id="joblog-note"></div>
-        <pre class="log" id="joblog-pre"></pre>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="vms" hidden>
-  <div class="split wide">
-    <div class="card"><h2 style="margin-bottom:8px">VMs</h2><div id="vm-list"></div></div>
-    <div class="card" id="vm-detail" hidden>
-      <div class="head"><h2 id="vm-title" class="mono"></h2><button class="danger" data-act="kill" id="vm-kill">Kill VM</button></div>
-      <dl class="kv" id="vm-meta"></dl>
-      <div class="tabs" role="tablist" aria-label="VM logs">
-        <button role="tab" data-act="logtab" data-id="console" aria-selected="true">Console</button>
-        <button role="tab" data-act="logtab" data-id="steps" aria-selected="false">Steps</button>
-      </div>
-      <pre class="log" id="vm-log" role="tabpanel"></pre>
-    </div>
-  </div>
-</section>
-
-<section id="tailscale" hidden>
-  <div id="ts-main"><p class="mute">Loading Tailscale status…</p></div>
-  <div class="card">
-    <div class="head"><h2>Netcheck</h2><button data-act="netcheck">Run netcheck</button></div>
-    <div id="netcheck" class="mute">Measures UDP reachability and latency to each DERP relay region. Takes a few seconds.</div>
-  </div>
-</section>
-
-<section id="settings" hidden>
-  <div class="card">
-    <div class="head"><h2>Runner settings</h2></div>
-    <form id="cfg" class="cfg"></form>
-  </div>
-  <div class="grid">
-    <div class="card">
-      <h2>GitHub token</h2>
-      <p class="mute" id="tok-status"></p>
-      <form id="tok" class="row"><label class="sr" for="tok-in">Personal access token</label><input id="tok-in" type="password" placeholder="ghp_…" autocomplete="off" required><button class="primary">Save token</button></form>
-      <p class="mute">Classic personal access token with the <code>repo</code> scope. Stored on the server, never shown again.</p>
-    </div>
-    <div class="card">
-      <div class="head"><h2>Base image</h2><button data-act="bake" id="bake-btn">Bake image</button></div>
-      <p id="bake-status" class="mute"></p>
-    </div>
-  </div>
-  <div class="card" style="margin-top:14px"><h2>Bake log</h2><pre class="log" id="bake-log"></pre></div>
-</section>
-</main>
-<div id="toast" role="status" aria-live="polite" hidden></div>
-
+<header class="top"><div>
+  <a class="logo" href="#/"><svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
+  <nav class="nav" id="nav" aria-label="Sections"></nav>
+  <span class="cdot" id="cdot" role="img" aria-label="Connected" title="Connected"></span>
+</div></header>
+<div id="conn" role="status"></div>
+<main id="app"></main>
+<nav class="tabs" id="tabs" aria-label="Sections"></nav>
+<div id="toasts" role="status"></div>
+<dialog id="dlg"></dialog>
+<dialog id="kdlg"><form method="dialog" id="kform"><h2>Dashboard key needed</h2>
+  <p>This browser is on the CI box, so it needs the dashboard key.</p>
+  <p class="mono sm" style="margin-top:8px">~/.local/share/kiln/dashboard.key</p>
+  <p class="fail sm" id="kbad" hidden style="margin-top:8px">That key was not accepted.</p>
+  <label class="sr" for="kin">Dashboard key</label><input type="password" id="kin" placeholder="Paste key" autocomplete="off" required>
+  <div class="act"><button class="btn pri" type="submit">Unlock</button></div></form></dialog>
 <script>
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const now = () => Date.now() / 1000;
-const iso = s => (s ? Date.parse(s) / 1000 : null);
-const ACTIVE = new Set(['booting', 'idle', 'busy']);
-const TABS = ['overview', 'repos', 'vms', 'tailscale', 'settings'];
-
+const iso = s => (s && !String(s).startsWith('0001') ? Date.parse(s) / 1000 : null);
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* private mode */ } };
+const lsJ = (k, d) => { try { return JSON.parse(lsGet(k)) ?? d; } catch { return d; } };
 function rel(t) {
   if (!t) return '—';
   const d = Math.max(0, now() - t);
-  if (d < 5) return 'just now';
-  if (d < 60) return Math.floor(d) + 's ago';
-  if (d < 3600) return Math.floor(d / 60) + 'm ago';
-  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
-  return Math.floor(d / 86400) + 'd ago';
+  return d < 5 ? 'just now' : d < 60 ? Math.floor(d) + 's ago' : d < 3600 ? Math.floor(d / 60) + 'm ago' : d < 86400 ? Math.floor(d / 3600) + 'h ago' : Math.floor(d / 86400) + 'd ago';
 }
 function dur(s) {
   s = Math.max(0, Math.round(s));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return h ? `${h}h ${m}m` : m ? `${m}m ${x}s` : `${x}s`;
 }
-function bytes(n) {
-  n = +n || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
-  while (n >= 1024 && i < 4) { n /= 1024; i++; }
-  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+const bytes = n => { n = +n || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + ' ' + u[i]; };
+const when = t => (t ? new Date(t * 1000).toLocaleString() : '—');
+const hhmm = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const P = {
+  overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  jobs: '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
+  repos: '<path d="M4 20V5a2 2 0 0 1 2-2h13v14H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13"/>',
+  settings: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+  wrap: '<path d="M3 6h18M3 12h14a3 3 0 0 1 0 6h-4m0 0 2-2m-2 2 2 2M3 18h5"/>', down: '<path d="M12 4v12m-6-5 6 6 6-6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+  dl: '<path d="M12 3v12m-5-5 5 5 5-5M4 21h16"/>',
+};
+const ic = (n, s = 16) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
+const badge = (s, c = s) => `<span class="bdg s-${c}">${esc(s)}</span>`;
+const ACTIVE = v => ['booting', 'idle', 'busy'].includes(v.state);
+function status(v) {
+  const r = String(v.result || '').toLowerCase();
+  switch (v.state) {
+    case 'booting': return 'booting';
+    case 'idle': return 'waiting';
+    case 'busy': return 'running';
+    case 'done': return r === 'succeeded' || !r ? 'passed' : /cancel/.test(r) ? 'cancelled' : 'failed';
+    case 'failed': return 'failed';
+    case 'killed': return 'killed';
+    default: return 'lost';
+  }
 }
-const when = t => (t ? new Date(t * 1000).toLocaleString() : '');
-const stripAnsi = s => s.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, '').replace(/\r\n/g, '\n');
+const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
+  : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
+const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
+const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
+const sz = v => v.cpus ? `<span class="mono sm fg2" title="${v.mem_mb ? Math.round(v.mem_mb / 1024) + ' GB' : ''}">${+v.cpus} cpu</span>` : '';
+const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? 'waiting for a job' : 'no job');
+const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
+const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
+const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v4\n`;
 
-function badge(text) {
-  const t = String(text || '').toLowerCase();
-  const cls = /^(done|success|succeeded|completed)$/.test(t) ? 'b-ok'
-    : /^(failed|failure|lost|timed_out|startup_failure)$/.test(t) ? 'b-bad'
-    : /^(busy|in_progress|running)$/.test(t) ? 'b-run'
-    : /^(booting|idle|queued|waiting|pending|requested|action_required)$/.test(t) ? 'b-warn' : 'b-off';
-  return `<span class="badge ${cls}">${esc(text)}</span>`;
+/* ---------- api, dialogs, toasts ---------- */
+let keyWait = null;
+function askKey() {
+  return keyWait ||= new Promise(res => {
+    const d = $('#kdlg'); $('#kbad').hidden = !lsGet('kiln-key'); $('#kin').value = '';
+    d.oncancel = e => e.preventDefault();
+    $('#kform').onsubmit = () => { lsSet('kiln-key', $('#kin').value.trim()); keyWait = null; res(); };
+    d.showModal();
+  });
 }
-
-/* ---------- API ---------- */
-// Requests from the CI box itself (or via `tailscale serve`) must carry the
-// dashboard key; tailnet peers are identified by Tailscale and never need it.
-const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
-let keyPrompted = false;
-async function api(path, opts = {}) {
-  const init = { method: opts.method || 'GET', headers: {} };
-  const key = lsGet('kiln-key');
+async function api(path, o = {}) {
+  const init = { method: o.method || 'GET', headers: {} }, key = lsGet('kiln-key');
   if (key) init.headers['x-kiln-key'] = key;
   if (init.method !== 'GET') {
-    init.headers['x-kiln'] = '1';
-    init.headers['content-type'] = 'application/json';
-    if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+    init.headers['x-kiln'] = '1'; init.headers['content-type'] = 'application/json';
+    if (o.body !== undefined) init.body = JSON.stringify(o.body);
   }
   const r = await fetch(path, init);
-  if (r.status === 401 && !keyPrompted) {
-    keyPrompted = true;
-    const k = prompt('Dashboard key (cat ~/.local/share/kiln/dashboard.key on the CI box):');
-    if (k) { lsSet('kiln-key', k.trim()); keyPrompted = false; return api(path, opts); }
-  }
+  if (r.status === 401) { await askKey(); return api(path, o); }
   const text = await r.text();
   if (!r.ok) {
-    let msg = text;
-    try { msg = JSON.parse(text).message || text; } catch { /* plain text */ }
-    const e = new Error(msg || `${r.status} ${r.statusText}`);
-    e.status = r.status;
-    throw e;
+    let m = text; try { m = JSON.parse(text).message || text; } catch { /* plain text */ }
+    throw Object.assign(new Error(m || `${r.status} ${r.statusText}`), { status: r.status });
   }
-  if (opts.text) return text;
-  return text ? JSON.parse(text) : null;
+  return o.text ? text : text ? JSON.parse(text) : null;
 }
-const post = (path, body) => api(path, { method: 'POST', body });
+const post = (p, body) => api(p, { method: 'POST', body });
 const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
-
-let toastT;
-function toast(msg, bad = true) {
-  const t = $('#toast');
-  t.textContent = msg; t.className = bad ? 'bad' : ''; t.hidden = false;
-  clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), bad ? 7000 : 3500);
+function toast(msg, bad) {
+  const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
+  $('#toasts').append(t); setTimeout(() => t.remove(), bad ? 7000 : 3500);
 }
-
-// Replace HTML only when it changed, and keep keyboard focus on the same control.
+const fail = e => toast(e.message || String(e), true);
+const dlg = $('#dlg');
+function modal(html) { dlg.innerHTML = html; dlg.returnValue = ''; dlg.showModal(); return new Promise(r => (dlg.onclose = () => r(dlg.returnValue === 'ok'))); }
+const ask = ({ title, body, action, danger }) => modal(`<form method="dialog"><h2>${esc(title)}</h2><p>${body}</p><div class="act">
+  <button class="btn" value="cancel" autofocus>Cancel</button><button class="btn ${danger ? 'dng fill' : 'pri'}" value="ok">${esc(action)}</button></div></form>`);
+async function copy(text, what = 'Copied') {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
+  toast(what);
+}
+let popEl = null;
+let popAnchor = null;
+function closePop(refocus) { popEl?.remove(); popEl = null; if (refocus && popAnchor?.isConnected) popAnchor.focus(); }
+function openPop(anchor, html) {
+  closePop(); popAnchor = anchor; popEl = document.createElement('div'); popEl.className = 'pop'; popEl.innerHTML = html; document.body.append(popEl);
+  const r = anchor.getBoundingClientRect();
+  const cw = document.documentElement.clientWidth; popEl.style.left = Math.max(8, Math.min(r.right - 240, cw - 248)) + 'px';
+  popEl.style.top = (r.bottom + 6 + 150 > innerHeight ? Math.max(8, r.top - 6 - popEl.offsetHeight) : r.bottom + 6) + 'px';
+  popEl.querySelector('input')?.select();
+}
+// Replace HTML only when changed; keep typed values and keyboard focus.
+function rove(r = document) { $$('.seg', r).forEach(g => { const b = $$('[role=radio]', g), c = b.find(x => x.getAttribute('aria-checked') === 'true' && !x.disabled) || b.find(x => !x.disabled); b.forEach(x => (x.tabIndex = x === c ? 0 : -1)); }); }
 function setHTML(el, html) {
-  if (el._h === html) return;
-  const a = document.activeElement;
-  let sel = null;
-  if (a && el.contains(a) && a.dataset.act) {
-    sel = `[data-act="${CSS.escape(a.dataset.act)}"]` + (a.dataset.id != null ? `[data-id="${CSS.escape(a.dataset.id)}"]` : ':not([data-id])');
-  }
-  el.innerHTML = html; el._h = html;
-  if (sel) el.querySelector(sel)?.focus();
+  if (el._h === html) return; el._h = html;
+  const fl = () => $$('a,button,input,select', el), a = document.activeElement, idx = el.contains(a) ? fl().indexOf(a) : -1;
+  const vals = $$('input[id]', el).map(x => [x.id, x.type === 'checkbox' ? x.checked : x.value]);
+  el.innerHTML = html;
+  for (const [i, v] of vals) { const x = el.querySelector('#' + CSS.escape(i)); if (x && x.type !== 'checkbox' && x.value !== v) x.value = v; }
+  fillTimes(el);
+  if (idx >= 0) fl()[idx]?.focus();
 }
-
-/* ---------- incremental log viewer ---------- */
-const LOGS = new Set();
-const shown = el => !document.hidden && el.offsetParent !== null;
-function logView(pre, src, file, live) {
-  let next = 0, timer = null, busy = false, stopped = false;
-  pre.textContent = '';
-  function append(d) {
-    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-    pre.append(stripAnsi(d));
-    if (stick) pre.scrollTop = pre.scrollHeight;
-  }
-  async function tick() {
-    timer = null; busy = true;
-    try {
-      for (;;) { // drain: each call returns at most 512KB
-        const from = next;
-        const r = await api(`/api/log?src=${encodeURIComponent(src)}&file=${file}&from=${from}`);
-        if (stopped) return;
-        if (r.next < from) pre.textContent = ''; // file was rewritten (rebake): server restarted at 0
-        next = r.next;
-        if (!r.data) break;
-        append(r.data);
-      }
-    } catch { /* daemon away; kick() retries on next state poll */ } finally { busy = false; }
-    if (!stopped && live() && shown(pre)) timer = setTimeout(tick, 1000);
-  }
-  const v = {
-    stop() { stopped = true; clearTimeout(timer); LOGS.delete(v); },
-    kick() { if (!stopped && !busy && !timer && live() && shown(pre)) tick(); },
-  };
-  LOGS.add(v); tick();
-  return v;
-}
+function fillTimes(r = document) { $$('[data-t]', r).forEach(e => (e.textContent = e.dataset.k === 'rel' ? rel(+e.dataset.t) : dur(now() - e.dataset.t))); }
+const relH = t => t ? `<span data-t="${t}" data-k="rel"></span>` : '—';
 
 /* ---------- state polling ---------- */
-let S = null;
-async function poll() {
-  clearTimeout(poll.t);
+let S = null, fails = 0, down = false, pollT, retryAt = 0, okUntil = 0;
+const DELAYS = [2, 2, 4, 8, 15];
+const notifyOn = () => lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted';
+let inflight = null;
+function poll() { return inflight ||= doPoll().finally(() => { inflight = null; }); }
+async function doPoll() {
+  clearTimeout(pollT);
   try {
-    S = await api('/api/state');
-    setConn(true);
-    onState();
-  } catch (e) { setConn(false, e.message); }
-  if (!document.hidden) poll.t = setTimeout(poll, 2000);
+    const s = await api('/api/state');
+    s.config.repos ||= []; s.config.allowed_users ||= []; s.poll ||= {}; s.vms ||= []; s.host ||= { load: [0, 0, 0], cpus: 0, mem_total_mb: 0, mem_avail_mb: 0, disk_free_gb: 0 };
+    S = s;
+    if (down) okUntil = now() + 2;
+    fails = 0; down = false; renderConn(); onState();
+  } catch (e) {
+    if (e.status === 403) return full('Not allowed', e.message, 'Ask the owner to add your login under Access.');
+    if (++fails >= 2) down = true;
+    renderConn();
+  }
+  const d = document.hidden ? (notifyOn() ? 15 : 0) : DELAYS[Math.min(fails, 4)];
+  retryAt = now() + d;
+  clearTimeout(pollT); if (d) pollT = setTimeout(poll, d * 1000);
+  renderConn();
 }
-function setConn(ok, msg) {
-  const c = $('#conn');
-  c.className = 'pill ' + (ok ? 'ok' : 'bad');
-  c.textContent = ok ? 'connected' : 'disconnected';
-  c.title = ok ? '' : msg || '';
+function renderConn() {
+  document.body.classList.toggle('down', down);
+  const dot = $('#cdot'); dot.classList.toggle('bad', down); dot.title = dot.ariaLabel = down ? 'Disconnected' : 'Connected';
+  setHTML($('#conn'), down ? `<div class="bn"><span>Can't reach kiln. Retrying in <b data-r>${Math.max(0, Math.ceil(retryAt - now()))}</b>s…</span><button class="btn" data-act="retry">Retry now</button></div>`
+    : now() < okUntil ? '<div class="bn" style="--c:var(--ok)"><span>Reconnected</span></div>' : '');
+  if (okUntil && !down && now() >= okUntil) okUntil = 0;
+}
+function full(title, msg, hint) {
+  clearTimeout(pollT); mounted = false; cur = null;
+  $('#app').innerHTML = `<div class="full"><h1>${esc(title)}</h1><p>${esc(msg)}</p><p class="fg2" style="margin-top:8px">${esc(hint)}</p></div>`;
+}
+setInterval(() => {
+  if (down) { const r = $('[data-r]'); if (r) r.textContent = Math.max(0, Math.ceil(retryAt - now())); return; }
+  if (okUntil) renderConn();
+  fillTimes();
+}, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+/* ---------- title, favicon, notifications ---------- */
+const FAV = dot => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="#A39A8E" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="#F59E4C"/>${dot ? `<circle cx="13" cy="3" r="2.5" fill="${dot}"/>` : ''}</svg>`)}`;
+const seen = () => new Set(lsJ('kiln-seen', null) || []);
+function markSeen() { if (S) lsSet('kiln-seen', JSON.stringify(S.vms.filter(isFail).map(v => v.id).slice(0, 300))); }
+function notifyState() {
+  const run = S.vms.filter(v => v.state === 'busy').length;
+  if (lsGet('kiln-seen') == null) markSeen();
+  const unseen = S.vms.some(v => isFail(v) && !seen().has(v.id));
+  const hot = !(cur === pages.jobs && !parse().seg[0]);
+  const un = unseen && hot;
+  document.title = un ? '✕ kiln' : run ? `(${run}) kiln` : 'kiln';
+  $('#fav').href = FAV(un ? '#F07068' : run ? '#F59E4C' : null);
+  if (cur === pages.jobs && !parse().seg[0] && unseen) markSeen();
+  const done = new Set(lsJ('kiln-notified', null) || []), first = lsGet('kiln-notified') == null;
+  for (const v of S.vms.filter(notifiable)) {
+    if (done.has(v.id)) continue; done.add(v.id);
+    if (!first && notifyOn()) {
+      const n = new Notification('kiln', { body: `${v.repo} / ${v.job || 'job'} ${status(v)}${jdur(v) != null ? ' after ' + dur(jdur(v)) : ''}`, tag: v.id });
+      n.onclick = () => { focus(); location.hash = '#/jobs/' + encodeURIComponent(v.id); n.close(); };
+    }
+  }
+  lsSet('kiln-notified', JSON.stringify([...done].slice(-300)));
+  const badge = $('#tabs .n'); if (badge) { badge.textContent = run; badge.hidden = !run; }
+}
+
+/* ---------- doctor + bake log (global) ---------- */
+let doctor = null;
+async function runDoctor() { try { doctor = { ...(await api('/api/doctor')), at: now() }; } catch (e) { doctor = { checks: [], err: e.message, at: now() }; } if (cur?.live) cur.live(); }
+const bk = { text: '', next: 0, t0: 0, was: false, busy: false, checked: false };
+async function pollBake() {
+  if (bk.busy) return; bk.busy = true;
+  try {
+    for (;;) {
+      const r = await api(`/api/log?src=bake&file=console&from=${bk.next}`);
+      if (r.next < bk.next) bk.text = '';
+      bk.next = r.next; if (!r.data) break; bk.text += r.data;
+    }
+  } catch { /* no bake log */ }
+  bk.busy = false; bk.checked = true;
+}
+const PH = [['kiln: fetching', 'Download'], ['kiln: actions runner', 'Prepare'], ['kiln: booting bake VM', 'Install'], ['kiln: base image ready', 'Done']];
+const bakeIdx = () => PH.reduce((a, [m], i) => (bk.text.includes(m) ? i : a), -1);
+const bakeFailed = () => { const f = bk.text.lastIndexOf('kiln: bake failed'); return f >= 0 && f > Math.max(...PH.map(([m]) => bk.text.lastIndexOf(m))); };
+const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+
+/* ---------- router ---------- */
+const pages = {};
+let cur = null, mounted = false;
+const NAV = [['overview', '#/', 'Overview'], ['jobs', '#/jobs', 'Jobs'], ['repos', '#/repos', 'Repos'], ['settings', '#/settings/capacity', 'Settings']];
+$('#nav').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${l}</a>`).join('');
+$('#tabs').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${ic(k, 20)}<span>${l}</span>${k === 'jobs' ? '<span class="n" hidden></span>' : ''}</a>`).join('');
+function parse() {
+  const [path, q] = location.hash.replace(/^#/, '').split('?');
+  const seg = path.split('/').filter(Boolean).map(decodeURIComponent);
+  return { page: seg[0] || 'overview', seg: seg.slice(1), q: new URLSearchParams(q || '') };
+}
+function route() {
+  cur?.unmount?.(); closePop();
+  const r = parse(), pg = pages[r.page] || pages.overview;
+  $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+  cur = pg; scrollTo(0, 0);
+  if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
+  mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
+  pg.mount(r); pg.update?.(); notifyState();
+}
+function skeleton() {
+  return `<div aria-busy="true" aria-label="Loading"><div class="sk" style="height:16px;width:240px;margin-bottom:24px"></div>
+  <div class="chs">${'<div class="sk" style="height:64px"></div>'.repeat(2)}</div>
+  <div class="stats" style="margin:24px 0;background:none;border:0;gap:12px">${'<div class="sk" style="height:72px"></div>'.repeat(4)}</div>
+  ${'<div class="sk" style="height:40px;margin-bottom:8px"></div>'.repeat(6)}</div>`;
 }
 function onState() {
-  const t = tab();
-  if (t === 'overview') renderOverview();
-  if (t === 'vms') renderVms();
-  if (t === 'settings') renderSettings();
-  if (t === 'repos') renderRepoList();
+  if (!S.baking && !bk.was && bk.next === 0 && !bk.checked) pollBake();
+  if (S.baking) { if (!bk.was) { bk.t0 = Date.now(); bk.text = ''; bk.next = 0; } pollBake(); } else if (bk.was) pollBake();
+  bk.was = S.baking;
+  if (!doctor || now() - doctor.at > 300) { doctor = { checks: [], at: now() }; runDoctor(); }
+  if (!mounted) {
+    const r = parse();
+    if (!onState.auto && r.page === 'overview' && !location.hash.replace('#', '').replace('/', '') && setupNeeded() && !lsGet('kiln-skip-setup')) { onState.auto = 1; location.hash = '#/setup'; return; }
+    onState.auto = 1; return route();
+  }
+  cur.update?.(); cur.live?.(); notifyState();
   LOGS.forEach(l => l.kick());
 }
-
-/* ---------- routing ---------- */
-const tab = () => (TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview');
-function route() {
-  const t = tab();
-  for (const x of TABS) $('#' + x).hidden = x !== t;
-  document.querySelectorAll('nav a').forEach(a => a.getAttribute('href') === '#' + t ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
-  if (t === 'repos') wfRepo = undefined; // reload workflows/runs on entry
-  if (S) onState();
-  if (t === 'tailscale') loadTs();
-}
-addEventListener('hashchange', route);
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
-  poll();
-  if (tab() === 'repos') loadRuns();
+let lastHash = location.hash, guard = false;
+addEventListener('hashchange', async () => {
+  if (guard) { guard = false; return; }
+  const to = location.hash;
+  if (cur === pages.settings && parse().page !== 'settings' && isDirty()) {
+    guard = true; location.hash = lastHash;
+    if (await ask({ title: 'Discard changes?', body: 'You have unsaved settings.', action: 'Discard', danger: 1 })) { draft = JSON.parse(JSON.stringify(S.config)); location.hash = to; }
+    return;
+  }
+  lastHash = to; route();
 });
+const setupNeeded = () => !S.token_set || !S.image_ready || !S.config.repos.length || !S.vms.length;
 
 /* ---------- overview ---------- */
-function pill(cls, html, title = '') { return `<span class="pill ${cls}" title="${esc(title)}">${html}</span>`; }
-function meter(label, val, max, text) {
-  const pct = max > 0 ? Math.min(100, (val / max) * 100) : 0;
-  const cls = pct > 90 ? 'bad' : pct > 70 ? 'warn' : '';
-  return `<div class="meter"><div class="meter-l"><span>${esc(label)}</span><span class="mono">${esc(text)}</span></div>
-    <div class="bar ${cls}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${+max || 0}" aria-valuenow="${+val || 0}"><span style="width:${pct.toFixed(1)}%"></span></div></div>`;
+function jobRow(v) {
+  const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
+  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span>`;
+  return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
+    <span class="w" title="${esc(when(v.started))}">${relH(v.started)}</span><span class="d">${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span></a></li>`;
 }
-function renderOverview() {
-  const c = S.config, p = S.poll, h = S.host;
-  const img = S.image;
-  setHTML($('#ov-health'), [
-    S.token_set ? pill('ok', 'GitHub token set') : pill('bad', 'No GitHub token'),
-    S.image_ready
-      ? pill('ok', `Image ready, runner ${esc(img?.runner_version || '?')}, baked ${rel(img?.baked_at)}`, when(img?.baked_at))
-      : pill('bad', 'Base image not baked'),
-    p.error ? pill('bad', 'Poll failed: ' + esc(p.error)) : p.last_ok ? pill('ok', 'GitHub polled ' + rel(p.last_ok), when(p.last_ok)) : pill('', 'Not polled yet'),
-    S.baking ? pill('warn', '<i class="spin" aria-hidden="true"></i> Baking image') : '',
-  ].join(''));
-  setHTML($('#ov-start'), gettingStarted());
+const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
+function banners() {
+  const p = S.poll, c = S.config, b = [], err = String(p.error || '');
+  const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})"><span>${msg}</span>${act || ''}</div>`);
+  const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
+  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
+  else if (/401|Bad credentials/i.test(err)) B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
+  if (S.baking) {
+    const i = bakeIdx(), last = plain(bk.text.trim().split('\n').pop() || '');
+    B('ember', `<b>Baking image</b> · elapsed ${dur((Date.now() - bk.t0) / 1000)}, usually ~4 min
+      <span class="ph-steps">${PH.map(([, n], k) => k === i ? `<b>${n}</b>` : `<span>${n}</span>`).join('')}</span>${i === 2 && last ? `<span class="mono sm fg2" style="display:block;margin-top:4px">${esc(last.slice(0, 120))}</span>` : ''}`, A('View log', '#/settings/image'));
+  } else if (bakeFailed()) B('fail', 'Image bake failed.', A('View log', '#/settings/image'));
+  else if (!S.image_ready) B('fail', 'Base image not baked. VMs can\'t start.', X('Bake image', 'bake', 1));
+  if (p.blocked) B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
+  for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}`);
+  for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(m)}`);
+  if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
+  const im = S.image;
+  if (im?.stale && im.runner_latest) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.`, X('Rebake', 'rebake'));
+  if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
+  const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
+  const bad = (doctor?.checks || []).filter(x => !x.ok).length;
+  if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
+  if (S.token_set && !c.repos.length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
+  if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
+  return b.join('');
+}
+const rate = () => { const r = parseFloat(lsGet('kiln-rate')); if (r > 0) return r; const c = S.config.vm_cpus; return c <= 2 ? 0.008 : c <= 4 ? 0.016 : c <= 8 ? 0.032 : 0.064; };
+const median = a => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+function stats() {
+  const n = now(), d0 = new Date(); const day = d0.setHours(0, 0, 0, 0) / 1000, mo = new Date(d0.getFullYear(), d0.getMonth(), 1) / 1000;
+  const ran = S.vms.filter(v => v.busy_since);
+  const f24 = S.vms.filter(v => isFail(v) && (v.ended || v.started) > n - 86400).length;
+  const med = median(ran.filter(v => v.ended).map(v => v.ended - v.busy_since));
+  const saved = ran.filter(v => v.ended && v.started >= mo).reduce((s, v) => s + Math.ceil((v.ended - v.busy_since) / 60), 0) * rate();
+  const st = (l, v, x = '') => `<div class="stat"><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
+  return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length)}
+    <a class="stat" href="#/jobs?f=failed"><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
+    ${st('Median job time', med == null ? '—' : dur(med))}${st('Saved this month', '≈ $' + saved.toFixed(2))}</div>
+    <p class="foot">from last 100 jobs · billed at <button class="lnk" data-act="rate">$${rate()}/min</button></p>`;
+}
+function meter(l, val, max, txt) {
+  const p = max > 0 ? Math.min(100, val / max * 100) : 0;
+  return `<div class="meter ${p > 85 ? 'hot' : ''}"><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
+}
+const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
+pages.overview = {
+  mount() {
+    $('#app').innerHTML = `<div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host"></div></aside></div>`;
+  },
+  update() {
+    const c = S.config, h = S.host, act = S.vms.filter(ACTIVE).sort((a, b) => a.started - b.started);
+    setHTML($('#ov-st'), banners());
+    const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
+    for (let i = 0; i < Math.min(total, act.length + 4); i++) {
+      const v = act[i];
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>` : '<div class="ch">Idle</div>');
+    }
+    if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
+    if (!tiles.length) tiles.push('<div class="ch">Paused</div>');
+    setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" title="${esc(qTip())}">${q} queued</span>` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    setHTML($('#ov-stats'), stats());
+    const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
+    setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
+    setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
+    const used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
+    setHTML($('#ov-host'), `<h2>Host</h2>${meter('Load', l[0], h.cpus, `${l.map(x => x.toFixed(2)).join(' ')}`)}
+      ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`)}
+      <div class="meter"><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
+  },
+};
+const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
+const emptyJobs = () => `<div class="empty"><p>No jobs yet. kiln starts a VM when GitHub queues a job labelled <code>${esc(S.config.label)}</code>.</p><button class="btn" data-act="copysnip">Copy workflow snippet</button><p class="sm">${esc(SIZES())}</p></div>`;
 
-  const active = S.vms.filter(v => ACTIVE.has(v.state));
-  const slots = [];
-  for (let i = 0; i < Math.max(c.max_vms, active.length); i++) {
-    const v = active[i];
-    slots.push(v
-      ? `<button class="slot on ${badgeColor(v.state)}" data-act="vm" data-id="${esc(v.id)}" title="${esc(v.repo)}"><b>${esc(v.id)}</b>${esc(v.state)}</button>`
-      : '<div class="slot">free</div>');
+/* ---------- jobs ---------- */
+const jf = { f: 'all', repo: '' };
+pages.jobs = {
+  mount(r) {
+    if (r.seg[0]) return pages.job.mount(r);
+    if (r.q.get('f')) jf.f = r.q.get('f');
+    markSeen();
+    const repos = [...new Set([...S.config.repos, ...S.vms.map(v => v.repo)])];
+    $('#app').innerHTML = `<div class="ph"><h1>Jobs</h1></div><div class="bar">
+      <div class="seg" role="radiogroup" aria-label="Filter">${['all', 'running', 'failed'].map(k => `<button role="radio" data-act="jf" data-v="${k}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>
+      <label class="sr" for="jf-repo">Repository</label><select id="jf-repo" data-act="jfrepo"><option value="">All repos</option>${repos.map(r => `<option ${r === jf.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></div><div id="jl"></div>`;
+  },
+  update() {
+    if (parse().seg[0]) return pages.job.update();
+    $$('[data-act=jf]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === jf.f)); rove();
+    const l = S.vms.filter(v => (jf.f === 'all' || (jf.f === 'running' ? ACTIVE(v) : isFail(v))) && (!jf.repo || v.repo === jf.repo));
+    setHTML($('#jl'), l.length ? jobList(l) : S.vms.length ? '<div class="empty"><p>No jobs match this filter.</p></div>' : emptyJobs());
+  },
+  unmount() { pages.job.unmount(); },
+};
+const fb = new Map();
+function segs(v) {
+  const n = now(), end = v.ended || n, online = v.online_at || fb.get(v.id) || null, o = [], act = ACTIVE(v);
+  if (v.queued_at && v.started) o.push(['Queue', v.started - v.queued_at, 'q']);
+  if (v.started) o.push(['Boot', (online || (v.state === 'booting' ? n : v.busy_since || end)) - v.started, 'b']);
+  if (online) o.push(['Wait', (v.busy_since || (act ? n : end)) - online, 'w']);
+  if (v.busy_since) o.push(['Job', end - v.busy_since, { passed: 'j-ok', running: 'j-run' }[status(v)] || 'j-fail']);
+  return o;
+}
+pages.job = {
+  mount(r) {
+    this.id = r.seg[0]; this.lv = null;
+    $('#app').innerHTML = `<a class="back" href="#/jobs">← Jobs</a><div id="jd"></div><div id="jd-log"></div>`;
+  },
+  update() {
+    const v = S.vms.find(x => x.id === this.id), box = $('#jd');
+    if (!v) { setHTML(box, '<div class="empty"><p>No job with this id. kiln only keeps the latest 100.</p><a class="btn" href="#/jobs">Back to jobs</a></div>'); this.lv?.destroy(); this.lv = null; return; }
+    if (!v.online_at && v.state !== 'booting' && !fb.has(v.id)) {
+      fb.set(v.id, null);
+      api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
+    }
+    const sg = segs(v), tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1, calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
+    setHTML(box, `<div class="jh">${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
+      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener">View on GitHub ↗</a>` : ''}${ACTIVE(v) ? '<button class="btn dng" data-act="kill">Kill VM</button>' : ''}</div>
+      <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
+      <div class="card"><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
+      <div class="tll">${sg.map(s => `<span>${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div></div>
+      ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
+    if (!this.lv) {
+      const id = v.id;
+      this.lv = new Log($('#jd-log'), { id, live: () => ACTIVE(S.vms.find(x => x.id === id) || {}), sources: [
+        { k: 'console', label: 'Console', src: id, file: 'console' }, { k: 'steps', label: 'Steps', src: id, file: 'steps' },
+        { k: 'gh', label: 'GitHub', off: true, gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
+    }
+    this.lv.setOff('gh', ACTIVE(v) || !v.ended);
+  },
+  unmount() { this.lv?.destroy(); this.lv = null; },
+};
+async function ghLog(v) {
+  const jm = /\/job\/(\d+)/.exec(v.job_url || '');
+  if (jm) { try { return await api(gh(v.repo, `jobs/${jm[1]}/logs`), { text: true }); } catch (e) { if (e.status === 404) throw e; } }
+  const runs = (await api(gh(v.repo, 'runs?per_page=5'))).workflow_runs || [];
+  for (const run of runs) {
+    const j = ((await api(gh(v.repo, `runs/${run.id}/jobs`))).jobs || []).find(x => x.runner_name === v.id);
+    if (j) return api(gh(v.repo, `jobs/${j.id}/logs`), { text: true });
   }
-  setHTML($('#ov-cap'), `<h2>Capacity</h2><div class="mute">${active.length} of ${c.max_vms} VM slots in use, ${c.vm_cpus} vCPU and ${c.vm_mem_mb} MB each</div><div class="slots">${slots.join('')}</div>`);
-
-  const load = h.load.map(Number);
-  const used = h.mem_total_mb - h.mem_avail_mb;
-  setHTML($('#ov-host'), `<h2>Host</h2>
-    ${meter('Load (1m)', load[0], h.cpus, `${load.map(x => x.toFixed(2)).join(' ')} / ${h.cpus} CPUs`)}
-    ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`)}`);
-
-  setHTML($('#ov-queue'), `<h2>Queued jobs</h2>` + (c.repos.length
-    ? `<table><tbody>${c.repos.map(r => {
-        const n = (p.queued || {})[r];
-        return `<tr><td class="mono">${esc(r)}</td><td style="text-align:right">${n == null ? '<span class="mute">—</span>' : n ? `<span class="badge b-warn">${n} queued</span>` : '<span class="mute">0</span>'}</td></tr>`;
-      }).join('')}</tbody></table>`
-    : '<p class="mute">No repositories yet. <a href="#repos">Add one</a>.</p>'));
-  setHTML($('#ov-vms'), vmTable(S.vms.slice(0, 8)));
-}
-const badgeColor = s => badge(s).match(/b-\w+/)[0];
-
-function gettingStarted() {
-  const c = S.config;
-  const done = [S.token_set, S.image_ready, c.repos.length > 0];
-  if (done.every(Boolean)) return '';
-  const snippet = `jobs:\n  build:\n    runs-on: [self-hosted, ${c.label}]\n    steps:\n      - uses: actions/checkout@v4`;
-  const d = i => (done[i] ? ' class="done"' : '');
-  return `<div class="card"><h2>Getting started</h2><ol class="start">
-    <li${d(0)}>Save a GitHub token (classic, <code>repo</code> scope) in <a href="#settings">Settings</a>.</li>
-    <li${d(1)}>Bake the base VM image. It takes a few minutes. <button data-act="bake" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : 'Bake image'}</button></li>
-    <li${d(2)}>Add a repository in <a href="#repos">Repos</a>.</li>
-    <li>Point a workflow job at kiln: <button data-act="copy">Copy YAML</button><pre class="snip" id="snippet">${esc(snippet)}</pre></li>
-  </ol></div>`;
+  throw new Error('This job is not among the repo\'s 5 latest runs on GitHub.');
 }
 
-/* ---------- VMs ---------- */
-let selVm = null, vmFile = 'console', vmLog = null;
-function vmTable(list) {
-  if (!list.length) return '<p class="mute">No VMs yet. One boots when a matching job is queued.</p>';
-  return `<div class="scroll"><table><thead><tr><th>VM</th><th>State</th><th>Repo</th><th>Job</th><th>Result</th><th>Started</th><th>Duration</th></tr></thead><tbody>${
-    list.map(v => `<tr data-vm="${esc(v.id)}"${v.id === selVm ? ' class="sel"' : ''}>
-      <td class="nw"><button class="link mono" data-act="vm" data-id="${esc(v.id)}">${esc(v.id)}</button></td>
-      <td>${badge(v.state)}</td><td class="mono">${esc(v.repo)}</td><td>${esc(v.job || '—')}</td>
-      <td>${v.result ? badge(v.result) : '<span class="mute">—</span>'}</td>
-      <td class="nw" title="${esc(when(v.started))}">${rel(v.started)}</td>
-      <td class="nw">${dur((v.ended || now()) - v.started)}</td></tr>`).join('')
-  }</tbody></table></div>`;
-}
-function renderVms() {
-  setHTML($('#vm-list'), vmTable(S.vms));
-  const v = S.vms.find(x => x.id === selVm);
-  const box = $('#vm-detail');
-  if (!v) { box.hidden = true; vmLog?.stop(); vmLog = null; return; }
-  box.hidden = false;
-  $('#vm-title').textContent = v.id;
-  $('#vm-kill').hidden = !ACTIVE.has(v.state);
-  $('#vm-kill').dataset.id = v.id;
-  const rows = [
-    ['State', badge(v.state)], ['Repo', `<span class="mono">${esc(v.repo)}</span>`], ['Job', esc(v.job || '—')],
-    ['Result', v.result ? badge(v.result) : '—'], ['Runner ID', esc(v.runner_id ?? '—')],
-    ['Started', `${esc(when(v.started))} <span class="mute">(${rel(v.started)})</span>`],
-    ['Job started', v.busy_since ? `${esc(when(v.busy_since))} <span class="mute">(waited ${dur(v.busy_since - v.started)})</span>` : '—'],
-    ['Ended', v.ended ? esc(when(v.ended)) : '—'], ['Duration', dur((v.ended || now()) - v.started)],
-  ];
-  if (v.note) rows.push(['Note', `<span class="err">${esc(v.note)}</span>`]);
-  setHTML($('#vm-meta'), rows.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join(''));
-  document.querySelectorAll('#vm-detail [role=tab]').forEach(b => b.setAttribute('aria-selected', b.dataset.id === vmFile));
-  const key = v.id + '/' + vmFile;
-  if (vmLog?.key !== key) {
-    vmLog?.stop();
-    const id = v.id;
-    vmLog = logView($('#vm-log'), id, vmFile, () => ACTIVE.has(S?.vms.find(x => x.id === id)?.state));
-    vmLog.key = key;
+/* ---------- log viewer ---------- */
+const LOGS = new Set();
+let curLog = null;
+class Log {
+  constructor(el, o) {
+    Object.assign(this, { el, o, raw: '', next: 0, k: o.sources[0].k, gen: 0, timer: null, busy: false, follow: true, st: new Set() });
+    this.wrap = lsGet('kiln-wrap') === '1';
+    el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
+    const T = (a, i, l, p) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}" title="${l}">${ic(i)}<span class="lbl">${l}</span></button>`;
+    el.innerHTML = `<div class="lt"><div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}">${s.label}</button>`).join('')}</div><span class="sp"></span>
+      ${T('wrap', 'wrap', 'Wrap', this.wrap)}${T('follow', 'down', 'Follow', true)}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false)}</span>${T('copy', 'copy', 'Copy', false)}${T('dl', 'dl', 'Download', false)}</div>
+      <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">Jump to latest</button></div>`;
+    this.pre = $('pre', el);
+    el.addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b || b.disabled) return;
+      if (b.dataset.src) this.select(b.dataset.src); else if (b.dataset.lv) this.toggle(b.dataset.lv);
+    });
+    this.pre.addEventListener('scroll', () => { const gap = this.pre.scrollHeight - this.pre.scrollTop - this.pre.clientHeight; if (gap > 40 && this.follow) this.setFollow(false); else if (gap <= 4 && !this.follow) this.setFollow(true); });
+    LOGS.add(this); curLog = this; this.select(this.k);
   }
-}
-function openVm(id) {
-  selVm = id;
-  if (tab() !== 'vms') location.hash = '#vms'; else renderVms();
+  src() { return this.o.sources.find(s => s.k === this.k); }
+  setOff(k, off) { const b = $(`[data-src=${k}]`, this.el); b.disabled = off; b.title = off ? 'Available when the job finishes' : ''; if (off && this.k === k) this.select(this.o.sources[0].k); }
+  setFollow(f) { this.follow = f; $('[data-lv=follow]', this.el).setAttribute('aria-pressed', f); $('.jump', this.el).hidden = f; if (f) this.pre.scrollTop = this.pre.scrollHeight; }
+  async toggle(a) {
+    if (a === 'follow') return this.setFollow(!this.follow);
+    if (a === 'jump') return this.setFollow(true);
+    if (a === 'wrap') { this.wrap = !this.wrap; lsSet('kiln-wrap', this.wrap ? '1' : '0'); this.el.classList.toggle('wrap', this.wrap); $('[data-lv=wrap]', this.el).setAttribute('aria-pressed', this.wrap); }
+    if (a === 'ts') { const on = this.el.classList.toggle('ts'); $('[data-lv=ts]', this.el).setAttribute('aria-pressed', on); }
+    if (a === 'copy') copy(this.raw, 'Log copied');
+    if (a === 'dl') {
+      const s = this.src(), id = this.o.id, a2 = document.createElement('a'); let text = this.raw;
+      if (this.skipped || this.trimmed) {
+        text = ''; try { for (let n = 0;;) { const r = await api(`/api/log?src=${encodeURIComponent(s.src)}&file=${s.file}&from=${n}`); if (!r.data) break; text += r.data; n = r.next; } } catch (e) { return fail(e); }
+      }
+      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'github'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
+    }
+  }
+  note(t) { const n = $('[data-note]', this.el); n.textContent = t || ''; n.hidden = !t; }
+  clear() { this.note(''); this.raw = ''; this.pre.textContent = ''; this.st = new Set(); this.trimmed = false; }
+  select(k) {
+    this.k = k; this.gen++; clearTimeout(this.timer); this.timer = null; this.next = 0; this.skipped = false; this.clear();
+    $$('[data-src]', this.el).forEach(b => b.setAttribute('aria-checked', b.dataset.src === k)); rove(this.el);
+    $('[data-ts]', this.el).hidden = k !== 'gh';
+    const s = this.src(); this.setFollow(true);
+    if (s.gh) this.loadGh(s, this.gen); else this.tick(this.gen);
+  }
+  async loadGh(s, g) {
+    this.pre.textContent = 'Fetching the log from GitHub…';
+    try { const t = await s.gh(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
+    catch (e) { if (g === this.gen) this.pre.textContent = e.status === 404 ? 'GitHub has no log for this job yet. Logs appear once the job completes.' : e.message; }
+  }
+  async tick(g) {
+    this.busy = true; clearTimeout(this.timer); this.timer = null; const s = this.src();
+    try {
+      for (;;) { // drain: each call returns at most 512KB
+        const from = this.next, r = await api(`/api/log?src=${encodeURIComponent(s.src)}&file=${s.file}&from=${from}`);
+        if (g !== this.gen) return;
+        if (r.next < from) { this.clear(); this.skipped = false; }
+        if (from === 0 && !this.skipped && r.size > 2097152) { this.skipped = true; this.next = r.size - 1048576; this.note('Showing last 1 MB. Download for the full log.'); continue; }
+        this.next = r.next; if (!r.data) break; this.add(r.data);
+      }
+    } catch { /* daemon away; kick() retries */ }
+    this.busy = false;
+    if (!this.pre.isConnected) return this.destroy();
+    if (g === this.gen && this.o.live() && !document.hidden) this.timer = setTimeout(() => this.tick(g), 1000);
+  }
+  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().gh && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
+  big(t, g) { // render big logs in slices so the page stays responsive
+    const lines = t.split('\n'); let i = 0;
+    const step = () => { if (g !== this.gen) return; this.add(lines.slice(i, i + 2500).join('\n') + '\n', true); i += 2500; if (i < lines.length) setTimeout(step); };
+    step();
+  }
+  sgr(codes) {
+    const st = this.st, a = codes.split(';').map(Number);
+    for (let i = 0; i < a.length; i++) {
+      const c = a[i] || 0;
+      if (c === 0) st.clear(); else if (c === 1 || c === 2) st.add('a' + c); else if (c === 22) { st.delete('a1'); st.delete('a2'); }
+      else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) { [...st].filter(x => /^a(3\d|9\d)$/.test(x)).forEach(x => st.delete(x)); st.add('a' + c); }
+      else if (c === 39) [...st].filter(x => /^a(3\d|9\d)$/.test(x)).forEach(x => st.delete(x));
+      else if (c === 38 || c === 48) i += a[i + 1] === 5 ? 2 : 4;
+    }
+  }
+  fmt(t, f) { // text is only ever inserted as text nodes
+    const re = /\x1b\[([0-9;]*)m|\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g; let i = 0, m;
+    const put = s => { if (!s) return; if (this.st.size) { const e = document.createElement('span'); e.className = [...this.st].join(' '); e.textContent = s; f.append(e); } else f.append(s); };
+    while ((m = re.exec(t))) { put(t.slice(i, m.index)); if (m[1] !== undefined) this.sgr(m[1]); i = re.lastIndex; }
+    put(t.slice(i));
+  }
+  add(t, isGh) {
+    t = t.replace(/\r\n/g, '\n').replace(/\r/g, ''); this.raw += t;
+    const f = document.createDocumentFragment();
+    if (!isGh) this.fmt(t, f);
+    else {
+      const ls = t.split('\n'); if (ls[ls.length - 1] === '') ls.pop();
+      for (const l of ls) {
+        const m = /^(\d{4}-\d\d-\d\dT[\d:.]+Z) ?([\s\S]*)$/.exec(l), body = m ? m[2] : l;
+        if (m) { const s = document.createElement('span'); s.className = 'tsp'; s.textContent = m[1] + ' '; f.append(s); }
+        const k = body.startsWith('##[group]') ? 'grp' : body.startsWith('##[error]') ? 'er' : '';
+        if (k) { const w = document.createElement('span'); w.className = k; this.fmt(body + '\n', w); f.append(w); } else this.fmt(body + '\n', f);
+      }
+    }
+    this.pre.append(f);
+    if (this.pre.childNodes.length > 30000) { for (let i = 0; i < 5000; i++) this.pre.firstChild.remove(); if (!this.trimmed) { this.trimmed = true; this.note('Showing the latest output. Download for the full log.'); } }
+    if (this.follow) this.pre.scrollTop = this.pre.scrollHeight;
+  }
+  destroy() { this.gen++; clearTimeout(this.timer); LOGS.delete(this); if (curLog === this) curLog = null; }
 }
 
 /* ---------- repos ---------- */
-let selRepo = null, runs = [], wfRepo = null;
-const expanded = new Set(), jobsCache = new Map();
-function renderRepoList() {
-  const repos = S.config.repos;
-  if (!repos.includes(selRepo)) { selRepo = repos[0] || null; }
-  setHTML($('#repo-list'), repos.length ? repos.map(r => `<li>
-      <button class="link" data-act="repo-sel" data-id="${esc(r)}" aria-current="${r === selRepo}">${esc(r)}</button>
-      <button class="danger" data-act="repo-rm" data-id="${esc(r)}" aria-label="Remove ${esc(r)}">Remove</button></li>`).join('')
-    : '<li class="mute">No repositories yet.</li>');
-  $('#repo-pane').hidden = !selRepo;
-  if (selRepo !== wfRepo) loadRepo();
+const lastRun = {};
+const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
+const repoErr = e => e.status === 404 ? 'Repo not found or token lacks access.' : e.message;
+function addRepo(raw) {
+  const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
+  if (S.config.repos.includes(r)) return toast(`${r} is already added`, true);
+  return saveCfg({ ...S.config, repos: [...S.config.repos, r] }).then(() => { toast(`Added ${r}`); return r; });
 }
-async function saveConfig(cfg) {
-  await post('/api/config', cfg);
-  await poll();
+async function saveCfg(c) {
+  const r = await post('/api/config', c); await poll();
+  if (r?.restart_required) { restartPending = true; toast('Restart kiln to apply the listen address'); }
+  return r;
 }
-async function loadRepo() {
-  wfRepo = selRepo; runs = []; expanded.clear(); jobsCache.clear();
-  $('#joblog').hidden = true;
-  if (!selRepo) return;
-  $('#repo-title').textContent = selRepo;
-  setHTML($('#wfs'), '<p class="mute">Loading…</p>');
-  setHTML($('#runs'), '<p class="mute">Loading…</p>');
-  loadRuns();
-  const repo = selRepo;
-  try {
-    const r = await api(gh(repo, 'workflows'));
-    if (repo !== selRepo) return;
-    const wfs = r.workflows || [];
-    setHTML($('#wfs'), wfs.length ? `<div class="scroll"><table><thead><tr><th>Workflow</th><th>State</th><th>Run on ref</th></tr></thead><tbody>${wfs.map(w => `<tr>
-        <td>${esc(w.name)}<div class="mono mute">${esc(w.path)}</div></td><td>${badge(w.state)}</td>
-        <td class="nw"><div class="row" style="flex-wrap:nowrap"><label class="sr" for="ref-${+w.id}">Ref for ${esc(w.name)}</label>
-          <input id="ref-${+w.id}" value="main" size="10" spellcheck="false"><button data-act="dispatch" data-id="${+w.id}">Run</button></div></td></tr>`).join('')}</tbody></table></div>`
-      : '<p class="mute">No workflows in this repository.</p>');
-  } catch (e) { setHTML($('#wfs'), `<p class="err">${esc(e.message)}</p>`); }
+const repoForm = `<form class="bar" data-form="addrepo" style="margin:16px 0 0"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false" style="width:260px"><button class="btn pri">Add repo</button></form>`;
+const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() };
+pages.repos = {
+  mount(r) {
+    this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null;
+    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${repoForm}`; S.config.repos.forEach(x => loadLast(x)); return; }
+    Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
+    $('#app').innerHTML = `<a class="back" href="#/repos">← Repos</a><div class="ph"><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener">GitHub ↗</a></div>
+      <div id="rd-err"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
+      <div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">Remove ${esc(this.r)}</button></div></div>`;
+    this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
+  },
+  unmount() { clearInterval(this.t); },
+  async load() {
+    const repo = this.r;
+    this.loadRuns();
+    try { const w = await api(gh(repo, 'workflows')); if (repo === rd.repo) { rd.wfs = w.workflows || []; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
+  },
+  async loadRuns() {
+    const repo = this.r; if (!repo || document.hidden) return;
+    try {
+      const r = (await api(gh(repo, 'runs?per_page=15'))).workflow_runs || [];
+      if (repo !== rd.repo) return; rd.runs = r; rd.err = null;
+      await Promise.all([...rd.open].map(id => api(gh(repo, `runs/${id}/jobs`)).then(j => rd.jobs.set(id, j.jobs || [])).catch(() => {})));
+    } catch (e) { rd.err = repoErr(e); }
+    if (repo === rd.repo) this.update();
+  },
+  update() {
+    if (!this.r) {
+      const rs = S.config.repos;
+      setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
+        const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
+        return `<li><div class="row rr"><a class="nm" href="#/repos/${r}">${esc(r)}</a>
+          <span class="rt">${ok ? '<span class="ok sm">Routing to kiln</span>' : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}">No kiln jobs seen</button>`}</span>
+          <span class="lr">${lr ? lr === 'err' ? '<span class="fg3 sm">unavailable</span>' : badge(lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm">${n ? n + ' queued' : ''}</span></div>
+          ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">Point a job at kiln in a workflow file:</p><pre class="snip">${esc(snippet())}</pre><p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p><button class="btn" style="margin-top:8px" data-act="copysnip">Copy</button></div>` : ''}</li>`;
+      }).join('')}</ul>` : '<div class="empty"><p>Add a repo kiln should pick jobs up from.</p></div>');
+      return;
+    }
+    const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">Retry</button></div>` : '');
+    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}">Run</button></div></li>`).join('')}</ul>` : '<div class="empty"><p>No workflows in this repository.</p></div>' : '<div class="sk" style="height:48px"></div>'));
+    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : '<div class="empty"><p>No runs yet. Run a workflow or push a commit.</p></div>' : '<div class="sk" style="height:48px"></div>'));
+  },
+};
+function runHTML(run) {
+  const st = ghStatus(run.status, run.conclusion), open = rd.open.has(run.id), done = run.status === 'completed';
+  const jobs = open ? (rd.jobs.get(run.id) || null) : null;
+  const jh = !open ? '' : !jobs ? '<div class="sn fg2 sm">Loading jobs…</div>' : `<div class="sn" style="padding-top:0">${jobs.map(j => {
+    const vm = S.vms.find(v => v.id === j.runner_name), t0 = iso(j.started_at), t1 = iso(j.completed_at);
+    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(ghStatus(j.status, j.conclusion))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
+      ${j.runner_name ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner_name)}</span>` : ''}</div>`;
+  }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
+  return `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
+    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
+    <span style="display:flex;gap:8px"><a class="btn" href="${esc(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub">↗</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}">Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}">Cancel</button>`}</span></div>${jh}</li>`;
 }
-async function loadJobs(id) {
-  const r = await api(gh(selRepo, `runs/${id}/jobs`));
-  jobsCache.set(id, r.jobs || []);
-}
-async function loadRuns() {
-  const repo = selRepo;
-  if (!repo) return;
-  try {
-    const r = await api(gh(repo, 'runs?per_page=15'));
-    if (repo !== selRepo) return;
-    runs = r.workflow_runs || [];
-    await Promise.all([...expanded].map(id => {
-      const run = runs.find(x => x.id === id);
-      return run && (run.status !== 'completed' || !jobsCache.has(id)) ? loadJobs(id).catch(() => {}) : null;
-    }));
-    renderRuns();
-  } catch (e) { setHTML($('#runs'), `<p class="err">${esc(e.message)}</p>`); }
-}
-function renderRuns() {
-  if (!runs.length) return setHTML($('#runs'), `<p class="mute">No runs yet. Dispatch a workflow above or push a commit.</p>`);
-  setHTML($('#runs'), `<div class="scroll"><table><thead><tr><th>Run</th><th>Status</th><th>Branch</th><th>Event</th><th>By</th><th>Created</th><th></th></tr></thead><tbody>${runs.map(run => {
-    const open = expanded.has(run.id), done = run.status === 'completed';
-    return `<tr><td><button class="link" data-act="run" data-id="${+run.id}" aria-expanded="${open}">${open ? '▾' : '▸'} #${+run.run_number} ${esc(run.display_title)}</button><div class="mute">${esc(run.name)}</div></td>
-      <td>${badge(done ? run.conclusion || 'completed' : run.status)}</td>
-      <td class="mono">${esc(run.head_branch)}</td><td>${esc(run.event)}</td><td>${esc(run.actor?.login)}</td>
-      <td class="nw" title="${esc(run.created_at)}">${rel(iso(run.created_at))}</td>
-      <td class="nw"><a href="${esc(run.html_url)}" target="_blank" rel="noopener">GitHub</a>
-        ${done ? `<button data-act="rerun" data-id="${+run.id}">Rerun</button>` : `<button class="danger" data-act="cancel" data-id="${+run.id}">Cancel</button>`}</td></tr>
-      ${open ? `<tr><td colspan="7">${jobsHTML(jobsCache.get(run.id))}</td></tr>` : ''}`;
-  }).join('')}</tbody></table></div>`);
-}
-function jobsHTML(jobs) {
-  if (!jobs) return '<span class="mute">Loading jobs…</span>';
-  if (!jobs.length) return '<span class="mute">No jobs.</span>';
-  return jobs.map(j => {
-    const st = j.status === 'completed' ? j.conclusion : j.status;
-    const t0 = iso(j.started_at), t1 = iso(j.completed_at);
-    const vm = S?.vms.find(v => v.id === j.runner_name);
-    return `<div class="job"><div class="row">${badge(st)} <b>${esc(j.name)}</b>
-      <span class="mute">${t0 ? dur((t1 || now()) - t0) : ''}</span>
-      <span class="mute">${(j.labels || []).map(esc).join(', ')}</span>
-      ${j.runner_name ? (vm ? `<button class="link mono" data-act="vm" data-id="${esc(vm.id)}">${esc(vm.id)}</button>` : `<span class="mono mute">${esc(j.runner_name)}</span>`) : ''}
-      <button data-act="joblog" data-id="${+j.id}" data-runner="${esc(j.runner_name || '')}">Logs</button></div>
-      <ol class="steps">${(j.steps || []).map(s => `<li>${badge(s.status === 'completed' ? s.conclusion : s.status)} ${esc(s.name)}</li>`).join('')}</ol></div>`;
-  }).join('');
-}
-async function jobLog(id, runner) {
-  const pre = $('#joblog-pre'), note = $('#joblog-note');
-  $('#joblog').hidden = false;
-  $('#joblog-title').textContent = `Job ${id} log`;
-  note.innerHTML = ''; pre.textContent = 'Loading…'; pre.hidden = false;
-  try {
-    pre.textContent = stripAnsi(await api(gh(selRepo, `jobs/${id}/logs`), { text: true }));
-    pre.scrollTop = pre.scrollHeight;
-  } catch (e) {
-    pre.hidden = true;
-    if (e.status === 404) {
-      const vm = S?.vms.find(v => v.id === runner);
-      note.innerHTML = `<p class="mute">Logs are available when the job finishes; live output is in the VM tab.${vm ? ` <button class="link mono" data-act="vm" data-id="${esc(vm.id)}">Open ${esc(vm.id)}</button>` : ''}</p>`;
-    } else note.innerHTML = `<p class="err">${esc(e.message)}</p>`;
-  }
-  $('#joblog').scrollIntoView({ block: 'nearest' });
-}
-setInterval(() => { if (tab() === 'repos' && !document.hidden) loadRuns(); }, 10000);
-
-/* ---------- tailscale ---------- */
-let TS = null;
-const pings = new Map();
-async function loadTs() {
-  try { TS = await api('/api/tailscale'); renderTs(); }
-  catch (e) { setHTML($('#ts-main'), `<div class="card"><p class="err">${esc(e.message)}</p><button data-act="ts-refresh">Retry</button></div>`); }
-}
-function renderTs() {
-  const st = TS.status || {}, self = st.Self || {};
-  const dns = String(self.DNSName || '').replace(/\.$/, '');
-  const serveOn = !!TS.serve?.TCP?.['8443'];
-  const url = `https://${dns}:8443`;
-  const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
-  const health = st.Health || [];
-  const peerRow = p => {
-    const ip = (p.TailscaleIPs || [])[0] || '';
-    const conn = !p.Online ? '<span class="mute">—</span>' : p.CurAddr ? `direct <span class="mono">${esc(p.CurAddr)}</span>` : p.Relay ? `DERP (${esc(p.Relay)})` : '<span class="mute">idle</span>';
-    const seen = p.Online ? 'online' : !p.LastSeen || p.LastSeen.startsWith('0001') ? 'never' : rel(iso(p.LastSeen));
-    const out = pings.get(ip);
-    return `<tr><td class="nw"><span class="dot${p.Online ? ' on' : ''}" aria-hidden="true"></span>${esc(p.HostName)}${p.ExitNode ? ' <span class="badge b-run">exit node</span>' : ''}<div class="mono mute">${esc(String(p.DNSName || '').replace(/\.$/, ''))}</div></td>
-      <td>${esc(p.OS)}</td><td class="mono">${(p.TailscaleIPs || []).map(esc).join('<br>')}</td><td>${conn}</td><td class="nw">${esc(seen)}</td>
-      <td class="nw mono">${bytes(p.RxBytes)} / ${bytes(p.TxBytes)}</td>
-      <td>${ip ? `<button data-act="ping" data-id="${esc(ip)}">Ping</button>` : ''}${out ? `<span class="out mono${out.ok ? '' : ' err'}">${esc(out.output)}</span>` : ''}</td></tr>`;
-  };
-  setHTML($('#ts-main'), `<div class="split wide">
-    <div class="card"><div class="head"><h2>This machine</h2><button data-act="ts-refresh">Refresh</button></div>
-      <dl class="kv"><dt>Backend</dt><dd>${badge(st.BackendState || 'unknown')}</dd>
-      <dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
-      <dt>Host</dt><dd>${esc(self.HostName || '—')} <span class="mute">${esc(self.OS || '')}</span></dd>
-      <dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd>
-      <dt>IPs</dt><dd class="mono">${(st.TailscaleIPs || self.TailscaleIPs || []).map(esc).join('<br>') || '—'}</dd>
-      <dt>Health</dt><dd>${health.length ? health.map(x => `<div class="err">${esc(x)}</div>`).join('') : '<span class="b-ok">no warnings</span>'}</dd></dl></div>
-    <div class="card"><div class="head"><h2>Serve dashboard over HTTPS (:8443)</h2>
-      <button data-act="serve" class="${serveOn ? 'danger' : 'primary'}" aria-pressed="${serveOn}">${serveOn ? 'Stop serving' : 'Start serving'}</button></div>
-      <p>${serveOn ? `Serving at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : `Off. When on, the dashboard is reachable from your tailnet at <span class="mono">${esc(url)}</span> with a real certificate.`}</p>
-      <h3>Current serve config</h3><pre class="snip">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></div></div>
-    <div class="card"><h2 style="margin-bottom:8px">Peers <span class="mute">${peers.filter(p => p.Online).length} of ${peers.length} online</span></h2>
-      ${peers.length ? `<div class="scroll"><table><thead><tr><th>Name</th><th>OS</th><th>IPs</th><th>Connection</th><th>Last seen</th><th>Rx / Tx</th><th></th></tr></thead><tbody>${peers.map(peerRow).join('')}</tbody></table></div>` : '<p class="mute">No peers.</p>'}</div>`);
-}
-async function netcheck(btn) {
-  btn.textContent = 'Running…';
-  try {
-    const n = await api('/api/tailscale/netcheck');
-    const lat = Object.entries(n.RegionLatency || {}).sort((a, b) => a[1] - b[1]).slice(0, 6);
-    const yn = v => (v ? '<span class="b-ok">yes</span>' : '<span class="b-bad">no</span>');
-    setHTML($('#netcheck'), `<dl class="kv"><dt>UDP</dt><dd>${yn(n.UDP)}</dd>
-      <dt>IPv4</dt><dd>${yn(n.IPv4)} <span class="mono">${esc(n.GlobalV4 || '')}</span></dd>
-      <dt>IPv6</dt><dd>${yn(n.IPv6)} <span class="mono">${esc(n.GlobalV6 || '')}</span></dd>
-      <dt>Preferred DERP</dt><dd>region ${esc(n.PreferredDERP)}</dd>
-      <dt>Fastest regions</dt><dd>${lat.map(([id, ns]) => `region ${esc(id)}: <span class="mono">${(ns / 1e6).toFixed(1)} ms</span>`).join('<br>') || '—'}</dd></dl>`);
-    $('#netcheck').className = '';
-  } finally { btn.textContent = 'Run netcheck'; }
+async function loadLast(r) {
+  try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
+  if (cur === pages.repos && !pages.repos.r) pages.repos.update();
 }
 
 /* ---------- settings ---------- */
-const FIELDS = [
-  ['listen', 'Listen address', 'text', 'Takes effect after restarting kiln.'],
-  ['label', 'Runner label', 'text', 'Jobs opt in with runs-on: [self-hosted, <label>].'],
-  ['max_vms', 'Max concurrent VMs', 'num'], ['vm_cpus', 'vCPUs per VM', 'num'],
-  ['vm_mem_mb', 'Memory per VM (MB)', 'num'], ['vm_disk_gb', 'Disk per VM (GB)', 'num'],
-  ['poll_secs', 'GitHub poll interval (s)', 'num'], ['job_timeout_mins', 'Job timeout (min)', 'num'],
-  ['idle_timeout_mins', 'Idle VM timeout (min)', 'num'],
-];
-let cfgDirty = false;
-function buildSettings() {
-  const f = $('#cfg');
-  f.innerHTML = FIELDS.map(([k, label, type, hint]) => `<label>${esc(label)}
-      <input name="${k}" ${type === 'num' ? 'type="number" min="0" step="1" required' : 'required spellcheck="false"'}>${hint ? `<span>${esc(hint)}</span>` : ''}</label>`).join('')
-    + `<label class="full">Allowed tailnet users (comma separated, empty means anyone on the tailnet)<input name="allowed_users" placeholder="alice@github, bob@example.com" spellcheck="false"></label>
-      <div class="full row"><button class="primary">Save settings</button><button type="button" data-act="cfg-reset">Discard changes</button></div>`;
-  f.addEventListener('input', () => (cfgDirty = true));
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics' };
+let ncHTML = '', tsOpen = false;
+let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
+const pings = new Map();
+const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
+const fld = (id, label, ctl, hint) => `<div class="fld"><label for="${id}">${label}</label><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
+const num = (k, v, step = 1) => `<input type="number" id="f-${k}" data-k="${k}" value="${esc(v)}" min="0" step="${step}">`;
+const G = {
+  capacity: {
+    html() {
+      const c = draft;
+      return `<div class="card"><h2>Capacity</h2>
+        <div class="fld"><span class="lb">Pause new jobs</span><div class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></div></div>
+        ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms))}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus))}
+        ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5))}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb))}
+        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`)}
+        <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
+    },
+    live() {
+      const h = S.host, c = draft, el = $('#cap-hint'); if (!el || !c) return;
+      const cpu = c.max_vms * c.vm_cpus, gb = c.max_vms * c.vm_mem_mb / 1024, tg = h.mem_total_mb / 1024;
+      el.innerHTML = `<span class="fg2">Uses ${cpu}/${h.cpus} CPUs, ${gb.toFixed(0)}/${tg.toFixed(0)} GB</span>` + (cpu > h.cpus ? `<div class="warn">max VMs × vCPUs exceeds ${h.cpus} host CPUs</div>` : '') + (gb > tg ? `<div class="warn">max VMs × memory exceeds ${tg.toFixed(0)} GB of host memory</div>` : '');
+      const p = $('#f-pause'); if (p) p.checked = c.max_vms === 0;
+    },
+  },
+  timeouts: { html: () => `<div class="card"><h2>Timeouts</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
+    ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}</div>` },
+  access: {
+    html: () => `<div class="card"><h2>Access</h2>
+      <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
+      ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
+      <div class="fld"><span class="lb">Dashboard key</span><div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">Forget key in this browser</button></div></div></div>`,
+    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip">${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}">×</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
+  },
+  github: {
+    html: () => `<div class="card"><h2>GitHub</h2><div id="gh-st"></div>
+      <form data-form="token" class="bar" style="margin:0"><label class="sr" for="tok-in">Personal access token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
+      <p class="fg2 sm" style="margin-top:8px">Classic token with the <span class="mono">repo</span> scope. Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div></div>`,
+    live() {
+      const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
+      setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd></dl>
+      ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
+    },
+  },
+  image: {
+    html: () => `<div class="card"><h2>Image options</h2>
+      <div class="fld"><span class="lb">Docker mirror</span><div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
+      <div class="fld"><span class="lb">Auto rebake</span><div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when a newer runner is released.</span></div></div></div>
+      <div class="card"><h2>Image</h2><div id="img-info"></div><details id="bake-d"><summary>Bake log</summary><div id="bake-log"></div></details></div>`,
+    open() { this.lv = new Log($('#bake-log'), { id: 'bake', live: () => !!S.baking, sources: [{ k: 'console', label: 'Console', src: 'bake', file: 'console' }] }); $('#bake-d').open = !!S.baking; },
+    close() { this.lv?.destroy(); },
+    live() {
+      const im = S.image, mi = S.mirror;
+      $('#mir').textContent = !mi ? 'Caches Docker pulls for job VMs.' : !mi.enabled ? 'Off.' : mi.running ? `Running${mi.cache_mb != null ? `, cache ${(mi.cache_mb / 1024).toFixed(1)} GB` : ''}.` : 'Enabled but not running.' + (mi.error ? ' ' + mi.error : '');
+      setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
+        ${im?.stale ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.</div>` : ''}
+        <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
+      if (S.baking && !this.was) $('#bake-d').open = true; this.was = S.baking;
+    },
+  },
+  network: {
+    html: () => `<div id="ts"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
+    open() { loadTs(); }, live() { if (TS) renderTs(); },
+  },
+  notifications: {
+    html() {
+      const on = lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted', sec = window.isSecureContext && window.Notification;
+      const dns = String(TS?.status?.Self?.DNSName || '').replace(/\.$/, '') || 'your-host.ts.net';
+      return `<div class="card"><h2>Notifications</h2><div class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></div>
+        <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p></div>`;
+    },
+    open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
+  },
+  diagnostics: {
+    html: () => `<div class="card"><h2>Diagnostics <button class="btn" data-act="doctor" style="margin-left:auto">Run checks</button></h2><div id="doc"></div></div>`,
+    open() { runDoctor(); },
+    live() {
+      setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
+    },
+  },
+};
+const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
+pages.settings = {
+  mount(r) {
+    const g = GROUPS[r.seg[0]] ? r.seg[0] : 'capacity'; this.g = g;
+    cfgJ = JSON.stringify(S.config); draft = JSON.parse(cfgJ);
+    $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
+      <div><label class="sr" for="gsel">Settings group</label><select id="gsel" data-act="gsel">${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${k === g ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <div id="set-body"></div><div id="dbar" hidden><span class="sp fg2">Unsaved changes</span><button class="btn" data-act="discard">Discard</button><button class="btn pri" data-act="save">Save changes</button></div></div></div>`;
+    this.render();
+  },
+  render() { G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html(); G[this.g].open?.(); this.live(); },
+  unmount() { G[this.g]?.close?.(); },
+  update() {
+    if (!isDirty()) { const j = JSON.stringify(S.config); if (j !== cfgJ) { cfgJ = j; draft = JSON.parse(j); if (!$('#set-body').contains(document.activeElement)) { G[this.g].close?.(); this.render(); } } }
+  },
+  live() { G[this.g].live?.(); $('#dbar').hidden = !isDirty() && !$('#f-adduser')?.value; },
+};
+async function loadTs() {
+  try { TS = await api('/api/tailscale'); } catch (e) { TS = { err: e.message }; }
+  if (cur === pages.settings && pages.settings.g === 'network') renderTs();
 }
-function renderSettings() {
-  const f = $('#cfg');
-  if (!cfgDirty) {
-    for (const [k] of FIELDS) f.elements[k].value = S.config[k];
-    f.elements.allowed_users.value = S.config.allowed_users.join(', ');
-  }
-  $('#tok-status').innerHTML = S.token_set ? '<span class="b-ok">A token is set.</span> Saving replaces it.' : '<span class="b-bad">No token set.</span> kiln cannot see queued jobs until one is saved.';
-  const img = S.image;
-  setHTML($('#bake-status'), S.baking ? '<i class="spin" aria-hidden="true"></i> Baking now. Follow the log below.'
-    : S.image_ready ? `Ready. Runner ${esc(img?.runner_version || '?')}, baked ${esc(when(img?.baked_at))} (${rel(img?.baked_at)}). Rebake to pick up a newer runner or package updates.`
-    : 'Not baked yet. VMs cannot start until the base image exists.');
-  const b = $('#bake-btn');
-  b.disabled = S.baking; b.textContent = S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image';
+addEventListener('toggle', e => { if (e.target.matches?.('#ts details')) tsOpen = e.target.open; }, true);
+function renderTs() {
+  if (TS.err) return setHTML($('#ts'), `<div class="card"><div class="cal">${esc(TS.err)}</div><button class="btn" data-act="tsr">Retry</button></div>`);
+  const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = !!TS.serve?.TCP?.['8443'], url = `https://${dns}:8443`;
+  const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
+  const row = p => {
+    const ip = (p.TailscaleIPs || [])[0] || '', pg = pings.get(ip), ls = iso(p.LastSeen);
+    const conn = !p.Online ? 'offline' : p.CurAddr ? `direct · ${p.CurAddr}` : p.Relay ? `relayed via ${p.Relay}` : 'idle';
+    return `<li><div class="row pr"><span class="t" style="grid-area:n"><span class="tt">${esc(p.HostName)}</span><span class="id">${esc(ip)} · ${esc(p.OS || '')}</span></span>
+      <span class="pc sm ${p.Online ? (p.CurAddr ? 'ok' : 'warn') : 'fg2'}">${esc(conn)}</span><span class="ps sm fg2">${p.Online ? 'online' : ls ? relH(ls) : 'never seen'}</span>
+      <span style="grid-area:p;text-align:right">${ip && p.Online ? `<button class="btn" data-act="ping" data-id="${esc(ip)}" ${pg?.busy ? 'disabled' : ''}>${pg?.busy ? 'Pinging…' : 'Ping'}</button>` : ''}</span>${pg && !pg.busy ? `<span class="pg ${pg.ok ? '' : 'fail'}">${esc(pg.output)}</span>` : ''}</div></li>`;
+  };
+  setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn')}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
+      <dt>This machine</dt><dd>${esc(self.HostName || '—')}</dd><dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd><dt>IPs</dt><dd class="mono">${(self.TailscaleIPs || []).map(esc).join(', ') || '—'}</dd></dl></div>
+    <div class="card"><h2>Serve over HTTPS</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${on ? 'checked' : ''}><span>${on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate.'}</span></div>
+      <details${(document.querySelector('#ts details')?.open ?? tsOpen) ? ' open' : ''}><summary>Raw serve config</summary><pre class="raw">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></details></div>
+    <div class="card"><h2>Peers <span class="fg2 sm" style="font-weight:400">${peers.filter(p => p.Online).length} of ${peers.length} online</span></h2>${peers.length ? `<ul class="list">${peers.map(row).join('')}</ul>` : '<p class="fg2">No peers.</p>'}</div>
+`);
 }
-buildSettings();
-$('#cfg').addEventListener('submit', async e => {
-  e.preventDefault();
-  const f = e.target, c = { ...S.config };
-  for (const [k, , type] of FIELDS) c[k] = type === 'num' ? Number(f.elements[k].value) : f.elements[k].value.trim();
-  c.allowed_users = f.elements.allowed_users.value.split(',').map(s => s.trim()).filter(Boolean);
-  try { await post('/api/config', c); cfgDirty = false; toast('Settings saved', false); poll(); }
-  catch (err) { toast(err.message); }
-});
-$('#tok').addEventListener('submit', async e => {
-  e.preventDefault();
-  const inp = $('#tok-in');
-  try { await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved', false); poll(); }
-  catch (err) { toast(err.message); }
-});
-$('#repo-add').addEventListener('submit', async e => {
-  e.preventDefault();
-  const inp = $('#repo-in');
-  const r = inp.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
-  if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name');
-  if (S.config.repos.includes(r)) return toast(`${r} is already added`);
-  try { await saveConfig({ ...S.config, repos: [...S.config.repos, r] }); inp.value = ''; selRepo = r; renderRepoList(); toast(`Added ${r}`, false); }
-  catch (err) { toast(err.message); }
-});
 
-/* ---------- actions (delegated) ---------- */
+/* ---------- onboarding ---------- */
+let setupOpen = null;
+pages.setup = {
+  mount() { $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip">Skip setup</button></div><div class="card"><ol class="stp" id="stp"></ol></div>`; setupOpen = null; },
+  update() {
+    const c = S.config, first = S.vms.find(v => v.busy_since && v.ended);
+    const done = [S.token_set, S.image_ready, c.repos.length > 0, lsGet('kiln-wf') === '1' || !!first, !!first];
+    const open = setupOpen ?? (done.indexOf(false) < 0 ? 4 : done.indexOf(false));
+    const tr = open === 1 && tokRes ? tokHTML() : '';
+    const B = [
+      `<form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
+       <p class="fg2 sm">Classic token with the <span class="mono">repo</span> scope.</p>${tokHTML()}`,
+      S.baking ? `<p>Baking the base image. ${PH[bakeIdx()]?.[1] || 'Starting'}, ${dur((Date.now() - bk.t0) / 1000)} elapsed, usually ~4 min.</p>` : `<p class="fg2">Builds the VM image every job starts from. Takes about 4 minutes.</p><button class="btn pri" data-act="bake">Bake image</button>`,
+      `${c.repos.length ? `<p class="fg2">${c.repos.map(esc).join(', ')}</p>` : ''}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
+      `<p class="fg2">Add this to a workflow in the repo:</p><pre class="snip" style="max-width:100%">${esc(snippet())}</pre><p class="fg2 sm">${esc(SIZES())}</p><div style="display:flex;gap:8px"><button class="btn" data-act="copysnip">Copy</button><button class="btn pri" data-act="wfdone">I added it</button></div>`,
+      first ? `<p class="ok">First job ran in ${dur(jdur(first))}.</p><a class="btn pri" href="#/" data-act="finish">Go to overview</a>` : `<p class="fg2">Waiting for a job with <span class="mono">runs-on: [self-hosted, ${esc(c.label)}]</span>…</p>`,
+    ];
+    setHTML($('#stp'), ['Add a GitHub token', 'Bake the image', 'Add a repo', 'Add the workflow', 'Run the first job'].map((t, i) => {
+      const d = done[i] && i !== open;
+      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? '✓' : i + 1}</span><h3>${t}${d ? `<button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${tr}${B[i]}</div>` : ''}</li>`;
+    }).join(''));
+  },
+};
+
+/* ---------- actions ---------- */
 const ACT = {
-  vm: b => openVm(b.dataset.id),
-  logtab: b => { vmFile = b.dataset.id; renderVms(); },
-  async kill(b) {
-    if (!confirm(`Kill VM ${b.dataset.id}? Its running job will fail.`)) return;
-    await post(`/api/vms/${encodeURIComponent(b.dataset.id)}/kill`); toast('Kill sent', false); poll();
+  retry() { fails = 0; poll(); },
+  async bake() { await post('/api/bake'); S.baking = true; bk.was = false; toast('Bake started'); setTimeout(poll, 300); },
+  async rebake() {
+    const n = S.vms.filter(ACTIVE).length;
+    if (n && !await ask({ title: 'Rebake image?', body: `${n} VM${n > 1 ? 's are' : ' is'} running on the current image. New jobs wait ~4 min for the bake.`, action: 'Rebake' })) return;
+    await ACT.bake(); setTimeout(() => $('[data-act=rebake]')?.focus(), 400);
   },
-  async bake() {
-    await post('/api/bake'); S.baking = true; toast('Bake started', false);
-    location.hash = '#settings'; setTimeout(poll, 300);
+  async resume() { await saveCfg({ ...S.config, max_vms: +lsGet('kiln-prev-vms') || 2 }); toast('Resumed'); },
+  async pause(b) {
+    if (b.checked) { if (S.config.max_vms > 0) lsSet('kiln-prev-vms', S.config.max_vms); await saveCfg({ ...S.config, max_vms: 0 }); toast('Paused'); } else await ACT.resume();
+    draft.max_vms = S.config.max_vms; cfgJ = JSON.stringify(S.config); pages.settings.render();
   },
-  async copy() {
-    const text = $('#snippet').textContent;
-    try { await navigator.clipboard.writeText(text); }
-    catch { const r = document.createRange(); r.selectNodeContents($('#snippet')); getSelection().removeAllRanges(); getSelection().addRange(r); document.execCommand('copy'); }
-    toast('YAML copied', false);
+  async kill() {
+    const v = S.vms.find(x => x.id === pages.job.id);
+    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(v.repo)} / ${esc(v.job || 'no job')}</b>? The job fails on GitHub.`, action: 'Kill VM', danger: 1 })) return;
+    await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
-  'repo-sel': b => { selRepo = b.dataset.id; renderRepoList(); },
-  async 'repo-rm'(b) {
+  copysnip: () => copy(snippet(), 'Workflow snippet copied'),
+  rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" value="${rate()}"><button class="btn pri">Save</button></form>`); },
+  jf(b) { jf.f = b.dataset.v; pages.jobs.update(); },
+  jfrepo(s) { jf.repo = s.value; pages.jobs.update(); },
+  route(b) { pages.repos.sn = pages.repos.sn === b.dataset.id ? null : b.dataset.id; pages.repos.update(); },
+  async rmrepo(b) {
     const r = b.dataset.id;
-    if (!confirm(`Stop serving jobs for ${r}?`)) return;
-    await saveConfig({ ...S.config, repos: S.config.repos.filter(x => x !== r) }); toast(`Removed ${r}`, false);
+    if (!await ask({ title: 'Remove repo?', body: `Stop picking up jobs from <b>${esc(r)}</b>? Running jobs finish.`, action: `Remove ${r}`, danger: 1 })) return;
+    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
-  'repo-refresh': () => loadRepo(),
+  rdretry() { rd.err = null; pages.repos.load(); },
+  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
   async run(b) {
     const id = +b.dataset.id;
-    if (expanded.has(id)) { expanded.delete(id); return renderRuns(); }
-    expanded.add(id); renderRuns();
-    await loadJobs(id); renderRuns();
+    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(gh(rd.repo, `runs/${id}/jobs`)).then(j => { rd.jobs.set(id, j.jobs || []); pages.repos.update(); }).catch(fail); }
+    pages.repos.update();
   },
-  async rerun(b) { await post(gh(selRepo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested', false); setTimeout(loadRuns, 2000); },
-  async cancel(b) { await post(gh(selRepo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested', false); setTimeout(loadRuns, 2000); },
-  async dispatch(b) {
-    const ref = $('#ref-' + b.dataset.id).value.trim() || 'main';
-    await post(gh(selRepo, `workflows/${b.dataset.id}/dispatches`), { ref });
-    toast(`Workflow dispatched on ${ref}`, false); setTimeout(loadRuns, 2500);
+  async rerun(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async cancel(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  gsel: s => (location.hash = '#/settings/' + s.value),
+  discard() { draft = JSON.parse(JSON.stringify(S.config)); pages.settings.render(); },
+  async save() {
+    const bad = ['vm_cpus', 'vm_mem_mb', 'vm_disk_gb', 'poll_secs', 'job_timeout_mins', 'idle_timeout_mins'].find(k => !(draft[k] > 0));
+    if (bad) return toast(`${bad.replace(/_/g, ' ')} must be greater than 0`, true);
+    const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
+    if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
+    await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); toast('Saved'); pages.settings.render();
   },
-  joblog: b => jobLog(b.dataset.id, b.dataset.runner),
-  'joblog-close': () => { $('#joblog').hidden = true; },
-  'ts-refresh': () => loadTs(),
+  rmuser(b) { draft.allowed_users = draft.allowed_users.filter(u => u !== b.dataset.id); pages.settings.live(); },
+  forgetkey() { lsSet('kiln-key', null); toast('Key forgotten in this browser'); },
+  async notify(b) {
+    if (!b.checked) return lsSet('kiln-notify', '0');
+    const p = await Notification.requestPermission();
+    if (p !== 'granted') { b.checked = false; return toast('Notifications are blocked in this browser', true); }
+    lsSet('kiln-notify', '1'); toast('Notifications on'); poll();
+  },
+  doctor() { doctor = null; return runDoctor(); },
+  tsr() { return loadTs(); },
   async ping(b) {
-    b.textContent = 'Pinging…';
-    try { pings.set(b.dataset.id, await post('/api/tailscale/ping', { peer: b.dataset.id })); }
-    finally { b.textContent = 'Ping'; }
+    const ip = b.dataset.id; pings.set(ip, { busy: 1 }); renderTs();
+    try { pings.set(ip, await post('/api/tailscale/ping', { peer: ip })); } catch (e) { pings.set(ip, { ok: false, output: e.message }); }
     renderTs();
   },
-  async serve() {
-    const on = !TS.serve?.TCP?.['8443'];
-    const r = await post('/api/tailscale/serve', { on });
-    toast(r?.output || (on ? 'Serving on :8443' : 'Stopped serving'), false); loadTs();
+  async serve(b) {
+    try { await post('/api/tailscale/serve', { on: b.checked }); toast(b.checked ? 'Serve on' : 'Serve off'); } finally { $('#ts')._h = null; loadTs(); }
   },
-  netcheck: b => netcheck(b),
-  'cfg-reset': () => { cfgDirty = false; renderSettings(); },
+  async netcheck(b) {
+    b.disabled = true; $('#nc').textContent = 'Running…';
+    try {
+      const n = await api('/api/tailscale/netcheck'), yn = v => v ? '<span class="ok">yes</span>' : '<span class="fail">no</span>';
+      const lat = Object.entries(n.RegionLatency || {}).sort((a, b) => a[1] - b[1]).slice(0, 5);
+      $('#nc').className = 'sm'; ncHTML = $('#nc').innerHTML = `<dl class="kv"><dt>UDP</dt><dd>${yn(n.UDP)}</dd><dt>IPv4</dt><dd>${yn(n.IPv4)} <span class="mono">${esc(n.GlobalV4 || '')}</span></dd><dt>IPv6</dt><dd>${yn(n.IPv6)}</dd><dt>Preferred relay</dt><dd>${esc(n.DERPMap?.Regions?.[n.PreferredDERP]?.RegionName || n.PreferredDERP)}</dd>
+        <dt>Fastest</dt><dd>${lat.map(([id, ns]) => `${esc(n.DERPMap?.Regions?.[id]?.RegionName || id)}: ${(ns / 1e6).toFixed(1)} ms`).join('<br>') || '—'}</dd></dl>`;
+    } catch (e) { $('#nc').textContent = e.message; } finally { b.disabled = false; }
+  },
+  skip() { lsSet('kiln-skip-setup', '1'); location.hash = '#/'; },
+  finish() { lsSet('kiln-skip-setup', '1'); },
+  wfdone() { lsSet('kiln-wf', '1'); setupOpen = 4; pages.setup.update(); },
+  stepopen(b) { setupOpen = +b.dataset.id; pages.setup.update(); },
 };
 document.addEventListener('click', async e => {
-  const b = e.target.closest('[data-act]');
-  if (!b) {
-    const tr = e.target.closest('tr[data-vm]');
-    if (tr && !e.target.closest('a,button,input')) openVm(tr.dataset.vm);
-    return;
-  }
-  const fn = ACT[b.dataset.act];
-  if (!fn) return;
-  e.preventDefault();
+  if (popEl && !popEl.contains(e.target) && !e.target.closest('[data-act=rate],[data-act=runwf]')) closePop();
+  const b = e.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'OPTION') return;
+  const fn = ACT[b.dataset.act]; if (!fn) return;
+  if (b.tagName !== 'INPUT' && b.tagName !== 'A') e.preventDefault();
   if (b.tagName === 'BUTTON') b.disabled = true;
-  try { await fn(b); } catch (err) { toast(err.message); } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
+  try { await fn(b); } catch (err) { fail(err); if (b.type === 'checkbox') b.checked = !b.checked; } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
+});
+document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) ACT[e.target.dataset.act](e.target); });
+document.addEventListener('input', e => {
+  const t = e.target, k = t.dataset.k; if (!k || !draft) return;
+  if (k === 'adduser') { $('#dbar').hidden = false; return; }
+  const v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value.trim();
+  if (k === 'vm_mem_gb') draft.vm_mem_mb = Math.round(v * 1024); else draft[k] = v;
+  pages.settings.live();
+});
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if (t.dataset?.k === 'adduser' && (e.key === 'Enter' || e.key === ',')) {
+    e.preventDefault(); const u = t.value.trim().replace(/^@/, '');
+    if (u && !draft.allowed_users.includes(u)) { draft.allowed_users.push(u); pages.settings.live(); } t.value = '';
+  }
+});
+document.addEventListener('submit', async e => {
+  const f = e.target, k = f.dataset.form; if (!k) return;
+  e.preventDefault(); const inp = $('input', f), btn = $('button', f); btn.disabled = true;
+  try {
+    if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast('Rate saved'); }
+    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
+    else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
+    else if (k === 'token') {
+      tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();
+      if (cur === pages.settings) $('#tok-res').innerHTML = tokHTML(); else cur.update();
+    }
+  } catch (err) { fail(err); } finally { btn.disabled = false; }
+});
+addEventListener('keydown', e => {
+  const rb = e.target.closest?.('.seg [role=radio]');
+  if (rb && /^Arrow(Left|Right)$/.test(e.key)) {
+    e.preventDefault(); const b = $$('[role=radio]', rb.parentElement).filter(x => !x.disabled), n = b[(b.indexOf(rb) + (e.key === 'ArrowRight' ? 1 : -1) + b.length) % b.length]; n.click(); setTimeout(() => { rove(); n.focus(); }); return;
+  }
+  if (e.key === 'Escape') closePop(true);
+  if (e.target.closest?.('input,select,textarea') || e.ctrlKey || e.metaKey || e.altKey || dlg.open) return;
+  if (ACT.g) { clearTimeout(ACT.g.t); const go = { o: '#/', j: '#/jobs', r: '#/repos', s: '#/settings/capacity' }[e.key]; ACT.g = null; if (go) { location.hash = go; return; } }
+  if (e.key === 'g') ACT.g = { t: setTimeout(() => (ACT.g = null), 1000) };
+  else if (e.key === '/') { e.preventDefault(); if (cur !== pages.jobs || parse().seg[0]) { location.hash = '#/jobs'; } setTimeout(() => $('#jf-repo')?.focus()); }
+  else if (e.key === 'f') curLog?.toggle('follow');
+  else if (e.key === 'w') curLog?.toggle('wrap');
+  else if (e.key === '?') modal(`<form method="dialog"><h2>Keyboard shortcuts</h2><div class="kbd"><span><kbd>g</kbd> <kbd>o</kbd></span><span>Overview</span><span><kbd>g</kbd> <kbd>j</kbd></span><span>Jobs</span><span><kbd>g</kbd> <kbd>r</kbd></span><span>Repos</span><span><kbd>g</kbd> <kbd>s</kbd></span><span>Settings</span>
+    <kbd>/</kbd><span>Filter jobs</span><kbd>f</kbd><span>Toggle follow in the log</span><kbd>w</kbd><span>Toggle wrap in the log</span><kbd>Esc</kbd><span>Close overlays</span></div><div class="act"><button class="btn pri" autofocus>Close</button></div></form>`);
 });
 
-logView($('#bake-log'), 'bake', 'console', () => !!S?.baking);
-route();
-poll();
+$('#fav').href = FAV(null);
+route(); poll();
 </script>
 </body>
 </html>
