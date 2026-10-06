@@ -30,7 +30,8 @@ next.
 | **JIT runner config** (`generate-jitconfig`) | Each VM gets a single-use, auto-deregistering runner. There's no long-lived registration token on disk. |
 | **JIT secret via SMBIOS OEM string** | It works with the stock cloud kernel (fw_cfg needs a module the cloud kernel lacks), and `path=` keeps it out of `ps`. |
 | **Polling, not webhooks** | The box is only reachable over Tailscale. Polling `runs?status=queued/in_progress` with ETags is almost free against the rate limit, because 304 responses don't count. |
-| **Demand by count, not by job id** | GitHub gives any queued job to any idle runner whose labels match, so kiln boots `queued − (booting + idle)` VMs per repo. |
+| **Demand by count, not by job id** | GitHub gives any queued job to any idle runner whose labels match, so kiln boots `queued − (booting + idle)` VMs per repo and size. |
+| **Docker Hub pull-through mirror** | Job VMs are fresh, so every `docker pull` would hit Docker Hub's rate limit. kiln runs a local registry cache they reach at `10.0.2.2:5000`; dockerd falls back to Docker Hub if it is down. |
 
 ## Quick start (on the CI box)
 
@@ -44,11 +45,11 @@ systemctl --user daemon-reload && systemctl --user enable --now kiln
 loginctl enable-linger $USER
 ```
 
-Open `http://<box>:7878` from any tailnet device. Optionally publish it over
+Run `kiln doctor` to check KVM, tools, disk, memory, the image, the token, the Docker mirror and Tailscale. Open `http://<box>:7878` from any tailnet device. Optionally publish it over
 HTTPS from the Tailscale tab, which serves it at `https://<box>.<tailnet>.ts.net:8443`.
 
 Then:
-1. **GitHub token.** kiln uses `KILN_GITHUB_TOKEN`, then the token saved from the dashboard, then `gh auth token`. A classic PAT needs the `repo` scope. A fine-grained one needs *Administration: write* and *Actions: read/write* on each repo.
+1. **GitHub token.** kiln uses `KILN_GITHUB_TOKEN`, then the token saved from the dashboard, then `gh auth token`. A classic PAT needs the `repo` scope. A fine-grained one needs *Administration: write* and *Actions: read/write* on each repo. On hosts where `gh` keeps its token in a keyring (locked after a headless reboot), save the token from the dashboard instead: the dashboard validates it against each repo before saving.
 2. **Repos.** Add them on the Repos tab, as `owner/name`.
 3. **Workflows.** Opt a workflow in:
    ```yaml
@@ -56,6 +57,20 @@ Then:
      test:
        runs-on: [self-hosted, kiln]
    ```
+
+### VM sizes
+
+The label picks the VM. `[self-hosted, kiln]` gets the default size (`vm_cpus` / `vm_mem_mb`, 4 vCPU / 8 GB unless changed); add a size to the label to choose another:
+
+| `runs-on` | vCPU | RAM |
+|---|---|---|
+| `[self-hosted, kiln]` | `vm_cpus` (4) | `vm_mem_mb` (8 GB) |
+| `[self-hosted, kiln-2cpu]` | 2 | 4 GB |
+| `[self-hosted, kiln-4cpu]` | 4 | 8 GB (the default size's RAM if `vm_cpus` is 4) |
+| `[self-hosted, kiln-8cpu]` | 8 | 16 GB |
+| `[self-hosted, kiln-16cpu]` | 16 | 24 GB |
+
+(`kiln` is the configured `label`.) RAM is min(N × 2 GB, 24 GB); disk is `vm_disk_gb` for all. A job must name exactly one kiln label: `[kiln, kiln-8cpu]` or `[kiln, gpu]` is not ours and is never picked up. A size larger than the host's CPU count is not served either (the job just waits, uncounted). A VM registers `kiln-Ncpu` plus the plain `kiln` only when N is the default size, so a big VM never steals a default job, and the default VM also serves `kiln-<default>cpu`. Each size is scheduled separately, within the shared `max_vms` and memory gate.
 
 kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this way.
 
@@ -67,6 +82,14 @@ kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this
 - **Tailscale:** connection state, peers (direct vs DERP), ping, netcheck, and the HTTPS serve toggle.
 - **Settings:** limits and timeouts, token, rebaking the base image.
 
+### Settings (`config.json`)
+
+Editable from the dashboard (`POST /api/config`); changes apply without a restart except `listen`. Besides `repos`, `label`, `max_vms`, `vm_cpus`, `vm_mem_mb`, `vm_disk_gb`, `job_timeout_mins`, `idle_timeout_mins`, `allowed_users`:
+
+- `poll_secs` (default 5, min 3): how often GitHub is polled. ETag 304s don't count against the rate limit, so 5s is cheap. A `config.json` saved by an older version keeps its old value.
+- `docker_mirror` (default `true`): run the Docker Hub pull-through cache. On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (sha256 verified, refused on mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000` (restart backoff 5s to 60s; log in `<data>/registry/registry.log`; images cached 7 days under `<data>/registry/data`). If port 5000 is already taken kiln leaves it alone and reports "port 5000 in use". Toggling it takes effect within seconds.
+- `auto_rebake` (default `true`): when the image is stale (runner behind the latest release, or over 25 days old) and no VM is active, kiln rebakes by itself, at most once every 6 hours. Jobs that queue meanwhile still launch on the old base, which is swapped atomically.
+
 ## Security model
 
 The dashboard holds a GitHub token, so who can call it matters:
@@ -74,6 +97,7 @@ The dashboard holds a GitHub token, so who can call it matters:
 - **Tailnet peers** are identified with `tailscale whois`. By default only the owner of the CI box gets in, which keeps out nodes shared in from other tailnets. Set `allowed_users` to change that.
 - **Requests from the CI box itself** need the key in `~/.local/share/kiln/dashboard.key`; the browser asks for it once. This covers loopback, the box's own tailnet IP, and `tailscale serve`. The source address can't be trusted here, because job VMs reach the host through QEMU's NAT and show up exactly like local traffic.
 - **Everything else** is refused. That includes the LAN, requests whose `Host` header isn't the tailnet name or an IP (to stop DNS rebinding), and POSTs without the `x-kiln` header (to stop CSRF).
+- **The Docker mirror** listens on host loopback only (`127.0.0.1:5000`) and is a pull-only proxy of public Docker Hub images (content-addressed). Job VMs reach it by design, through the NAT as `10.0.2.2:5000`; it holds no credentials and can't push.
 - **The GitHub proxy** only passes `repos/<configured>/actions/{workflows,runs,jobs}`. Runners, secrets and variables are out of reach.
 
 What a job can reach: a job VM has full outbound network through the host's
@@ -90,6 +114,8 @@ is in place.
   token                       GitHub token, mode 0600 (if set from the dashboard)
   images/base.qcow2           frozen base image   base.vmlinuz   base.json (runner version)
   images/bake.log             last bake
+  bin/registry                pinned Docker registry binary (docker_mirror)
+  registry/                   config.yml, registry.log, data/ (the pull cache)
   vms/<id>/meta.json          per-VM record; console.log, steps.log
                               (disk.qcow2 and the JIT secret are deleted when the VM exits)
 ```
@@ -98,10 +124,9 @@ The base image recipe is [`guest/user-data.yaml`](guest/user-data.yaml) (cloud-i
 
 ## Known limits and next steps
 
-- **Runner updates.** kiln pins the runner version at bake time. GitHub stops sending jobs to runners more than about 30 days out of date, so rebake monthly (one click). *Next:* automatic rebake when a new runner is released.
+- **Runner updates.** kiln pins the runner version at bake time. GitHub stops sending jobs to runners more than about 30 days out of date, so rebake monthly (one click). kiln rebakes automatically (`auto_rebake`) once the image is stale and the box is idle.
 - **Network throughput.** Slirp tops out well below line rate and is CPU-heavy on large `docker pull`s. *Next:* `passt` (still rootless), or a one-time root setup of tap devices, which would also allow Firecracker or Cloud Hypervisor.
 - **No cache between jobs yet.** *Next:* one persistent cache disk per VM slot, mounted at `/var/lib/docker` and `~/.cache`. QEMU's image locking keeps two VMs from sharing one.
 - **PAT auth.** *Next:* a GitHub App for org-wide runners and short-lived tokens.
 - **Single host, x86_64 only.** Scheduling is a per-repo count; there are no priorities or fair-share yet.
 - **Job egress filtering.** *Next:* passt or tap networking with a host firewall that allows only the internet, not the LAN or tailnet.
-- **Old runner registrations.** If kiln dies mid-boot, the runner it registered stays offline on GitHub until GitHub removes it (about 1 day).

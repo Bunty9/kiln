@@ -10,6 +10,9 @@ After=network-online.target
 ExecStart=%h/.local/bin/kiln serve
 Restart=on-failure
 RestartSec=5
+# SIGTERM goes to kiln only; it kills its VMs and deregisters runners, then the rest is SIGKILLed.
+KillMode=mixed
+TimeoutStopSec=30
 # Optional: Environment=KILN_GITHUB_TOKEN=... (or set it from the dashboard)
 
 [Install]

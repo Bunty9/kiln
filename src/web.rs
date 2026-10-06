@@ -1,12 +1,12 @@
 //! Dashboard + JSON API. Reachable only from loopback and the tailnet.
 
-use crate::{App, Config, now, vm};
+use crate::{App, Config, mirror, now, vm};
 use anyhow::{Context, anyhow};
 use axum::{
     Json, Router,
     body::Bytes,
     extract::{ConnectInfo, Path, Query, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{any, get, post},
@@ -33,14 +33,19 @@ impl IntoResponse for Error {
 }
 type R<T> = Result<T, Error>;
 
+/// The address actually bound; a config change to `listen` needs a restart.
+static RUNNING_LISTEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let addr = app.cfg().listen;
+    let _ = RUNNING_LISTEN.set(addr.clone());
     load_key(&app.data)?;
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
         .route("/api/state", get(state))
         .route("/api/config", post(set_config))
         .route("/api/token", post(set_token))
+        .route("/api/doctor", get(doctor))
         .route("/api/log", get(log))
         .route("/api/vms/{id}/kill", post(kill))
         .route("/api/bake", post(bake))
@@ -166,6 +171,34 @@ fn host_ok(host: Option<&str>) -> bool {
 ///   reach the host through QEMU's NAT and arrive as loopback or as this
 ///   host's own tailnet IP, so a local source address proves nothing.
 async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+    let api = req.uri().path().starts_with("/api/");
+    let mut r = admit(app, peer, req, next).await;
+    let h = r.headers_mut();
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // No script-src: the dashboard uses an inline script.
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("frame-ancestors 'none'"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    if api {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    r
+}
+
+/// Tailscale reports tagged nodes as this pseudo-login; it names no person.
+const TAGGED: &str = "tagged-devices";
+
+/// `allowed` is the configured list; empty falls back to the box's owner,
+/// unless that owner is the tagged pseudo-user. A tagged peer gets in only
+/// when listed explicitly.
+fn peer_allowed(allowed: &[String], owner: Option<String>, login: &str) -> bool {
+    let mut allowed = allowed.to_vec();
+    if allowed.is_empty() {
+        allowed.extend(owner.filter(|o| o != TAGGED));
+    }
+    allowed.iter().any(|a| a.eq_ignore_ascii_case(login))
+}
+
+async fn admit(app: Arc<App>, peer: SocketAddr, req: Request, next: Next) -> Response {
     let ip = peer.ip().to_canonical();
     let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
     // Owned copies: `req` (its body) is not Sync, so no borrows across awaits.
@@ -197,11 +230,7 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
             return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
         }
     } else if is_tailnet(ip) {
-        let mut allowed = app.cfg().allowed_users;
-        if allowed.is_empty() {
-            allowed.extend(me.owner);
-        }
-        if !who.is_some_and(|(l, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(&l))) {
+        if !who.is_some_and(|(l, _)| peer_allowed(&app.cfg().allowed_users, me.owner, &l)) {
             return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
         }
     } else {
@@ -210,54 +239,77 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
     next.run(req).await
 }
 
-fn host_stats() -> Value {
+async fn host_stats(app: &App) -> Value {
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-    let mem = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let kb = |key: &str| -> u64 {
-        mem.lines()
-            .find(|l| l.starts_with(key))
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0)
-    };
     json!({
         "load": load.split_whitespace().take(3).collect::<Vec<_>>(),
         "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
-        "mem_total_mb": kb("MemTotal:") / 1024,
-        "mem_avail_mb": kb("MemAvailable:") / 1024,
+        "mem_total_mb": vm::meminfo_kb("MemTotal:") / 1024,
+        "mem_avail_mb": vm::mem_avail_mb(),
+        "disk_free_gb": vm::disk_free_gb(&app.data).await,
     })
 }
 
 async fn state(State(app): S) -> R<Json<Value>> {
     let vms: Vec<_> = app.vms.lock().unwrap().iter().rev().take(100).cloned().collect();
-    let image: Value = std::fs::read(app.data.join("images/base.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Value::Null);
+    let mut poll = serde_json::to_value(&*app.poll.lock().unwrap())?;
+    poll["backoff"] = app
+        .backoff
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(r, &(fails, retry_at))| (r.clone(), json!({ "fails": fails, "retry_at": retry_at })))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    poll["rate"] = match *app.gh.rate.lock().unwrap() {
+        Some((remaining, limit, reset)) => json!({ "remaining": remaining, "limit": limit, "reset": reset }),
+        None => Value::Null,
+    };
+    poll["paused_until"] = json!(app.gh.paused_until());
     Ok(Json(json!({
         "config": app.cfg(),
         "token_set": app.gh.has_token(),
-        "poll": *app.poll.lock().unwrap(),
+        "token_source": app.gh.source(),
+        "poll": poll,
         "vms": vms,
-        "image": image,
+        "image": vm::image_info(&app.data, app.gh.latest_cached()),
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
-        "host": host_stats(),
+        "host": host_stats(&app).await,
+        "mirror": mirror::status_json(&app).await,
     })))
 }
 
-async fn set_config(State(app): S, Json(c): Json<Config>) -> R<StatusCode> {
+async fn doctor(State(app): S) -> R<Json<Value>> {
+    Ok(Json(json!({ "checks": vm::doctor(&app, false).await })))
+}
+
+async fn set_config(State(app): S, Json(c): Json<Config>) -> R<Json<Value>> {
+    let restart = RUNNING_LISTEN.get().is_some_and(|l| *l != c.listen);
     app.save_cfg(c)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(json!({ "restart_required": restart })))
 }
 
 #[derive(Deserialize)]
 struct TokenBody {
     token: String,
 }
-async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<StatusCode> {
-    app.save_token(b.token)?;
-    Ok(StatusCode::NO_CONTENT)
+/// Check the token against GitHub before saving it: it must authenticate, and
+/// each configured repo's runners API is probed so a missing permission shows now.
+async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<Json<Value>> {
+    let token = b.token.trim().to_string();
+    let (status, scopes, user) = app.gh.probe(&token, "user").await?;
+    if status != 200 {
+        bail_r(&format!("GitHub rejected the token: {status} {}", user["message"].as_str().unwrap_or("")))?;
+    }
+    let mut repos = serde_json::Map::new();
+    for r in app.cfg().repos {
+        let (st, _, body) = app.gh.probe(&token, &format!("repos/{r}/actions/runners?per_page=1")).await?;
+        let msg = if st == 200 { "ok".to_string() } else { format!("{st} {}", body["message"].as_str().unwrap_or("")) };
+        repos.insert(r, msg.into());
+    }
+    app.save_token(token)?;
+    Ok(Json(json!({ "login": user["login"], "scopes": scopes, "repos": repos })))
 }
 
 #[derive(Deserialize)]
@@ -431,6 +483,17 @@ mod tests {
         assert!(!ok("repos/Bunty9/kiln/actions/runs/%2e%2e/%2e%2e"));
         assert!(!ok("repos/Bunty9/kiln-evil/actions/runs"));
         assert!(!ok("repos/Other/repo/actions/runs"));
+    }
+
+    #[test]
+    fn tagged_devices_never_default_allowed() {
+        let owner = || Some("me@x.com".to_string());
+        assert!(peer_allowed(&[], owner(), "ME@x.com"));
+        assert!(!peer_allowed(&[], owner(), TAGGED));
+        assert!(!peer_allowed(&[], Some(TAGGED.into()), TAGGED));
+        assert!(!peer_allowed(&[], None, "me@x.com"));
+        assert!(peer_allowed(&[TAGGED.into()], owner(), TAGGED));
+        assert!(!peer_allowed(&["a@x.com".into()], owner(), "me@x.com"));
     }
 
     #[test]
