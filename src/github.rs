@@ -197,7 +197,16 @@ impl Gh {
     /// (event, head branch, default branch, job conclusion) of the run behind a job, to
     /// decide whether its cache may be committed. The conclusion is GitHub's, not the console's.
     pub async fn cache_trust(&self, repo: &str, job: u64) -> Result<(String, String, String, String)> {
-        let j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
+        // The VM powers off a moment before GitHub records the job's conclusion;
+        // without waiting, trusted saves on the default branch would be lost to the race.
+        let mut j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
+        for _ in 0..6 {
+            if j["status"] == "completed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
+        }
         let run_id = j["run_id"].as_u64().context("job has no run_id")?;
         let run = self.get(&format!("repos/{repo}/actions/runs/{run_id}")).await?;
         let branch = j["head_branch"].as_str().or(run["head_branch"].as_str()).unwrap_or("").to_string();
@@ -280,6 +289,62 @@ impl Gh {
         Ok(n)
     }
 
+    /// (status, JSON body) of one call with the stored token; the token never reaches an error.
+    async fn api(&self, method: Method, path: &str, body: Option<Value>) -> Result<(u16, Value)> {
+        let r = self.raw(method, path, body).await.map_err(|_| anyhow::anyhow!("could not reach GitHub"))?;
+        Ok((r.status, serde_json::from_slice(&r.body).unwrap_or(Value::Null)))
+    }
+
+    /// Onboarding: open a PR that adds a hello workflow for `label`. Returns (pr_url, branch).
+    // ponytail: a branch left behind by a failed later step is not deleted.
+    pub async fn hello_pr(&self, repo: &str, label: &str, t: u64) -> Result<(String, String)> {
+        let (st, v) = self.api(Method::GET, &format!("repos/{repo}"), None).await?;
+        if st != 200 {
+            bail!("{}", hello_err(st, &v, "reading the repo"));
+        }
+        let default = v["default_branch"].as_str().context("repo has no default_branch")?.to_string();
+        let (st, v) = self.api(Method::GET, &format!("repos/{repo}/git/ref/heads/{default}"), None).await?;
+        if st != 200 {
+            bail!("{}", hello_err(st, &v, "reading the default branch"));
+        }
+        let base = v["object"]["sha"].as_str().context("default branch has no sha")?.to_string();
+        // Build the commit first and point a new branch at it, so the repo sees one
+        // push (with the workflow) instead of a bare branch push plus a file push.
+        let (st, v) = self.api(Method::GET, &format!("repos/{repo}/git/commits/{base}"), None).await?;
+        if st != 200 {
+            bail!("{}", hello_err(st, &v, "reading the default branch"));
+        }
+        let base_tree = v["tree"]["sha"].as_str().context("commit has no tree")?.to_string();
+        let file = json!({ "path": ".github/workflows/kiln-hello.yml", "mode": "100644", "type": "blob", "content": hello_workflow(label) });
+        let (st, v) = self.api(Method::POST, &format!("repos/{repo}/git/trees"), Some(json!({ "base_tree": base_tree, "tree": [file] }))).await?;
+        if st != 201 {
+            bail!("{}", hello_err(st, &v, "adding the workflow"));
+        }
+        let tree = v["sha"].as_str().context("tree has no sha")?.to_string();
+        let commit = json!({ "message": "Add kiln hello workflow", "tree": tree, "parents": [base] });
+        let (st, v) = self.api(Method::POST, &format!("repos/{repo}/git/commits"), Some(commit)).await?;
+        if st != 201 {
+            bail!("{}", hello_err(st, &v, "adding the workflow"));
+        }
+        let sha = v["sha"].as_str().context("commit has no sha")?.to_string();
+        let mut branch = format!("kiln-hello-{t}");
+        for retry in [true, false] {
+            let body = json!({ "ref": format!("refs/heads/{branch}"), "sha": sha });
+            let (st, v) = self.api(Method::POST, &format!("repos/{repo}/git/refs"), Some(body)).await?;
+            match st {
+                201 => break,
+                422 if retry => branch = format!("kiln-hello-{}", t + 1),
+                _ => bail!("{}", hello_err(st, &v, "creating the branch")),
+            }
+        }
+        let body = json!({ "title": "Try kiln: run a job on your own hardware", "head": branch, "base": default, "body": HELLO_PR_BODY });
+        let (st, v) = self.api(Method::POST, &format!("repos/{repo}/pulls"), Some(body)).await?;
+        if st != 201 {
+            bail!("{}", hello_err(st, &v, "opening the pull request"));
+        }
+        Ok((v["html_url"].as_str().context("PR has no html_url")?.to_string(), branch))
+    }
+
     /// Returns (runner_id, encoded_jit_config).
     pub async fn jit_config(&self, repo: &str, name: &str, labels: &[String]) -> Result<(u64, String)> {
         let v = self
@@ -303,6 +368,40 @@ impl Gh {
         }
         Ok(())
     }
+}
+
+const HELLO_PR_BODY: &str = "This adds `.github/workflows/kiln-hello.yml`, a tiny workflow that runs on kiln.\n\n\
+kiln is a self-hosted CI that runs each GitHub Actions job in a fresh VM on your own hardware. \
+The workflow runs when this PR opens and on demand (workflow_dispatch), prints the VM's size and Docker version, and does nothing else.\n\n\
+It is safe to close this PR and delete the branch.";
+
+/// Plain-text reason for a failed onboarding call.
+fn hello_err(status: u16, body: &Value, what: &str) -> String {
+    match status {
+        403 | 404 if what != "reading the repo" => "GitHub refused: the token needs write access to this repo's contents and workflows (classic: repo + workflow scopes; fine-grained: Contents and Workflows: read & write)".into(),
+        404 => "repo not found, or the token cannot see it".into(),
+        _ => format!("GitHub: {status} while {what}: {}", body["message"].as_str().unwrap_or("no message")),
+    }
+}
+
+fn hello_workflow(label: &str) -> String {
+    format!(
+        "name: kiln hello
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  hello:
+    runs-on: [self-hosted, {label}]
+    steps:
+      - name: Hello from kiln
+        run: |
+          echo \"Running in a fresh kiln VM on your own hardware\"
+          echo \"vCPUs: $(nproc)  RAM: $(free -g | awk '/Mem:/{{print $2}}') GB\"
+          docker --version
+          uname -r
+"
+    )
 }
 
 /// Allowed `<label>-<N>cpu` sizes.
@@ -419,6 +518,17 @@ mod tests {
         assert_eq!(size(json!(["kilnx-8cpu"])), None);
         assert_eq!(size(json!([])), None);
         assert_eq!(size(json!(null)), None);
+    }
+
+    #[test]
+    fn hello() {
+        let w = hello_workflow("kiln");
+        assert!(w.contains("runs-on: [self-hosted, kiln]\n") && w.contains("awk '/Mem:/{print $2}'") && w.contains("echo \"vCPUs: $(nproc)"));
+        let m = json!({ "message": "Nope" });
+        assert!(hello_err(404, &m, "creating the branch").contains("Contents and Workflows"));
+        assert!(hello_err(403, &m, "adding the workflow").starts_with("GitHub refused"));
+        assert_eq!(hello_err(404, &m, "reading the repo"), "repo not found, or the token cannot see it");
+        assert_eq!(hello_err(422, &m, "creating the branch"), "GitHub: 422 while creating the branch: Nope");
     }
 
     #[test]

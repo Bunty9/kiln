@@ -168,8 +168,8 @@ input[role=switch]:disabled{opacity:.5;cursor:default}
 .sub{display:flex;flex-direction:column;gap:2px;position:sticky;top:76px;align-self:start}
 .sub a{padding:6px 12px;border-radius:6px;color:var(--fg-2);text-decoration:none;font-size:13px}
 .sub a:hover{background:var(--raised);color:var(--fg)}.sub a[aria-current]{background:var(--raised);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line)}
-#gsel{display:none;width:100%;margin-bottom:16px}
-@media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel{display:block}}
+#gsel,#guide-sel{display:none;width:100%;margin-bottom:16px}
+@media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel,#guide-sel{display:block}}
 .fld{display:grid;grid-template-columns:200px minmax(0,1fr);gap:4px 16px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
 .fld:first-child{border-top:0;padding-top:0}
 .fld label,.fld .lb{font-size:13px}.fld .h{grid-column:2;font-size:12px;color:var(--fg-2)}
@@ -188,7 +188,7 @@ pre.snip{margin:0;background:var(--sunk);border:1px solid var(--line);border-rad
 .stp>li::before{content:"";position:absolute;left:11.5px;top:28px;bottom:4px;width:1px;background:var(--line)}.stp>li:last-child::before{display:none}
 .mk{position:absolute;left:0;top:0;width:24px;height:24px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;font-size:12px;font-weight:600;color:var(--fg-2)}
 .mk.cur{background:var(--ember);border-color:var(--ember);color:var(--on-ember)}.mk.done{background:var(--ok);border-color:var(--ok);color:var(--bg)}
-.stp h3{font-size:14px;font-weight:600;line-height:24px;display:flex;gap:12px;align-items:center}
+.stp h3{font-size:14px;font-weight:600;line-height:24px;display:flex;flex-wrap:wrap;gap:0 12px;align-items:center}
 .stp .bd2{margin-top:12px;display:flex;flex-direction:column;align-items:flex-start;gap:12px;max-width:560px}
 .stp form{display:flex;gap:8px;width:100%;flex-wrap:wrap}.stp form input{flex:1;min-width:200px}
 #toasts{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}
@@ -217,12 +217,34 @@ dialog input{width:100%;margin-top:16px}
 @keyframes sh{to{background-position:-200% 0}}
 .full{max-width:520px;margin:96px auto;padding:0 16px}.full h1{font-size:20px;font-weight:600;margin-bottom:8px}
 @media(prefers-reduced-motion:reduce){*,::before,::after{animation-duration:0s!important;animation-iteration-count:1!important;transition-duration:0s!important}.sk{animation:none}}
+
+.hq{position:relative;display:inline-grid;place-items:center;width:16px;height:16px;padding:0;margin-left:6px;border-radius:50%;border:1px solid var(--line-strong);background:none;color:var(--fg-3);font:600 11px/1 var(--sans);cursor:pointer;vertical-align:middle;flex:none}
+.hq::after{content:"";position:absolute;inset:-6px}
+.hq:hover,.hq[aria-expanded=true]{color:var(--fg);border-color:var(--fg-3)}
+.pop.help{width:min(300px,calc(100vw - 16px));padding:14px}
+.pop.help:focus{outline:0}
+.pop.help h3{font-size:13px;font-weight:600;margin-bottom:4px}.pop.help p{font-size:13px;color:var(--fg-2)}.pop.help a{display:inline-block;margin-top:8px;font-size:13px}
+.tip{display:flex;align-items:center;gap:12px;border:1px dashed var(--line-strong);border-radius:6px;padding:8px 12px;margin-bottom:16px;font-size:13px;color:var(--fg-2)}
+.tip b{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-3);font-weight:600}.tip span{flex:1;min-width:0}
+.cb{position:relative;max-width:100%}.cb pre.snip{padding-right:44px}.cb .btn{position:absolute;top:6px;right:6px;width:28px;height:28px;padding:0}
+.empty .cb{width:100%;max-width:560px}
+.hello{display:flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:100%}.hello .cal{margin:0}
+.ck{list-style:none;padding:0;margin:0;display:grid;gap:4px}
+.wm{display:inline-flex;align-items:center;height:16px;padding:0 6px;margin-left:6px;border-radius:999px;border:1px solid var(--line-strong);font:500 11px/1 var(--sans);color:var(--fg-2);vertical-align:middle}
+.hlp{display:flex;align-items:center;gap:6px;margin-left:auto;padding:6px 10px;border-radius:6px;color:var(--fg-2);font-size:13px;text-decoration:none}
+.hlp:hover,.hlp[aria-current]{color:var(--fg);background:var(--raised)}.hlp+.cdot{margin-left:0}
+.gd{max-width:68ch}.gd h2{font-size:18px;font-weight:600}.gd>*+*{margin-top:12px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:4px}
+.gd code{font:12.5px var(--mono);background:var(--sunk);padding:1px 5px;border-radius:4px}
+.gd .tw{overflow-x:auto}.gd table{border-collapse:collapse;font-size:13px}.gd th,.gd td{border:1px solid var(--line);padding:4px 10px;text-align:left}
+.gnav{display:flex;justify-content:space-between;gap:16px;margin-top:32px;font-size:13px}
+@media(max-width:719px){.hq::after{inset:-12px}.cb .btn{width:40px;height:40px}.cb pre.snip{padding-right:52px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
 </style>
 </head>
 <body>
 <header class="top"><div>
   <a class="logo" href="#/"><svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
   <nav class="nav" id="nav" aria-label="Sections"></nav>
+  <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/></svg><span>Help</span></a>
   <span class="cdot" id="cdot" role="img" aria-label="Connected" title="Connected"></span>
 </div></header>
 <div id="conn" role="status"></div>
@@ -289,7 +311,37 @@ const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' 
 const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = v => v.cpus ? `<span class="mono sm fg2" title="${v.mem_mb ? Math.round(v.mem_mb / 1024) + ' GB' : ''}">${+v.cpus} cpu</span>` : '';
-const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? 'waiting for a job' : 'no job');
+const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
+const wm = v => (v.warm && v.state === 'idle' ? '<span class="wm" title="Pre-booted VM waiting for a job">warm</span>' : '');
+const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+const HELP = {
+  maxvms: ["Max VMs", "How many job VMs may run at once. Each holds its vCPUs and memory while running. 0 pauses kiln: running jobs finish, new ones stay queued.", "stuck"],
+  label: ["Runner label", "The word a job puts in `runs-on` to choose kiln. Add `-2cpu`, `-8cpu`… for other sizes. A job must name exactly one kiln label, or it is never picked up.", "move"],
+  autorebake: ["Auto rebake", "When the image is stale (runner behind GitHub's latest, or baked over 25 days ago), kiln rebakes on its own, at most every 6 hours.", "image"],
+  mirror: ["Docker mirror", "A local cache of Docker Hub images. Fresh VMs would otherwise hit Docker Hub's pull limit. Jobs use it automatically; if it is down, they pull from Docker Hub.", "cache"],
+  key: ["Dashboard key", "Tailnet devices are recognised by their Tailscale login. A browser on the CI box itself can't be, because job VMs look like local traffic too. So it has to show this key once.", "network"],
+  serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it.", "network"],
+  doctor: ["Diagnostics", "Runs `kiln doctor`: KVM, tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
+  queued: ["Queued", "Jobs GitHub is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
+  stale: ["Stale image", "The runner in the base image is older than GitHub's latest. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
+  backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
+  size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
+  timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
+  cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it, but only a successful push to the default branch saves to it. Pull requests can't change it.", "cache"],
+  network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
+  held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out.", "debug"],
+  warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
+};
+const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
+const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class="btn" data-act="copycode" aria-label="Copy">${ic('copy')}</button></div>`;
+const WFSCOPE = "This token can't create workflow files. Add the `workflow` scope (classic), or Contents, Pull requests and Workflows: write (fine-grained), then save it again.";
+const TIPS = {
+  overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
+  jobs: "Every row is one throwaway VM that ran one job. Open a row for its timeline and logs.",
+  job: "Console is boot and runner output, Steps is your steps live, and the GitHub log appears when the job ends.",
+  repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
+  settings: "Changes apply within seconds, with no restart. The listen address is the only exception.",
+};
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
 const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v4\n`;
@@ -338,13 +390,20 @@ async function copy(text, what = 'Copied') {
 }
 let popEl = null;
 let popAnchor = null;
-function closePop(refocus) { popEl?.remove(); popEl = null; if (refocus && popAnchor?.isConnected) popAnchor.focus(); }
-function openPop(anchor, html) {
-  closePop(); popAnchor = anchor; popEl = document.createElement('div'); popEl.className = 'pop'; popEl.innerHTML = html; document.body.append(popEl);
-  const r = anchor.getBoundingClientRect();
-  const cw = document.documentElement.clientWidth; popEl.style.left = Math.max(8, Math.min(r.right - 240, cw - 248)) + 'px';
-  popEl.style.top = (r.bottom + 6 + 150 > innerHeight ? Math.max(8, r.top - 6 - popEl.offsetHeight) : r.bottom + 6) + 'px';
+function closePop(refocus) { popEl?.remove(); popEl = null; popAnchor?.setAttribute?.('aria-expanded', 'false'); if (refocus && popAnchor?.isConnected) popAnchor.focus(); }
+const popKey = a => a.dataset.act + ':' + (a.dataset.id ?? '');
+function openPop(anchor, html, cls = '') {
+  closePop(); popAnchor = anchor; popEl = document.createElement('div'); popEl.className = 'pop ' + cls; popEl.innerHTML = html; document.body.append(popEl);
+  const r = anchor.getBoundingClientRect(), w = popEl.offsetWidth, h = popEl.offsetHeight, cw = document.documentElement.clientWidth;
+  popEl.style.left = Math.max(8, Math.min(r.left - 12, cw - w - 8)) + 'px';
+  popEl.style.top = (r.bottom + 6 + h > innerHeight ? Math.max(8, r.top - 6 - h) : r.bottom + 6) + 'px';
+  popEl.addEventListener('focusout', () => setTimeout(() => { if (popEl && !popEl.contains(document.activeElement) && document.activeElement !== popAnchor) closePop(); }));
   popEl.querySelector('input')?.select();
+}
+// setHTML may replace the anchor of an open popover: follow it by key, or close.
+function rebindPop() {
+  const k = popKey(popAnchor), a = popAnchor.isConnected ? popAnchor : $$('[data-act]').find(x => popKey(x) === k);
+  if (!a) return closePop(); popAnchor = a; if (a.classList.contains('hq')) a.setAttribute('aria-expanded', 'true');
 }
 // Replace HTML only when changed; keep typed values and keyboard focus.
 function rove(r = document) { $$('.seg', r).forEach(g => { const b = $$('[role=radio]', g), c = b.find(x => x.getAttribute('aria-checked') === 'true' && !x.disabled) || b.find(x => !x.disabled); b.forEach(x => (x.tabIndex = x === c ? 0 : -1)); }); }
@@ -356,6 +415,7 @@ function setHTML(el, html) {
   for (const [i, v] of vals) { const x = el.querySelector('#' + CSS.escape(i)); if (x && x.type !== 'checkbox' && x.value !== v) x.value = v; }
   fillTimes(el);
   if (idx >= 0) fl()[idx]?.focus();
+  if (popEl && popAnchor) rebindPop();
 }
 function fillTimes(r = document) { $$('[data-t]', r).forEach(e => (e.textContent = e.dataset.k === 'rel' ? rel(+e.dataset.t) : dur(now() - e.dataset.t))); }
 const relH = t => t ? `<span data-t="${t}" data-k="rel"></span>` : '—';
@@ -465,7 +525,11 @@ function route() {
   cur = pg; scrollTo(0, 0);
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
-  pg.mount(r); pg.update?.(); notifyState();
+  pg.mount(r);
+  const pk = Object.keys(pages).find(k => pages[k] === pg), tk = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'repos' && r.seg.length ? null : pk;
+  if (TIPS[tk] && !lsGet('kiln-tip-' + tk) && !setupNeeded()) $('#app').insertAdjacentHTML('afterbegin', `<div class="tip" role="note"><b>Tip</b><span>${esc(TIPS[tk])}</span><button class="lnk sm" data-act="tipok" data-id="kiln-tip-${tk}">Got it</button></div>`);
+  if (pk === 'setup' || pk === 'repos' || !S.vms.length) loadHello();
+  pg.update?.(); notifyState();
 }
 function skeleton() {
   return `<div aria-busy="true" aria-label="Loading"><div class="sk" style="height:16px;width:240px;margin-bottom:24px"></div>
@@ -502,9 +566,9 @@ const setupNeeded = () => !S.token_set || !S.image_ready || !S.config.repos.leng
 /* ---------- overview ---------- */
 function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
-  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span>`;
+  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>`;
   return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
-    <span class="w" title="${esc(when(v.started))}">${relH(v.started)}</span><span class="d">${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span></a></li>`;
+    <span class="w" title="${esc(when(v.started))}">${relH(v.started)}</span><span class="d">${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
 function banners() {
@@ -521,16 +585,17 @@ function banners() {
   else if (!S.image_ready) B('fail', 'Base image not baked. VMs can\'t start.', X('Bake image', 'bake', 1));
   if (p.blocked) B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
-  for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}`);
+  for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(m)}`);
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   const im = S.image;
-  if (im?.stale && im.runner_latest) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.`, X('Rebake', 'rebake'));
+  if (im?.stale && im.runner_latest) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
   if (S.token_set && !c.repos.length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
+  else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
   if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
   return b.join('');
 }
@@ -563,11 +628,11 @@ pages.overview = {
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>` : '<div class="ch">Idle</div>');
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>` : '<div class="ch">Idle</div>');
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
     if (!tiles.length) tiles.push('<div class="ch">Paused</div>');
-    setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" title="${esc(qTip())}">${q} queued</span>` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" title="${esc(qTip())}">${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
     const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
@@ -579,7 +644,7 @@ pages.overview = {
   },
 };
 const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
-const emptyJobs = () => `<div class="empty"><p>No jobs yet. kiln starts a VM when GitHub queues a job labelled <code>${esc(S.config.label)}</code>.</p><button class="btn" data-act="copysnip">Copy workflow snippet</button><p class="sm">${esc(SIZES())}</p></div>`;
+const emptyJobs = () => { const r = S.config.repos[0]; return `<div class="empty"><p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more →</a></div>`; };
 
 /* ---------- jobs ---------- */
 const jf = { f: 'all', repo: '' };
@@ -597,7 +662,7 @@ pages.jobs = {
     if (parse().seg[0]) return pages.job.update();
     $$('[data-act=jf]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === jf.f)); rove();
     const l = S.vms.filter(v => (jf.f === 'all' || (jf.f === 'running' ? ACTIVE(v) : isFail(v))) && (!jf.repo || v.repo === jf.repo));
-    setHTML($('#jl'), l.length ? jobList(l) : S.vms.length ? '<div class="empty"><p>No jobs match this filter.</p></div>' : emptyJobs());
+    setHTML($('#jl'), l.length ? jobList(l) : S.vms.length ? `<div class="empty"><p>${jf.f === 'running' ? 'Nothing running right now.' : 'No jobs match this filter.'}</p></div>` : emptyJobs());
   },
   unmount() { pages.job.unmount(); },
 };
@@ -605,7 +670,7 @@ const fb = new Map();
 const cacheLine = v => {
   const t = v.cache === 'committed' ? 'committed' : v.cache === 'read' ? 'attached' : v.cache === 'discarded' ? 'read-only' : S.config.cache === false ? 'disabled' : v.cache_note ? 'off' : '';
   const why = v.cache_note ? ` (${esc(v.cache_note.replace(/^cache not saved: /, ''))})` : '';
-  return t ? `<p class="fg2 sm" style="margin:8px 0">Cache: ${t}${why}</p>` : '';
+  return t ? `<p class="fg2 sm" style="margin:8px 0">Cache: ${t}${why}${hq('cache')}</p>` : '';
 };
 function segs(v) {
   const n = now(), end = v.ended || n, online = v.online_at || fb.get(v.id) || null, o = [], act = ACTIVE(v);
@@ -630,11 +695,11 @@ pages.job = {
     const sg = segs(v), tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1, calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
     setHTML(box, `<div class="jh">${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener">View on GitHub ↗</a>` : ''}${v.state === 'held' ? '<button class="btn" data-act="release">Release now</button>' : ''}${ACTIVE(v) ? '<button class="btn dng" data-act="kill">Kill VM</button>' : ''}</div>
-      <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
-      <div class="card"><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
+      <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}${v.cpus ? hq('size') : ''}${wm(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
+      <div class="card"><div class="sm fg2" style="display:flex;align-items:center;margin-bottom:8px"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
       <div class="tll">${sg.map(s => `<span>${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div></div>
-      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b><div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
-      ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}</p>` : ''}
+      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
+      ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv) {
       const id = v.id;
@@ -788,7 +853,7 @@ pages.repos = {
     if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${repoForm}`; S.config.repos.forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
     $('#app').innerHTML = `<a class="back" href="#/repos">← Repos</a><div class="ph"><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener">GitHub ↗</a></div>
-      <div id="rd-err"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
+      <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
       <div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">Remove ${esc(this.r)}</button></div></div>`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
   },
@@ -815,10 +880,12 @@ pages.repos = {
         return `<li><div class="row rr"><a class="nm" href="#/repos/${r}">${esc(r)}</a>
           <span class="rt">${ok ? '<span class="ok sm">Routing to kiln</span>' : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}">No kiln jobs seen</button>`}</span>
           <span class="lr">${lr ? lr === 'err' ? '<span class="fg3 sm">unavailable</span>' : badge(lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm">${n ? n + ' queued' : ''}</span></div>
-          ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">Point a job at kiln in a workflow file:</p><pre class="snip">${esc(snippet())}</pre><p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p><button class="btn" style="margin-top:8px" data-act="copysnip">Copy</button></div>` : ''}</li>`;
-      }).join('')}</ul>` : '<div class="empty"><p>Add a repo kiln should pick jobs up from.</p></div>');
+          ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
+      }).join('')}</ul>` : `<div class="empty"><p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
       return;
     }
+    const wn = (S.config.warm || {})[this.r] || 0;
+    setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">Retry</button></div>` : '');
     setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}">Run</button></div></li>`).join('')}</ul>` : '<div class="empty"><p>No workflows in this repository.</p></div>' : '<div class="sk" style="height:48px"></div>'));
     setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : '<div class="empty"><p>No runs yet. Run a workflow or push a commit.</p></div>' : '<div class="sk" style="height:48px"></div>'));
@@ -847,7 +914,7 @@ let ncHTML = '', tsOpen = false;
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
-const fld = (id, label, ctl, hint) => `<div class="fld"><label for="${id}">${label}</label><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
+const fld = (id, label, ctl, hint, help) => `<div class="fld"><div><label for="${id}">${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
 const num = (k, v, step = 1) => `<input type="number" id="f-${k}" data-k="${k}" value="${esc(v)}" min="0" step="${step}">`;
 const G = {
   capacity: {
@@ -855,9 +922,10 @@ const G = {
       const c = draft;
       return `<div class="card"><h2>Capacity</h2>
         <div class="fld"><span class="lb">Pause new jobs</span><div class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></div></div>
-        ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms))}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus))}
+        ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus))}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5))}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb))}
-        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`)}
+        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`, 'label')}
+        ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
         <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
     },
     live() {
@@ -873,13 +941,13 @@ const G = {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
       ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
-      <div class="fld"><span class="lb">Dashboard key</span><div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">Forget key in this browser</button></div></div></div>`,
+      <div class="fld"><span class="lb">Dashboard key</span>${hq('key')}<div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">Forget key in this browser</button></div></div></div>`,
     live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip">${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}">×</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
   },
   github: {
     html: () => `<div class="card"><h2>GitHub</h2><div id="gh-st"></div>
       <form data-form="token" class="bar" style="margin:0"><label class="sr" for="tok-in">Personal access token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
-      <p class="fg2 sm" style="margin-top:8px">Classic token with the <span class="mono">repo</span> scope. Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div></div>`,
+      <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p></div>`,
     live() {
       const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd></dl>
@@ -888,8 +956,8 @@ const G = {
   },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
-      <div class="fld"><span class="lb">Docker mirror</span><div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
-      <div class="fld"><span class="lb">Auto rebake</span><div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when a newer runner is released.</span></div></div></div>
+      <div class="fld"><span class="lb">Docker mirror</span>${hq('mirror')}<div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
+      <div class="fld"><span class="lb">Auto rebake</span>${hq('autorebake')}<div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated or the image is over 25 days old.</span></div></div></div>
       <div class="card"><h2>Image</h2><div id="img-info"></div><details id="bake-d"><summary>Bake log</summary><div id="bake-log"></div></details></div>`,
     open() { this.lv = new Log($('#bake-log'), { id: 'bake', live: () => !!S.baking, sources: [{ k: 'console', label: 'Console', src: 'bake', file: 'console' }] }); $('#bake-d').open = !!S.baking; },
     close() { this.lv?.destroy(); },
@@ -897,19 +965,19 @@ const G = {
       const im = S.image, mi = S.mirror;
       $('#mir').textContent = !mi ? 'Caches Docker pulls for job VMs.' : !mi.enabled ? 'Off.' : mi.running ? `Running${mi.cache_mb != null ? `, cache ${(mi.cache_mb / 1024).toFixed(1)} GB` : ''}.` : 'Enabled but not running.' + (mi.error ? ' ' + mi.error : '');
       setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
-        ${im?.stale ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.</div>` : ''}
+        ${im?.stale ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}</div>` : ''}
         <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
       if (S.baking && !this.was) $('#bake-d').open = true; this.was = S.baking;
     },
   },
   cache: {
     html: () => `<div class="card"><h2>Repo cache</h2>
-      <div class="fld"><span class="lb">Persistent cache</span><div class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (docker layers, npm, cargo, go, gradle, maven, ~/.cache). Every job reads it; only a successful push to the default branch saves to it.</span></div></div>
+      <div class="fld"><span class="lb">Persistent cache</span><div class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven, ~/.cache). Every job reads it; only a successful push to the default branch saves to it.</span></div></div>
       ${fld('f-cache_gb', 'Size (GB)', `<input type="number" id="f-cache_gb" data-k="cache_gb" value="${esc(draft.cache_gb)}" min="5" max="500" step="1">`, 'Applies to caches created from now on. A cache that grows past 1.2x this is reset. Clear a cache to resize it.')}</div>
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
       const c = S.caches || {}, repos = S.config.repos;
-      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}">Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
+      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. It is created on the first job and saved after a successful push to the default branch.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}">Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
     },
   },
   debug: {
@@ -934,12 +1002,13 @@ const G = {
       const on = lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted', sec = window.isSecureContext && window.Notification;
       const dns = String(TS?.status?.Self?.DNSName || '').replace(/\.$/, '') || 'your-host.ts.net';
       return `<div class="card"><h2>Notifications</h2><div class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></div>
-        <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p></div>`;
+        <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p></div>
+        <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">Reset tips</button></div>`;
     },
     open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
   },
   diagnostics: {
-    html: () => `<div class="card"><h2>Diagnostics <button class="btn" data-act="doctor" style="margin-left:auto">Run checks</button></h2><div id="doc"></div></div>`,
+    html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">Run checks</button></h2><div id="doc"></div></div>`,
     open() { runDoctor(); },
     live() {
       setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
@@ -981,33 +1050,130 @@ function renderTs() {
   };
   setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn')}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
       <dt>This machine</dt><dd>${esc(self.HostName || '—')}</dd><dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd><dt>IPs</dt><dd class="mono">${(self.TailscaleIPs || []).map(esc).join(', ') || '—'}</dd></dl></div>
-    <div class="card"><h2>Serve over HTTPS</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${on ? 'checked' : ''}><span>${on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate.'}</span></div>
+    <div class="card"><h2>Serve over HTTPS${hq('serve')}</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${on ? 'checked' : ''}><span>${on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate.'}</span></div>
       <details${(document.querySelector('#ts details')?.open ?? tsOpen) ? ' open' : ''}><summary>Raw serve config</summary><pre class="raw">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></details></div>
     <div class="card"><h2>Peers <span class="fg2 sm" style="font-weight:400">${peers.filter(p => p.Online).length} of ${peers.length} online</span></h2>${peers.length ? `<ul class="list">${peers.map(row).join('')}</ul>` : '<p class="fg2">No peers.</p>'}</div>
 `);
 }
 
-/* ---------- onboarding ---------- */
-let setupOpen = null;
+/* ---------- test PR + onboarding ---------- */
+let setupOpen = null, setupRepo = null, setupSnip = false, hello = lsJ('kiln-hello', {});
+const helloSt = {}, helloErr = {};
+async function loadHello() {
+  try {
+    const r = (await api('/api/onboard')).hello_prs || {};
+    hello = Object.fromEntries(Object.entries(r).map(([k, v]) => [k, { ...v, branch: hello[k]?.branch }]));
+    lsSet('kiln-hello', JSON.stringify(hello));
+  } catch { /* keep the cached copy */ }
+  cur?.update?.();
+}
+function helloBtn(repo, pri = true) {
+  const h = hello[repo], e = helloErr[repo];
+  const btn = h ? `<a class="btn" href="${esc(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened ↗ · branch <code>${esc(h.branch)}</code>` : 'Test PR ↗'}</a>`
+    : `<button class="btn${pri ? ' pri' : ''}" data-act="hello" data-id="${esc(repo)}" ${helloSt[repo] ? 'disabled' : ''}>${helloSt[repo] ? 'Opening PR…' : 'Open a test PR'}</button>`;
+  return `<div class="hello">${btn}${e && !h ? `<div class="cal">${esc(e)}${/workflow/i.test(e) ? ` ${md(WFSCOPE)} <button class="btn" data-act="updtok">Update token</button>` : ''}</div>` : ''}</div>`;
+}
+const imgStrip = () => S.image_ready ? ['o', '<span class="ok">✓ VM image ready</span>']
+  : S.baking ? ['neu', `Preparing the VM image in the background · ${PH[bakeIdx()]?.[1] || 'Starting'} · ${dur((Date.now() - bk.t0) / 1000)} of ~4 min`]
+  : bakeFailed() ? ['', 'Image bake failed. <a class="btn" href="#/settings/image">View log</a> <button class="btn" data-act="bake">Try again</button>']
+  : ['w', 'The VM image isn\'t built yet. <button class="btn" data-act="bake">Bake image</button>'];
 pages.setup = {
-  mount() { $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip">Skip setup</button></div><div class="card"><ol class="stp" id="stp"></ol></div>`; setupOpen = null; },
+  mount() {
+    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip">Skip for now</button></div>
+      <p class="fg2" style="margin:-8px 0 16px">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div class="card" id="su"></div>`;
+    setupOpen = null;
+  },
   update() {
-    const c = S.config, first = S.vms.find(v => v.busy_since && v.ended);
-    const done = [S.token_set, S.image_ready, c.repos.length > 0, lsGet('kiln-wf') === '1' || !!first, !!first];
-    const open = setupOpen ?? (done.indexOf(false) < 0 ? 4 : done.indexOf(false));
-    const tr = open === 1 && tokRes ? tokHTML() : '';
+    const c = S.config, rs = c.repos, repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
+    if (!S.image_ready && !S.baking && bk.checked && !bakeFailed() && !lsGet('kiln-bake-auto')) { lsSet('kiln-bake-auto', '1'); ACT.bake().catch(fail); }
+    const [cls, st] = imgStrip(), strip = `<div class="cal ${cls}" style="margin:0 0 20px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">${st}</div>`;
+    if (first) {
+      const ok = status(first) === 'passed', sg = segs(first), tot = sg.reduce((a, x) => a + Math.max(x[1], 0), 0) || 1;
+      return setHTML($('#su'), `${strip}<h2><span class="ok">✓</span> kiln ran its first job</h2>
+        <p>${esc(first.repo)} / ${esc(first.job || 'job')} ${ok ? 'passed' : 'failed'} in ${dur(jdur(first))}, on a fresh VM that's already gone.</p>
+        <div class="card" style="margin-top:12px"><div class="tl" role="img" aria-label="Timeline">${sg.map(x => `<i class="${x[2]}" style="flex:${Math.max(x[1], 0) / tot} 1 0"></i>`).join('')}</div><div class="tll">${sg.map(x => `<span>${x[0]}<b>${dur(x[1])}</b></span>`).join('')}</div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin:16px 0"><a class="btn pri" href="#/jobs/${encodeURIComponent(first.id)}">View the job</a><a class="btn" href="#/" data-act="finish">Go to overview</a></div>
+        <p class="fg2">${ok ? 'Next: close or merge the test PR, then <a href="#/guides/move">move a real workflow →</a>' : 'kiln worked; the workflow failed. <a href="#/guides/debug">Debug a failed job →</a>'}</p>`);
+    }
+    const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
+    const sum = [tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected', `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+    const test = () => {
+      if (!repo) return '<p class="fg2">Add a repo first.</p>';
+      const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
+      const sel = rs.length > 1 ? `<label class="sr" for="su-repo">Repository</label><select id="su-repo" data-act="surepo">${rs.map(r => `<option ${r === repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>` : '';
+      const intro = `<p class="fg2">kiln can open a pull request in <b>${esc(repo)}</b> adding one small workflow, <code>kiln-hello.yml</code>. The PR itself triggers the job, so you'll see kiln work in about a minute. Close or merge it afterwards.</p>`;
+      if (!h) return intro + sel + helloBtn(repo) + alt;
+      const vm = S.vms.find(v => v.repo === repo && (ACTIVE(v) || v.started >= h.at - 5)), q = ((S.poll.queued || {})[repo] || 0) > 0 || !!vm;
+      const rows = [[1, `<a href="${esc(h.pr_url)}" target="_blank" rel="noopener">PR opened ↗</a>`], [q, 'GitHub queued the job'], [!!vm, 'VM booting'],
+        [!!vm?.busy_since, vm?.busy_since ? `Running <span data-t="${vm.busy_since}" data-k="dur"></span>` : 'Running']];
+      return `${sel}<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${on ? '✓' : '○'}</span> <span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>
+        ${S.image_ready ? '' : '<p class="fg2 sm">The job starts as soon as the image is ready.</p>'}
+        ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
+    };
     const B = [
-      `<form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
-       <p class="fg2 sm">Classic token with the <span class="mono">repo</span> scope.</p>${tokHTML()}`,
-      S.baking ? `<p>Baking the base image. ${PH[bakeIdx()]?.[1] || 'Starting'}, ${dur((Date.now() - bk.t0) / 1000)} elapsed, usually ~4 min.</p>` : `<p class="fg2">Builds the VM image every job starts from. Takes about 4 minutes.</p><button class="btn pri" data-act="bake">Bake image</button>`,
-      `${c.repos.length ? `<p class="fg2">${c.repos.map(esc).join(', ')}</p>` : ''}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
-      `<p class="fg2">Add this to a workflow in the repo:</p><pre class="snip" style="max-width:100%">${esc(snippet())}</pre><p class="fg2 sm">${esc(SIZES())}</p><div style="display:flex;gap:8px"><button class="btn" data-act="copysnip">Copy</button><button class="btn pri" data-act="wfdone">I added it</button></div>`,
-      first ? `<p class="ok">First job ran in ${dur(jdur(first))}.</p><a class="btn pri" href="#/" data-act="finish">Go to overview</a>` : `<p class="fg2">Waiting for a job with <span class="mono">runs-on: [self-hosted, ${esc(c.label)}]</span>…</p>`,
+      `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
+       <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
+       <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}`,
+      `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
+      test(),
     ];
-    setHTML($('#stp'), ['Add a GitHub token', 'Bake the image', 'Add a repo', 'Add the workflow', 'Run the first job'].map((t, i) => {
+    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', 'Choose a repo', 'Run a test job'].map((t, i) => {
       const d = done[i] && i !== open;
-      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? '✓' : i + 1}</span><h3>${t}${d ? `<button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${tr}${B[i]}</div>` : ''}</li>`;
-    }).join(''));
+      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? '✓' : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
+    }).join('')}</ol>`);
+  },
+};
+
+/* ---------- guides ---------- */
+const GUIDES = [
+  ['start', 'Getting started', L => `<h2>Getting started</h2>
+    <p>When GitHub queues a job whose <code>runs-on</code> names kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
+    <p>You need three things:</p>
+    <ol><li><b>A GitHub token</b> (Settings › GitHub), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
+    <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
+    <p>Day to day, glance at Overview: banners mean something needs you.</p>`],
+  ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
+    ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
+    <p>For another size, use exactly one size label:</p>
+    <div class="tw"><table><tr><th>runs-on</th><th>vCPU</th><th>RAM</th></tr><tr><td><code>[self-hosted, ${L}]</code></td><td>${D}</td><td>default</td></tr>
+    ${[[2, 4], [4, 8], [8, 16], [16, 24]].map(([c, m]) => `<tr><td><code>[self-hosted, ${L}-${c}cpu]</code></td><td>${c}</td><td>${m} GB</td></tr>`).join('')}</table></div>
+    <ul><li>Never combine labels: <code>[${L}, ${L}-8cpu]</code> is never picked up.</li><li>A size above this box's CPU count waits forever.</li><li>Each job gets a fresh VM. Install steps rerun every time, but downloads come from the repo cache.</li><li>To skip the ~10 s boot, keep <b>warm VMs</b> ready: Repos › your repo › Warm VMs. They hold memory while idle and are recycled so they never go stale.</li></ul>
+    <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. macOS, Windows and GPUs are not supported.</p>`],
+  ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
+    <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
+    <p>The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
+    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.73.48.98')}</li>
+    <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
+    <p>If holds stop working after you update kiln, rebake the image.</p>`],
+  ['cache', 'Caching', () => `<h2>Caching</h2>
+    <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
+    <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch. Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
+    <p><b>Size:</b> set in Settings › Cache (default 30 GB). A cache that grows past 1.2× its size is reset.</p>
+    <p><b>Clear:</b> Settings › Cache › Clear. It is refused while that repo has jobs running. Clear after resizing.</p>`],
+  ['network', 'Network & security', () => `<h2>Network &amp; security</h2><p><b>What jobs can reach</b> (Settings › Network):</p>
+    <ul><li><b>Open</b> (default): anything this box can reach, including your LAN and tailnet.</li><li><b>Filtered:</b> only the internet, DNS and the Docker mirror. LAN, tailnet, this box, cloud metadata and port 25 are blocked; IPv6 is off. If the filter fails, nothing launches. The host needs these packages:${cb('sudo apt install rootlesskit slirp4netns nftables uidmap')}</li></ul>
+    <p>Use Filtered before running pull requests from forks.</p><p><b>Who can open this dashboard:</b></p>
+    <ul><li>Tailnet devices are let in by their Tailscale login. By default that is only this box's owner; see Settings › Access.</li><li>A browser on the CI box itself needs the key from <code>~/.local/share/kiln/dashboard.key</code>.</li><li>LAN access is always refused.</li></ul>`],
+  ['image', 'Keeping the image fresh', () => `<h2>Keeping the image fresh</h2>
+    <p>Every job boots from one base image: Ubuntu 24.04 with Docker, build tools and a pinned Actions runner.</p>
+    <p><b>Why rebake:</b> GitHub stops sending jobs to runners that are about 30 days out of date. The image is <i>stale</i> when its runner is behind GitHub's latest or it is over 25 days old.</p>
+    <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in.</p>
+    <p><b>By hand:</b> Settings › Image › Rebake image. It takes ~4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
+    <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
+  ['stuck', 'Troubleshooting', L => `<h2>Troubleshooting</h2><p><i>A job stays queued.</i> Check these in order:</p>
+    <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
+    <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
+    <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
+    <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
+    <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
+];
+pages.guides = {
+  mount(r) {
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>';
+    $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${x[1]}</a>`).join('')}</nav>
+      <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
+      <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], '← ' + (GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], (GUIDES[i + 1]?.[1] || '') + ' →')}</div></div></div>`;
   },
 };
 
@@ -1037,7 +1203,26 @@ const ACT = {
     if (!await ask({ title: 'Clear cache?', body: `Delete the cache of <b>${esc(r)}</b>? The next job starts cold and rebuilds it.`, action: 'Clear cache', danger: 1 })) return;
     await post('/api/cache/clear', { repo: r }); toast('Cache cleared'); await poll();
   },
-  copysnip: () => copy(snippet(), 'Workflow snippet copied'),
+  help(b) {
+    if (popEl && popAnchor === b) return closePop(true);
+    const [t, body, g] = HELP[b.dataset.id];
+    openPop(b, `<h3 id="hp-t">${esc(t)}</h3><p>${md(body.replace('{R}', S.config.warm_recycle_mins ?? 30))}</p><a href="#/guides/${g}">Learn more →</a>`, 'help');
+    popEl.setAttribute('role', 'dialog'); popEl.setAttribute('aria-labelledby', 'hp-t'); popEl.tabIndex = -1; b.setAttribute('aria-expanded', 'true'); popEl.focus({ preventScroll: true });
+  },
+  tipok(b) { lsSet(b.dataset.id, '1'); b.closest('.tip').remove(); },
+  copycode: b => copy(b.previousElementSibling.textContent, 'Copied'),
+  async hello(b) {
+    const repo = b.dataset.id; helloSt[repo] = 1; delete helloErr[repo]; cur?.update?.();
+    try { const r = await post('/api/onboard/hello', { repo }); hello[repo] = { pr_url: r.pr_url, branch: r.branch, at: now() }; lsSet('kiln-hello', JSON.stringify(hello)); toast('Test PR opened'); }
+    catch (e) { helloErr[repo] = e.message; }
+    delete helloSt[repo]; await loadHello();
+  },
+  snip() { setupSnip = !setupSnip; pages.setup.update(); },
+  surepo(s) { setupRepo = s.value; pages.setup.update(); },
+  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/github'; },
+  resettips() { Object.keys(TIPS).forEach(k => lsSet('kiln-tip-' + k, null)); toast('Tips will show again'); },
+  guides() { dlg.close(); location.hash = '#/guides'; },
+  gdsel: s => (location.hash = '#/guides/' + s.value),
   rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" value="${rate()}"><button class="btn pri">Save</button></form>`); },
   jf(b) { jf.f = b.dataset.v; pages.jobs.update(); },
   jfrepo(s) { jf.repo = s.value; pages.jobs.update(); },
@@ -1045,7 +1230,7 @@ const ACT = {
   async rmrepo(b) {
     const r = b.dataset.id;
     if (!await ask({ title: 'Remove repo?', body: `Stop picking up jobs from <b>${esc(r)}</b>? Running jobs finish.`, action: `Remove ${r}`, danger: 1 })) return;
-    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r) }); toast(`Removed ${r}`); location.hash = '#/repos';
+    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
   runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
@@ -1061,6 +1246,7 @@ const ACT = {
   async save() {
     const bad = ['vm_cpus', 'vm_mem_mb', 'vm_disk_gb', 'poll_secs', 'job_timeout_mins', 'idle_timeout_mins', 'cache_gb'].find(k => !(draft[k] > 0));
     if (bad) return toast(`${bad.replace(/_/g, ' ')} must be greater than 0`, true);
+    if (draft.warm_recycle_mins != null && !(draft.warm_recycle_mins >= 5 && draft.warm_recycle_mins <= 1440)) return toast('Warm VM recycle must be 5 to 1440 minutes', true);
     const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
     if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
     await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); toast('Saved'); pages.settings.render();
@@ -1095,15 +1281,14 @@ const ACT = {
   },
   skip() { lsSet('kiln-skip-setup', '1'); location.hash = '#/'; },
   finish() { lsSet('kiln-skip-setup', '1'); },
-  wfdone() { lsSet('kiln-wf', '1'); setupOpen = 4; pages.setup.update(); },
   stepopen(b) { setupOpen = +b.dataset.id; pages.setup.update(); },
 };
 document.addEventListener('click', async e => {
-  if (popEl && !popEl.contains(e.target) && !e.target.closest('[data-act=rate],[data-act=runwf]')) closePop();
+  if (popEl && !popEl.contains(e.target) && !e.target.closest('[data-act=rate],[data-act=runwf],[data-act=help]')) closePop();
   const b = e.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'OPTION') return;
   const fn = ACT[b.dataset.act]; if (!fn) return;
   if (b.tagName !== 'INPUT' && b.tagName !== 'A') e.preventDefault();
-  if (b.tagName === 'BUTTON') b.disabled = true;
+  if (b.tagName === 'BUTTON' && !b.classList.contains('hq')) b.disabled = true;
   try { await fn(b); } catch (err) { fail(err); if (b.type === 'checkbox') b.checked = !b.checked; } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
 });
 document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) ACT[e.target.dataset.act](e.target); });
@@ -1128,6 +1313,11 @@ document.addEventListener('submit', async e => {
   try {
     if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast('Rate saved'); }
     else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
+    else if (k === 'warm') {
+      const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), w = { ...(S.config.warm || {}) }, r = pages.repos.r;
+      if (n) w[r] = n; else delete w[r];
+      await saveCfg({ ...S.config, warm: w }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
+    }
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {
       tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();
@@ -1135,6 +1325,7 @@ document.addEventListener('submit', async e => {
     }
   } catch (err) { fail(err); } finally { btn.disabled = false; }
 });
+addEventListener('scroll', () => { if (popEl) closePop(); }, true);
 addEventListener('keydown', e => {
   const rb = e.target.closest?.('.seg [role=radio]');
   if (rb && /^Arrow(Left|Right)$/.test(e.key)) {
@@ -1142,13 +1333,13 @@ addEventListener('keydown', e => {
   }
   if (e.key === 'Escape') closePop(true);
   if (e.target.closest?.('input,select,textarea') || e.ctrlKey || e.metaKey || e.altKey || dlg.open) return;
-  if (ACT.g) { clearTimeout(ACT.g.t); const go = { o: '#/', j: '#/jobs', r: '#/repos', s: '#/settings/capacity' }[e.key]; ACT.g = null; if (go) { location.hash = go; return; } }
+  if (ACT.g) { clearTimeout(ACT.g.t); const go = { o: '#/', j: '#/jobs', r: '#/repos', s: '#/settings/capacity', h: '#/guides' }[e.key]; ACT.g = null; if (go) { location.hash = go; return; } }
   if (e.key === 'g') ACT.g = { t: setTimeout(() => (ACT.g = null), 1000) };
   else if (e.key === '/') { e.preventDefault(); if (cur !== pages.jobs || parse().seg[0]) { location.hash = '#/jobs'; } setTimeout(() => $('#jf-repo')?.focus()); }
   else if (e.key === 'f') curLog?.toggle('follow');
   else if (e.key === 'w') curLog?.toggle('wrap');
-  else if (e.key === '?') modal(`<form method="dialog"><h2>Keyboard shortcuts</h2><div class="kbd"><span><kbd>g</kbd> <kbd>o</kbd></span><span>Overview</span><span><kbd>g</kbd> <kbd>j</kbd></span><span>Jobs</span><span><kbd>g</kbd> <kbd>r</kbd></span><span>Repos</span><span><kbd>g</kbd> <kbd>s</kbd></span><span>Settings</span>
-    <kbd>/</kbd><span>Filter jobs</span><kbd>f</kbd><span>Toggle follow in the log</span><kbd>w</kbd><span>Toggle wrap in the log</span><kbd>Esc</kbd><span>Close overlays</span></div><div class="act"><button class="btn pri" autofocus>Close</button></div></form>`);
+  else if (e.key === '?') modal(`<form method="dialog"><h2>Keyboard shortcuts</h2><div class="kbd"><span><kbd>g</kbd> <kbd>o</kbd></span><span>Overview</span><span><kbd>g</kbd> <kbd>j</kbd></span><span>Jobs</span><span><kbd>g</kbd> <kbd>r</kbd></span><span>Repos</span><span><kbd>g</kbd> <kbd>s</kbd></span><span>Settings</span><span><kbd>g</kbd> <kbd>h</kbd></span><span>Guides</span>
+    <kbd>/</kbd><span>Filter jobs</span><kbd>f</kbd><span>Toggle follow in the log</span><kbd>w</kbd><span>Toggle wrap in the log</span><kbd>Esc</kbd><span>Close overlays</span></div><div class="act"><button class="btn" data-act="guides" type="button">Open guides</button><button class="btn pri" autofocus>Close</button></div></form>`);
 });
 
 $('#fav').href = FAV(null);

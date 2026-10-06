@@ -39,7 +39,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 | setup-node / npm / pnpm / yarn | ✓ Works | Node LTS 24 pre-installed in `/opt/hostedtoolcache` |
 | setup-python / uv / poetry | ✓ Works | Python 3.12+ available; uv recommended |
 | setup-go | ✓ Works | ImageOS=ubuntu24 set for cache hits |
-| Rust (rust-toolchain, rust-cache) | ✓ Works | libssl-dev, libffi-dev included in base image |
+| Rust (rust-toolchain, rust-cache) | ✓ Works | libssl-dev, libffi-dev included; `~/.cargo` and `~/.rustup` live on the cache disk, so the toolchain is warm |
 | setup-java + Gradle/Maven | ✓ Works | Wrapper recommended; bare `mvn` not pre-installed |
 | setup-dotnet | ✓ Works | Install dir `/usr/share/dotnet` writable by runner |
 | ruby / setup-ruby + Rails | ✓ Works | libyaml, libpq included; gems compile cleanly |
@@ -58,7 +58,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 
 ## Tips
 
-- **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, cargo registry/git, Go modules, Gradle caches and `~/.m2/repository` are warm without any workflow change. Every job reads it; only a successful push to the default branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
+- **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, the whole `~/.cargo` and `~/.rustup` (so the Rust toolchain is already there), Go modules, Gradle caches and `~/.m2/repository` are warm without any workflow change. Every job reads it; only a successful push to the default branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
 - **Debugging:** set `debug_hold_mins` and `debug_ssh_keys` in Settings > Debugging and a failed job's VM stays up for SSH (see the README).
 - **Image pulls:** Docker Hub limits 100 pulls/6h per IP; kiln's built-in pull-through mirror (live, `docker_mirror` in settings; 10.0.2.2:5000 from the VM) avoids this, with a fallback to Docker Hub if it is down.
 - **Parallelism:** Use `concurrency:` groups to avoid overwhelming your host.

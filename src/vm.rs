@@ -95,6 +95,9 @@ pub struct Vm {
     /// Job network this VM booted with: "open" | "filtered" ("" in older records).
     #[serde(default)]
     pub egress: String,
+    /// Launched to fill the warm pool; cleared once it takes a job.
+    #[serde(default)]
+    pub warm: bool,
 }
 
 const KEEP_HISTORY: usize = 200;
@@ -166,7 +169,7 @@ fn backoff_secs(fails: u32) -> u64 {
 
 /// Register the VM synchronously (so the next scheduler tick counts it), then
 /// boot it in the background.
-pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
+pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let id = format!("kiln-{}-{seq}", now());
@@ -193,6 +196,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
         hold_until: None,
         ssh_hostkeys: vec![],
         egress: app.cfg().egress,
+        warm,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -267,15 +271,56 @@ fn reap_candidates(vms: &[Vm], repo: &str, cpus: u32, n: usize, t: u64) -> Vec<(
 /// if GitHub refuses (422), the runner just got a job and must live.
 pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
     let c = reap_candidates(&app.vms.lock().unwrap(), repo, cpus, n, now());
+    drop_idle(app, repo, c, "no job left for this runner").await;
+}
+
+async fn drop_idle(app: &App, repo: &str, c: Vec<(String, u64)>, why: &str) {
     for (id, rid) in c {
         if app.gh.delete_runner(repo, rid).await.is_err() {
             continue;
         }
-        note(app, &id, "no job left for this runner");
+        note(app, &id, why);
         if let Some(k) = app.kills.lock().unwrap().get(&id) {
             k.notify_one();
         }
     }
+}
+
+/// (demand launches, warm launches) for one repo at the default size: demand is
+/// queued jobs no waiting VM covers; warm tops the waiting VMs up to queued + target.
+pub fn launch_split(queued: usize, waiting: usize, target: usize) -> (usize, usize) {
+    (queued.saturating_sub(waiting), if waiting >= queued { target.saturating_sub(waiting - queued) } else { target })
+}
+
+/// Waiting VMs beyond demand and the warm target.
+pub fn surplus(waiting: usize, queued: usize, target: usize) -> usize {
+    waiting.saturating_sub(queued + target)
+}
+
+/// Idle VMs to recycle: warm ones online longer than `recycle_secs` (so they never go
+/// stale), and, with a cache commit parked while only idle job-less VMs still read the
+/// cache, all of those (warm or a leftover from a burst; they would block the commit).
+fn recycle_candidates(vms: &[Vm], repo: &str, recycle_secs: u64, t: u64, pending: bool) -> Vec<(String, u64)> {
+    let mine = |v: &&Vm| v.repo.eq_ignore_ascii_case(repo);
+    let idle_free = |v: &Vm| v.state == State::Idle && v.job_url.is_none();
+    let mut readers = vms.iter().filter(mine).filter(|v| v.state.is_active() && v.cache == CacheUse::Read).peekable();
+    let flush = pending && readers.peek().is_some() && readers.all(&idle_free);
+    vms.iter()
+        .filter(mine)
+        .filter(|v| idle_free(v) && ((v.warm && v.online_at.is_some_and(|o| o + recycle_secs < t)) || (flush && v.cache == CacheUse::Read)))
+        .filter_map(|v| Some((v.id.clone(), v.runner_id?)))
+        .collect()
+}
+
+pub async fn recycle_warm(app: &App, repo: &str, recycle_mins: u64) {
+    let pending = pending_file(&app.data, repo).exists();
+    let c = recycle_candidates(&app.vms.lock().unwrap(), repo, recycle_mins * 60, now(), pending);
+    drop_idle(app, repo, c, "recycled warm VM").await;
+}
+
+/// A cache commit for `repo` is running or parked: warm VMs wait for it so they boot on the new cache.
+pub fn cache_busy(app: &App, repo: &str) -> bool {
+    pending_file(&app.data, repo).exists() || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
 }
 
 /// The state the VM ends in (Killed, Failed or Done); Err = infrastructure failure.
@@ -402,7 +447,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let (mut first, mut logged, mut decided, mut cont) = (true, 0, false, false);
     // A job is root in its VM and can write anything to the console, so console lines
     // may shape the timeline but never extend the VM's life past this hard cap.
-    let hard_cap = start_cap(&cfg);
+    let hard_cap = start_cap(&cfg, v.warm);
     loop {
         // Idle VMs are reaped quickly; busy ones get the full job timeout.
         let v = update(app, id, |_| {}).context("vm vanished")?;
@@ -410,6 +455,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             // The guest powers itself off at hold end; this is only the safety net.
             (State::Held, _) => v.hold_until.unwrap_or_else(now) + 60,
             (_, Some(t)) => t + cfg.job_timeout_mins * 60,
+            // ponytail: an online warm VM waits warm_recycle_mins + 5 for the reaper's recycle first.
+            _ if v.warm && v.online_at.is_some() => v.started + (cfg.warm_recycle_mins + 5) * 60,
             _ => v.started + cfg.idle_timeout_mins * 60,
         }
         .min(v.started + hard_cap);
@@ -638,7 +685,7 @@ pub fn valid_ssh_key(k: &str) -> bool {
 }
 
 /// Standard base64; the guest decodes with `base64 -d`. (No crate for 10 lines.)
-fn b64(data: &[u8]) -> String {
+pub fn b64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     data.chunks(3)
         .flat_map(|c| {
@@ -786,7 +833,8 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         Err(String::new())
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
-    let (state, note) = match cache_verdict(cfg.cache, succeeded, t) {
+    let verdict = if v.job.is_none() { Err("no job ran".to_string()) } else { cache_verdict(cfg.cache, succeeded, t) };
+    let (state, note) = match verdict {
         Err(why) => {
             let _ = tokio::fs::remove_file(&ov).await;
             (CacheUse::Discarded, Some(format!("cache not saved: {why}")))
@@ -814,7 +862,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
 
 /// Commit the repo's parked trusted overlay if nothing else reads the cache.
 /// None = nothing parked, or still readers (stays parked).
-async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(CacheUse, Option<String>)> {
+pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(CacheUse, Option<String>)> {
     let pending = pending_file(&app.data, repo);
     let key = repo.to_ascii_lowercase();
     {
@@ -828,6 +876,14 @@ async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(CacheUse
     let cfg = app.cfg();
     let backing = cache_file(&app.data, repo);
     let r = qemu_img(&["commit", "-q", &pending.display().to_string()]).await;
+    // qemu-img takes the write lock before touching anything: a refusal means some QEMU
+    // still has the cache open and nothing was written. Keep it parked; the tick retries.
+    if let Err(e) = &r
+        && is_lock_refusal(&format!("{e:#}"))
+    {
+        app.committing.lock().unwrap().remove(&key);
+        return Some((CacheUse::Committed, Some("cache queued: still in use, saving shortly".into())));
+    }
     let _ = tokio::fs::remove_file(&pending).await;
     let big = disk_bytes(&backing);
     let out = match r {
@@ -845,6 +901,10 @@ async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(CacheUse
     };
     app.committing.lock().unwrap().remove(&key);
     Some(out)
+}
+
+fn is_lock_refusal(err: &str) -> bool {
+    err.contains("Failed to get \"write\" lock") || err.contains("Failed to get shared \"write\" lock")
 }
 
 /// Active VMs of `repo` (other than `except`) with the cache attached.
@@ -891,8 +951,9 @@ fn observe(app: &App, id: &str, line: &str) {
 }
 
 /// Longest a VM may live, whatever its console says: idle + job + hold, plus slack.
-fn start_cap(cfg: &crate::Config) -> u64 {
-    (cfg.idle_timeout_mins + cfg.job_timeout_mins + cfg.debug_hold_mins) * 60 + 300
+fn start_cap(cfg: &crate::Config, warm: bool) -> u64 {
+    let idle = if warm { cfg.idle_timeout_mins.max(cfg.warm_recycle_mins + 5) } else { cfg.idle_timeout_mins };
+    (idle + cfg.job_timeout_mins + cfg.debug_hold_mins) * 60 + 300
 }
 
 /// Returns true when the change is worth persisting right away. Each lifecycle
@@ -919,6 +980,7 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             return false;
         }
         v.state = State::Busy;
+        v.warm = false;
         v.job = Some(job.trim().to_string());
         v.busy_since = Some(t);
         true
@@ -1550,6 +1612,7 @@ mod tests {
             hold_until: None,
             ssh_hostkeys: vec![],
             egress: String::new(),
+            warm: false,
         }
     }
 
@@ -1623,7 +1686,49 @@ mod tests {
         apply_line(&mut v, "Job x completed with result: Succeeded", 700);
         assert_eq!((v.state, v.busy_since, v.job.as_deref(), v.result.as_deref()), (State::Busy, Some(120), Some("build"), Some("Failed")));
         let cfg = crate::Config { idle_timeout_mins: 10, job_timeout_mins: 60, debug_hold_mins: 30, ..Default::default() };
-        assert_eq!(start_cap(&cfg), 100 * 60 + 300);
+        assert_eq!(start_cap(&cfg, false), 100 * 60 + 300);
+        let cfg = crate::Config { warm_recycle_mins: 30, ..cfg };
+        assert_eq!(start_cap(&cfg, true), 125 * 60 + 300);
+    }
+
+    #[test]
+    fn warm_math() {
+        assert_eq!(launch_split(0, 0, 2), (0, 2));
+        assert_eq!(launch_split(3, 1, 2), (2, 2));
+        assert_eq!(launch_split(0, 3, 2), (0, 0));
+        assert_eq!(launch_split(1, 2, 2), (0, 1));
+        assert_eq!(launch_split(2, 2, 1), (0, 1));
+        assert_eq!(launch_split(5, 0, 0), (5, 0));
+        assert_eq!((surplus(3, 1, 1), surplus(2, 1, 1), surplus(1, 2, 1), surplus(2, 0, 0)), (1, 0, 0, 2));
+    }
+
+    #[test]
+    fn warm_recycle_selection() {
+        let w = |id: &str, online: u64, cache: CacheUse| Vm { warm: true, cache, ..vm(id, State::Idle, Some(online)) };
+        // age: only the one online longer than 1800s at t=2000
+        let vms = [w("old", 100, CacheUse::Read), w("young", 1500, CacheUse::Read)];
+        let ids = |c: Vec<(String, u64)>| c.into_iter().map(|(i, _)| i).collect::<Vec<_>>();
+        assert_eq!(ids(recycle_candidates(&vms, "O/N", 1800, 2000, false)), ["old"]);
+        assert!(recycle_candidates(&vms, "o/n", 1800, 1900, false).is_empty());
+        // parked commit, only idle warm readers: all recycled
+        assert_eq!(ids(recycle_candidates(&vms, "o/n", 1800, 2000, true)), ["old", "young"]);
+        // an idle job-less leftover (not warm) is flushed too; it is never aged out as warm
+        let leftover = [w("a", 1500, CacheUse::Read), Vm { cache: CacheUse::Read, ..vm("b", State::Idle, Some(1)) }];
+        assert_eq!(ids(recycle_candidates(&leftover, "o/n", 1800, 2000, true)), ["a", "b"]);
+        assert!(recycle_candidates(&leftover[1..], "o/n", 1800, 9999, false).is_empty());
+        // a busy reader or one GitHub already gave a job blocks the flush
+        let mut blocked = leftover.to_vec();
+        blocked[1] = Vm { cache: CacheUse::Read, ..vm("b", State::Busy, Some(1)) };
+        assert!(recycle_candidates(&blocked, "o/n", 1800, 2000, true).is_empty());
+        blocked[1] = Vm { job_url: Some("u".into()), ..w("b", 1500, CacheUse::Read) };
+        assert!(recycle_candidates(&blocked, "o/n", 1800, 2000, true).is_empty());
+        // nothing parked, nothing stale: nothing to do; other repos untouched
+        assert!(recycle_candidates(&vms[1..], "o/n", 1800, 2000, false).is_empty());
+        assert!(recycle_candidates(&vms, "x/y", 1800, 9999, true).is_empty());
+        // taking a job clears warm
+        let mut v = w("j", 1, CacheUse::Read);
+        apply_line(&mut v, "x: Running job: build", 5);
+        assert!(!v.warm);
     }
 
     #[test]
@@ -1735,6 +1840,12 @@ mod tests {
         assert_eq!(b64(b"foo"), "Zm9v");
         assert_eq!(b64(b"foob"), "Zm9vYg==");
         assert_eq!(b64(b"ssh-a b\nssh-c d"), "c3NoLWEgYgpzc2gtYyBk");
+    }
+
+    #[test]
+    fn lock_refusal_is_not_corruption() {
+        assert!(is_lock_refusal("qemu-img commit: qemu-img: Failed to get \"write\" lock\nIs another process using the image [/x.qcow2]?"));
+        assert!(!is_lock_refusal("qemu-img commit: Could not write to the backing file: No space left on device"));
     }
 
     #[test]

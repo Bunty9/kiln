@@ -5,7 +5,7 @@ mod web;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -45,6 +45,10 @@ pub struct Config {
     pub debug_ssh_keys: Vec<String>,
     /// Job VM network: "open" (full outbound via the host) or "filtered" (internet + mirror only).
     pub egress: String,
+    /// "owner/name" -> pre-booted idle VMs of the default size kept ready (0..=4).
+    pub warm: BTreeMap<String, u32>,
+    /// Idle warm VMs older than this are replaced so they never go stale.
+    pub warm_recycle_mins: u64,
 }
 
 impl Default for Config {
@@ -69,6 +73,8 @@ impl Default for Config {
             debug_hold_mins: 0,
             debug_ssh_keys: vec![],
             egress: "open".into(),
+            warm: BTreeMap::new(),
+            warm_recycle_mins: 30,
         }
     }
 }
@@ -81,6 +87,14 @@ impl Config {
             l.push(self.label.clone());
         }
         l
+    }
+
+    /// Warm VMs wanted for `repo` at size `cpus`: default size only, none while paused.
+    pub fn warm_target(&self, repo: &str, cpus: u32) -> usize {
+        if cpus != self.vm_cpus || self.max_vms == 0 {
+            return 0;
+        }
+        self.warm.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(0, |(_, &n)| n as usize)
     }
 
     pub fn mem_mb(&self, cpus: u32) -> u32 {
@@ -134,6 +148,12 @@ impl Config {
         }
         if let Some(k) = self.debug_ssh_keys.iter().find(|k| !vm::valid_ssh_key(k)) {
             bail!("debug_ssh_keys: not a single-line ssh-/ecdsa-/sk- public key: {:?}", k.chars().take(24).collect::<String>());
+        }
+        if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r))) {
+            bail!("warm: {r:?} must be a configured repo with a count of 0..=4");
+        }
+        if !(5..=1440).contains(&self.warm_recycle_mins) {
+            bail!("warm_recycle_mins must be 5..=1440");
         }
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
@@ -472,8 +492,14 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         };
         attach_jobs(app, &runners);
         let backed_off = app.backoff.lock().unwrap().get(repo).is_some_and(|&(_, at)| at > now());
+        vm::recycle_warm(app, repo, cfg.warm_recycle_mins).await;
+        // A parked cache save whose readers are gone (or that hit a lock last time).
+        vm::commit_pending(app, repo, "").await;
         // Sizes with demand, plus sizes with waiting VMs (which may now be surplus).
         let mut sizes: Vec<u32> = by_size.keys().copied().collect();
+        if cfg.warm_target(repo, cfg.vm_cpus) > 0 {
+            sizes.push(cfg.vm_cpus);
+        }
         sizes.extend(app.vms.lock().unwrap().iter().filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_waiting()).map(|v| v.cpus));
         sizes.sort_unstable();
         sizes.dedup();
@@ -484,22 +510,29 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 let waiting = vms.iter().filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.cpus == n && v.state.is_waiting()).count();
                 (waiting, vms.iter().filter(|v| v.state.is_active()).count())
             };
-            if waiting > queued {
-                vm::reap(app, repo, n, waiting - queued).await;
+            let target = cfg.warm_target(repo, n);
+            let surplus = vm::surplus(waiting, queued, target);
+            if surplus > 0 {
+                vm::reap(app, repo, n, surplus).await;
             }
             let gate = vm::launch_gate(mem_avail, cfg.mem_mb(n), disk, mirror_mb, cache_mb);
             if queued > waiting && blocked.is_none() {
                 blocked = gate.clone();
             }
             let held = backed_off || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
-            let want = if held { 0 } else { queued.saturating_sub(waiting).min(cfg.max_vms.saturating_sub(active)) };
+            let (demand, mut warm) = vm::launch_split(queued, waiting, target);
+            // Replacements wait for a cache commit so they boot on the new cache.
+            if warm > 0 && vm::cache_busy(app, repo) {
+                warm = 0;
+            }
+            let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
             if blocked.is_none() {
                 blocked = limit;
             }
-            for _ in 0..want {
-                vm::launch(app.clone(), repo.clone(), n);
+            for i in 0..want {
+                vm::launch(app.clone(), repo.clone(), n, i >= demand);
             }
         }
         queued_by_repo.insert(repo.clone(), by_size);
@@ -574,6 +607,18 @@ mod tests {
         assert!(!ok(|c| c.debug_ssh_keys = vec!["rm -rf /".into()]));
         assert!(ok(|c| c.egress = "filtered".into()));
         assert!(!ok(|c| c.egress = "closed".into()));
+        let warm = |repos: &[&str], r: &str, n: u32| {
+            let mut c = Config { repos: repos.iter().map(|s| s.to_string()).collect(), ..Config::default() };
+            c.warm.insert(r.into(), n);
+            c.validate_for(8).is_ok()
+        };
+        assert!(warm(&["a/b"], "A/B", 4));
+        assert!(warm(&["a/b"], "a/b", 0));
+        assert!(!warm(&["a/b"], "a/b", 5));
+        assert!(!warm(&["a/b"], "x/y", 1));
+        assert!(ok(|c| c.warm_recycle_mins = 5));
+        assert!(!ok(|c| c.warm_recycle_mins = 4));
+        assert!(!ok(|c| c.warm_recycle_mins = 1441));
     }
 
     #[test]
@@ -583,6 +628,15 @@ mod tests {
         assert_eq!(c.runner_labels(8), ["self-hosted", "linux", "x64", "kiln-8cpu"]);
         assert_eq!((c.mem_mb(4), c.mem_mb(2), c.mem_mb(16)), (8192, 4096, 24576));
         assert_eq!(c.poll_secs, 5);
+    }
+
+    #[test]
+    fn warm_target_rules() {
+        let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
+        c.warm.insert("a/b".into(), 2);
+        assert_eq!((c.warm_target("A/B", 4), c.warm_target("a/b", 8), c.warm_target("x/y", 4)), (2, 0, 0));
+        c.max_vms = 0;
+        assert_eq!(c.warm_target("a/b", 4), 0);
     }
 
     #[test]

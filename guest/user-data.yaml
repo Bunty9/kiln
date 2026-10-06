@@ -169,8 +169,11 @@ write_files:
       blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb
       mkdir -p /mnt/cache
       mount -o noatime /dev/vdb /mnt/cache
-      for t in /var/lib/docker /home/runner/.cache /home/runner/.npm /home/runner/.cargo/registry \
-               /home/runner/.cargo/git /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
+      # Whole ~/.cargo and ~/.rustup: the Rust toolchain itself is cached, not just crates.
+      # Older caches kept ~/.cargo/{registry,git} separately: drop those obsolete dirs.
+      rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
+      for t in /var/lib/docker /home/runner/.cache /home/runner/.npm /home/runner/.cargo /home/runner/.rustup \
+               /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
         mkdir -p "$src"
         case $t in

@@ -50,6 +50,8 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/vms/{id}/kill", post(kill))
         .route("/api/vms/{id}/release", post(release))
         .route("/api/cache/clear", post(cache_clear))
+        .route("/api/onboard", get(onboard))
+        .route("/api/onboard/hello", post(onboard_hello))
         .route("/api/bake", post(bake))
         .route("/api/tailscale", get(ts_status))
         .route("/api/tailscale/netcheck", get(ts_netcheck))
@@ -381,6 +383,30 @@ struct RepoBody {
 async fn cache_clear(State(app): S, Json(b): Json<RepoBody>) -> R<StatusCode> {
     vm::clear_cache(&app, &b.repo)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// {"o/n": {"pr_url", "at"}} of hello PRs this kiln opened; survives restarts.
+fn hello_prs(data: &std::path::Path) -> serde_json::Map<String, Value> {
+    std::fs::read(data.join("onboard.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+async fn onboard(State(app): S) -> Json<Value> {
+    Json(json!({ "hello_prs": hello_prs(&app.data) }))
+}
+
+/// Opens a PR with a hello workflow in a configured repo (no proxy: needs write scopes).
+async fn onboard_hello(State(app): S, Json(b): Json<RepoBody>) -> R<Json<Value>> {
+    static SAVE: Mutex<()> = Mutex::new(());
+    let cfg = app.cfg();
+    let repo = cfg.repos.iter().find(|r| r.eq_ignore_ascii_case(&b.repo)).ok_or_else(|| anyhow!("not a configured repo"))?;
+    let t = now();
+    let (pr_url, branch) = app.gh.hello_pr(repo, &cfg.label, t).await?;
+    let _g = SAVE.lock().unwrap();
+    let mut m = hello_prs(&app.data);
+    m.insert(repo.clone(), json!({ "pr_url": pr_url, "at": t }));
+    // Best effort: the PR exists either way.
+    let _ = std::fs::write(app.data.join("onboard.json"), serde_json::to_vec(&m)?);
+    Ok(Json(json!({ "pr_url": pr_url, "branch": branch })))
 }
 
 async fn bake(State(app): S) -> R<StatusCode> {

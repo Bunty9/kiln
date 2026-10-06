@@ -72,6 +72,8 @@ The label picks the VM. `[self-hosted, kiln]` gets the default size (`vm_cpus` /
 
 (`kiln` is the configured `label`.) RAM is min(N × 2 GB, 24 GB); disk is `vm_disk_gb` for all. A job must name exactly one kiln label: `[kiln, kiln-8cpu]` or `[kiln, gpu]` is not ours and is never picked up. A size larger than the host's CPU count is not served either (the job just waits, uncounted). A VM registers `kiln-Ncpu` plus the plain `kiln` only when N is the default size, so a big VM never steals a default job, and the default VM also serves `kiln-<default>cpu`. Each size is scheduled separately, within the shared `max_vms` and memory gate.
 
+`POST /api/onboard/hello {"repo":"o/n"}` opens a PR adding `.github/workflows/kiln-hello.yml` (needs a token with contents and workflows write); `GET /api/onboard` lists the PRs opened.
+
 kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this way.
 
 ## Dashboard
@@ -96,15 +98,22 @@ Editable from the dashboard (`POST /api/config`); changes apply without a restar
 - `mirror_gb` (default 20, 1 to 500): cap on the mirror's storage. Every 10 minutes kiln checks `<data>/registry/data`; over the cap it stops the registry, deletes the data and restarts it (no LRU: wiping is fine for a pull-through cache, which refills).
 - `cache` (default `true`), `cache_gb` (default 30, 5 to 500): the per-repo cache disk, see [Repo cache](#repo-cache).
 - `debug_hold_mins` (default 0 = off, max 120) and `debug_ssh_keys`: keep failed jobs for SSH, see [Debugging a failed job](#debugging-a-failed-job).
+- `warm` (default `{}`), `warm_recycle_mins` (default 30, 5 to 1440): opt-in warm pool, see [Warm pool](#warm-pool).
 - `auto_rebake` (default `true`): when the image is stale (runner behind the latest release, or over 25 days old), kiln rebakes by itself, at most once every 6 hours. Jobs that queue meanwhile still launch on the old base, which is swapped atomically.
 
 ## Repo cache
 
-Each repo gets one persistent cache disk, `<data>/cache/<owner>__<name>.qcow2` (virtual size `cache_gb`, created blank on first use; the guest formats it). The guest bind-mounts these onto it: `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo/{registry,git}`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository`. `/opt/hostedtoolcache` is not cached (the pre-seeded Node lives there). So Docker layers and package downloads are warm on every job, with no `actions/cache` round trip.
+Each repo gets one persistent cache disk, `<data>/cache/<owner>__<name>.qcow2` (virtual size `cache_gb`, created blank on first use; the guest formats it). The guest bind-mounts these onto it: `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup` (the Rust toolchain too), `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository`. `/opt/hostedtoolcache` is not cached (the pre-seeded Node lives there). So Docker layers and package downloads are warm on every job, with no `actions/cache` round trip.
 
 **Trust rule: trusted writer, throwaway readers.** Every job VM gets a private qcow2 overlay of its repo's cache, as a second disk, so any job (PR or branch) starts warm and many can run at once. kiln merges the overlay back (`qemu-img commit`) only when all of these hold: the job succeeded, it was a `push` to the repo's default branch (checked through the GitHub API), and `cache` is on. If other jobs of the repo are still reading the cache, the overlay is parked and merged as soon as the last of them finishes (committing under a live reader would corrupt its overlay); a newer trusted overlay supersedes a parked one, since every live overlay shares the same base. Anything else is discarded with the overlay, and the job page says why ("cache not saved: pull_request event"). This mirrors GitHub's branch-scope rule for `actions/cache`: a PR can read the cache but can never poison it.
 
 A cache that grows past 1.2x `cache_gb` is deleted at commit time and starts empty again. Changing `cache_gb` only affects caches created afterwards. To clear one, use Settings > Cache > Clear, or `POST /api/cache/clear {"repo":"o/n"}` (refused while jobs of that repo run), or delete the file while kiln is idle. The cache directory counts toward the low-disk message.
+
+Older caches kept `~/.cargo/{registry,git}` as separate directories; `kiln-cache` deletes those obsolete dirs from the cache disk on first use (after a rebake, since it lives in the guest image).
+
+## Warm pool
+
+`"warm": {"owner/name": 2}` keeps that many pre-booted idle VMs of the default size ready for the repo (0 to 4; the repo must be in `repos`), so a job starts in about a second instead of waiting for a boot. They cost RAM and a `max_vms` slot while idle, and the reaper never drops below the target. Each tick kiln launches `queued + target - waiting` VMs; a VM that takes a job is a normal job VM and gets replaced. Idle warm VMs older than `warm_recycle_mins` are deregistered and replaced so they never go stale, and their idle timeout is that plus 5 minutes. `max_vms` 0 (paused) means no warm VMs. An idle warm VM reads the repo cache, which would block a parked cache commit forever: when only idle warm VMs still read it, kiln recycles them, and replacements launch after the commit. `/api/state` VMs carry `"warm": true` until they take a job.
 
 ## Debugging a failed job
 
