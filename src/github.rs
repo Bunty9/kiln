@@ -34,11 +34,8 @@ pub struct Resp {
 
 impl Gh {
     pub fn new(token: String, source: &'static str) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent("kiln-ci")
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .expect("http client");
+        let http =
+            reqwest::Client::builder().user_agent("kiln-ci").timeout(std::time::Duration::from_secs(60)).build().expect("http client");
         Self {
             http,
             token: std::sync::RwLock::new(token),
@@ -140,12 +137,7 @@ impl Gh {
         }
         let r = self.exec(rb).await?;
         let status = r.status().as_u16();
-        let content_type = r
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
+        let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
         let body = r.bytes().await?;
         self.note_body(status, &String::from_utf8_lossy(&body));
         Ok(Resp { status, content_type, body })
@@ -166,9 +158,10 @@ impl Gh {
         }
         let r = self.exec(rb).await?;
         if r.status() == StatusCode::NOT_MODIFIED
-            && let Some((_, v)) = cached {
-                return Ok(v);
-            }
+            && let Some((_, v)) = cached
+        {
+            return Ok(v);
+        }
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
@@ -239,7 +232,12 @@ impl Gh {
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
     /// runner name -> (job page, queued-at unix time).
-    pub async fn queued_jobs(&self, repo: &str, label: &str, default_cpus: u32) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64)>)> {
+    pub async fn queued_jobs(
+        &self,
+        repo: &str,
+        label: &str,
+        default_cpus: u32,
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64)>)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut ours = HashMap::new();
@@ -315,8 +313,10 @@ impl Gh {
             bail!("{}", hello_err(st, &v, "reading the default branch"));
         }
         let base_tree = v["tree"]["sha"].as_str().context("commit has no tree")?.to_string();
-        let file = json!({ "path": ".github/workflows/kiln-hello.yml", "mode": "100644", "type": "blob", "content": hello_workflow(label) });
-        let (st, v) = self.api(Method::POST, &format!("repos/{repo}/git/trees"), Some(json!({ "base_tree": base_tree, "tree": [file] }))).await?;
+        let file =
+            json!({ "path": ".github/workflows/kiln-hello.yml", "mode": "100644", "type": "blob", "content": hello_workflow(label) });
+        let (st, v) =
+            self.api(Method::POST, &format!("repos/{repo}/git/trees"), Some(json!({ "base_tree": base_tree, "tree": [file] }))).await?;
         if st != 201 {
             bail!("{}", hello_err(st, &v, "adding the workflow"));
         }
@@ -523,7 +523,9 @@ mod tests {
     #[test]
     fn hello() {
         let w = hello_workflow("kiln");
-        assert!(w.contains("runs-on: [self-hosted, kiln]\n") && w.contains("awk '/Mem:/{print $2}'") && w.contains("echo \"vCPUs: $(nproc)"));
+        assert!(
+            w.contains("runs-on: [self-hosted, kiln]\n") && w.contains("awk '/Mem:/{print $2}'") && w.contains("echo \"vCPUs: $(nproc)")
+        );
         let m = json!({ "message": "Nope" });
         assert!(hello_err(404, &m, "creating the branch").contains("Contents and Workflows"));
         assert!(hello_err(403, &m, "adding the workflow").starts_with("GitHub refused"));

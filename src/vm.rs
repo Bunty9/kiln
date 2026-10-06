@@ -247,9 +247,10 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             }
             // A JIT runner that never ran a job stays registered (offline) on GitHub.
             if let (Some(rid), None) = (v.runner_id, &v.job)
-                && let Err(e) = app.gh.delete_runner(&v.repo, rid).await {
-                    tracing::warn!("{}: {e:#}", v.id);
-                }
+                && let Err(e) = app.gh.delete_runner(&v.repo, rid).await
+            {
+                tracing::warn!("{}: {e:#}", v.id);
+            }
             persist(&app, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
@@ -391,7 +392,13 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let filtered = v.egress == "filtered";
     let mut ssh_host = None;
     let mut fwd = String::new();
-    let publish = if !filtered { Publish::Monitor } else if which("rootlessctl") { Publish::Rootless } else { Publish::Static };
+    let publish = if !filtered {
+        Publish::Monitor
+    } else if which("rootlessctl") {
+        Publish::Rootless
+    } else {
+        Publish::Static
+    };
     if cfg.debug_hold_mins > 0 && !cfg.debug_ssh_keys.is_empty() {
         let ip = bind_ip().await;
         if let Some(port) = pick_port(app, id, &ip) {
@@ -606,7 +613,14 @@ async fn publish_ssh(dir: &Path, how: Publish, ip: &str, port: u16) -> Result<()
     match how {
         Publish::Static => Ok(()),
         Publish::Rootless => {
-            let o = Command::new("rootlessctl").arg("--socket").arg(dir.join("rk/api.sock")).arg("add-ports").arg(format!("{ip}:{port}:127.0.0.1:{port}/tcp")).output().await.context("rootlessctl")?;
+            let o = Command::new("rootlessctl")
+                .arg("--socket")
+                .arg(dir.join("rk/api.sock"))
+                .arg("add-ports")
+                .arg(format!("{ip}:{port}:127.0.0.1:{port}/tcp"))
+                .output()
+                .await
+                .context("rootlessctl")?;
             if !o.status.success() {
                 bail!("rootlessctl: {}", String::from_utf8_lossy(&o.stderr).trim());
             }
@@ -629,7 +643,10 @@ async fn publish_ssh(dir: &Path, how: Publish, ip: &str, port: u16) -> Result<()
             .await;
             let out = String::from_utf8_lossy(&out);
             if hmp_failed(&out) {
-                bail!("hostfwd_add: {}", out.lines().rev().find(|l| l.contains("Could not") || l.contains("rror")).unwrap_or("failed").trim());
+                bail!(
+                    "hostfwd_add: {}",
+                    out.lines().rev().find(|l| l.contains("Could not") || l.contains("rror")).unwrap_or("failed").trim()
+                );
             }
             Ok(())
         }
@@ -646,7 +663,8 @@ fn hmp_failed(out: &str) -> bool {
 }
 
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()))
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()))
 }
 
 /// Copy the guest's ttyS1 (QEMU serves it on a unix socket) into steps.log, capped like
@@ -946,7 +964,9 @@ pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
         bail!("not a configured repo");
     }
     let vms = app.vms.lock().unwrap();
-    if vms.iter().any(|v| v.state.is_active() && v.repo.eq_ignore_ascii_case(repo)) || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase()) {
+    if vms.iter().any(|v| v.state.is_active() && v.repo.eq_ignore_ascii_case(repo))
+        || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
+    {
         bail!("jobs of {repo} are running: clear the cache when they finish");
     }
     let _ = std::fs::remove_file(pending_file(&app.data, repo));
@@ -973,7 +993,9 @@ fn kill_note(app: &App, id: &str) {
 /// `2026-10-06 10:01:40Z: Job build completed with result: Succeeded`
 fn observe(app: &App, id: &str, line: &str) {
     let mut save = false;
-    if let Some(v) = update(app, id, |v| save = apply_line(v, line, now())) && save {
+    if let Some(v) = update(app, id, |v| save = apply_line(v, line, now()))
+        && save
+    {
         persist(app, &v);
     }
 }
@@ -1056,7 +1078,10 @@ fn qemu(cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
 fn egress_nft(mirror: bool) -> String {
     let (dnat, accept) = if mirror {
-        ("\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }", "\n    ip daddr 10.0.2.2 tcp dport 5000 accept")
+        (
+            "\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }",
+            "\n    ip daddr 10.0.2.2 tcp dport 5000 accept",
+        )
     } else {
         ("", "")
     };
@@ -1102,7 +1127,13 @@ fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<Str
         // address, which the egress filter drops (10.0.0.0/8); loopback is allowed.
         a.extend(["--port-driver=builtin".into(), "-p".into(), format!("{ip}:{port}:127.0.0.1:{port}/tcp")]);
     }
-    a.extend(["/bin/sh".into(), "-ec".into(), format!("{RK_SETUP}; shift; exec {DROP_CAPS} \"$@\""), "sh".into(), dir.join("egress.nft").display().to_string()]);
+    a.extend([
+        "/bin/sh".into(),
+        "-ec".into(),
+        format!("{RK_SETUP}; shift; exec {DROP_CAPS} \"$@\""),
+        "sh".into(),
+        dir.join("egress.nft").display().to_string(),
+    ]);
     a.extend_from_slice(qemu);
     a
 }
@@ -1174,7 +1205,11 @@ async fn egress_probe(app: &App) -> Result<()> {
         return Ok(());
     }
     let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-    let why = out.lines().find(|l| l.starts_with("step:")).map(String::from).or_else(|| err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()));
+    let why = out
+        .lines()
+        .find(|l| l.starts_with("step:"))
+        .map(String::from)
+        .or_else(|| err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()));
     bail!("{}", why.unwrap_or_else(|| format!("rootlesskit exited with {}", o.status)))
 }
 
@@ -1264,7 +1299,11 @@ async fn bake_inner(app: &App) -> Result<()> {
         say(format!("fetching {CLOUD}/{f}")).await?;
         let _ = tokio::fs::remove_file(part(f)).await;
         let mut curl = Command::new("curl");
-        curl.args(["-fLR", "--no-progress-meter", "--speed-limit", "1024", "--speed-time", "60", "-z"]).arg(local(f)).arg("-o").arg(part(f)).arg(format!("{CLOUD}/{f}"));
+        curl.args(["-fLR", "--no-progress-meter", "--speed-limit", "1024", "--speed-time", "60", "-z"])
+            .arg(local(f))
+            .arg("-o")
+            .arg(part(f))
+            .arg(format!("{CLOUD}/{f}"));
         sh(&log, &mut curl).await?;
     }
     for f in CLOUD_FILES {
@@ -1373,12 +1412,7 @@ fn proc_uid(status: &str) -> Option<u32> {
 }
 
 fn kb_of(meminfo: &str, key: &str) -> u64 {
-    meminfo
-        .lines()
-        .find(|l| l.starts_with(key))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+    meminfo.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 pub fn meminfo_kb(key: &str) -> u64 {
@@ -1403,13 +1437,23 @@ const MIN_DISK_GB: u64 = 15;
 
 /// Why no VM may start right now, if so. The mirror cache is the usual
 /// reclaimable disk hog, so a low-disk message names its size.
-pub fn launch_gate(mem_avail_mb: u64, vm_mem_mb: u32, disk_free_gb: Option<u64>, mirror_mb: Option<u64>, cache_mb: Option<u64>) -> Option<String> {
+pub fn launch_gate(
+    mem_avail_mb: u64,
+    vm_mem_mb: u32,
+    disk_free_gb: Option<u64>,
+    mirror_mb: Option<u64>,
+    cache_mb: Option<u64>,
+) -> Option<String> {
     if mem_avail_mb < vm_mem_mb as u64 + 1024 {
         return Some(format!("not enough memory: {mem_avail_mb} MB free"));
     }
     disk_free_gb.filter(|&g| g < MIN_DISK_GB).map(|g| {
         let gb = |m: u64| m as f64 / 1024.0;
-        let parts: Vec<String> = [mirror_mb.map(|m| format!("docker mirror cache {:.1} GB", gb(m))), cache_mb.map(|m| format!("repo caches {:.1} GB", gb(m)))].into_iter().flatten().collect();
+        let parts: Vec<String> =
+            [mirror_mb.map(|m| format!("docker mirror cache {:.1} GB", gb(m))), cache_mb.map(|m| format!("repo caches {:.1} GB", gb(m)))]
+                .into_iter()
+                .flatten()
+                .collect();
         let m = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
         format!("low disk: {g} GB free{m}")
     })
@@ -1473,12 +1517,7 @@ pub fn image_info(data: &Path, latest: Option<String>) -> serde_json::Value {
     else {
         return serde_json::Value::Null;
     };
-    let (age, stale) = image_age(
-        v["baked_at"].as_u64().unwrap_or(0),
-        v["runner_version"].as_str().unwrap_or(""),
-        latest.as_deref(),
-        now(),
-    );
+    let (age, stale) = image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
     v["runner_latest"] = latest.into();
     v["age_days"] = age.into();
     v["stale"] = stale.into();
@@ -1543,14 +1582,22 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let avail = mem_avail_mb();
     let want = cfg.max_vms as u64 * cfg.vm_mem_mb as u64;
     let note = if avail < want { "; not enough for all slots at once" } else { "" };
-    out.push(check("memory", avail >= cfg.vm_mem_mb as u64, format!("{avail} MB available, {} x {} MB wanted{note}", cfg.max_vms, cfg.vm_mem_mb)));
+    out.push(check(
+        "memory",
+        avail >= cfg.vm_mem_mb as u64,
+        format!("{avail} MB available, {} x {} MB wanted{note}", cfg.max_vms, cfg.vm_mem_mb),
+    ));
 
     app.gh.refresh_latest().await;
     let info = image_info(&app.data, app.gh.latest_cached());
     out.push(if !image_ready(&app.data) {
         check("image", false, "not baked: run `kiln bake`")
     } else if info["stale"] == true {
-        check("image", true, format!("warning: stale: {} days old, runner {} (latest {})", info["age_days"], info["runner_version"], info["runner_latest"]))
+        check(
+            "image",
+            true,
+            format!("warning: stale: {} days old, runner {} (latest {})", info["age_days"], info["runner_version"], info["runner_latest"]),
+        )
     } else {
         check("image", true, format!("runner {}, {} days old", info["runner_version"], info["age_days"]))
     });
@@ -1558,7 +1605,11 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let src = app.gh.source();
     out.push(match (app.gh.has_token(), src) {
         (false, _) => check("token", false, "no token: set one in the dashboard, KILN_GITHUB_TOKEN, or `gh auth login`"),
-        (true, "gh") => check("token", true, "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead"),
+        (true, "gh") => check(
+            "token",
+            true,
+            "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead",
+        ),
         (true, s) => check("token", true, format!("source: {s}")),
     });
     for repo in &cfg.repos {
@@ -1576,7 +1627,11 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     // Cached unless run from the CLI; a failure only matters when jobs are filtered.
     out.push(match egress_ready(app, cli).await {
         Ok(()) => check("filtered egress", true, "jobs reach the internet and the mirror only"),
-        Err(e) => check("filtered egress", cfg.egress != "filtered", if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") }),
+        Err(e) => check(
+            "filtered egress",
+            cfg.egress != "filtered",
+            if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") },
+        ),
     });
 
     out.push(match output("tailscale", &["status", "--json"]).await {
@@ -1601,11 +1656,18 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         })
         .count();
     let active = app.vms.lock().unwrap().iter().any(|v| v.state.is_active());
-    let serving = cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
+    let serving =
+        cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
     out.push(if stray > 0 && serving {
         check("stray qemu", true, format!("{stray} qemu process(es) owned by running kiln serve"))
     } else if stray > 0 && !active {
-        check("stray qemu", false, format!("{stray} qemu process(es) running from {vms_dir} with no active VM (expected only if another kiln serve is running jobs)"))
+        check(
+            "stray qemu",
+            false,
+            format!(
+                "{stray} qemu process(es) running from {vms_dir} with no active VM (expected only if another kiln serve is running jobs)"
+            ),
+        )
     } else {
         check("stray qemu", true, "none")
     });
@@ -1657,7 +1719,9 @@ mod tests {
         // qemu args follow the script and nft path as separate argv entries
         assert_eq!(&a[a.len() - 3..], &q[..]);
         assert_eq!(a[a.len() - 4], "/d/vm 1/egress.nft");
-        assert!(a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all"));
+        assert!(
+            a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all")
+        );
         assert!(!rk_args(Path::new("/d"), None, &q).contains(&"-p".into()));
         let on = egress_nft(true);
         assert!(on.contains("ct state established,related accept") && on.contains("tcp dport 25 drop"));
@@ -1786,7 +1850,10 @@ mod tests {
         assert!(launch_gate(9300, 8192, None, None, None).is_none());
         assert_eq!(launch_gate(9300, 8192, Some(3), None, None).unwrap(), "low disk: 3 GB free");
         assert_eq!(launch_gate(9300, 8192, Some(12), Some(9523), None).unwrap(), "low disk: 12 GB free (docker mirror cache 9.3 GB)");
-        assert_eq!(launch_gate(9300, 8192, Some(12), Some(9523), Some(2048)).unwrap(), "low disk: 12 GB free (docker mirror cache 9.3 GB, repo caches 2.0 GB)");
+        assert_eq!(
+            launch_gate(9300, 8192, Some(12), Some(9523), Some(2048)).unwrap(),
+            "low disk: 12 GB free (docker mirror cache 9.3 GB, repo caches 2.0 GB)"
+        );
         assert_eq!(launch_gate(9300, 8192, Some(12), None, Some(2048)).unwrap(), "low disk: 12 GB free (repo caches 2.0 GB)");
         assert!(launch_gate(5000, 8192, Some(100), None, None).unwrap().starts_with("not enough memory"));
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 100 40 62914560 40% /\n";
@@ -1874,7 +1941,12 @@ mod tests {
     #[test]
     fn stale_policy_selection() {
         let idle = |id: &str, p: &str| Vm { policy: p.into(), ..vm(id, State::Idle, Some(1)) };
-        let vms = [idle("open", "open"), idle("filtered", "filtered"), Vm { policy: "open".into(), ..vm("busy", State::Busy, Some(1)) }, Vm { job_url: Some("u".into()), ..idle("assigned", "open") }];
+        let vms = [
+            idle("open", "open"),
+            idle("filtered", "filtered"),
+            Vm { policy: "open".into(), ..vm("busy", State::Busy, Some(1)) },
+            Vm { job_url: Some("u".into()), ..idle("assigned", "open") },
+        ];
         let ids: Vec<_> = stale_policy(&vms, "O/N", "filtered").into_iter().map(|(i, _)| i).collect();
         assert_eq!(ids, ["open"]);
         assert!(stale_policy(&vms, "o/n", "open").iter().all(|(i, _)| i == "filtered"));

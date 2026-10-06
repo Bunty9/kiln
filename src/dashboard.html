@@ -596,7 +596,7 @@ function banners() {
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
   if (S.token_set && !c.repos.length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
-  if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
+  if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.version ? ` · kiln ${esc(S.version)}` : ''}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
   return b.join('');
 }
 const rate = () => { const r = parseFloat(lsGet('kiln-rate')); if (r > 0) return r; const c = S.config.vm_cpus; return c <= 2 ? 0.008 : c <= 4 ? 0.016 : c <= 8 ? 0.032 : 0.064; };

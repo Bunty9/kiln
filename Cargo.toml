@@ -2,6 +2,20 @@
 name = "kiln"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "Self-hosted CI: a fresh rootless KVM virtual machine per GitHub Actions job, on hardware you own"
+license = "MIT OR Apache-2.0"
+authors = ["Bunty9"]
+repository = "https://github.com/Bunty9/kiln"
+readme = "README.md"
+keywords = ["ci", "github-actions", "self-hosted", "kvm", "qemu"]
+categories = ["command-line-utilities", "development-tools"]
+# Distributed as GitHub Release binaries, not on crates.io.
+publish = false
+
+[profile.release]
+strip = true
+lto = "thin"
 
 [dependencies]
 anyhow = "1.0.104"

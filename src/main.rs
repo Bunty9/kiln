@@ -27,7 +27,7 @@ pub struct Config {
     pub job_timeout_mins: u64,
     /// A VM that booted but never got a job (cancelled, picked by another runner) is reaped after this.
     pub idle_timeout_mins: u64,
-    /// Tailnet login names allowed to use the dashboard. Empty = anyone on the tailnet.
+    /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
     /// Docker Hub pull-through cache for job VMs (host loopback :5000).
     pub docker_mirror: bool,
@@ -111,9 +111,7 @@ impl Config {
                 bail!("repo listed twice (GitHub names are case-insensitive): {r:?}");
             }
             let ok = r.split('/').count() == 2
-                && r.split('/').all(|p| {
-                    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-                });
+                && r.split('/').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
             if !ok {
                 bail!("repo must look like owner/name: {r:?}");
             }
@@ -210,12 +208,7 @@ impl App {
 
     pub fn save_token(&self, t: String) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.data.join("token"))?;
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(self.data.join("token"))?;
         std::io::Write::write_all(&mut f, t.trim().as_bytes())?;
         self.gh.set_token(t.trim().to_string(), "file");
         Ok(())
@@ -264,10 +257,14 @@ fn pick_token(env: Option<String>, file: Option<String>, only_file: bool, gh: im
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V" | "version")) {
+        println!("kiln {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     tracing_subscriber::fmt().with_target(false).init();
-    let data = std::env::var_os("KILN_DATA").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln")
-    });
+    let data = std::env::var_os("KILN_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
     std::fs::create_dir_all(data.join("vms"))?;
     std::fs::create_dir_all(data.join("images"))?;
     let cfg: Config = match std::fs::read(data.join("config.json")) {
@@ -324,7 +321,9 @@ async fn main() -> Result<()> {
             }
         }
         _ => {
-            eprintln!("usage: kiln [serve|bake|doctor]\n  serve   run scheduler + dashboard (default)\n  bake    build the base VM image\n  doctor  check host prerequisites");
+            eprintln!(
+                "usage: kiln [serve|bake|doctor|--version]\n  serve      run scheduler + dashboard (default)\n  bake       build the base VM image\n  doctor     check host prerequisites\n  --version  print the version"
+            );
             std::process::exit(2)
         }
     }
@@ -468,7 +467,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
     // Fail closed: filtered jobs never fall back to open networking.
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
-    let mut blocked = egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")).or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
+    let mut blocked = egress_err
+        .as_ref()
+        .map(|e| format!("egress filtering unavailable: {e}"))
+        .or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());

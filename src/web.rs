@@ -110,12 +110,7 @@ async fn self_info() -> SelfInfo {
     }
     let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output().await else { return cached };
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    let ips = v["Self"]["TailscaleIPs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|ip| ip.as_str()?.parse().ok())
-        .collect();
+    let ips = v["Self"]["TailscaleIPs"].as_array().into_iter().flatten().filter_map(|ip| ip.as_str()?.parse().ok()).collect();
     let uid = v["Self"]["UserID"].to_string();
     let owner = v["User"][uid.as_str()]["LoginName"].as_str().map(String::from);
     let node = v["Self"]["ID"].as_str().map(String::from);
@@ -219,6 +214,11 @@ async fn admit(app: Arc<App>, peer: SocketAddr, req: Request, next: Next) -> Res
     if api && !get && csrf.is_none() {
         return deny(StatusCode::FORBIDDEN, "missing x-kiln header");
     }
+    // LAN and internet sources are refused outright, whatever Tailscale's state:
+    // over plain HTTP they could otherwise be asked for the dashboard key.
+    if !ip.is_loopback() && !is_tailnet(ip) {
+        return deny(StatusCode::FORBIDDEN, "kiln only answers on the tailnet");
+    }
     let me = self_info().await;
     let who = if is_tailnet(ip) && !ip.is_loopback() { whois(ip).await } else { None };
     // Fail closed: if we can't tell our own addresses or node apart from a
@@ -232,12 +232,8 @@ async fn admit(app: Arc<App>, peer: SocketAddr, req: Request, next: Next) -> Res
         if api && !key_ok(key.as_deref()) {
             return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
         }
-    } else if is_tailnet(ip) {
-        if !who.is_some_and(|(l, _)| peer_allowed(&app.cfg().allowed_users, me.owner, &l)) {
-            return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
-        }
-    } else {
-        return deny(StatusCode::FORBIDDEN, "kiln only answers on the tailnet");
+    } else if !who.is_some_and(|(l, _)| peer_allowed(&app.cfg().allowed_users, me.owner, &l)) {
+        return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
     }
     next.run(req).await
 }
@@ -279,6 +275,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
         "host": host_stats(&app).await,
+        "version": env!("CARGO_PKG_VERSION"),
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.cfg().repos),
     })))
@@ -295,7 +292,9 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<Json<Value>> {
     if to_filtered {
         // Probe now so the dashboard shows the result and the scheduler has it cached.
         let a = app.clone();
-        tokio::spawn(async move { let _ = vm::egress_ready(&a, true).await; });
+        tokio::spawn(async move {
+            let _ = vm::egress_ready(&a, true).await;
+        });
     }
     Ok(Json(json!({ "restart_required": restart })))
 }
@@ -462,11 +461,7 @@ struct ServeBody {
 async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
     let port = app.cfg().listen.rsplit(':').next().unwrap_or("7878").to_string();
     let target = format!("http://127.0.0.1:{port}");
-    let args: Vec<&str> = if b.on {
-        vec!["serve", "--bg", "--https=8443", &target]
-    } else {
-        vec!["serve", "--https=8443", "off"]
-    };
+    let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
     let out = tailscale(&args).await?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
@@ -482,13 +477,7 @@ fn bail_r(msg: &str) -> R<()> {
 /// GitHub passthrough, restricted to `repos/<configured repo>/actions/...`,
 /// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
 /// or cancel without a dedicated endpoint per call.
-async fn gh_proxy(
-    State(app): S,
-    method: Method,
-    Path(path): Path<String>,
-    q: axum::extract::RawQuery,
-    body: Bytes,
-) -> R<Response> {
+async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: axum::extract::RawQuery, body: Bytes) -> R<Response> {
     if !proxy_path_ok(&path, &app.cfg().repos) {
         bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
     }
@@ -513,9 +502,8 @@ fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
     path.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c))
         && !path.split('/').any(|seg| seg == "." || seg == "..")
         && repos.iter().any(|r| {
-            path.strip_prefix(&format!("repos/{r}/actions/")).is_some_and(|rest| {
-                rest == "runs" || ["workflows", "runs/", "jobs/"].iter().any(|p| rest.starts_with(p))
-            })
+            path.strip_prefix(&format!("repos/{r}/actions/"))
+                .is_some_and(|rest| rest == "runs" || ["workflows", "runs/", "jobs/"].iter().any(|p| rest.starts_with(p)))
         })
 }
 

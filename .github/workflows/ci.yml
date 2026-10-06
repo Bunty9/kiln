@@ -2,8 +2,12 @@
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -11,9 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        run: curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy
+        run: curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt
+      - name: Format
+        run: . "$HOME/.cargo/env" && cargo fmt --check
+      - name: Lint
+        run: . "$HOME/.cargo/env" && cargo clippy --locked --tests -- -D warnings
       - name: Test
-        run: |
-          . "$HOME/.cargo/env"
-          cargo test --locked
-          cargo clippy --locked -- -D warnings
+        run: . "$HOME/.cargo/env" && cargo test --locked
+      - name: Dashboard script
+        run: sed -n '/<script>/,/<\/script>/p' src/dashboard.html | sed '1d;$d' > "$RUNNER_TEMP/dashboard.js" && node --check "$RUNNER_TEMP/dashboard.js"
