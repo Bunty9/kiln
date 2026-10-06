@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>kiln</title>
+<style>
+:root{
+  --bg:#171a20;--panel:#1e222a;--sunk:#13161b;--line:#2d333d;--fg:#dde2ea;--mute:#949cab;
+  --accent:#7cb7e8;--ok:#5cc79a;--warn:#e2b75e;--bad:#ef7a73;--idle:#8a93a3;
+  --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
+}
+@media (prefers-color-scheme:light){:root{
+  --bg:#f3f5f8;--panel:#fff;--sunk:#eef1f5;--line:#d6dbe3;--fg:#1b2230;--mute:#566072;
+  --accent:#1f62b8;--ok:#13804e;--warn:#8f6200;--bad:#c0322b;--idle:#5f6878;
+}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 var(--sans)}
+body{min-height:100vh}
+a{color:var(--accent)}
+h1,h2,h3{margin:0;font-weight:600}
+h2{font-size:15px}h3{font-size:13px;color:var(--mute);margin:14px 0 6px}
+code,.mono{font-family:var(--mono);font-size:12.5px}
+.mute{color:var(--mute)}.err{color:var(--bad);white-space:pre-wrap;word-break:break-word}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;letter-spacing:.02em}
+nav{display:flex;gap:2px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
+nav a{color:var(--mute);text-decoration:none;padding:6px 10px;border-radius:6px;white-space:nowrap}
+nav a:hover{color:var(--fg)}
+nav a[aria-current=page]{color:var(--fg);background:var(--sunk);box-shadow:inset 0 -2px var(--accent)}
+main{max-width:1280px;margin:0 auto;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px;min-width:0}
+.head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.grid>.card{margin:0}
+.split{display:grid;grid-template-columns:minmax(220px,300px) minmax(0,1fr);gap:14px;align-items:start}
+.split.wide{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}
+@media (max-width:860px){.split,.split.wide{grid-template-columns:minmax(0,1fr)}}
+button{font:inherit;font-size:13px;color:var(--fg);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.55;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
+button.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 50%,var(--line))}
+button.link{background:none;border:0;padding:0;color:var(--accent);text-align:left}
+input{font:inherit;color:var(--fg);background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:5px 8px;min-width:0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row input{flex:1}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;font-weight:500;color:var(--mute);padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr[data-vm]{cursor:pointer}
+tr[data-vm]:hover td,tr.sel td{background:var(--sunk)}
+td.nw{white-space:nowrap}
+.badge{display:inline-block;font-size:12px;padding:0 7px;border-radius:9px;border:1px solid currentColor;white-space:nowrap;line-height:18px}
+.b-ok{color:var(--ok)}.b-bad{color:var(--bad)}.b-warn{color:var(--warn)}.b-run{color:var(--accent)}.b-off{color:var(--idle)}
+.pills{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:14px;background:var(--panel);border:1px solid var(--line);font-size:13px;max-width:100%}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--idle);flex:none}
+.pill.ok::before{background:var(--ok)}.pill.bad::before{background:var(--bad)}.pill.warn::before{background:var(--warn)}
+.pill.bad{color:var(--bad)}
+.spin{width:10px;height:10px;border:2px solid var(--warn);border-right-color:transparent;border-radius:50%;animation:sp 1s linear infinite;display:inline-block}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.meter{margin:8px 0}
+.meter-l{display:flex;justify-content:space-between;gap:8px;font-size:13px}
+.bar{height:6px;background:var(--sunk);border-radius:3px;overflow:hidden;margin-top:4px}
+.bar span{display:block;height:100%;background:var(--accent)}
+.bar.warn span{background:var(--warn)}.bar.bad span{background:var(--bad)}
+.slots{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px}
+.slot{width:74px;height:54px;border-radius:6px;border:1px dashed var(--line);display:flex;flex-direction:column;justify-content:center;align-items:center;font-size:12px}
+.slot:not(.on){color:var(--mute)}
+button.slot{padding:0;background:none}
+.slot.on{border-style:solid;border-color:currentColor;background:color-mix(in srgb,currentColor 12%,transparent)}
+.slot b{font-family:var(--mono);font-weight:500;font-size:11px;color:var(--fg);max-width:66px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 14px;margin:0;font-size:13px}
+dl.kv dt{color:var(--mute)}dl.kv dd{margin:0;word-break:break-word}
+pre.log,pre.snip{background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0 0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all;overflow:auto}
+pre.log{height:min(60vh,520px)}
+pre.log:empty::before{content:"No output yet.";color:var(--mute)}
+pre.snip{white-space:pre}
+.tabs{display:flex;gap:4px;margin-top:12px}
+.tabs button[aria-selected=true]{border-color:var(--accent);color:var(--accent)}
+ol.start{margin:6px 0 0;padding-left:22px}ol.start li{margin:8px 0}
+ol.start li.done{color:var(--mute)}ol.start li.done::marker{content:"✓  ";color:var(--ok)}
+ul.list{list-style:none;margin:0 0 10px;padding:0}
+ul.list li{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--line)}
+ul.list li button.link{flex:1;color:var(--fg);padding:3px 4px;border-radius:4px;font-family:var(--mono);font-size:12.5px;word-break:break-all}
+ul.list li button.link[aria-current=true]{background:var(--sunk);color:var(--accent)}
+.steps{margin:4px 0 0;padding:0;list-style:none;font-size:12.5px}
+.steps li{display:flex;gap:8px;padding:2px 0}
+.job{padding:8px 0;border-top:1px dashed var(--line)}
+.job:first-child{border-top:0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--idle);margin-right:6px}
+.dot.on{background:var(--ok)}
+.out{display:block;margin-top:4px;color:var(--mute);word-break:break-word}
+form.cfg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 14px}
+form.cfg label{display:flex;flex-direction:column;gap:3px;font-size:12.5px;color:var(--mute)}
+form.cfg .full{grid-column:1/-1}
+#conn{margin-left:auto}
+#toast{position:fixed;right:16px;bottom:16px;left:16px;margin-left:auto;max-width:440px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:6px;padding:10px 12px;box-shadow:0 6px 24px rgba(0,0,0,.35);white-space:pre-wrap;word-break:break-word;z-index:9}
+#toast.bad{border-left-color:var(--bad)}
+</style>
+</head>
+<body>
+<header>
+  <h1>kiln</h1>
+  <nav aria-label="Sections">
+    <a href="#overview">Overview</a><a href="#repos">Repos</a><a href="#vms">VMs</a><a href="#tailscale">Tailscale</a><a href="#settings">Settings</a>
+  </nav>
+  <span id="conn" class="pill">connecting</span>
+</header>
+<main>
+<section id="overview">
+  <div id="ov-health" class="pills"></div>
+  <div id="ov-start"></div>
+  <div class="grid">
+    <div class="card" id="ov-cap"></div>
+    <div class="card" id="ov-host"></div>
+    <div class="card" id="ov-queue"></div>
+  </div>
+  <div class="card" style="margin-top:14px"><div class="head"><h2>Recent VMs</h2><a href="#vms">All VMs</a></div><div id="ov-vms"></div></div>
+</section>
+
+<section id="repos" hidden>
+  <div class="split">
+    <div class="card">
+      <h2>Repositories</h2>
+      <ul id="repo-list" class="list" style="margin-top:8px"></ul>
+      <form id="repo-add" class="row"><label class="sr" for="repo-in">Repository to add</label><input id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button>Add</button></form>
+    </div>
+    <div>
+      <div class="card" id="repo-pane">
+        <div class="head"><h2 id="repo-title" class="mono"></h2><button data-act="repo-refresh">Refresh</button></div>
+        <h3>Workflows</h3><div id="wfs"></div>
+        <h3>Recent runs</h3><div id="runs"></div>
+      </div>
+      <div class="card" id="joblog" hidden>
+        <div class="head"><h2 id="joblog-title"></h2><button data-act="joblog-close">Close</button></div>
+        <div id="joblog-note"></div>
+        <pre class="log" id="joblog-pre"></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="vms" hidden>
+  <div class="split wide">
+    <div class="card"><h2 style="margin-bottom:8px">VMs</h2><div id="vm-list"></div></div>
+    <div class="card" id="vm-detail" hidden>
+      <div class="head"><h2 id="vm-title" class="mono"></h2><button class="danger" data-act="kill" id="vm-kill">Kill VM</button></div>
+      <dl class="kv" id="vm-meta"></dl>
+      <div class="tabs" role="tablist" aria-label="VM logs">
+        <button role="tab" data-act="logtab" data-id="console" aria-selected="true">Console</button>
+        <button role="tab" data-act="logtab" data-id="steps" aria-selected="false">Steps</button>
+      </div>
+      <pre class="log" id="vm-log" role="tabpanel"></pre>
+    </div>
+  </div>
+</section>
+
+<section id="tailscale" hidden>
+  <div id="ts-main"><p class="mute">Loading Tailscale status…</p></div>
+  <div class="card">
+    <div class="head"><h2>Netcheck</h2><button data-act="netcheck">Run netcheck</button></div>
+    <div id="netcheck" class="mute">Measures UDP reachability and latency to each DERP relay region. Takes a few seconds.</div>
+  </div>
+</section>
+
+<section id="settings" hidden>
+  <div class="card">
+    <div class="head"><h2>Runner settings</h2></div>
+    <form id="cfg" class="cfg"></form>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <h2>GitHub token</h2>
+      <p class="mute" id="tok-status"></p>
+      <form id="tok" class="row"><label class="sr" for="tok-in">Personal access token</label><input id="tok-in" type="password" placeholder="ghp_…" autocomplete="off" required><button class="primary">Save token</button></form>
+      <p class="mute">Classic personal access token with the <code>repo</code> scope. Stored on the server, never shown again.</p>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Base image</h2><button data-act="bake" id="bake-btn">Bake image</button></div>
+      <p id="bake-status" class="mute"></p>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Bake log</h2><pre class="log" id="bake-log"></pre></div>
+</section>
+</main>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+'use strict';
+const $ = (s, r = document) => r.querySelector(s);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const now = () => Date.now() / 1000;
+const iso = s => (s ? Date.parse(s) / 1000 : null);
+const ACTIVE = new Set(['booting', 'idle', 'busy']);
+const TABS = ['overview', 'repos', 'vms', 'tailscale', 'settings'];
+
+function rel(t) {
+  if (!t) return '—';
+  const d = Math.max(0, now() - t);
+  if (d < 5) return 'just now';
+  if (d < 60) return Math.floor(d) + 's ago';
+  if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago';
+  return Math.floor(d / 86400) + 'd ago';
+}
+function dur(s) {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${x}s` : `${x}s`;
+}
+function bytes(n) {
+  n = +n || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < 4) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+}
+const when = t => (t ? new Date(t * 1000).toLocaleString() : '');
+const stripAnsi = s => s.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, '').replace(/\r\n/g, '\n');
+
+function badge(text) {
+  const t = String(text || '').toLowerCase();
+  const cls = /^(done|success|succeeded|completed)$/.test(t) ? 'b-ok'
+    : /^(failed|failure|lost|timed_out|startup_failure)$/.test(t) ? 'b-bad'
+    : /^(busy|in_progress|running)$/.test(t) ? 'b-run'
+    : /^(booting|idle|queued|waiting|pending|requested|action_required)$/.test(t) ? 'b-warn' : 'b-off';
+  return `<span class="badge ${cls}">${esc(text)}</span>`;
+}
+
+/* ---------- API ---------- */
+async function api(path, opts = {}) {
+  const init = { method: opts.method || 'GET', headers: {} };
+  if (init.method !== 'GET') {
+    init.headers['x-kiln'] = '1';
+    init.headers['content-type'] = 'application/json';
+    if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
+  }
+  const r = await fetch(path, init);
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).message || text; } catch { /* plain text */ }
+    const e = new Error(msg || `${r.status} ${r.statusText}`);
+    e.status = r.status;
+    throw e;
+  }
+  if (opts.text) return text;
+  return text ? JSON.parse(text) : null;
+}
+const post = (path, body) => api(path, { method: 'POST', body });
+const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
+
+let toastT;
+function toast(msg, bad = true) {
+  const t = $('#toast');
+  t.textContent = msg; t.className = bad ? 'bad' : ''; t.hidden = false;
+  clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), bad ? 7000 : 3500);
+}
+
+// Replace HTML only when it changed, and keep keyboard focus on the same control.
+function setHTML(el, html) {
+  if (el._h === html) return;
+  const a = document.activeElement;
+  let sel = null;
+  if (a && el.contains(a) && a.dataset.act) {
+    sel = `[data-act="${CSS.escape(a.dataset.act)}"]` + (a.dataset.id != null ? `[data-id="${CSS.escape(a.dataset.id)}"]` : ':not([data-id])');
+  }
+  el.innerHTML = html; el._h = html;
+  if (sel) el.querySelector(sel)?.focus();
+}
+
+/* ---------- incremental log viewer ---------- */
+const LOGS = new Set();
+const shown = el => !document.hidden && el.offsetParent !== null;
+function logView(pre, src, file, live) {
+  let next = 0, timer = null, busy = false, stopped = false;
+  pre.textContent = '';
+  function append(d) {
+    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    pre.append(stripAnsi(d));
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+  async function tick() {
+    timer = null; busy = true;
+    try {
+      for (;;) { // drain: each call returns at most 512KB
+        const from = next;
+        const r = await api(`/api/log?src=${encodeURIComponent(src)}&file=${file}&from=${from}`);
+        if (stopped) return;
+        if (r.next < from) pre.textContent = ''; // file was rewritten (rebake): server restarted at 0
+        next = r.next;
+        if (!r.data) break;
+        append(r.data);
+      }
+    } catch { /* daemon away; kick() retries on next state poll */ } finally { busy = false; }
+    if (!stopped && live() && shown(pre)) timer = setTimeout(tick, 1000);
+  }
+  const v = {
+    stop() { stopped = true; clearTimeout(timer); LOGS.delete(v); },
+    kick() { if (!stopped && !busy && !timer && live() && shown(pre)) tick(); },
+  };
+  LOGS.add(v); tick();
+  return v;
+}
+
+/* ---------- state polling ---------- */
+let S = null;
+async function poll() {
+  clearTimeout(poll.t);
+  try {
+    S = await api('/api/state');
+    setConn(true);
+    onState();
+  } catch (e) { setConn(false, e.message); }
+  if (!document.hidden) poll.t = setTimeout(poll, 2000);
+}
+function setConn(ok, msg) {
+  const c = $('#conn');
+  c.className = 'pill ' + (ok ? 'ok' : 'bad');
+  c.textContent = ok ? 'connected' : 'disconnected';
+  c.title = ok ? '' : msg || '';
+}
+function onState() {
+  const t = tab();
+  if (t === 'overview') renderOverview();
+  if (t === 'vms') renderVms();
+  if (t === 'settings') renderSettings();
+  if (t === 'repos') renderRepoList();
+  LOGS.forEach(l => l.kick());
+}
+
+/* ---------- routing ---------- */
+const tab = () => (TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview');
+function route() {
+  const t = tab();
+  for (const x of TABS) $('#' + x).hidden = x !== t;
+  document.querySelectorAll('nav a').forEach(a => a.getAttribute('href') === '#' + t ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
+  if (t === 'repos') wfRepo = undefined; // reload workflows/runs on entry
+  if (S) onState();
+  if (t === 'tailscale') loadTs();
+}
+addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  poll();
+  if (tab() === 'repos') loadRuns();
+});
+
+/* ---------- overview ---------- */
+function pill(cls, html, title = '') { return `<span class="pill ${cls}" title="${esc(title)}">${html}</span>`; }
+function meter(label, val, max, text) {
+  const pct = max > 0 ? Math.min(100, (val / max) * 100) : 0;
+  const cls = pct > 90 ? 'bad' : pct > 70 ? 'warn' : '';
+  return `<div class="meter"><div class="meter-l"><span>${esc(label)}</span><span class="mono">${esc(text)}</span></div>
+    <div class="bar ${cls}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${+max || 0}" aria-valuenow="${+val || 0}"><span style="width:${pct.toFixed(1)}%"></span></div></div>`;
+}
+function renderOverview() {
+  const c = S.config, p = S.poll, h = S.host;
+  const img = S.image;
+  setHTML($('#ov-health'), [
+    S.token_set ? pill('ok', 'GitHub token set') : pill('bad', 'No GitHub token'),
+    S.image_ready
+      ? pill('ok', `Image ready, runner ${esc(img?.runner_version || '?')}, baked ${rel(img?.baked_at)}`, when(img?.baked_at))
+      : pill('bad', 'Base image not baked'),
+    p.error ? pill('bad', 'Poll failed: ' + esc(p.error)) : p.last_ok ? pill('ok', 'GitHub polled ' + rel(p.last_ok), when(p.last_ok)) : pill('', 'Not polled yet'),
+    S.baking ? pill('warn', '<i class="spin" aria-hidden="true"></i> Baking image') : '',
+  ].join(''));
+  setHTML($('#ov-start'), gettingStarted());
+
+  const active = S.vms.filter(v => ACTIVE.has(v.state));
+  const slots = [];
+  for (let i = 0; i < Math.max(c.max_vms, active.length); i++) {
+    const v = active[i];
+    slots.push(v
+      ? `<button class="slot on ${badgeColor(v.state)}" data-act="vm" data-id="${esc(v.id)}" title="${esc(v.repo)}"><b>${esc(v.id)}</b>${esc(v.state)}</button>`
+      : '<div class="slot">free</div>');
+  }
+  setHTML($('#ov-cap'), `<h2>Capacity</h2><div class="mute">${active.length} of ${c.max_vms} VM slots in use, ${c.vm_cpus} vCPU and ${c.vm_mem_mb} MB each</div><div class="slots">${slots.join('')}</div>`);
+
+  const load = h.load.map(Number);
+  const used = h.mem_total_mb - h.mem_avail_mb;
+  setHTML($('#ov-host'), `<h2>Host</h2>
+    ${meter('Load (1m)', load[0], h.cpus, `${load.map(x => x.toFixed(2)).join(' ')} / ${h.cpus} CPUs`)}
+    ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`)}`);
+
+  setHTML($('#ov-queue'), `<h2>Queued jobs</h2>` + (c.repos.length
+    ? `<table><tbody>${c.repos.map(r => {
+        const n = (p.queued || {})[r];
+        return `<tr><td class="mono">${esc(r)}</td><td style="text-align:right">${n == null ? '<span class="mute">—</span>' : n ? `<span class="badge b-warn">${n} queued</span>` : '<span class="mute">0</span>'}</td></tr>`;
+      }).join('')}</tbody></table>`
+    : '<p class="mute">No repositories yet. <a href="#repos">Add one</a>.</p>'));
+  setHTML($('#ov-vms'), vmTable(S.vms.slice(0, 8)));
+}
+const badgeColor = s => badge(s).match(/b-\w+/)[0];
+
+function gettingStarted() {
+  const c = S.config;
+  const done = [S.token_set, S.image_ready, c.repos.length > 0];
+  if (done.every(Boolean)) return '';
+  const snippet = `jobs:\n  build:\n    runs-on: [self-hosted, ${c.label}]\n    steps:\n      - uses: actions/checkout@v4`;
+  const d = i => (done[i] ? ' class="done"' : '');
+  return `<div class="card"><h2>Getting started</h2><ol class="start">
+    <li${d(0)}>Save a GitHub token (classic, <code>repo</code> scope) in <a href="#settings">Settings</a>.</li>
+    <li${d(1)}>Bake the base VM image. It takes a few minutes. <button data-act="bake" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : 'Bake image'}</button></li>
+    <li${d(2)}>Add a repository in <a href="#repos">Repos</a>.</li>
+    <li>Point a workflow job at kiln: <button data-act="copy">Copy YAML</button><pre class="snip" id="snippet">${esc(snippet)}</pre></li>
+  </ol></div>`;
+}
+
+/* ---------- VMs ---------- */
+let selVm = null, vmFile = 'console', vmLog = null;
+function vmTable(list) {
+  if (!list.length) return '<p class="mute">No VMs yet. One boots when a matching job is queued.</p>';
+  return `<div class="scroll"><table><thead><tr><th>VM</th><th>State</th><th>Repo</th><th>Job</th><th>Result</th><th>Started</th><th>Duration</th></tr></thead><tbody>${
+    list.map(v => `<tr data-vm="${esc(v.id)}"${v.id === selVm ? ' class="sel"' : ''}>
+      <td class="nw"><button class="link mono" data-act="vm" data-id="${esc(v.id)}">${esc(v.id)}</button></td>
+      <td>${badge(v.state)}</td><td class="mono">${esc(v.repo)}</td><td>${esc(v.job || '—')}</td>
+      <td>${v.result ? badge(v.result) : '<span class="mute">—</span>'}</td>
+      <td class="nw" title="${esc(when(v.started))}">${rel(v.started)}</td>
+      <td class="nw">${dur((v.ended || now()) - v.started)}</td></tr>`).join('')
+  }</tbody></table></div>`;
+}
+function renderVms() {
+  setHTML($('#vm-list'), vmTable(S.vms));
+  const v = S.vms.find(x => x.id === selVm);
+  const box = $('#vm-detail');
+  if (!v) { box.hidden = true; vmLog?.stop(); vmLog = null; return; }
+  box.hidden = false;
+  $('#vm-title').textContent = v.id;
+  $('#vm-kill').hidden = !ACTIVE.has(v.state);
+  $('#vm-kill').dataset.id = v.id;
+  const rows = [
+    ['State', badge(v.state)], ['Repo', `<span class="mono">${esc(v.repo)}</span>`], ['Job', esc(v.job || '—')],
+    ['Result', v.result ? badge(v.result) : '—'], ['Runner ID', esc(v.runner_id ?? '—')],
+    ['Started', `${esc(when(v.started))} <span class="mute">(${rel(v.started)})</span>`],
+    ['Job started', v.busy_since ? `${esc(when(v.busy_since))} <span class="mute">(waited ${dur(v.busy_since - v.started)})</span>` : '—'],
+    ['Ended', v.ended ? esc(when(v.ended)) : '—'], ['Duration', dur((v.ended || now()) - v.started)],
+  ];
+  if (v.note) rows.push(['Note', `<span class="err">${esc(v.note)}</span>`]);
+  setHTML($('#vm-meta'), rows.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join(''));
+  document.querySelectorAll('#vm-detail [role=tab]').forEach(b => b.setAttribute('aria-selected', b.dataset.id === vmFile));
+  const key = v.id + '/' + vmFile;
+  if (vmLog?.key !== key) {
+    vmLog?.stop();
+    const id = v.id;
+    vmLog = logView($('#vm-log'), id, vmFile, () => ACTIVE.has(S?.vms.find(x => x.id === id)?.state));
+    vmLog.key = key;
+  }
+}
+function openVm(id) {
+  selVm = id;
+  if (tab() !== 'vms') location.hash = '#vms'; else renderVms();
+}
+
+/* ---------- repos ---------- */
+let selRepo = null, runs = [], wfRepo = null;
+const expanded = new Set(), jobsCache = new Map();
+function renderRepoList() {
+  const repos = S.config.repos;
+  if (!repos.includes(selRepo)) { selRepo = repos[0] || null; }
+  setHTML($('#repo-list'), repos.length ? repos.map(r => `<li>
+      <button class="link" data-act="repo-sel" data-id="${esc(r)}" aria-current="${r === selRepo}">${esc(r)}</button>
+      <button class="danger" data-act="repo-rm" data-id="${esc(r)}" aria-label="Remove ${esc(r)}">Remove</button></li>`).join('')
+    : '<li class="mute">No repositories yet.</li>');
+  $('#repo-pane').hidden = !selRepo;
+  if (selRepo !== wfRepo) loadRepo();
+}
+async function saveConfig(cfg) {
+  await post('/api/config', cfg);
+  await poll();
+}
+async function loadRepo() {
+  wfRepo = selRepo; runs = []; expanded.clear(); jobsCache.clear();
+  $('#joblog').hidden = true;
+  if (!selRepo) return;
+  $('#repo-title').textContent = selRepo;
+  setHTML($('#wfs'), '<p class="mute">Loading…</p>');
+  setHTML($('#runs'), '<p class="mute">Loading…</p>');
+  loadRuns();
+  const repo = selRepo;
+  try {
+    const r = await api(gh(repo, 'workflows'));
+    if (repo !== selRepo) return;
+    const wfs = r.workflows || [];
+    setHTML($('#wfs'), wfs.length ? `<div class="scroll"><table><thead><tr><th>Workflow</th><th>State</th><th>Run on ref</th></tr></thead><tbody>${wfs.map(w => `<tr>
+        <td>${esc(w.name)}<div class="mono mute">${esc(w.path)}</div></td><td>${badge(w.state)}</td>
+        <td class="nw"><div class="row" style="flex-wrap:nowrap"><label class="sr" for="ref-${+w.id}">Ref for ${esc(w.name)}</label>
+          <input id="ref-${+w.id}" value="main" size="10" spellcheck="false"><button data-act="dispatch" data-id="${+w.id}">Run</button></div></td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="mute">No workflows in this repository.</p>');
+  } catch (e) { setHTML($('#wfs'), `<p class="err">${esc(e.message)}</p>`); }
+}
+async function loadJobs(id) {
+  const r = await api(gh(selRepo, `runs/${id}/jobs`));
+  jobsCache.set(id, r.jobs || []);
+}
+async function loadRuns() {
+  const repo = selRepo;
+  if (!repo) return;
+  try {
+    const r = await api(gh(repo, 'runs?per_page=15'));
+    if (repo !== selRepo) return;
+    runs = r.workflow_runs || [];
+    await Promise.all([...expanded].map(id => {
+      const run = runs.find(x => x.id === id);
+      return run && (run.status !== 'completed' || !jobsCache.has(id)) ? loadJobs(id).catch(() => {}) : null;
+    }));
+    renderRuns();
+  } catch (e) { setHTML($('#runs'), `<p class="err">${esc(e.message)}</p>`); }
+}
+function renderRuns() {
+  if (!runs.length) return setHTML($('#runs'), `<p class="mute">No runs yet. Dispatch a workflow above or push a commit.</p>`);
+  setHTML($('#runs'), `<div class="scroll"><table><thead><tr><th>Run</th><th>Status</th><th>Branch</th><th>Event</th><th>By</th><th>Created</th><th></th></tr></thead><tbody>${runs.map(run => {
+    const open = expanded.has(run.id), done = run.status === 'completed';
+    return `<tr><td><button class="link" data-act="run" data-id="${+run.id}" aria-expanded="${open}">${open ? '▾' : '▸'} #${+run.run_number} ${esc(run.display_title)}</button><div class="mute">${esc(run.name)}</div></td>
+      <td>${badge(done ? run.conclusion || 'completed' : run.status)}</td>
+      <td class="mono">${esc(run.head_branch)}</td><td>${esc(run.event)}</td><td>${esc(run.actor?.login)}</td>
+      <td class="nw" title="${esc(run.created_at)}">${rel(iso(run.created_at))}</td>
+      <td class="nw"><a href="${esc(run.html_url)}" target="_blank" rel="noopener">GitHub</a>
+        ${done ? `<button data-act="rerun" data-id="${+run.id}">Rerun</button>` : `<button class="danger" data-act="cancel" data-id="${+run.id}">Cancel</button>`}</td></tr>
+      ${open ? `<tr><td colspan="7">${jobsHTML(jobsCache.get(run.id))}</td></tr>` : ''}`;
+  }).join('')}</tbody></table></div>`);
+}
+function jobsHTML(jobs) {
+  if (!jobs) return '<span class="mute">Loading jobs…</span>';
+  if (!jobs.length) return '<span class="mute">No jobs.</span>';
+  return jobs.map(j => {
+    const st = j.status === 'completed' ? j.conclusion : j.status;
+    const t0 = iso(j.started_at), t1 = iso(j.completed_at);
+    const vm = S?.vms.find(v => v.id === j.runner_name);
+    return `<div class="job"><div class="row">${badge(st)} <b>${esc(j.name)}</b>
+      <span class="mute">${t0 ? dur((t1 || now()) - t0) : ''}</span>
+      <span class="mute">${(j.labels || []).map(esc).join(', ')}</span>
+      ${j.runner_name ? (vm ? `<button class="link mono" data-act="vm" data-id="${esc(vm.id)}">${esc(vm.id)}</button>` : `<span class="mono mute">${esc(j.runner_name)}</span>`) : ''}
+      <button data-act="joblog" data-id="${+j.id}" data-runner="${esc(j.runner_name || '')}">Logs</button></div>
+      <ol class="steps">${(j.steps || []).map(s => `<li>${badge(s.status === 'completed' ? s.conclusion : s.status)} ${esc(s.name)}</li>`).join('')}</ol></div>`;
+  }).join('');
+}
+async function jobLog(id, runner) {
+  const pre = $('#joblog-pre'), note = $('#joblog-note');
+  $('#joblog').hidden = false;
+  $('#joblog-title').textContent = `Job ${id} log`;
+  note.innerHTML = ''; pre.textContent = 'Loading…'; pre.hidden = false;
+  try {
+    pre.textContent = stripAnsi(await api(gh(selRepo, `jobs/${id}/logs`), { text: true }));
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) {
+    pre.hidden = true;
+    if (e.status === 404) {
+      const vm = S?.vms.find(v => v.id === runner);
+      note.innerHTML = `<p class="mute">Logs are available when the job finishes; live output is in the VM tab.${vm ? ` <button class="link mono" data-act="vm" data-id="${esc(vm.id)}">Open ${esc(vm.id)}</button>` : ''}</p>`;
+    } else note.innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
+  $('#joblog').scrollIntoView({ block: 'nearest' });
+}
+setInterval(() => { if (tab() === 'repos' && !document.hidden) loadRuns(); }, 10000);
+
+/* ---------- tailscale ---------- */
+let TS = null;
+const pings = new Map();
+async function loadTs() {
+  try { TS = await api('/api/tailscale'); renderTs(); }
+  catch (e) { setHTML($('#ts-main'), `<div class="card"><p class="err">${esc(e.message)}</p><button data-act="ts-refresh">Retry</button></div>`); }
+}
+function renderTs() {
+  const st = TS.status || {}, self = st.Self || {};
+  const dns = String(self.DNSName || '').replace(/\.$/, '');
+  const serveOn = !!TS.serve?.TCP?.['8443'];
+  const url = `https://${dns}:8443`;
+  const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
+  const health = st.Health || [];
+  const peerRow = p => {
+    const ip = (p.TailscaleIPs || [])[0] || '';
+    const conn = !p.Online ? '<span class="mute">—</span>' : p.CurAddr ? `direct <span class="mono">${esc(p.CurAddr)}</span>` : p.Relay ? `DERP (${esc(p.Relay)})` : '<span class="mute">idle</span>';
+    const seen = p.Online ? 'online' : !p.LastSeen || p.LastSeen.startsWith('0001') ? 'never' : rel(iso(p.LastSeen));
+    const out = pings.get(ip);
+    return `<tr><td class="nw"><span class="dot${p.Online ? ' on' : ''}" aria-hidden="true"></span>${esc(p.HostName)}${p.ExitNode ? ' <span class="badge b-run">exit node</span>' : ''}<div class="mono mute">${esc(String(p.DNSName || '').replace(/\.$/, ''))}</div></td>
+      <td>${esc(p.OS)}</td><td class="mono">${(p.TailscaleIPs || []).map(esc).join('<br>')}</td><td>${conn}</td><td class="nw">${esc(seen)}</td>
+      <td class="nw mono">${bytes(p.RxBytes)} / ${bytes(p.TxBytes)}</td>
+      <td>${ip ? `<button data-act="ping" data-id="${esc(ip)}">Ping</button>` : ''}${out ? `<span class="out mono${out.ok ? '' : ' err'}">${esc(out.output)}</span>` : ''}</td></tr>`;
+  };
+  setHTML($('#ts-main'), `<div class="split wide">
+    <div class="card"><div class="head"><h2>This machine</h2><button data-act="ts-refresh">Refresh</button></div>
+      <dl class="kv"><dt>Backend</dt><dd>${badge(st.BackendState || 'unknown')}</dd>
+      <dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
+      <dt>Host</dt><dd>${esc(self.HostName || '—')} <span class="mute">${esc(self.OS || '')}</span></dd>
+      <dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd>
+      <dt>IPs</dt><dd class="mono">${(st.TailscaleIPs || self.TailscaleIPs || []).map(esc).join('<br>') || '—'}</dd>
+      <dt>Health</dt><dd>${health.length ? health.map(x => `<div class="err">${esc(x)}</div>`).join('') : '<span class="b-ok">no warnings</span>'}</dd></dl></div>
+    <div class="card"><div class="head"><h2>Serve dashboard over HTTPS (:8443)</h2>
+      <button data-act="serve" class="${serveOn ? 'danger' : 'primary'}" aria-pressed="${serveOn}">${serveOn ? 'Stop serving' : 'Start serving'}</button></div>
+      <p>${serveOn ? `Serving at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : `Off. When on, the dashboard is reachable from your tailnet at <span class="mono">${esc(url)}</span> with a real certificate.`}</p>
+      <h3>Current serve config</h3><pre class="snip">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></div></div>
+    <div class="card"><h2 style="margin-bottom:8px">Peers <span class="mute">${peers.filter(p => p.Online).length} of ${peers.length} online</span></h2>
+      ${peers.length ? `<div class="scroll"><table><thead><tr><th>Name</th><th>OS</th><th>IPs</th><th>Connection</th><th>Last seen</th><th>Rx / Tx</th><th></th></tr></thead><tbody>${peers.map(peerRow).join('')}</tbody></table></div>` : '<p class="mute">No peers.</p>'}</div>`);
+}
+async function netcheck(btn) {
+  btn.textContent = 'Running…';
+  try {
+    const n = await api('/api/tailscale/netcheck');
+    const lat = Object.entries(n.RegionLatency || {}).sort((a, b) => a[1] - b[1]).slice(0, 6);
+    const yn = v => (v ? '<span class="b-ok">yes</span>' : '<span class="b-bad">no</span>');
+    setHTML($('#netcheck'), `<dl class="kv"><dt>UDP</dt><dd>${yn(n.UDP)}</dd>
+      <dt>IPv4</dt><dd>${yn(n.IPv4)} <span class="mono">${esc(n.GlobalV4 || '')}</span></dd>
+      <dt>IPv6</dt><dd>${yn(n.IPv6)} <span class="mono">${esc(n.GlobalV6 || '')}</span></dd>
+      <dt>Preferred DERP</dt><dd>region ${esc(n.PreferredDERP)}</dd>
+      <dt>Fastest regions</dt><dd>${lat.map(([id, ns]) => `region ${esc(id)}: <span class="mono">${(ns / 1e6).toFixed(1)} ms</span>`).join('<br>') || '—'}</dd></dl>`);
+    $('#netcheck').className = '';
+  } finally { btn.textContent = 'Run netcheck'; }
+}
+
+/* ---------- settings ---------- */
+const FIELDS = [
+  ['listen', 'Listen address', 'text', 'Takes effect after restarting kiln.'],
+  ['label', 'Runner label', 'text', 'Jobs opt in with runs-on: [self-hosted, <label>].'],
+  ['max_vms', 'Max concurrent VMs', 'num'], ['vm_cpus', 'vCPUs per VM', 'num'],
+  ['vm_mem_mb', 'Memory per VM (MB)', 'num'], ['vm_disk_gb', 'Disk per VM (GB)', 'num'],
+  ['poll_secs', 'GitHub poll interval (s)', 'num'], ['job_timeout_mins', 'Job timeout (min)', 'num'],
+  ['idle_timeout_mins', 'Idle VM timeout (min)', 'num'],
+];
+let cfgDirty = false;
+function buildSettings() {
+  const f = $('#cfg');
+  f.innerHTML = FIELDS.map(([k, label, type, hint]) => `<label>${esc(label)}
+      <input name="${k}" ${type === 'num' ? 'type="number" min="0" step="1" required' : 'required spellcheck="false"'}>${hint ? `<span>${esc(hint)}</span>` : ''}</label>`).join('')
+    + `<label class="full">Allowed tailnet users (comma separated, empty means anyone on the tailnet)<input name="allowed_users" placeholder="alice@github, bob@example.com" spellcheck="false"></label>
+      <div class="full row"><button class="primary">Save settings</button><button type="button" data-act="cfg-reset">Discard changes</button></div>`;
+  f.addEventListener('input', () => (cfgDirty = true));
+}
+function renderSettings() {
+  const f = $('#cfg');
+  if (!cfgDirty) {
+    for (const [k] of FIELDS) f.elements[k].value = S.config[k];
+    f.elements.allowed_users.value = S.config.allowed_users.join(', ');
+  }
+  $('#tok-status').innerHTML = S.token_set ? '<span class="b-ok">A token is set.</span> Saving replaces it.' : '<span class="b-bad">No token set.</span> kiln cannot see queued jobs until one is saved.';
+  const img = S.image;
+  setHTML($('#bake-status'), S.baking ? '<i class="spin" aria-hidden="true"></i> Baking now. Follow the log below.'
+    : S.image_ready ? `Ready. Runner ${esc(img?.runner_version || '?')}, baked ${esc(when(img?.baked_at))} (${rel(img?.baked_at)}). Rebake to pick up a newer runner or package updates.`
+    : 'Not baked yet. VMs cannot start until the base image exists.');
+  const b = $('#bake-btn');
+  b.disabled = S.baking; b.textContent = S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image';
+}
+buildSettings();
+$('#cfg').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target, c = { ...S.config };
+  for (const [k, , type] of FIELDS) c[k] = type === 'num' ? Number(f.elements[k].value) : f.elements[k].value.trim();
+  c.allowed_users = f.elements.allowed_users.value.split(',').map(s => s.trim()).filter(Boolean);
+  try { await post('/api/config', c); cfgDirty = false; toast('Settings saved', false); poll(); }
+  catch (err) { toast(err.message); }
+});
+$('#tok').addEventListener('submit', async e => {
+  e.preventDefault();
+  const inp = $('#tok-in');
+  try { await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved', false); poll(); }
+  catch (err) { toast(err.message); }
+});
+$('#repo-add').addEventListener('submit', async e => {
+  e.preventDefault();
+  const inp = $('#repo-in');
+  const r = inp.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name');
+  if (S.config.repos.includes(r)) return toast(`${r} is already added`);
+  try { await saveConfig({ ...S.config, repos: [...S.config.repos, r] }); inp.value = ''; selRepo = r; renderRepoList(); toast(`Added ${r}`, false); }
+  catch (err) { toast(err.message); }
+});
+
+/* ---------- actions (delegated) ---------- */
+const ACT = {
+  vm: b => openVm(b.dataset.id),
+  logtab: b => { vmFile = b.dataset.id; renderVms(); },
+  async kill(b) {
+    if (!confirm(`Kill VM ${b.dataset.id}? Its running job will fail.`)) return;
+    await post(`/api/vms/${encodeURIComponent(b.dataset.id)}/kill`); toast('Kill sent', false); poll();
+  },
+  async bake() {
+    await post('/api/bake'); S.baking = true; toast('Bake started', false);
+    location.hash = '#settings'; setTimeout(poll, 300);
+  },
+  async copy() {
+    const text = $('#snippet').textContent;
+    try { await navigator.clipboard.writeText(text); }
+    catch { const r = document.createRange(); r.selectNodeContents($('#snippet')); getSelection().removeAllRanges(); getSelection().addRange(r); document.execCommand('copy'); }
+    toast('YAML copied', false);
+  },
+  'repo-sel': b => { selRepo = b.dataset.id; renderRepoList(); },
+  async 'repo-rm'(b) {
+    const r = b.dataset.id;
+    if (!confirm(`Stop serving jobs for ${r}?`)) return;
+    await saveConfig({ ...S.config, repos: S.config.repos.filter(x => x !== r) }); toast(`Removed ${r}`, false);
+  },
+  'repo-refresh': () => loadRepo(),
+  async run(b) {
+    const id = +b.dataset.id;
+    if (expanded.has(id)) { expanded.delete(id); return renderRuns(); }
+    expanded.add(id); renderRuns();
+    await loadJobs(id); renderRuns();
+  },
+  async rerun(b) { await post(gh(selRepo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested', false); setTimeout(loadRuns, 2000); },
+  async cancel(b) { await post(gh(selRepo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested', false); setTimeout(loadRuns, 2000); },
+  async dispatch(b) {
+    const ref = $('#ref-' + b.dataset.id).value.trim() || 'main';
+    await post(gh(selRepo, `workflows/${b.dataset.id}/dispatches`), { ref });
+    toast(`Workflow dispatched on ${ref}`, false); setTimeout(loadRuns, 2500);
+  },
+  joblog: b => jobLog(b.dataset.id, b.dataset.runner),
+  'joblog-close': () => { $('#joblog').hidden = true; },
+  'ts-refresh': () => loadTs(),
+  async ping(b) {
+    b.textContent = 'Pinging…';
+    try { pings.set(b.dataset.id, await post('/api/tailscale/ping', { peer: b.dataset.id })); }
+    finally { b.textContent = 'Ping'; }
+    renderTs();
+  },
+  async serve() {
+    const on = !TS.serve?.TCP?.['8443'];
+    const r = await post('/api/tailscale/serve', { on });
+    toast(r?.output || (on ? 'Serving on :8443' : 'Stopped serving'), false); loadTs();
+  },
+  netcheck: b => netcheck(b),
+  'cfg-reset': () => { cfgDirty = false; renderSettings(); },
+};
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) {
+    const tr = e.target.closest('tr[data-vm]');
+    if (tr && !e.target.closest('a,button,input')) openVm(tr.dataset.vm);
+    return;
+  }
+  const fn = ACT[b.dataset.act];
+  if (!fn) return;
+  e.preventDefault();
+  if (b.tagName === 'BUTTON') b.disabled = true;
+  try { await fn(b); } catch (err) { toast(err.message); } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
+});
+
+logView($('#bake-log'), 'bake', 'console', () => !!S?.baking);
+route();
+poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# systemd *user* unit: kiln needs no root, only /dev/kvm access.
+#   install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service
+#   systemctl --user daemon-reload && systemctl --user enable --now kiln
+#   loginctl enable-linger $USER   # keep running while logged out
+[Unit]
+Description=kiln self-hosted CI (ephemeral QEMU/KVM GitHub Actions runners)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/kiln serve
+Restart=on-failure
+RestartSec=5
+# Optional: Environment=KILN_GITHUB_TOKEN=... (or set it from the dashboard)
+
+[Install]
+WantedBy=default.target

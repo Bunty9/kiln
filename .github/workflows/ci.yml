@@ -1,0 +1,19 @@
+# kiln builds itself: this runs in a fresh VM on the kiln box.
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, kiln]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy
+      - name: Test
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test --locked
+          cargo clippy --locked -- -D warnings
