@@ -377,7 +377,10 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let mut stdin = child.stdin.take();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut buf = Vec::new();
-    let (mut first, mut logged) = (true, 0);
+    let (mut first, mut logged, mut decided) = (true, 0, false);
+    // A job is root in its VM and can write anything to the console, so console lines
+    // may shape the timeline but never extend the VM's life past this hard cap.
+    let hard_cap = start_cap(&cfg);
     loop {
         // Idle VMs are reaped quickly; busy ones get the full job timeout.
         let v = update(app, id, |_| {}).context("vm vanished")?;
@@ -386,7 +389,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             (State::Held, _) => v.hold_until.unwrap_or_else(now) + 60,
             (_, Some(t)) => t + cfg.job_timeout_mins * 60,
             _ => v.started + cfg.idle_timeout_mins * 60,
-        };
+        }
+        .min(v.started + hard_cap);
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         buf.clear();
         tokio::select! {
@@ -406,7 +410,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 }
                 let text = String::from_utf8_lossy(&buf);
                 observe(app, id, &text);
-                if text.contains("kiln: decide") {
+                if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
                     let hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
                     send(&mut stdin, &decide_msg(hold)).await;
@@ -760,20 +764,35 @@ fn observe(app: &App, id: &str, line: &str) {
     }
 }
 
-/// Returns true when the change is worth persisting right away.
+/// Longest a VM may live, whatever its console says: idle + job + hold, plus slack.
+fn start_cap(cfg: &crate::Config) -> u64 {
+    (cfg.idle_timeout_mins + cfg.job_timeout_mins + cfg.debug_hold_mins) * 60 + 300
+}
+
+/// Returns true when the change is worth persisting right away. Each lifecycle
+/// step is accepted once and only forward: the job (root in the guest) can echo
+/// these lines itself, and must not rewind the state or restart its timeout.
 fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
     let line = line.trim_end();
     if line.contains("Listening for Jobs") {
+        if v.state != State::Booting {
+            return false;
+        }
         v.state = State::Idle;
         v.online_at.get_or_insert(t);
         true
     } else if let Some((_, job)) = line.split_once("Running job: ") {
+        if v.busy_since.is_some() || !matches!(v.state, State::Booting | State::Idle) {
+            return false;
+        }
         v.state = State::Busy;
         v.job = Some(job.trim().to_string());
         v.busy_since = Some(t);
         true
     } else if let Some((_, result)) = line.split_once("completed with result: ") {
-        v.result = Some(result.trim().to_string());
+        if v.result.is_none() && v.state == State::Busy {
+            v.result = Some(result.trim().to_string());
+        }
         false
     } else if line.contains("Runner update") {
         v.note = Some("runner self-updating (rebake to avoid)".into());
@@ -1448,6 +1467,14 @@ mod tests {
         assert_eq!(v.result.as_deref(), Some("Failed"));
         assert!(!apply_line(&mut v, "Runner update in progress, do not shutdown runner.", 140));
         assert!(v.note.as_deref().unwrap().contains("self-updating"));
+        // A job echoing lifecycle lines itself can't rewind state, restart its
+        // timeout or rewrite its result.
+        assert!(!apply_line(&mut v, "Listening for Jobs", 500));
+        assert!(!apply_line(&mut v, "x: Running job: again", 600));
+        apply_line(&mut v, "Job x completed with result: Succeeded", 700);
+        assert_eq!((v.state, v.busy_since, v.job.as_deref(), v.result.as_deref()), (State::Busy, Some(120), Some("build"), Some("Failed")));
+        let cfg = crate::Config { idle_timeout_mins: 10, job_timeout_mins: 60, debug_hold_mins: 30, ..Default::default() };
+        assert_eq!(start_cap(&cfg), 100 * 60 + 300);
     }
 
     #[test]
