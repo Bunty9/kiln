@@ -352,8 +352,26 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd = rk;
     }
     let console = tokio::fs::File::create(dir.join("console.log")).await?;
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(console.into_std().await);
+    if filtered {
+        cmd.stderr(Stdio::piped());
+    } else {
+        cmd.stderr(console.into_std().await);
+    }
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = cmd.spawn().context(if filtered { "spawning rootlesskit" } else { "spawning qemu-system-x86_64" })?;
+    if let Some(err) = child.stderr.take() {
+        // rootlesskit warns on every start that we keep host loopback; we do on purpose
+        // (the mirror), and nft blocks every other loopback port. Keep the rest.
+        let path = dir.join("console.log");
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(err).lines();
+            while let Ok(Some(l)) = lines.next_line().await {
+                if !l.contains("--disable-host-loopback is highly recommended") {
+                    let _ = append(&path, &format!("{l}\n")).await;
+                }
+            }
+        });
+    }
 
     let mut log = tokio::fs::OpenOptions::new().append(true).open(dir.join("console.log")).await?;
     let mut stdin = child.stdin.take();

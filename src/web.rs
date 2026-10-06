@@ -180,9 +180,8 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
     // No script-src: the dashboard uses an inline script.
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("frame-ancestors 'none'"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    if api {
-        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    }
+    // The page is embedded in the binary: no-cache so a redeploy shows up on reload.
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if api { "no-store" } else { "no-cache" }));
     r
 }
 
