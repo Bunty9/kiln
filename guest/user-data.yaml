@@ -22,6 +22,7 @@ packages:
   - xz-utils
   - rsync
   - openssh-client
+  - openssh-server
   - build-essential
   - pkg-config
   - cmake
@@ -99,7 +100,13 @@ write_files:
       systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer motd-news.timer \
         e2scrub_reap.service fwupd-refresh.timer
       apt-get clean
-      systemctl enable kiln-job.service
+      systemctl enable kiln-job.service kiln-cache.service
+      # sshd only exists for held (failed) jobs: kiln-job starts it. Noble socket-activates it, so disable both.
+      # Host keys are generated now, so every VM shares them: fine for throwaway VMs behind key-only auth.
+      ssh-keygen -A
+      systemctl disable ssh.service ssh.socket || true
+      # kiln talks to the guest over ttyS0 input; nothing else may read it.
+      systemctl mask serial-getty@ttyS0.service
       touch /etc/cloud/cloud-init.disabled
       cloud-init clean --logs --machine-id
       echo KILN_BAKE_OK > /dev/ttyS0
@@ -119,9 +126,78 @@ write_files:
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
         sleep 1 # let kiln-steps flush the last page
+        # Host->guest control channel is ttyS0 input. Open it once and keep it open:
+        # input that arrives while no fd is open would be flushed.
+        stty -F /dev/ttyS0 -echo 2>/dev/null
+        exec 3</dev/ttyS0
+        echo "kiln: decide"
+        cmd=""
+        read -r -t 20 cmd <&3 || true
+        secs=${cmd#hold }
+        if [ "$secs" != "$cmd" ] && [[ $secs =~ ^[0-9]+$ ]]; then
+          echo "kiln: holding for ${secs}s"
+          keys=$(dmidecode -q -t 11 | sed -n 's/^[[:space:]]*String [0-9]*: kiln.ssh=//p')
+          if [ -n "$keys" ]; then
+            install -d -m 700 -o runner -g runner /home/runner/.ssh
+            echo "$keys" | base64 -d > /home/runner/.ssh/authorized_keys
+            chown runner:runner /home/runner/.ssh/authorized_keys
+            chmod 600 /home/runner/.ssh/authorized_keys
+          fi
+          systemctl start ssh
+          end=$((SECONDS + secs))
+          while [ "$SECONDS" -lt "$end" ]; do
+            c=""
+            read -r -t 5 c <&3 || true
+            [ "$c" = release ] && break
+          done
+          echo "kiln: hold over"
+        fi
       fi
       sync
       echo o > /proc/sysrq-trigger
+  - path: /usr/local/sbin/kiln-cache
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # kiln attaches the repo's cache as a second virtio disk (no disk = no cache).
+      # First use of a repo: it is blank, so format it. Then bind the usual cache
+      # dirs onto it. /opt/hostedtoolcache stays off: the pre-seeded Node lives there.
+      [ -b /dev/vdb ] || exit 0
+      set -eu
+      blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb
+      mkdir -p /mnt/cache
+      mount -o noatime /dev/vdb /mnt/cache
+      for t in /var/lib/docker /home/runner/.cache /home/runner/.npm /home/runner/.cargo/registry \
+               /home/runner/.cargo/git /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
+        src=/mnt/cache/$(echo "${t#/}" | tr / _)
+        mkdir -p "$src"
+        case $t in
+          /home/runner/*) runuser -u runner -- mkdir -p "$t"; chown runner:runner "$src" ;;
+          *) mkdir -p "$t" ;;
+        esac
+        mount --bind "$src" "$t"
+      done
+  - path: /etc/ssh/sshd_config.d/00-kiln.conf
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+  - path: /etc/systemd/system/kiln-cache.service
+    content: |
+      [Unit]
+      Description=kiln: mount the per-repo cache disk
+      After=local-fs.target
+      Before=docker.service kiln-job.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/kiln-cache
+      StandardOutput=journal+console
+      StandardError=journal+console
+
+      [Install]
+      WantedBy=multi-user.target
   - path: /usr/local/sbin/kiln-steps
     permissions: "0755"
     content: |

@@ -33,6 +33,16 @@ pub struct Config {
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
     pub auto_rebake: bool,
+    /// Per-repo persistent cache disk (see vm.rs: trusted writer, throwaway readers).
+    pub cache: bool,
+    /// Virtual size of a new repo cache; it is reset when it grows past 1.2x this.
+    pub cache_gb: u32,
+    /// Keep a failed job's VM this long for SSH debugging. 0 = off.
+    pub debug_hold_mins: u64,
+    /// Public keys allowed into a held VM (one authorized_keys line each).
+    pub debug_ssh_keys: Vec<String>,
+    /// Job VM network: "open" (full outbound via the host) or "filtered" (internet + mirror only).
+    pub egress: String,
 }
 
 impl Default for Config {
@@ -51,6 +61,11 @@ impl Default for Config {
             allowed_users: vec![],
             docker_mirror: true,
             auto_rebake: true,
+            cache: true,
+            cache_gb: 30,
+            debug_hold_mins: 0,
+            debug_ssh_keys: vec![],
+            egress: "open".into(),
         }
     }
 }
@@ -105,6 +120,18 @@ impl Config {
         if !(1..=1440).contains(&self.job_timeout_mins) || !(1..=1440).contains(&self.idle_timeout_mins) {
             bail!("job_timeout_mins and idle_timeout_mins must be 1..=1440");
         }
+        if !(5..=500).contains(&self.cache_gb) {
+            bail!("cache_gb must be 5..=500");
+        }
+        if self.debug_hold_mins > 120 {
+            bail!("debug_hold_mins must be 0..=120 (0 = off)");
+        }
+        if let Some(k) = self.debug_ssh_keys.iter().find(|k| !vm::valid_ssh_key(k)) {
+            bail!("debug_ssh_keys: not a single-line ssh-/ecdsa-/sk- public key: {:?}", k.chars().take(24).collect::<String>());
+        }
+        if !["open", "filtered"].contains(&self.egress.as_str()) {
+            bail!("egress must be \"open\" or \"filtered\"");
+        }
         Ok(())
     }
 }
@@ -127,6 +154,10 @@ pub struct App {
     pub gh: github::Gh,
     pub vms: Mutex<Vec<vm::Vm>>,
     pub kills: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// "Release now" for held VMs.
+    pub releases: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Repos (lowercase) whose cache is being committed. Only touched with `vms` locked first.
+    pub committing: Mutex<std::collections::HashSet<String>>,
     pub poll: Mutex<PollStatus>,
     pub baking: AtomicBool,
     /// Set on SIGTERM/SIGINT: the scheduler stops launching.
@@ -224,6 +255,8 @@ async fn main() -> Result<()> {
         vms: Mutex::default(),
         data,
         kills: Mutex::default(),
+        releases: Mutex::default(),
+        committing: Mutex::default(),
         poll: Mutex::default(),
         baking: Default::default(),
         stopping: Default::default(),
@@ -246,6 +279,14 @@ async fn main() -> Result<()> {
         Some("serve") | None => {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
+            if app.cfg().egress == "filtered" {
+                let a = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = vm::egress_ready(&a, true).await {
+                        tracing::error!("egress filtering unavailable: {e}");
+                    }
+                });
+            }
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::select! {
@@ -398,7 +439,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let (mem_avail, disk) = (vm::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
     // Shown on the dashboard; each size is gated on its own memory below.
     let mirror_mb = cfg.docker_mirror.then(|| mirror::cache_mb(app)).flatten();
-    let mut blocked = vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb);
+    let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
+    // Fail closed: filtered jobs never fall back to open networking.
+    let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
+    let mut blocked = egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")).or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
@@ -437,11 +481,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if waiting > queued {
                 vm::reap(app, repo, n, waiting - queued).await;
             }
-            let gate = vm::launch_gate(mem_avail, cfg.mem_mb(n), disk, mirror_mb);
+            let gate = vm::launch_gate(mem_avail, cfg.mem_mb(n), disk, mirror_mb, cache_mb);
             if queued > waiting && blocked.is_none() {
                 blocked = gate.clone();
             }
-            let held = backed_off || gate.is_some() || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
             let want = if held { 0 } else { queued.saturating_sub(waiting).min(cfg.max_vms.saturating_sub(active)) };
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
@@ -512,6 +556,15 @@ mod tests {
         assert!(!ok(|c| c.vm_cpus = 9));
         assert!(ok(|c| c.repos = vec!["a/b".into(), "a/c".into()]));
         assert!(!ok(|c| c.repos = vec!["Bunty9/Kiln".into(), "bunty9/kiln".into()]));
+        assert!(ok(|c| c.cache_gb = 500));
+        assert!(!ok(|c| c.cache_gb = 4));
+        assert!(!ok(|c| c.cache_gb = 501));
+        assert!(ok(|c| c.debug_hold_mins = 120));
+        assert!(!ok(|c| c.debug_hold_mins = 121));
+        assert!(ok(|c| c.debug_ssh_keys = vec!["ssh-ed25519 AAAA me@x".into()]));
+        assert!(!ok(|c| c.debug_ssh_keys = vec!["rm -rf /".into()]));
+        assert!(ok(|c| c.egress = "filtered".into()));
+        assert!(!ok(|c| c.egress = "closed".into()));
     }
 
     #[test]

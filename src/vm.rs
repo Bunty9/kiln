@@ -7,6 +7,7 @@
 use crate::{App, now};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -23,6 +24,8 @@ pub enum State {
     Done,
     Failed,
     Killed,
+    /// Job failed; the guest is kept alive for SSH until `hold_until`.
+    Held,
     /// Was active when kiln stopped; its QEMU died with us.
     Lost,
 }
@@ -33,8 +36,20 @@ impl State {
         matches!(self, State::Booting | State::Idle)
     }
     pub fn is_active(self) -> bool {
-        matches!(self, State::Booting | State::Idle | State::Busy)
+        matches!(self, State::Booting | State::Idle | State::Busy | State::Held)
     }
+}
+
+/// What this VM's cache disk did.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheUse {
+    #[default]
+    None,
+    /// Attached as a throwaway overlay.
+    Read,
+    Committed,
+    Discarded,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -62,6 +77,21 @@ pub struct Vm {
     pub cpus: u32,
     #[serde(default)]
     pub mem_mb: u32,
+    #[serde(default)]
+    pub cache: CacheUse,
+    /// Why the cache was not saved.
+    #[serde(default)]
+    pub cache_note: Option<String>,
+    /// Held VMs: `ssh -p N runner@host`, and when the hold ends.
+    #[serde(default)]
+    pub ssh: Option<String>,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    #[serde(default)]
+    pub hold_until: Option<u64>,
+    /// Job network this VM booted with: "open" | "filtered" ("" in older records).
+    #[serde(default)]
+    pub egress: String,
 }
 
 const KEEP_HISTORY: usize = 200;
@@ -97,6 +127,7 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
             // The crash skipped the normal cleanup: don't leave a disk or a credential behind.
             let dir = data.join("vms").join(&v.id);
             let _ = std::fs::remove_file(dir.join("disk.qcow2"));
+            let _ = std::fs::remove_file(dir.join("cache.qcow2"));
             let _ = std::fs::remove_file(dir.join("jit"));
             write_meta(data, v);
         }
@@ -150,17 +181,28 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
         note: None,
         cpus,
         mem_mb: app.cfg().mem_mb(cpus),
+        cache: CacheUse::None,
+        cache_note: None,
+        ssh: None,
+        ssh_port: None,
+        hold_until: None,
+        egress: app.cfg().egress,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
     app.kills.lock().unwrap().insert(id.clone(), kill.clone());
+    let release = Arc::new(tokio::sync::Notify::new());
+    app.releases.lock().unwrap().insert(id.clone(), release.clone());
     app.vms.lock().unwrap().push(vm);
     tokio::spawn(async move {
         let dir = app.data.join("vms").join(&id);
-        let outcome = run(&app, &id, &repo, &dir, &kill).await;
+        let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
+        finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
         // Never leave a big overlay or a credential behind, whatever happened.
         let _ = tokio::fs::remove_file(dir.join("disk.qcow2")).await;
         let _ = tokio::fs::remove_file(dir.join("jit")).await;
+        let _ = tokio::fs::remove_file(dir.join("egress.nft")).await;
+        let _ = tokio::fs::remove_dir_all(dir.join("rk")).await;
         let v = update(&app, &id, |v| {
             v.ended = Some(now());
             v.state = match outcome {
@@ -195,6 +237,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
             persist(&app, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
+        app.releases.lock().unwrap().remove(&id);
         app.kills.lock().unwrap().remove(&id);
         prune(&app);
     });
@@ -228,7 +271,7 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
 }
 
 /// The state the VM ends in (Killed, Failed or Done); Err = infrastructure failure.
-async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify) -> Result<State> {
+async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
     let cfg = app.cfg();
     tokio::fs::create_dir_all(dir).await?;
     if let Some(v) = update(app, id, |_| {}) {
@@ -262,29 +305,69 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         return Ok(State::Killed);
     }
 
-    let mut cmd = qemu(cpus, mem_mb, &disk);
+    // Cache overlay (second disk, so root stays /dev/vda1) and the debug SSH forward.
+    let cache_ov = if cfg.cache { setup_cache(app, id, repo, dir, cfg.cache_gb).await } else { None };
+    let filtered = v.egress == "filtered";
+    let mut ssh_host = None;
+    let mut fwd = String::new();
+    if cfg.debug_hold_mins > 0 && !cfg.debug_ssh_keys.is_empty() {
+        let ip = bind_ip().await;
+        if let Some(port) = pick_port(app, id, &ip) {
+            // Filtered: QEMU runs in a private netns, so hostfwd binds there, not on the
+            // host. rootlesskit's port driver publishes host <ip>:<port> into the netns
+            // (see rk_args); QEMU listens on all netns addresses (the driver dials the
+            // netns loopback). Open: QEMU binds the host address itself.
+            fwd = if filtered { format!(",hostfwd=tcp::{port}-:22") } else { format!(",hostfwd=tcp:{ip}:{port}-:22") };
+            write_secret(&dir.join("ssh"), &format!("kiln.ssh={}", b64(cfg.debug_ssh_keys.join("\n").as_bytes()))).await?;
+            ssh_host = Some((ip, port));
+        } else {
+            note(app, id, "no free ssh port (2200-2299): this VM will not be held");
+        }
+    }
+    if filtered {
+        fwd.push_str(",ipv6=off");
+    }
+    let mut cmd = qemu(cpus, mem_mb, &disk, &fwd);
+    if let Some(ov) = &cache_ov {
+        cmd.arg("-drive").arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", ov.display()));
+    }
     // Direct kernel boot without initrd: virtio + ext4 are built into the
     // Ubuntu kernel, which brings boot-to-runner down to ~4s. panic=1 + -no-reboot
     // make a kernel panic end the VM instead of hanging until the timeout.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
     cmd.args(["-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"]);
     cmd.arg("-smbios").arg(format!("type=11,path={}", dir.join("jit").display()));
+    if ssh_host.is_some() {
+        cmd.arg("-smbios").arg(format!("type=11,path={}", dir.join("ssh").display()));
+    }
+    // stdio is the guest's ttyS0: its input is the host->guest control channel (hold/release).
     cmd.arg("-serial").arg("stdio");
     cmd.arg("-serial").arg(format!("file:{}", dir.join("steps.log").display()));
+    if filtered {
+        tokio::fs::write(dir.join("egress.nft"), EGRESS_NFT).await?;
+        let std = cmd.as_std();
+        let q: Vec<String> = std::iter::once(std.get_program()).chain(std.get_args()).map(|a| a.to_string_lossy().into_owned()).collect();
+        let mut rk = Command::new("rootlesskit");
+        rk.args(rk_args(dir, ssh_host.as_ref().map(|(ip, p)| (ip.as_str(), *p)), &q)).kill_on_drop(true);
+        cmd = rk;
+    }
     let console = tokio::fs::File::create(dir.join("console.log")).await?;
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(console.into_std().await);
-    let mut child = cmd.spawn().context("spawning qemu-system-x86_64")?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(console.into_std().await);
+    let mut child = cmd.spawn().context(if filtered { "spawning rootlesskit" } else { "spawning qemu-system-x86_64" })?;
 
     let mut log = tokio::fs::OpenOptions::new().append(true).open(dir.join("console.log")).await?;
+    let mut stdin = child.stdin.take();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut buf = Vec::new();
     let (mut first, mut logged) = (true, 0);
     loop {
         // Idle VMs are reaped quickly; busy ones get the full job timeout.
         let v = update(app, id, |_| {}).context("vm vanished")?;
-        let deadline = match v.busy_since {
-            Some(t) => t + cfg.job_timeout_mins * 60,
-            None => v.started + cfg.idle_timeout_mins * 60,
+        let deadline = match (v.state, v.busy_since) {
+            // The guest powers itself off at hold end; this is only the safety net.
+            (State::Held, _) => v.hold_until.unwrap_or_else(now) + 60,
+            (_, Some(t)) => t + cfg.job_timeout_mins * 60,
+            _ => v.started + cfg.idle_timeout_mins * 60,
         };
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         buf.clear();
@@ -297,21 +380,48 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     // QEMU read the SMBIOS file before the guest printed anything.
                     first = false;
                     let _ = tokio::fs::remove_file(dir.join("jit")).await;
+                    let _ = tokio::fs::remove_file(dir.join("ssh")).await;
                 }
                 if logged < LOG_CAP {
                     log.write_all(&buf).await?;
                     logged += buf.len();
                 }
-                observe(app, id, &String::from_utf8_lossy(&buf));
+                let text = String::from_utf8_lossy(&buf);
+                observe(app, id, &text);
+                if text.contains("kiln: decide") {
+                    let v = update(app, id, |_| {}).context("vm vanished")?;
+                    let hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
+                    send(&mut stdin, &decide_msg(hold)).await;
+                    if let (Some(secs), Some((ip, port))) = (hold, &ssh_host) {
+                        let v = update(app, id, |v| {
+                            v.state = State::Held;
+                            v.hold_until = Some(now() + secs);
+                            v.ssh = Some(format!("ssh -p {port} runner@{ip}"));
+                            v.ssh_port = Some(*port);
+                        });
+                        if let Some(v) = v {
+                            persist(app, &v);
+                        }
+                    }
+                }
             }
+            _ = release.notified() => send(&mut stdin, "release\n").await,
             _ = kill.notified() => {
+                if update(app, id, |_| {}).is_some_and(|v| v.state == State::Held) {
+                    // Ask nicely so the guest powers off cleanly; QEMU dies anyway after 5s.
+                    send(&mut stdin, "release\n").await;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+                }
                 child.kill().await.ok();
                 kill_note(app, id);
                 return Ok(State::Killed);
             }
             _ = tokio::time::sleep(left) => {
                 child.kill().await.ok();
-                if v.busy_since.is_some() {
+                if v.state == State::Held {
+                    note(app, id, "debug hold expired");
+                    return Ok(State::Killed);
+                } else if v.busy_since.is_some() {
                     note(app, id, &format!("job timeout after {} min", cfg.job_timeout_mins));
                     return Ok(State::Killed);
                 } else if v.online_at.is_some() {
@@ -332,6 +442,282 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         return Ok(State::Failed);
     }
     Ok(State::Done)
+}
+
+async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
+    if let Some(s) = stdin {
+        let _ = s.write_all(msg.as_bytes()).await;
+        let _ = s.flush().await;
+    }
+}
+
+/// Seconds to hold the VM, if at all. Only a job that started and did not
+/// succeed (or whose runner died without a verdict) is worth keeping, and only
+/// when there is a way in.
+fn decide(hold_mins: u64, can_ssh: bool, job_started: bool, result: Option<&str>) -> Option<u64> {
+    (hold_mins > 0 && can_ssh && job_started && result != Some("Succeeded")).then_some(hold_mins * 60)
+}
+
+fn decide_msg(hold: Option<u64>) -> String {
+    hold.map_or("release\n".into(), |s| format!("hold {s}\n"))
+}
+
+/// First free port of 2200..2300 that no active VM owns and the host can bind.
+fn alloc_port(used: &[u16], bindable: impl Fn(u16) -> bool) -> Option<u16> {
+    (2200..2300).find(|p| !used.contains(p) && bindable(*p))
+}
+
+/// Reserve a port for `id` under the `vms` lock, so concurrent launches get different ones.
+fn pick_port(app: &App, id: &str, ip: &str) -> Option<u16> {
+    let mut vms = app.vms.lock().unwrap();
+    let used: Vec<u16> = vms.iter().filter(|v| v.state.is_active()).filter_map(|v| v.ssh_port).collect();
+    let port = alloc_port(&used, |p| std::net::TcpListener::bind((ip, p)).is_ok())?;
+    // Not Held yet, but taken: a later launch must not pick it.
+    vms.iter_mut().find(|v| v.id == id)?.ssh_port = Some(port);
+    Some(port)
+}
+
+/// The tailnet IP, so held VMs are not reachable from the LAN; loopback if unknown.
+async fn bind_ip() -> String {
+    tailnet_ip().await.unwrap_or("127.0.0.1".into())
+}
+
+async fn tailnet_ip() -> Option<String> {
+    let out = output("tailscale", &["ip", "-4"]).await.unwrap_or_default();
+    out.lines().next().map(str::trim).filter(|l| l.parse::<std::net::Ipv4Addr>().is_ok()).map(String::from)
+}
+
+/// Public keys only, but a guest-side authorized_keys line: one line, known type.
+pub fn valid_ssh_key(k: &str) -> bool {
+    let k = k.trim();
+    ["ssh-", "ecdsa-", "sk-"].iter().any(|p| k.starts_with(p)) && k.contains(' ') && !k.chars().any(|c| c.is_control())
+}
+
+/// Standard base64; the guest decodes with `base64 -d`. (No crate for 10 lines.)
+fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    data.chunks(3)
+        .flat_map(|c| {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            (0..4).map(move |i| if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- repo cache
+//
+// Trusted writer, throwaway readers: every job VM gets a private qcow2 overlay
+// of its repo's cache disk, so any job starts warm. Only a successful `push`
+// to the default branch may merge its overlay back, so PRs and other branches
+// read the cache but can never poison it (GitHub's branch-scope rule for
+// actions/cache, kept on a disk).
+
+pub fn cache_file(data: &Path, repo: &str) -> PathBuf {
+    data.join("cache").join(format!("{}.qcow2", repo.to_ascii_lowercase().replace('/', "__")))
+}
+
+/// Bytes actually allocated (like `du`), not the virtual size.
+fn disk_bytes(p: &Path) -> u64 {
+    std::fs::metadata(p).map_or(0, |m| m.blocks() * 512)
+}
+
+/// Over 1.2x the configured size: reset instead of growing forever.
+fn cache_too_big(bytes: u64, gb: u32) -> bool {
+    bytes > gb as u64 * (6u64 << 30) / 5
+}
+
+pub fn cache_dir_mb(data: &Path) -> u64 {
+    let d = std::fs::read_dir(data.join("cache")).into_iter().flatten().flatten();
+    d.map(|e| disk_bytes(&e.path())).sum::<u64>() >> 20
+}
+
+/// `caches` of /api/state: {"o/n": {"size_mb", "updated"}} for repos that have one.
+/// A stat per repo, so no throttling needed.
+pub fn cache_stats(data: &Path, repos: &[String]) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for r in repos {
+        let Ok(md) = std::fs::metadata(cache_file(data, r)) else { continue };
+        m.insert(r.clone(), serde_json::json!({ "size_mb": (md.blocks() * 512) >> 20, "updated": u64::try_from(md.mtime()).ok() }));
+    }
+    m.into()
+}
+
+/// Job id from `https://github.com/o/n/actions/runs/1/job/2`.
+fn job_id(url: &str) -> Option<u64> {
+    url.rsplit_once("/job/")?.1.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// May this job's cache overlay be committed? Err = the reason it is not.
+/// `trust` is (event, head branch, default branch), or why it is unknown.
+fn cache_verdict(cache_on: bool, succeeded: bool, trust: Result<(&str, &str, &str), &str>) -> Result<(), String> {
+    if !cache_on {
+        return Err("cache disabled".into());
+    }
+    if !succeeded {
+        return Err("job did not succeed".into());
+    }
+    let (event, branch, default) = trust.map_err(|e| format!("could not verify the trigger ({e})"))?;
+    if event != "push" {
+        return Err(format!("{event} event"));
+    }
+    if branch != default {
+        return Err(format!("branch {branch} is not the default ({default})"));
+    }
+    Ok(())
+}
+
+/// A trusted overlay parked until the repo's other jobs stop reading the cache.
+fn pending_file(data: &Path, repo: &str) -> PathBuf {
+    cache_file(data, repo).with_extension("pending.qcow2")
+}
+
+async fn qemu_img(args: &[&str]) -> Result<()> {
+    let out = Command::new("qemu-img").args(args).output().await.context("qemu-img")?;
+    if !out.status.success() {
+        bail!("qemu-img {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Attach point for a job: flag the VM as a reader (under the `vms` lock, so a
+/// commit or clear can't slip in), create the repo cache if missing, then the overlay.
+async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Option<PathBuf> {
+    static INIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let key = repo.to_ascii_lowercase();
+    {
+        let mut vms = app.vms.lock().unwrap();
+        let busy = app.committing.lock().unwrap().contains(&key);
+        let v = vms.iter_mut().find(|v| v.id == id)?;
+        if busy {
+            v.cache_note = Some("cache busy (another job is saving it): this job runs cold".into());
+            return None;
+        }
+        v.cache = CacheUse::Read;
+    }
+    let (backing, ov) = (cache_file(&app.data, repo), dir.join("cache.qcow2"));
+    let made = async {
+        let _g = INIT.lock().await;
+        if !backing.exists() {
+            tokio::fs::create_dir_all(backing.parent().unwrap()).await?;
+            // Unformatted: the guest runs mkfs on first use.
+            qemu_img(&["create", "-q", "-f", "qcow2", &backing.display().to_string(), &format!("{gb}G")]).await?;
+        }
+        qemu_img(&["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing.display().to_string(), &ov.display().to_string()]).await
+    }
+    .await;
+    match made {
+        Ok(()) => Some(ov),
+        Err(e) => {
+            tracing::warn!("{id}: cache: {e:#}");
+            update(app, id, |v| {
+                v.cache = CacheUse::None;
+                v.cache_note = Some(format!("cache unavailable: {e:#}"));
+            });
+            None
+        }
+    }
+}
+
+/// After QEMU exited: commit the overlay into the repo cache if the job earned
+/// it, else just drop it.
+async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
+    let ov = dir.join("cache.qcow2");
+    let Some(v) = update(app, id, |_| {}) else { return };
+    if v.cache != CacheUse::Read {
+        let _ = tokio::fs::remove_file(&ov).await;
+        return;
+    }
+    let cfg = app.cfg();
+    let succeeded = done && v.result.as_deref() == Some("Succeeded");
+    let trust = if succeeded && cfg.cache {
+        match v.job_url.as_deref().and_then(job_id) {
+            Some(j) => app.gh.cache_trust(repo, j).await.map_err(|e| format!("{e:#}")),
+            None => Err("no job page".into()),
+        }
+    } else {
+        Err(String::new())
+    };
+    let t = trust.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str())).map_err(String::as_str);
+    let (state, note) = match cache_verdict(cfg.cache, succeeded, t) {
+        Err(why) => {
+            let _ = tokio::fs::remove_file(&ov).await;
+            (CacheUse::Discarded, Some(format!("cache not saved: {why}")))
+        }
+        Ok(()) => {
+            // Every overlay alive right now shares the same backing state (commits only happen
+            // with no readers), so a newer trusted overlay simply supersedes a parked one.
+            let pending = pending_file(&app.data, repo);
+            let _ = tokio::fs::rename(&ov, &pending).await;
+            match commit_pending(app, repo, id).await {
+                Some(r) => r,
+                None => (CacheUse::Committed, Some("cache queued: saved when this repo's other jobs finish".into())),
+            }
+        }
+    };
+    update(app, id, |v| {
+        v.cache = state;
+        v.cache_note = note;
+    });
+    // This VM may have been the last reader holding up an earlier job's parked commit.
+    if let Some((_, Some(why))) = commit_pending(app, repo, id).await {
+        tracing::info!("{repo}: parked cache commit: {why}");
+    }
+}
+
+/// Commit the repo's parked trusted overlay if nothing else reads the cache.
+/// None = nothing parked, or still readers (stays parked).
+async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(CacheUse, Option<String>)> {
+    let pending = pending_file(&app.data, repo);
+    let key = repo.to_ascii_lowercase();
+    {
+        let vms = app.vms.lock().unwrap();
+        let mut committing = app.committing.lock().unwrap();
+        if !pending.exists() || cache_readers(&vms, repo, except) > 0 || committing.contains(&key) {
+            return None;
+        }
+        committing.insert(key.clone());
+    }
+    let cfg = app.cfg();
+    let backing = cache_file(&app.data, repo);
+    let r = qemu_img(&["commit", "-q", &pending.display().to_string()]).await;
+    let _ = tokio::fs::remove_file(&pending).await;
+    let big = disk_bytes(&backing);
+    let out = match r {
+        Err(e) => {
+            // A failed commit may leave the backing half-written: start over.
+            let _ = tokio::fs::remove_file(&backing).await;
+            (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}")))
+        }
+        Ok(()) if cache_too_big(big, cfg.cache_gb) => {
+            let _ = tokio::fs::remove_file(&backing).await;
+            tracing::info!("cache for {repo} grew to {} MB, over {} GB x 1.2: reset", big >> 20, cfg.cache_gb);
+            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB", cfg.cache_gb as f64 * 1.2)))
+        }
+        Ok(()) => (CacheUse::Committed, None),
+    };
+    app.committing.lock().unwrap().remove(&key);
+    Some(out)
+}
+
+/// Active VMs of `repo` (other than `except`) with the cache attached.
+fn cache_readers(vms: &[Vm], repo: &str, except: &str) -> usize {
+    vms.iter().filter(|v| v.id != except && v.state.is_active() && v.cache == CacheUse::Read && v.repo.eq_ignore_ascii_case(repo)).count()
+}
+
+/// Dashboard "Clear": delete a repo's cache (recreated empty by the next job).
+pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
+    if !app.cfg().repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+        bail!("not a configured repo");
+    }
+    let vms = app.vms.lock().unwrap();
+    if vms.iter().any(|v| v.state.is_active() && v.repo.eq_ignore_ascii_case(repo)) || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase()) {
+        bail!("jobs of {repo} are running: clear the cache when they finish");
+    }
+    let _ = std::fs::remove_file(pending_file(&app.data, repo));
+    match std::fs::remove_file(cache_file(&app.data, repo)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 fn note(app: &App, id: &str, msg: &str) {
@@ -387,17 +773,138 @@ async fn write_secret(path: &Path, s: &str) -> Result<()> {
 }
 
 /// Common QEMU flags for both bake and job VMs.
-fn qemu(cpus: u32, mem_mb: u32, disk: &Path) -> Command {
+/// `netdev_extra`: more `-netdev user` options, e.g. `,hostfwd=...`.
+fn qemu(cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
     let mut c = Command::new("qemu-system-x86_64");
     c.args(["-machine", "q35,accel=kvm", "-cpu", "host", "-nodefaults", "-display", "none", "-no-reboot"])
         .args(["-smp", &cpus.to_string(), "-m", &mem_mb.to_string()])
         // cache=unsafe: the overlay is discarded after the job anyway, so skip fsyncs.
         .arg("-drive")
         .arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", disk.display()))
-        .args(["-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0"])
+        .args(["-netdev", &format!("user,id=n0{netdev_extra}"), "-device", "virtio-net-pci,netdev=n0"])
         .args(["-device", "virtio-rng-pci"])
         .kill_on_drop(true);
     c
+}
+
+/// nftables ruleset loaded inside a filtered job VM's network namespace.
+/// Guest traffic leaves QEMU's slirp as ordinary sockets of the qemu process, so it
+/// hits this OUTPUT chain. The guest's 10.0.2.2 is the namespace loopback; the DNAT
+/// rewrites the mirror's port to slirp4netns's host-loopback alias 10.0.2.2, which
+/// reaches the host's 127.0.0.1:5000. Every other host loopback port, the LAN, the
+/// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
+/// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
+const EGRESS_NFT: &str = r#"table ip kilnnat {
+  chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }
+  chain post { type nat hook postrouting priority 100; oifname "tap0" masquerade; }
+}
+table inet kiln {
+  chain out {
+    type filter hook output priority 0; policy drop;
+    ct state established,related accept
+    oifname "lo" accept
+    ip daddr 10.0.2.3 meta l4proto { tcp, udp } th dport 53 accept
+    ip daddr 10.0.2.2 tcp dport 5000 accept
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+               172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 } drop
+    tcp dport 25 drop
+    oifname "tap0" meta nfproto ipv4 accept
+  }
+}
+"#;
+
+/// Namespace setup shared by jobs and the doctor: `$1` is the nft file.
+const RK_SETUP: &str = "sysctl -qw net.ipv4.conf.all.route_localnet=1; nft -f \"$1\"";
+
+fn rk_base(state: &Path) -> Vec<String> {
+    ["--state-dir", &state.display().to_string(), "--net=slirp4netns", "--copy-up=/etc"].map(String::from).into()
+}
+
+/// rootlesskit argv that runs `qemu` (program + args) in a filtered namespace.
+/// `sh -e` fails closed: if sysctl or nft fail, QEMU never starts. QEMU's args are
+/// positional parameters, never spliced into the script. `publish`: host (ip, port)
+/// forwarded to the same port in the namespace, for the debug-SSH hostfwd.
+fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<String> {
+    let mut a = rk_base(&dir.join("rk"));
+    a.extend(["--mtu=65520", "--slirp4netns-sandbox=auto", "--slirp4netns-seccomp=auto"].map(String::from));
+    if let Some((ip, port)) = publish {
+        a.extend(["--port-driver=builtin".into(), "-p".into(), format!("{ip}:{port}:{port}/tcp")]);
+    }
+    a.extend(["/bin/sh".into(), "-ec".into(), format!("{RK_SETUP}; shift; exec \"$@\""), "sh".into(), dir.join("egress.nft").display().to_string()]);
+    a.extend_from_slice(qemu);
+    a
+}
+
+/// Script for the doctor's probe namespace. `$1` nft file, `$2` dashboard port, `$3` tailnet IP.
+fn egress_script(mirror: bool, tailnet: bool) -> String {
+    let step = |cond: &str, msg: &str| format!("{cond} && {{ echo 'step: {msg}'; exit 1; }}\n");
+    let mut s = String::from("sysctl -qw net.ipv4.conf.all.route_localnet=1 || { echo 'step: sysctl'; exit 1; }\n");
+    s += "nft -f \"$1\" || { echo 'step: loading nft rules'; exit 1; }\n";
+    if mirror {
+        s += &step("! curl -sf -m5 -o /dev/null http://127.0.0.1:5000/v2/", "docker mirror unreachable");
+    }
+    s += &step("curl -s -m3 -o /dev/null \"http://10.0.2.2:$2/\"", "dashboard port reachable from jobs");
+    if tailnet {
+        s += &step("curl -s -m3 -o /dev/null \"http://$3:$2/\"", "tailnet address reachable from jobs");
+    }
+    // Each check is `cond && fail`, so a passing last check leaves status 1: end explicitly.
+    s + &step("! curl -sf -m8 -o /dev/null https://api.github.com/", "internet unreachable") + "exit 0\n"
+}
+
+/// Last probe: (unix time, result). Held across the probe so callers share one run.
+static EGRESS: tokio::sync::Mutex<Option<(u64, Result<(), String>)>> = tokio::sync::Mutex::const_new(None);
+const EGRESS_TTL: u64 = 600;
+
+fn fresh(at: u64, t: u64) -> bool {
+    t < at + EGRESS_TTL
+}
+
+/// Result of the filtered-egress probe, cached 10 minutes unless `force`.
+pub async fn egress_ready(app: &App, force: bool) -> Result<(), String> {
+    let mut g = EGRESS.lock().await;
+    if let Some((at, r)) = &*g
+        && !force
+        && fresh(*at, now())
+    {
+        return r.clone();
+    }
+    let r = egress_probe(app).await.map_err(|e| format!("{e:#}"));
+    *g = Some((now(), r.clone()));
+    r
+}
+
+async fn egress_probe(app: &App) -> Result<()> {
+    for bin in ["rootlesskit", "slirp4netns", "nft"] {
+        let found = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()));
+        if !found {
+            bail!("{bin} not found; install: sudo apt install rootlesskit slirp4netns nftables uidmap");
+        }
+    }
+    let cfg = app.cfg();
+    let port = cfg.listen.parse::<std::net::SocketAddr>()?.port();
+    let mirror = cfg.docker_mirror && app.mirror.lock().unwrap().running;
+    let ts = tailnet_ip().await;
+    let dir = app.data.join("egress-check");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir).await?;
+    let nft = dir.join("egress.nft");
+    tokio::fs::write(&nft, EGRESS_NFT).await?;
+    let mut cmd = Command::new("rootlesskit");
+    cmd.args(rk_base(&dir.join("rk")))
+        .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some()), "sh"])
+        .arg(&nft)
+        .arg(port.to_string())
+        .arg(ts.unwrap_or_default())
+        .kill_on_drop(true);
+    let o = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let o = o.context("probe timed out")?.context("running rootlesskit")?;
+    if o.status.success() {
+        return Ok(());
+    }
+    let (out, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    let why = out.lines().find(|l| l.starts_with("step:")).map(String::from).or_else(|| err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()));
+    bail!("{}", why.unwrap_or_else(|| format!("rootlesskit exited with {}", o.status)))
 }
 
 fn prune(app: &App) {
@@ -522,7 +1029,7 @@ async fn bake_inner(app: &App) -> Result<()> {
     sh(&log, Command::new("qemu-img").arg("resize").arg(&disk).arg(format!("{}G", cfg.vm_disk_gb))).await?;
 
     say("booting bake VM (installs packages + runner, takes a few minutes)".into()).await?;
-    let mut cmd = qemu(cfg.vm_cpus, cfg.vm_mem_mb.max(4096), &disk);
+    let mut cmd = qemu(cfg.vm_cpus, cfg.vm_mem_mb.max(4096), &disk, "");
     cmd.arg("-kernel").arg(&kernel).arg("-initrd").arg(&initrd);
     cmd.args(["-append", "root=LABEL=cloudimg-rootfs ro console=ttyS0"]);
     cmd.arg("-drive").arg(format!("file={},if=virtio,format=raw,readonly=on", seed.display()));
@@ -577,6 +1084,23 @@ async fn copy_new(src: &Path, dst: &Path, off: &mut usize) {
 
 // ---------------------------------------------------------------- host checks
 
+/// gid of the `kvm` group from /etc/group text.
+fn kvm_gid(etc_group: &str) -> Option<u32> {
+    etc_group.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == "kvm").then(|| f.nth(1)?.parse().ok())?
+    })
+}
+
+/// Is `gid` among the `Groups:` of /proc/self/status text?
+fn has_gid(status: &str, gid: u32) -> bool {
+    status.lines().find_map(|l| l.strip_prefix("Groups:")).is_some_and(|g| g.split_whitespace().any(|x| x.parse() == Ok(gid)))
+}
+
+fn proc_uid(status: &str) -> Option<u32> {
+    status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
+}
+
 fn kb_of(meminfo: &str, key: &str) -> u64 {
     meminfo
         .lines()
@@ -608,12 +1132,14 @@ const MIN_DISK_GB: u64 = 15;
 
 /// Why no VM may start right now, if so. The mirror cache is the usual
 /// reclaimable disk hog, so a low-disk message names its size.
-pub fn launch_gate(mem_avail_mb: u64, vm_mem_mb: u32, disk_free_gb: Option<u64>, mirror_mb: Option<u64>) -> Option<String> {
+pub fn launch_gate(mem_avail_mb: u64, vm_mem_mb: u32, disk_free_gb: Option<u64>, mirror_mb: Option<u64>, cache_mb: Option<u64>) -> Option<String> {
     if mem_avail_mb < vm_mem_mb as u64 + 1024 {
         return Some(format!("not enough memory: {mem_avail_mb} MB free"));
     }
     disk_free_gb.filter(|&g| g < MIN_DISK_GB).map(|g| {
-        let m = mirror_mb.map_or(String::new(), |m| format!(" (docker mirror cache {:.1} GB)", m as f64 / 1024.0));
+        let gb = |m: u64| m as f64 / 1024.0;
+        let parts: Vec<String> = [mirror_mb.map(|m| format!("docker mirror cache {:.1} GB", gb(m))), cache_mb.map(|m| format!("repo caches {:.1} GB", gb(m)))].into_iter().flatten().collect();
+        let m = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
         format!("low disk: {g} GB free{m}")
     })
 }
@@ -714,8 +1240,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let mut out = vec![];
 
     let kvm = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm");
-    let groups = output("id", &["-nG"]).await.unwrap_or_default();
-    let warn = if groups.split_whitespace().any(|g| g == "kvm") { "" } else { " (warning: current user is not in the kvm group)" };
+    // The running process's groups, not `id -nG`: a group added after login shows up
+    // in `id` but not in processes started by the old user manager.
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let warn = match (kvm_gid(&group), proc_uid(&status)) {
+        (Some(g), uid) if !has_gid(&status, g) => format!(
+            " (kvm group not active for this process yet — restart the user manager (sudo systemctl restart user@{}) or reboot)",
+            uid.map_or("<uid>".into(), |u| u.to_string())
+        ),
+        _ => String::new(),
+    };
     out.push(match kvm {
         Ok(_) => check("kvm", true, format!("/dev/kvm opens read/write{warn}")),
         Err(e) => check("kvm", false, format!("/dev/kvm: {e}{warn}")),
@@ -766,6 +1301,12 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     let (ok, detail) = crate::mirror::check(app).await;
     out.push(check("docker mirror", ok, detail));
+
+    // Cached unless run from the CLI; a failure only matters when jobs are filtered.
+    out.push(match egress_ready(app, cli).await {
+        Ok(()) => check("filtered egress", true, "jobs reach the internet and the mirror only"),
+        Err(e) => check("filtered egress", cfg.egress != "filtered", if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") }),
+    });
 
     out.push(match output("tailscale", &["status", "--json"]).await {
         Ok(j) => {
@@ -821,7 +1362,53 @@ mod tests {
             note: None,
             cpus: 4,
             mem_mb: 8192,
+            cache: CacheUse::None,
+            cache_note: None,
+            ssh: None,
+            ssh_port: None,
+            hold_until: None,
+            egress: String::new(),
         }
+    }
+
+    #[test]
+    fn egress_wrapping() {
+        let q: Vec<String> = ["qemu-system-x86_64", "-drive", "file=/a b/disk.qcow2"].map(String::from).into();
+        let a = rk_args(Path::new("/d/vm 1"), Some(("100.1.2.3", 2201)), &q);
+        let at = |x: &str| a.iter().position(|v| v == x).unwrap();
+        assert!(a.contains(&"--state-dir".into()) && a.contains(&"/d/vm 1/rk".into()));
+        assert!(!a.iter().any(|v| v == "--disable-host-loopback"));
+        assert_eq!(a[at("-p") + 1], "100.1.2.3:2201:2201/tcp");
+        assert!(a.contains(&"--port-driver=builtin".into()));
+        // qemu args follow the script and nft path as separate argv entries
+        assert_eq!(&a[a.len() - 3..], &q[..]);
+        assert_eq!(a[a.len() - 4], "/d/vm 1/egress.nft");
+        assert!(a[at("-ec") + 1].ends_with("exec \"$@\""));
+        assert!(!rk_args(Path::new("/d"), None, &q).contains(&"-p".into()));
+        assert!(EGRESS_NFT.contains("ct state established,related accept") && EGRESS_NFT.contains("tcp dport 25 drop"));
+    }
+
+    #[test]
+    fn egress_probe_script() {
+        let s = egress_script(true, true);
+        assert!(s.contains("mirror") && s.contains("tailnet") && s.contains("internet unreachable"));
+        let s = egress_script(false, false);
+        assert!(!s.contains("mirror") && !s.contains("$3") && s.contains("dashboard port"));
+        assert!(fresh(100, 699) && !fresh(100, 700));
+    }
+
+    /// Runs the real probe script with stubbed tools: a correctly filtered
+    /// namespace must exit 0, a leaky one must name the failing step.
+    #[test]
+    fn egress_probe_script_runs() {
+        let run = |leaky: bool| {
+            let curl = if leaky { "return 0" } else { r#"case "$*" in *5000*|*github*) return 0;; *) return 7;; esac"# };
+            let script = format!("sysctl(){{ :; }}; nft(){{ :; }}; curl(){{ {curl}; }}\n{}", egress_script(true, true));
+            std::process::Command::new("sh").args(["-c", &script, "sh", "x.nft", "7878", "100.1.2.3"]).output().unwrap()
+        };
+        assert!(run(false).status.success());
+        let leaky = run(true);
+        assert!(!leaky.status.success() && String::from_utf8_lossy(&leaky.stdout).contains("step: dashboard port reachable"));
     }
 
     #[test]
@@ -867,11 +1454,13 @@ mod tests {
 
     #[test]
     fn gates_and_parsers() {
-        assert!(launch_gate(9300, 8192, Some(100), None).is_none());
-        assert!(launch_gate(9300, 8192, None, None).is_none());
-        assert_eq!(launch_gate(9300, 8192, Some(3), None).unwrap(), "low disk: 3 GB free");
-        assert_eq!(launch_gate(9300, 8192, Some(12), Some(9523)).unwrap(), "low disk: 12 GB free (docker mirror cache 9.3 GB)");
-        assert!(launch_gate(5000, 8192, Some(100), None).unwrap().starts_with("not enough memory"));
+        assert!(launch_gate(9300, 8192, Some(100), None, None).is_none());
+        assert!(launch_gate(9300, 8192, None, None, None).is_none());
+        assert_eq!(launch_gate(9300, 8192, Some(3), None, None).unwrap(), "low disk: 3 GB free");
+        assert_eq!(launch_gate(9300, 8192, Some(12), Some(9523), None).unwrap(), "low disk: 12 GB free (docker mirror cache 9.3 GB)");
+        assert_eq!(launch_gate(9300, 8192, Some(12), Some(9523), Some(2048)).unwrap(), "low disk: 12 GB free (docker mirror cache 9.3 GB, repo caches 2.0 GB)");
+        assert_eq!(launch_gate(9300, 8192, Some(12), None, Some(2048)).unwrap(), "low disk: 12 GB free (repo caches 2.0 GB)");
+        assert!(launch_gate(5000, 8192, Some(100), None, None).unwrap().starts_with("not enough memory"));
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 100 40 62914560 40% /\n";
         assert_eq!(parse_df_kb(df), Some(62914560));
         assert_eq!(kb_of("MemTotal: 10 kB\nMemAvailable:    2048 kB\n", "MemAvailable:"), 2048);
@@ -893,6 +1482,94 @@ mod tests {
         assert_eq!(why.unwrap(), "cpu budget: 4 vCPUs committed of 9");
         assert_eq!(Budget::new(65536, 0, 0, 16).take(3, 8192, 4), (3, None));
         assert_eq!(Budget::new(3000, 0, 0, 16).take(1, 2048, 2).0, 0); // the 2 GB host reserve
+    }
+
+    #[test]
+    fn hold_decisions() {
+        let f = Some("Failed");
+        assert_eq!(decide_msg(decide(30, true, true, f)), "hold 1800\n");
+        assert_eq!(decide_msg(decide(30, true, true, None)), "hold 1800\n"); // runner crashed
+        assert_eq!(decide_msg(decide(30, true, true, Some("Succeeded"))), "release\n");
+        assert_eq!(decide_msg(decide(0, true, true, f)), "release\n");
+        assert_eq!(decide_msg(decide(30, false, true, f)), "release\n"); // no way in
+        assert_eq!(decide_msg(decide(30, true, false, None)), "release\n"); // never ran a job
+        assert_eq!(decide_msg(decide(30, true, true, Some("Cancelled"))), "hold 1800\n");
+    }
+
+    #[test]
+    fn ssh_ports() {
+        assert_eq!(alloc_port(&[], |_| true), Some(2200));
+        assert_eq!(alloc_port(&[2200, 2201], |_| true), Some(2202));
+        assert_eq!(alloc_port(&[2200], |p| p != 2201), Some(2202));
+        assert_eq!(alloc_port(&[], |_| false), None);
+        let all: Vec<u16> = (2200..2300).collect();
+        assert_eq!(alloc_port(&all, |_| true), None);
+    }
+
+    #[test]
+    fn key_validation() {
+        assert!(valid_ssh_key("ssh-ed25519 AAAAC3 me@x"));
+        assert!(valid_ssh_key("ecdsa-sha2-nistp256 AAAA"));
+        assert!(valid_ssh_key("sk-ssh-ed25519@openssh.com AAAA"));
+        assert!(!valid_ssh_key("ssh-ed25519"));
+        assert!(!valid_ssh_key("rsa AAAA"));
+        assert!(!valid_ssh_key("ssh-rsa AAAA\nssh-rsa BBBB"));
+        assert!(!valid_ssh_key(""));
+    }
+
+    #[test]
+    fn base64_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foob"), "Zm9vYg==");
+        assert_eq!(b64(b"ssh-a b\nssh-c d"), "c3NoLWEgYgpzc2gtYyBk");
+    }
+
+    #[test]
+    fn cache_trust_rules() {
+        let t = |e, b, d| Ok::<_, &str>((e, b, d));
+        assert!(cache_verdict(true, true, t("push", "main", "main")).is_ok());
+        assert_eq!(cache_verdict(true, true, t("pull_request", "feat", "main")).unwrap_err(), "pull_request event");
+        assert!(cache_verdict(true, true, t("push", "feat", "main")).unwrap_err().contains("not the default"));
+        assert!(cache_verdict(true, false, t("push", "main", "main")).is_err());
+        assert!(cache_verdict(false, true, t("push", "main", "main")).is_err());
+        assert!(cache_verdict(true, true, Err("rate limited")).unwrap_err().contains("rate limited"));
+    }
+
+    #[test]
+    fn cache_paths_and_limits() {
+        assert_eq!(cache_file(Path::new("/d"), "Bunty9/Kiln"), Path::new("/d/cache/bunty9__kiln.qcow2"));
+        assert!(!cache_too_big(36 << 30, 30));
+        assert!(cache_too_big((36 << 30) + 1, 30));
+        assert_eq!(job_id("https://github.com/o/n/actions/runs/1/job/22?pr=3"), Some(22));
+        assert_eq!(job_id("https://github.com/o/n/actions/runs/1"), None);
+        let mut a = vm("a", State::Busy, None);
+        a.cache = CacheUse::Read;
+        let mut b = vm("b", State::Busy, None);
+        b.cache = CacheUse::Read;
+        let mut c = vm("c", State::Done, None);
+        c.cache = CacheUse::Read;
+        let vms = [a, b, c];
+        assert_eq!(cache_readers(&vms, "O/N", "a"), 1);
+        assert_eq!(cache_readers(&vms, "o/n", "zz"), 2);
+        assert_eq!(cache_readers(&vms, "x/y", "a"), 0);
+    }
+
+    #[test]
+    fn kvm_group_parsing() {
+        let st = "Name:\tkiln\nUid:\t1000\t1000\t1000\t1000\nGroups:\t4 24 993 1000 \n";
+        assert_eq!(kvm_gid("root:x:0:\nkvm:x:993:kame\n"), Some(993));
+        assert_eq!(kvm_gid("root:x:0:\n"), None);
+        assert!(has_gid(st, 993));
+        assert!(!has_gid(st, 994));
+        assert_eq!(proc_uid(st), Some(1000));
+    }
+
+    #[test]
+    fn held_counts_as_active() {
+        assert!(State::Held.is_active() && !State::Held.is_waiting());
     }
 
     #[test]

@@ -115,7 +115,7 @@ a.row:hover,li:hover>.row{background:var(--raised)}
 .pg{margin-top:4px;font:12px var(--mono);color:var(--fg-2);grid-area:g;white-space:pre-wrap;overflow-wrap:anywhere}
 .bdg{--c:var(--fg-2);display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:4px;font:500 12px/20px var(--sans);color:var(--c);background:color-mix(in srgb,var(--c) var(--tint),var(--surface));white-space:nowrap}
 .bdg::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
-.s-running{--c:var(--ember)}.s-booting,.s-waiting,.s-queued{--c:var(--queued)}.s-passed,.s-ok{--c:var(--ok)}.s-failed{--c:var(--fail)}.s-lost,.s-warn{--c:var(--warn)}
+.s-running{--c:var(--ember)}.s-booting,.s-waiting,.s-queued{--c:var(--queued)}.s-passed,.s-ok{--c:var(--ok)}.s-failed{--c:var(--fail)}.s-lost,.s-warn,.s-held{--c:var(--warn)}
 .s-running::before,.dot.run{animation:br 1.6s ease-in-out infinite alternate}
 @keyframes br{from{opacity:.55}to{opacity:1}}
 .chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;border:1px solid var(--line-strong);font-size:13px}
@@ -128,7 +128,8 @@ a.row:hover,li:hover>.row{background:var(--raised)}
 .btn[disabled]{opacity:.5;cursor:default}
 @media(max-width:719px){.btn{height:40px}}
 input[type=text],input[type=number],input[type=password],select{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line-strong);background:var(--sunk);min-width:0;max-width:100%}
-input::placeholder{color:var(--fg-3)}
+textarea{font:inherit;color:inherit;padding:8px 10px;border-radius:4px;border:1px solid var(--line-strong);background:var(--sunk);max-width:100%;resize:vertical}
+input::placeholder,textarea::placeholder{color:var(--fg-3)}
 @media(max-width:719px){input[type=text],input[type=number],input[type=password],select{height:40px;font-size:16px}}
 input[role=switch]{appearance:none;flex:none;width:32px;height:18px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer;margin:0;transition:background var(--ease)}
 input[role=switch]::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fg);transition:transform var(--ease)}
@@ -269,13 +270,14 @@ const P = {
 };
 const ic = (n, s = 16) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
 const badge = (s, c = s) => `<span class="bdg s-${c}">${esc(s)}</span>`;
-const ACTIVE = v => ['booting', 'idle', 'busy'].includes(v.state);
+const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
 function status(v) {
   const r = String(v.result || '').toLowerCase();
   switch (v.state) {
     case 'booting': return 'booting';
     case 'idle': return 'waiting';
     case 'busy': return 'running';
+    case 'held': return 'held';
     case 'done': return r === 'succeeded' || !r ? 'passed' : /cancel/.test(r) ? 'cancelled' : 'failed';
     case 'failed': return 'failed';
     case 'killed': return 'killed';
@@ -600,6 +602,11 @@ pages.jobs = {
   unmount() { pages.job.unmount(); },
 };
 const fb = new Map();
+const cacheLine = v => {
+  const t = v.cache === 'committed' ? 'committed' : v.cache === 'read' ? 'attached' : v.cache === 'discarded' ? 'read-only' : S.config.cache === false ? 'disabled' : v.cache_note ? 'off' : '';
+  const why = v.cache_note ? ` (${esc(v.cache_note.replace(/^cache not saved: /, ''))})` : '';
+  return t ? `<p class="fg2 sm" style="margin:8px 0">Cache: ${t}${why}</p>` : '';
+};
 function segs(v) {
   const n = now(), end = v.ended || n, online = v.online_at || fb.get(v.id) || null, o = [], act = ACTIVE(v);
   if (v.queued_at && v.started) o.push(['Queue', v.started - v.queued_at, 'q']);
@@ -622,10 +629,12 @@ pages.job = {
     }
     const sg = segs(v), tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1, calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
     setHTML(box, `<div class="jh">${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener">View on GitHub ↗</a>` : ''}${ACTIVE(v) ? '<button class="btn dng" data-act="kill">Kill VM</button>' : ''}</div>
+      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener">View on GitHub ↗</a>` : ''}${v.state === 'held' ? '<button class="btn" data-act="release">Release now</button>' : ''}${ACTIVE(v) ? '<button class="btn dng" data-act="kill">Kill VM</button>' : ''}</div>
       <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
       <div class="card"><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
       <div class="tll">${sg.map(s => `<span>${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div></div>
+      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b><div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div></div>` : ''}
+      ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv) {
       const id = v.id;
@@ -833,7 +842,7 @@ async function loadLast(r) {
 }
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics' };
 let ncHTML = '', tsOpen = false;
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
 const pings = new Map();
@@ -893,9 +902,32 @@ const G = {
       if (S.baking && !this.was) $('#bake-d').open = true; this.was = S.baking;
     },
   },
+  cache: {
+    html: () => `<div class="card"><h2>Repo cache</h2>
+      <div class="fld"><span class="lb">Persistent cache</span><div class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (docker layers, npm, cargo, go, gradle, maven, ~/.cache). Every job reads it; only a successful push to the default branch saves to it.</span></div></div>
+      ${fld('f-cache_gb', 'Size (GB)', `<input type="number" id="f-cache_gb" data-k="cache_gb" value="${esc(draft.cache_gb)}" min="5" max="500" step="1">`, 'Applies to caches created from now on. A cache that grows past 1.2x this is reset. Clear a cache to resize it.')}</div>
+      <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
+    live() {
+      const c = S.caches || {}, repos = S.config.repos;
+      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}">Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
+    },
+  },
+  debug: {
+    html: () => `<div class="card"><h2>Debug hold</h2>
+      ${fld('f-debug_hold_mins', 'Hold failed jobs (min)', `<input type="number" id="f-debug_hold_mins" data-k="debug_hold_mins" value="${esc(draft.debug_hold_mins)}" min="0" max="120" step="1">`, '0 = off. A job that fails keeps its VM (and its memory and slot) for this long so you can SSH in. Max 120.')}
+      <div class="fld"><label for="f-ssh">SSH public keys</label><div><textarea id="f-ssh" data-k="debug_ssh_keys" rows="4" spellcheck="false" class="mono" style="width:100%" placeholder="ssh-ed25519 AAAA… you@laptop">${esc((draft.debug_ssh_keys || []).join('\n'))}</textarea></div><div class="h">One per line. Key-only login as <span class="mono">runner</span>, on the tailnet address of this box. Needs both settings.</div></div></div>`,
+  },
   network: {
-    html: () => `<div id="ts"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
-    open() { loadTs(); }, live() { if (TS) renderTs(); },
+    html: () => `<div class="card"><h2>Job network</h2>
+      <div class="fld"><span class="lb" id="eg-l">Job network</span><div><div class="seg" role="radiogroup" aria-labelledby="eg-l">${['open', 'filtered'].map(m => `<button role="radio" aria-checked="${(draft.egress || 'open') === m}" data-act="egress" data-id="${m}">${m === 'open' ? 'Open' : 'Filtered'}</button>`).join('')}</div>
+      <div class="h">Filtered: jobs reach the internet and kiln's Docker mirror only — not your LAN, tailnet, or other services on this box. Recommended before running untrusted pull requests. Open: jobs route like any process on the host.</div><div id="eg-st" class="sm" style="margin-top:8px"></div></div></div></div>
+      <div id="ts" style="margin-top:16px"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
+    open() { loadTs(); if (!doctor?.checks?.length) runDoctor(); },
+    live() {
+      const c = (doctor?.checks || []).find(x => x.name === 'filtered egress'), el = $('#eg-st');
+      if (el) setHTML(el, c ? `<span class="${c.ok ? 'ok' : 'fail'}">${c.ok ? 'Check passed' : 'Check failed'}</span> <span class="fg2">${esc(c.detail)}</span>` : '<span class="fg2">Checking…</span>');
+      if (TS) renderTs();
+    },
   },
   notifications: {
     html() {
@@ -998,6 +1030,13 @@ const ACT = {
     if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(v.repo)} / ${esc(v.job || 'no job')}</b>? The job fails on GitHub.`, action: 'Kill VM', danger: 1 })) return;
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
+  async release() { await post(`/api/vms/${encodeURIComponent(pages.job.id)}/release`); toast('Releasing'); await poll(); },
+  copyssh: b => copy(b.dataset.id, 'ssh command copied'),
+  async clearcache(b) {
+    const r = b.dataset.id;
+    if (!await ask({ title: 'Clear cache?', body: `Delete the cache of <b>${esc(r)}</b>? The next job starts cold and rebuilds it.`, action: 'Clear cache', danger: 1 })) return;
+    await post('/api/cache/clear', { repo: r }); toast('Cache cleared'); await poll();
+  },
   copysnip: () => copy(snippet(), 'Workflow snippet copied'),
   rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" value="${rate()}"><button class="btn pri">Save</button></form>`); },
   jf(b) { jf.f = b.dataset.v; pages.jobs.update(); },
@@ -1020,7 +1059,7 @@ const ACT = {
   gsel: s => (location.hash = '#/settings/' + s.value),
   discard() { draft = JSON.parse(JSON.stringify(S.config)); pages.settings.render(); },
   async save() {
-    const bad = ['vm_cpus', 'vm_mem_mb', 'vm_disk_gb', 'poll_secs', 'job_timeout_mins', 'idle_timeout_mins'].find(k => !(draft[k] > 0));
+    const bad = ['vm_cpus', 'vm_mem_mb', 'vm_disk_gb', 'poll_secs', 'job_timeout_mins', 'idle_timeout_mins', 'cache_gb'].find(k => !(draft[k] > 0));
     if (bad) return toast(`${bad.replace(/_/g, ' ')} must be greater than 0`, true);
     const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
     if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
@@ -1035,6 +1074,7 @@ const ACT = {
     lsSet('kiln-notify', '1'); toast('Notifications on'); poll();
   },
   doctor() { doctor = null; return runDoctor(); },
+  egress(b) { draft.egress = b.dataset.id; pages.settings.render(); },
   tsr() { return loadTs(); },
   async ping(b) {
     const ip = b.dataset.id; pings.set(ip, { busy: 1 }); renderTs();
@@ -1071,6 +1111,7 @@ document.addEventListener('input', e => {
   const t = e.target, k = t.dataset.k; if (!k || !draft) return;
   if (k === 'adduser') { $('#dbar').hidden = false; return; }
   const v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value.trim();
+  if (k === 'debug_ssh_keys') draft[k] = t.value.split('\n').map(x => x.trim()).filter(Boolean); else
   if (k === 'vm_mem_gb') draft.vm_mem_mb = Math.round(v * 1024); else draft[k] = v;
   pages.settings.live();
 });

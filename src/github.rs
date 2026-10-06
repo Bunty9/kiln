@@ -22,6 +22,8 @@ pub struct Gh {
     // URL -> (etag, body). Conditional GETs that return 304 are free against
     // the rate limit, which is what makes 5s polling of several repos viable.
     etags: Mutex<HashMap<String, (String, Value)>>,
+    /// repo -> (default branch, fetched at unix time); renames are rare, so 1h.
+    defaults: std::sync::Mutex<HashMap<String, (String, u64)>>,
 }
 
 pub struct Resp {
@@ -45,6 +47,7 @@ impl Gh {
             paused_until: AtomicU64::new(0),
             latest: Default::default(),
             etags: Mutex::default(),
+            defaults: Default::default(),
         }
     }
 
@@ -189,6 +192,37 @@ impl Gh {
             bail!("{method} {path}: {status} {body}");
         }
         Ok(r.json().await.unwrap_or(Value::Null))
+    }
+
+    /// (event, head branch, default branch) of the run behind a job, to decide
+    /// whether its cache may be committed.
+    pub async fn cache_trust(&self, repo: &str, job: u64) -> Result<(String, String, String)> {
+        let j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
+        let run_id = j["run_id"].as_u64().context("job has no run_id")?;
+        let run = self.get(&format!("repos/{repo}/actions/runs/{run_id}")).await?;
+        let branch = j["head_branch"].as_str().or(run["head_branch"].as_str()).unwrap_or("").to_string();
+        let event = run["event"].as_str().unwrap_or("").to_string();
+        let key = repo.to_ascii_lowercase();
+        let cached = self.defaults.lock().unwrap().get(&key).filter(|(_, at)| crate::now() < at + 3600).map(|(b, _)| b.clone());
+        let default = match cached {
+            Some(b) => b,
+            None => {
+                let b = self.get(&format!("repos/{repo}")).await?["default_branch"].as_str().context("no default_branch")?.to_string();
+                self.defaults.lock().unwrap().insert(key, (b.clone(), crate::now()));
+                b
+            }
+        };
+        // A pushed *tag* named like the default branch also arrives as
+        // event=push, head_branch=main. Only trust it if the commit is really
+        // on the default branch (identical to it or an ancestor of it).
+        if event == "push" && branch == default {
+            let sha = run["head_sha"].as_str().context("run has no head_sha")?;
+            let cmp = self.get(&format!("repos/{repo}/compare/{default}...{sha}")).await?;
+            if !matches!(cmp["status"].as_str(), Some("identical" | "behind")) {
+                return Ok((event, format!("{branch} (commit {:.7} not on {default})", sha), default));
+            }
+        }
+        Ok((event, branch, default))
     }
 
     /// Queued jobs per VM size (see `job_size`), counted once per job id.

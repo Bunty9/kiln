@@ -48,6 +48,8 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/doctor", get(doctor))
         .route("/api/log", get(log))
         .route("/api/vms/{id}/kill", post(kill))
+        .route("/api/vms/{id}/release", post(release))
+        .route("/api/cache/clear", post(cache_clear))
         .route("/api/bake", post(bake))
         .route("/api/tailscale", get(ts_status))
         .route("/api/tailscale/netcheck", get(ts_netcheck))
@@ -277,6 +279,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
         "host": host_stats(&app).await,
         "mirror": mirror::status_json(&app).await,
+        "caches": vm::cache_stats(&app.data, &app.cfg().repos),
     })))
 }
 
@@ -286,7 +289,13 @@ async fn doctor(State(app): S) -> R<Json<Value>> {
 
 async fn set_config(State(app): S, Json(c): Json<Config>) -> R<Json<Value>> {
     let restart = RUNNING_LISTEN.get().is_some_and(|l| *l != c.listen);
+    let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     app.save_cfg(c)?;
+    if to_filtered {
+        // Probe now so the dashboard shows the result and the scheduler has it cached.
+        let a = app.clone();
+        tokio::spawn(async move { let _ = vm::egress_ready(&a, true).await; });
+    }
     Ok(Json(json!({ "restart_required": restart })))
 }
 
@@ -352,6 +361,26 @@ async fn log(State(app): S, Query(q): Query<LogQuery>) -> R<Json<Value>> {
 async fn kill(State(app): S, Path(id): Path<String>) -> R<StatusCode> {
     let n = app.kills.lock().unwrap().get(&id).cloned().ok_or_else(|| anyhow!("no running VM {id}"))?;
     n.notify_one();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends a hold early: the guest powers off and the VM finishes normally.
+async fn release(State(app): S, Path(id): Path<String>) -> R<StatusCode> {
+    vm::check_id(&id)?;
+    if !app.vms.lock().unwrap().iter().any(|v| v.id == id && v.state == vm::State::Held) {
+        bail_r("that VM is not held")?;
+    }
+    let n = app.releases.lock().unwrap().get(&id).cloned().ok_or_else(|| anyhow!("no running VM {id}"))?;
+    n.notify_one();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RepoBody {
+    repo: String,
+}
+async fn cache_clear(State(app): S, Json(b): Json<RepoBody>) -> R<StatusCode> {
+    vm::clear_cache(&app, &b.repo)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -93,7 +93,23 @@ Editable from the dashboard (`POST /api/config`); changes apply without a restar
 
 - `poll_secs` (default 5, min 3): how often GitHub is polled. ETag 304s don't count against the rate limit, so 5s is cheap. A `config.json` saved by an older version keeps its old value.
 - `docker_mirror` (default `true`): run the Docker Hub pull-through cache. On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (sha256 verified, refused on mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000` (restart backoff 5s to 60s; log in `<data>/registry/registry.log`; images cached 7 days under `<data>/registry/data`). If port 5000 is already taken kiln leaves it alone and reports "port 5000 in use". Toggling it takes effect within seconds.
+- `cache` (default `true`), `cache_gb` (default 30, 5 to 500): the per-repo cache disk, see [Repo cache](#repo-cache).
+- `debug_hold_mins` (default 0 = off, max 120) and `debug_ssh_keys`: keep failed jobs for SSH, see [Debugging a failed job](#debugging-a-failed-job).
 - `auto_rebake` (default `true`): when the image is stale (runner behind the latest release, or over 25 days old), kiln rebakes by itself, at most once every 6 hours. Jobs that queue meanwhile still launch on the old base, which is swapped atomically.
+
+## Repo cache
+
+Each repo gets one persistent cache disk, `<data>/cache/<owner>__<name>.qcow2` (virtual size `cache_gb`, created blank on first use; the guest formats it). The guest bind-mounts these onto it: `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo/{registry,git}`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository`. `/opt/hostedtoolcache` is not cached (the pre-seeded Node lives there). So Docker layers and package downloads are warm on every job, with no `actions/cache` round trip.
+
+**Trust rule: trusted writer, throwaway readers.** Every job VM gets a private qcow2 overlay of its repo's cache, as a second disk, so any job (PR or branch) starts warm and many can run at once. kiln merges the overlay back (`qemu-img commit`) only when all of these hold: the job succeeded, it was a `push` to the repo's default branch (checked through the GitHub API), and `cache` is on. If other jobs of the repo are still reading the cache, the overlay is parked and merged as soon as the last of them finishes (committing under a live reader would corrupt its overlay); a newer trusted overlay supersedes a parked one, since every live overlay shares the same base. Anything else is discarded with the overlay, and the job page says why ("cache not saved: pull_request event"). This mirrors GitHub's branch-scope rule for `actions/cache`: a PR can read the cache but can never poison it.
+
+A cache that grows past 1.2x `cache_gb` is deleted at commit time and starts empty again. Changing `cache_gb` only affects caches created afterwards. To clear one, use Settings > Cache > Clear, or `POST /api/cache/clear {"repo":"o/n"}` (refused while jobs of that repo run), or delete the file while kiln is idle. The cache directory counts toward the low-disk message.
+
+## Debugging a failed job
+
+Set `debug_hold_mins` (say 30) and add your public keys to `debug_ssh_keys` (Settings > Debugging). When a job fails (or its runner dies without a verdict) its VM stays up for that long instead of powering off, and its job page shows the command, e.g. `ssh -p 2201 runner@100.73.48.98`, with Release now and Kill buttons. Login is key-only as `runner`, on a port from 2200 to 2299 forwarded by QEMU, bound to the box's Tailscale IPv4 (loopback if tailscale is not up). kiln talks to the guest over the serial console: after the runner exits the guest asks (`kiln: decide`) and kiln answers `hold <secs>` or `release`.
+
+Security notes: a held VM keeps its memory and its slot (it counts toward `max_vms`) until released or the time is up. sshd is not running during jobs; it is started only for a hold. All VMs share the same SSH host keys (baked into the image), which is fine for throwaway guests behind key-only auth. Job VMs reach the host's tailnet address through the NAT, so a running job can reach a held VM's SSH port; it still needs your key. Rebake after updating kiln to get the guest side.
 
 ## Security model
 
@@ -105,11 +121,14 @@ The dashboard holds a GitHub token, so who can call it matters:
 - **The Docker mirror** listens on host loopback only (`127.0.0.1:5000`) and is a pull-only proxy of public Docker Hub images (content-addressed). Job VMs reach it by design, through the NAT as `10.0.2.2:5000`; it holds no credentials and can't push.
 - **The GitHub proxy** only passes `repos/<configured>/actions/{workflows,runs,jobs}`. Runners, secrets and variables are out of reach.
 
-What a job can reach: a job VM has full outbound network through the host's
-NAT. That includes the LAN and **the tailnet** (it routes like any process on
-the host). That's fine for your own repos. Don't point kiln at repos that run
-untrusted pull requests from forks until the egress filtering on the roadmap
-is in place.
+What a job can reach depends on **Settings > Network > Job network** (`egress`):
+
+- **open** (default for now): a job VM has full outbound network through the host's NAT. That includes the LAN and **the tailnet**. Fine for your own repos.
+- **filtered**: each job's QEMU runs in its own rootless network namespace (rootlesskit + slirp4netns) with an nftables egress filter loaded first. Jobs reach the public internet, DNS and the Docker mirror (`:5000` only). They cannot reach the LAN, the tailnet, the host's own addresses, cloud metadata or any other port on the host's loopback, and outbound SMTP (port 25) is dropped. IPv6 is off. If the filter cannot be set up, QEMU never starts, and kiln runs a probe (cached 10 minutes, shown in Diagnostics as "filtered egress") and launches nothing while it fails: it never falls back to open. Recommended before running untrusted pull requests from forks.
+
+Residual risks in filtered mode: DNS goes through the host's resolver, so data can be exfiltrated in DNS queries; IPv6 is disabled rather than filtered; and the host's public WAN IP is not blocked (a router that hairpins it would expose its forwarded ports).
+
+Host requirements for filtered mode: `sudo apt install rootlesskit slirp4netns nftables uidmap`, plus subuid/subgid ranges for the kiln user (`/etc/subuid`, `/etc/subgid`; Ubuntu creates them). On Ubuntu 24.04 plain user namespaces are restricted by AppArmor, but the rootlesskit and slirp4netns packages ship profiles that allow them. Bake VMs always use open networking. A held debug VM's SSH port is published into the namespace by rootlesskit's port driver. The default will become filtered once verified on the host.
 
 ## Files
 
@@ -121,8 +140,9 @@ is in place.
   images/bake.log             last bake
   bin/registry                pinned Docker registry binary (docker_mirror)
   registry/                   config.yml, registry.log, data/ (the pull cache)
+  cache/<owner>__<name>.qcow2 per-repo cache disk (cache)
   vms/<id>/meta.json          per-VM record; console.log, steps.log
-                              (disk.qcow2 and the JIT secret are deleted when the VM exits)
+                              (disk.qcow2, cache.qcow2 and the JIT secret are deleted when the VM exits)
 ```
 
 The base image recipe is [`guest/user-data.yaml`](guest/user-data.yaml) (cloud-init). It is the place to add toolchains your jobs expect.
@@ -131,7 +151,6 @@ The base image recipe is [`guest/user-data.yaml`](guest/user-data.yaml) (cloud-i
 
 - **Runner updates.** kiln pins the runner version at bake time. GitHub stops sending jobs to runners more than about 30 days out of date, so rebake monthly (one click). kiln rebakes automatically (`auto_rebake`) once the image is stale and the box is idle.
 - **Network throughput.** Slirp tops out well below line rate and is CPU-heavy on large `docker pull`s. *Next:* `passt` (still rootless), or a one-time root setup of tap devices, which would also allow Firecracker or Cloud Hypervisor.
-- **No cache between jobs yet.** *Next:* one persistent cache disk per VM slot, mounted at `/var/lib/docker` and `~/.cache`. QEMU's image locking keeps two VMs from sharing one.
 - **PAT auth.** *Next:* a GitHub App for org-wide runners and short-lived tokens.
 - **Single host, x86_64 only.** Scheduling is a per-repo count; there are no priorities or fair-share yet.
-- **Job egress filtering.** *Next:* passt or tap networking with a host firewall that allows only the internet, not the LAN or tailnet.
+- **Filtered egress is opt-in.** `egress: "filtered"` is implemented; *Next:* make it the default once verified on the host, and filter DNS.

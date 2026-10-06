@@ -15,7 +15,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 **Kiln is not right for:**
 - macOS or Windows builds (only Ubuntu 24.04)
 - High-availability requirements (single-host design)
-- Untrusted fork PRs (egress filtering not yet implemented)
+- Untrusted fork PRs unless you set `egress` to `filtered` (Settings > Network): then jobs reach only the internet and the Docker mirror, not your LAN or tailnet. It needs `rootlesskit slirp4netns nftables uidmap`; see the README
 
 ## Migration in 3 Steps
 
@@ -58,7 +58,8 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 
 ## Tips
 
-- **Caching:** `actions/cache` and `cache-to: type=gha` work but route over the internet. Per-repo persistent cache disks are planned.
+- **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, cargo registry/git, Go modules, Gradle caches and `~/.m2/repository` are warm without any workflow change. Every job reads it; only a successful push to the default branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
+- **Debugging:** set `debug_hold_mins` and `debug_ssh_keys` in Settings > Debugging and a failed job's VM stays up for SSH (see the README).
 - **Image pulls:** Docker Hub limits 100 pulls/6h per IP; kiln's built-in pull-through mirror (live, `docker_mirror` in settings; 10.0.2.2:5000 from the VM) avoids this, with a fallback to Docker Hub if it is down.
 - **Parallelism:** Use `concurrency:` groups to avoid overwhelming your host.
 - **Pin runner labels:** Always use `[self-hosted, kiln]` (or a size label) to avoid accidents with other self-hosted runners.
