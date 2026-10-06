@@ -76,11 +76,16 @@ kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this
 
 ## Dashboard
 
-- **Overview:** health, host load and memory, VM slots, queued jobs per repo, recent VMs.
-- **Repos:** connected repos, their workflows (with dispatch), recent runs (with rerun and cancel), jobs, steps, and logs of finished jobs.
-- **VMs:** every job VM, with a live **console** (boot and runner) and live **steps** output. Step output comes from the runner's `_diag/pages`, mirrored over a second serial port. Kill button.
-- **Tailscale:** connection state, peers (direct vs DERP), ping, netcheck, and the HTTPS serve toggle.
-- **Settings:** limits and timeouts, token, rebaking the base image.
+A first-run stepper (token, bake, repo, workflow, first job) takes over until kiln is set up. After that there are four pages:
+
+- **Overview:** health banners only when something needs you (token, image, backoff, rate limit, memory, mirror), one "chamber" per VM slot with live timers, jobs today, failures, median job time, and an estimate of minutes saved against GitHub-hosted prices.
+- **Jobs:** every job VM, filterable. The detail page shows a queue, boot, wait and job timeline, the exit reason, and three log sources: live **console** (boot and runner), live **steps** (the runner's `_diag/pages`, mirrored over a second serial port) and the **GitHub** log once the job finishes. Logs render ANSI colour and support follow, wrap, copy and download. Kill button.
+- **Repos:** connected repos, whether jobs actually route to kiln, workflows (with dispatch), recent runs (rerun or cancel), and jobs and steps.
+- **Settings:** capacity (and pause), timeouts, access, GitHub token (validated on save), image (rebake, Docker mirror, auto-rebake), Tailscale network (peers, ping, netcheck, HTTPS serve) and diagnostics (`kiln doctor`).
+
+The tab title and favicon show running jobs and unseen failures. Opt-in browser notifications for failed jobs need HTTPS, so turn on Serve first.
+
+For moving real projects over (stack compatibility, pricing, examples), see [docs/stacks.md](docs/stacks.md).
 
 ### Settings (`config.json`)
 
@@ -88,7 +93,7 @@ Editable from the dashboard (`POST /api/config`); changes apply without a restar
 
 - `poll_secs` (default 5, min 3): how often GitHub is polled. ETag 304s don't count against the rate limit, so 5s is cheap. A `config.json` saved by an older version keeps its old value.
 - `docker_mirror` (default `true`): run the Docker Hub pull-through cache. On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (sha256 verified, refused on mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000` (restart backoff 5s to 60s; log in `<data>/registry/registry.log`; images cached 7 days under `<data>/registry/data`). If port 5000 is already taken kiln leaves it alone and reports "port 5000 in use". Toggling it takes effect within seconds.
-- `auto_rebake` (default `true`): when the image is stale (runner behind the latest release, or over 25 days old) and no VM is active, kiln rebakes by itself, at most once every 6 hours. Jobs that queue meanwhile still launch on the old base, which is swapped atomically.
+- `auto_rebake` (default `true`): when the image is stale (runner behind the latest release, or over 25 days old), kiln rebakes by itself, at most once every 6 hours. Jobs that queue meanwhile still launch on the old base, which is swapped atomically.
 
 ## Security model
 
