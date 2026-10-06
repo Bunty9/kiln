@@ -14,6 +14,8 @@ on:
 
 jobs:
   node-postgres:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     services:
       postgres:
@@ -41,6 +43,8 @@ jobs:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   python-uv:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     defaults:
       run:
@@ -51,6 +55,8 @@ jobs:
       - run: uv run --with pytest pytest -q
 
   go:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     defaults:
       run:
@@ -64,6 +70,8 @@ jobs:
       - run: go test ./...
 
   docker-build:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     defaults:
       run:
@@ -80,6 +88,8 @@ jobs:
       - run: docker run --rm kiln-test:latest
 
   playwright:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     defaults:
       run:
@@ -94,6 +104,8 @@ jobs:
       - run: npx playwright test
 
   rust:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     steps:
       - uses: actions/checkout@v4

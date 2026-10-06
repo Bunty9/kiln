@@ -392,6 +392,8 @@ on:
   workflow_dispatch:
 jobs:
   hello:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, {label}]
     steps:
       - name: Hello from kiln

@@ -77,6 +77,18 @@ kiln is honest about these:
 
 ## Recommendations
 
+- **Never let fork pull requests reach kiln.** For a public repo, guard every `pull_request` job (kiln's own workflows and the `kiln-hello.yml` it generates already do):
+
+```yaml
+jobs:
+  test:
+    # Never run pull requests from forks on self-hosted hardware.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, kiln]
+```
+
+  Also keep GitHub's "Require approval for all outside collaborators" setting on (Settings › Actions › General).
+
 - Set `egress` to `filtered` before running untrusted pull requests, such as ones from forks, and check Diagnostics shows "filtered egress" passing. Also consider requiring approval for workflows from outside contributors in the repository's GitHub settings.
 - Use a fine-grained token with only the repos you serve and the permissions listed in [docs/configuration.md](docs/configuration.md#github-token): *Administration: write* and *Actions: read and write*. Add *Contents* and *Workflows* write only while you use the hello PR.
 - Keep `allowed_users` empty (owner only) or minimal, and do not share the box's node to other tailnets.
