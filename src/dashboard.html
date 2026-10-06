@@ -633,7 +633,7 @@ pages.job = {
       <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
       <div class="card"><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
       <div class="tll">${sg.map(s => `<span>${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div></div>
-      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b><div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div></div>` : ''}
+      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b><div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv) {

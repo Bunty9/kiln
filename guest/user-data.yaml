@@ -102,8 +102,8 @@ write_files:
       apt-get clean
       systemctl enable kiln-job.service kiln-cache.service
       # sshd only exists for held (failed) jobs: kiln-job starts it. Noble socket-activates it, so disable both.
-      # Host keys are generated now, so every VM shares them: fine for throwaway VMs behind key-only auth.
-      ssh-keygen -A
+      # No baked host keys: kiln-job generates fresh ones per boot, at hold time.
+      rm -f /etc/ssh/ssh_host_*
       systemctl disable ssh.service ssh.socket || true
       # kiln talks to the guest over ttyS0 input; nothing else may read it.
       systemctl mask serial-getty@ttyS0.service
@@ -143,6 +143,8 @@ write_files:
             chown runner:runner /home/runner/.ssh/authorized_keys
             chmod 600 /home/runner/.ssh/authorized_keys
           fi
+          ssh-keygen -A >/dev/null 2>&1
+          for k in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$k"; done | sed 's/^/kiln: hostkey /'
           systemctl start ssh
           end=$((SECONDS + secs))
           while [ "$SECONDS" -lt "$end" ]; do

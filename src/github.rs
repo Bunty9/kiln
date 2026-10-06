@@ -194,14 +194,15 @@ impl Gh {
         Ok(r.json().await.unwrap_or(Value::Null))
     }
 
-    /// (event, head branch, default branch) of the run behind a job, to decide
-    /// whether its cache may be committed.
-    pub async fn cache_trust(&self, repo: &str, job: u64) -> Result<(String, String, String)> {
+    /// (event, head branch, default branch, job conclusion) of the run behind a job, to
+    /// decide whether its cache may be committed. The conclusion is GitHub's, not the console's.
+    pub async fn cache_trust(&self, repo: &str, job: u64) -> Result<(String, String, String, String)> {
         let j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
         let run_id = j["run_id"].as_u64().context("job has no run_id")?;
         let run = self.get(&format!("repos/{repo}/actions/runs/{run_id}")).await?;
         let branch = j["head_branch"].as_str().or(run["head_branch"].as_str()).unwrap_or("").to_string();
         let event = run["event"].as_str().unwrap_or("").to_string();
+        let conclusion = j["conclusion"].as_str().unwrap_or("none").to_string();
         let key = repo.to_ascii_lowercase();
         let cached = self.defaults.lock().unwrap().get(&key).filter(|(_, at)| crate::now() < at + 3600).map(|(b, _)| b.clone());
         let default = match cached {
@@ -219,10 +220,10 @@ impl Gh {
             let sha = run["head_sha"].as_str().context("run has no head_sha")?;
             let cmp = self.get(&format!("repos/{repo}/compare/{default}...{sha}")).await?;
             if !matches!(cmp["status"].as_str(), Some("identical" | "behind")) {
-                return Ok((event, format!("{branch} (commit {:.7} not on {default})", sha), default));
+                return Ok((event, format!("{branch} (commit {:.7} not on {default})", sha), default, conclusion));
             }
         }
-        Ok((event, branch, default))
+        Ok((event, branch, default, conclusion))
     }
 
     /// Queued jobs per VM size (see `job_size`), counted once per job id.

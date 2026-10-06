@@ -37,6 +37,8 @@ pub struct Config {
     pub cache: bool,
     /// Virtual size of a new repo cache; it is reset when it grows past 1.2x this.
     pub cache_gb: u32,
+    /// Docker mirror storage cap; over it (checked every 10 min) the cache is wiped.
+    pub mirror_gb: u32,
     /// Keep a failed job's VM this long for SSH debugging. 0 = off.
     pub debug_hold_mins: u64,
     /// Public keys allowed into a held VM (one authorized_keys line each).
@@ -63,6 +65,7 @@ impl Default for Config {
             auto_rebake: true,
             cache: true,
             cache_gb: 30,
+            mirror_gb: 20,
             debug_hold_mins: 0,
             debug_ssh_keys: vec![],
             egress: "open".into(),
@@ -122,6 +125,9 @@ impl Config {
         }
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
+        }
+        if !(1..=500).contains(&self.mirror_gb) {
+            bail!("mirror_gb must be 1..=500");
         }
         if self.debug_hold_mins > 120 {
             bail!("debug_hold_mins must be 0..=120 (0 = off)");
@@ -559,6 +565,9 @@ mod tests {
         assert!(ok(|c| c.cache_gb = 500));
         assert!(!ok(|c| c.cache_gb = 4));
         assert!(!ok(|c| c.cache_gb = 501));
+        assert!(ok(|c| c.mirror_gb = 500));
+        assert!(!ok(|c| c.mirror_gb = 0));
+        assert!(!ok(|c| c.mirror_gb = 501));
         assert!(ok(|c| c.debug_hold_mins = 120));
         assert!(!ok(|c| c.debug_hold_mins = 121));
         assert!(ok(|c| c.debug_ssh_keys = vec!["ssh-ed25519 AAAA me@x".into()]));

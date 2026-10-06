@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -89,14 +89,19 @@ pub struct Vm {
     pub ssh_port: Option<u16>,
     #[serde(default)]
     pub hold_until: Option<u64>,
+    /// Host key fingerprints the held guest printed (first 4), to verify before trusting the login.
+    #[serde(default)]
+    pub ssh_hostkeys: Vec<String>,
     /// Job network this VM booted with: "open" | "filtered" ("" in older records).
     #[serde(default)]
     pub egress: String,
 }
 
 const KEEP_HISTORY: usize = 200;
-/// console.log stops growing here (parsing continues).
+/// console.log and steps.log stop growing here (parsing continues).
 const LOG_CAP: usize = 64 << 20;
+/// Longest console line kept in memory; a guest can print forever without a newline.
+const LINE_CAP: u64 = 64 << 10;
 
 pub fn check_id(id: &str) -> Result<()> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -186,6 +191,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
         ssh: None,
         ssh_port: None,
         hold_until: None,
+        ssh_hostkeys: vec![],
         egress: app.cfg().egress,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
@@ -202,6 +208,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32) {
         let _ = tokio::fs::remove_file(dir.join("disk.qcow2")).await;
         let _ = tokio::fs::remove_file(dir.join("jit")).await;
         let _ = tokio::fs::remove_file(dir.join("egress.nft")).await;
+        let _ = tokio::fs::remove_file(dir.join("steps.sock")).await;
+        let _ = tokio::fs::remove_file(dir.join("mon.sock")).await;
         let _ = tokio::fs::remove_dir_all(dir.join("rk")).await;
         let v = update(&app, &id, |v| {
             v.ended = Some(now());
@@ -310,14 +318,20 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let filtered = v.egress == "filtered";
     let mut ssh_host = None;
     let mut fwd = String::new();
+    let publish = if !filtered { Publish::Monitor } else if which("rootlessctl") { Publish::Rootless } else { Publish::Static };
     if cfg.debug_hold_mins > 0 && !cfg.debug_ssh_keys.is_empty() {
         let ip = bind_ip().await;
         if let Some(port) = pick_port(app, id, &ip) {
-            // Filtered: QEMU runs in a private netns, so hostfwd binds there, not on the
-            // host. rootlesskit's port driver publishes host <ip>:<port> into the netns
-            // (see rk_args); QEMU listens on all netns addresses (the driver dials the
-            // netns loopback). Open: QEMU binds the host address itself.
-            fwd = if filtered { format!(",hostfwd=tcp::{port}-:22") } else { format!(",hostfwd=tcp:{ip}:{port}-:22") };
+            // The port is only reserved here; it is published when the VM is held (publish_ssh),
+            // so a running job cannot even connect to it.
+            // Filtered: QEMU runs in a private netns, so its hostfwd binds there, not on the
+            // host; rootlesskit's port driver publishes host <ip>:<port> into the netns, at hold
+            // time via rootlessctl (QEMU listens on all netns addresses: the driver dials the
+            // netns loopback). Without rootlessctl, `-p` publishes it from the start.
+            // Open: hostfwd_add through the QEMU monitor at hold time.
+            if filtered {
+                fwd = format!(",hostfwd=tcp::{port}-:22");
+            }
             write_secret(&dir.join("ssh"), &format!("kiln.ssh={}", b64(cfg.debug_ssh_keys.join("\n").as_bytes()))).await?;
             ssh_host = Some((ip, port));
         } else {
@@ -342,13 +356,19 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
     // stdio is the guest's ttyS0: its input is the host->guest control channel (hold/release).
     cmd.arg("-serial").arg("stdio");
-    cmd.arg("-serial").arg(format!("file:{}", dir.join("steps.log").display()));
+    // ttyS1 (steps) is a unix socket kiln copies into a capped steps.log.
+    cmd.arg("-chardev").arg(format!("socket,id=s1,path={},server=on,wait=off", dir.join("steps.sock").display()));
+    cmd.args(["-serial", "chardev:s1"]);
+    if ssh_host.is_some() && publish == Publish::Monitor {
+        cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", dir.join("mon.sock").display()));
+    }
     if filtered {
-        tokio::fs::write(dir.join("egress.nft"), EGRESS_NFT).await?;
+        tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror)).await?;
         let std = cmd.as_std();
         let q: Vec<String> = std::iter::once(std.get_program()).chain(std.get_args()).map(|a| a.to_string_lossy().into_owned()).collect();
         let mut rk = Command::new("rootlesskit");
-        rk.args(rk_args(dir, ssh_host.as_ref().map(|(ip, p)| (ip.as_str(), *p)), &q)).kill_on_drop(true);
+        let stat = ssh_host.as_ref().filter(|_| publish == Publish::Static);
+        rk.args(rk_args(dir, stat.map(|(ip, p)| (ip.as_str(), *p)), &q)).kill_on_drop(true);
         cmd = rk;
     }
     let console = tokio::fs::File::create(dir.join("console.log")).await?;
@@ -358,6 +378,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd.stderr(console.into_std().await);
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let steps = tokio::fs::File::create(dir.join("steps.log")).await?;
     let mut child = cmd.spawn().context(if filtered { "spawning rootlesskit" } else { "spawning qemu-system-x86_64" })?;
     if let Some(err) = child.stderr.take() {
         // rootlesskit warns on every start that we keep host loopback; we do on purpose
@@ -373,11 +394,12 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         });
     }
 
+    tokio::spawn(copy_steps(dir.join("steps.sock"), steps));
     let mut log = tokio::fs::OpenOptions::new().append(true).open(dir.join("console.log")).await?;
     let mut stdin = child.stdin.take();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut buf = Vec::new();
-    let (mut first, mut logged, mut decided) = (true, 0, false);
+    let (mut first, mut logged, mut decided, mut cont) = (true, 0, false, false);
     // A job is root in its VM and can write anything to the console, so console lines
     // may shape the timeline but never extend the VM's life past this hard cap.
     let hard_cap = start_cap(&cfg);
@@ -394,7 +416,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         buf.clear();
         tokio::select! {
-            r = lines.read_until(b'\n', &mut buf) => {
+            r = read_capped(&mut lines, &mut buf) => {
                 if r? == 0 {
                     break; // guest powered off, QEMU closed stdout
                 }
@@ -408,12 +430,23 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     log.write_all(&buf).await?;
                     logged += buf.len();
                 }
+                // A line cut at LINE_CAP and its remainder are never parsed: no marker hides in them.
+                let was_cont = std::mem::replace(&mut cont, buf.len() as u64 >= LINE_CAP && !buf.ends_with(b"\n"));
+                if was_cont || cont {
+                    continue;
+                }
                 let text = String::from_utf8_lossy(&buf);
                 observe(app, id, &text);
                 if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
-                    let hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
-                    send(&mut stdin, &decide_msg(hold)).await;
+                    let mut hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
+                    if let (Some(_), Some((ip, port))) = (hold, &ssh_host)
+                        && let Err(e) = publish_ssh(dir, publish, ip, *port).await
+                    {
+                        // No way in after all: a hold nobody can reach is just a leak.
+                        note(app, id, &format!("ssh forward failed, VM released instead of held: {e:#}"));
+                        hold = None;
+                    }
                     if let (Some(secs), Some((ip, port))) = (hold, &ssh_host) {
                         let v = update(app, id, |v| {
                             v.state = State::Held;
@@ -425,6 +458,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                             persist(app, &v);
                         }
                     }
+                    send(&mut stdin, &decide_msg(hold)).await;
                 }
             }
             _ = release.notified() => send(&mut stdin, "release\n").await,
@@ -473,11 +507,99 @@ async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
     }
 }
 
-/// Seconds to hold the VM, if at all. Only a job that started and did not
-/// succeed (or whose runner died without a verdict) is worth keeping, and only
-/// when there is a way in.
+/// Seconds to hold the VM, if at all. Only a job that started and ended with a
+/// verdict other than success is worth keeping, and only when there is a way in.
+/// The guest asking early (no verdict yet) is answered "release", so a job
+/// cannot force a hold by printing `kiln: decide` itself.
 fn decide(hold_mins: u64, can_ssh: bool, job_started: bool, result: Option<&str>) -> Option<u64> {
-    (hold_mins > 0 && can_ssh && job_started && result != Some("Succeeded")).then_some(hold_mins * 60)
+    (hold_mins > 0 && can_ssh && job_started && result.is_some_and(|r| r != "Succeeded")).then_some(hold_mins * 60)
+}
+
+/// How a held VM's SSH port reaches the host.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Publish {
+    /// Open egress: `hostfwd_add` through the QEMU monitor.
+    Monitor,
+    /// Filtered: `rootlessctl add-ports` on the rootlesskit API.
+    Rootless,
+    /// Filtered without rootlessctl: `-p` at launch, so the port is open for the whole VM life.
+    Static,
+}
+
+/// Open the SSH port on the host; Err = hold is pointless.
+async fn publish_ssh(dir: &Path, how: Publish, ip: &str, port: u16) -> Result<()> {
+    match how {
+        Publish::Static => Ok(()),
+        Publish::Rootless => {
+            let o = Command::new("rootlessctl").arg("--socket").arg(dir.join("rk/api.sock")).arg("add-ports").arg(format!("{ip}:{port}:127.0.0.1:{port}/tcp")).output().await.context("rootlessctl")?;
+            if !o.status.success() {
+                bail!("rootlessctl: {}", String::from_utf8_lossy(&o.stderr).trim());
+            }
+            Ok(())
+        }
+        Publish::Monitor => {
+            let mut s = tokio::net::UnixStream::connect(dir.join("mon.sock")).await.context("qemu monitor")?;
+            s.write_all(format!("hostfwd_add n0 tcp:{ip}:{port}-:22\n").as_bytes()).await?;
+            // HMP is silent on success and prints the error otherwise; wait briefly for either.
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut b = [0u8; 512];
+                while let Ok(n) = s.read(&mut b).await {
+                    if n == 0 || out.len() > 4096 {
+                        break;
+                    }
+                    out.extend_from_slice(&b[..n]);
+                }
+            })
+            .await;
+            let out = String::from_utf8_lossy(&out);
+            if hmp_failed(&out) {
+                bail!("hostfwd_add: {}", out.lines().rev().find(|l| l.contains("Could not") || l.contains("rror")).unwrap_or("failed").trim());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One line, at most LINE_CAP bytes (0 = EOF; hitting the cap returns >0 without a newline).
+async fn read_capped(r: &mut (impl AsyncBufReadExt + Unpin), buf: &mut Vec<u8>) -> std::io::Result<usize> {
+    r.take(LINE_CAP).read_until(b'\n', buf).await
+}
+
+fn hmp_failed(out: &str) -> bool {
+    out.contains("Could not") || out.contains("rror")
+}
+
+fn which(bin: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()))
+}
+
+/// Copy the guest's ttyS1 (QEMU serves it on a unix socket) into steps.log, capped like
+/// console.log. Reads in 64 KiB chunks, so a flood costs disk up to LOG_CAP and no memory.
+async fn copy_steps(sock: PathBuf, mut out: tokio::fs::File) {
+    let mut s = None;
+    // QEMU creates the socket at start; in filtered mode that is after rootlesskit's setup.
+    for _ in 0..100 {
+        if let Ok(c) = tokio::net::UnixStream::connect(&sock).await {
+            s = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let Some(mut s) = s else { return };
+    let (mut buf, mut logged) = (vec![0u8; 64 << 10], 0);
+    while let Ok(n @ 1..) = s.read(&mut buf).await {
+        let k = room(logged, n);
+        if k > 0 && out.write_all(&buf[..k]).await.is_err() {
+            return;
+        }
+        logged += k;
+    }
+}
+
+/// How many of `n` new bytes still fit under LOG_CAP.
+fn room(logged: usize, n: usize) -> usize {
+    n.min(LOG_CAP.saturating_sub(logged))
 }
 
 fn decide_msg(hold: Option<u64>) -> String {
@@ -570,15 +692,19 @@ fn job_id(url: &str) -> Option<u64> {
 }
 
 /// May this job's cache overlay be committed? Err = the reason it is not.
-/// `trust` is (event, head branch, default branch), or why it is unknown.
-fn cache_verdict(cache_on: bool, succeeded: bool, trust: Result<(&str, &str, &str), &str>) -> Result<(), String> {
+/// `trust` is (event, head branch, default branch, GitHub's job conclusion), or why it is
+/// unknown. The console's result alone (the job controls it) never earns a commit.
+fn cache_verdict(cache_on: bool, succeeded: bool, trust: Result<(&str, &str, &str, &str), &str>) -> Result<(), String> {
     if !cache_on {
         return Err("cache disabled".into());
     }
     if !succeeded {
         return Err("job did not succeed".into());
     }
-    let (event, branch, default) = trust.map_err(|e| format!("could not verify the trigger ({e})"))?;
+    let (event, branch, default, conclusion) = trust.map_err(|e| format!("could not verify the trigger ({e})"))?;
+    if conclusion != "success" {
+        return Err(format!("GitHub reports the job as {conclusion}"));
+    }
     if event != "push" {
         return Err(format!("{event} event"));
     }
@@ -659,7 +785,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     } else {
         Err(String::new())
     };
-    let t = trust.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str())).map_err(String::as_str);
+    let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
     let (state, note) = match cache_verdict(cfg.cache, succeeded, t) {
         Err(why) => {
             let _ = tokio::fs::remove_file(&ov).await;
@@ -774,7 +900,14 @@ fn start_cap(cfg: &crate::Config) -> u64 {
 /// these lines itself, and must not rewind the state or restart its timeout.
 fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
     let line = line.trim_end();
-    if line.contains("Listening for Jobs") {
+    // The guest's journal prefixes console lines ("[ 32.2] kiln-job[1395]: kiln: hostkey ...").
+    if let Some((_, k)) = line.split_once("kiln: hostkey ") {
+        if v.state != State::Held || v.ssh_hostkeys.len() >= 4 {
+            return false;
+        }
+        v.ssh_hostkeys.push(k.chars().filter(|c| !c.is_control()).take(200).collect());
+        true
+    } else if line.contains("Listening for Jobs") {
         if v.state != State::Booting {
             return false;
         }
@@ -824,31 +957,41 @@ fn qemu(cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
     c
 }
 
-/// nftables ruleset loaded inside a filtered job VM's network namespace.
+/// nftables ruleset (the mirror's DNAT and accept only when `mirror`) loaded inside a filtered job VM's network namespace.
 /// Guest traffic leaves QEMU's slirp as ordinary sockets of the qemu process, so it
 /// hits this OUTPUT chain. The guest's 10.0.2.2 is the namespace loopback; the DNAT
 /// rewrites the mirror's port to slirp4netns's host-loopback alias 10.0.2.2, which
 /// reaches the host's 127.0.0.1:5000. Every other host loopback port, the LAN, the
 /// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
-const EGRESS_NFT: &str = r#"table ip kilnnat {
-  chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }
-  chain post { type nat hook postrouting priority 100; oifname "tap0" masquerade; }
-}
-table inet kiln {
-  chain out {
+fn egress_nft(mirror: bool) -> String {
+    let (dnat, accept) = if mirror {
+        ("\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }", "\n    ip daddr 10.0.2.2 tcp dport 5000 accept")
+    } else {
+        ("", "")
+    };
+    format!(
+        r#"table ip kilnnat {{{dnat}
+  chain post {{ type nat hook postrouting priority 100; oifname "tap0" masquerade; }}
+}}
+table inet kiln {{
+  chain out {{
     type filter hook output priority 0; policy drop;
     ct state established,related accept
     oifname "lo" accept
-    ip daddr 10.0.2.3 meta l4proto { tcp, udp } th dport 53 accept
-    ip daddr 10.0.2.2 tcp dport 5000 accept
-    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
-               172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 } drop
+    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}
+    ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+               172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} drop
     tcp dport 25 drop
     oifname "tap0" meta nfproto ipv4 accept
-  }
+  }}
+}}
+"#
+    )
 }
-"#;
+
+/// Drops every capability QEMU could use in the namespace once nft is loaded (fails closed if setpriv is missing).
+const DROP_CAPS: &str = "setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs";
 
 /// Namespace setup shared by jobs and the doctor: `$1` is the nft file.
 const RK_SETUP: &str = "sysctl -qw net.ipv4.conf.all.route_localnet=1; nft -f \"$1\"";
@@ -865,9 +1008,11 @@ fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<Str
     let mut a = rk_base(&dir.join("rk"));
     a.extend(["--mtu=65520", "--slirp4netns-sandbox=auto", "--slirp4netns-seccomp=auto"].map(String::from));
     if let Some((ip, port)) = publish {
-        a.extend(["--port-driver=builtin".into(), "-p".into(), format!("{ip}:{port}:{port}/tcp")]);
+        // Child IP 127.0.0.1: by default the port driver dials the namespace's tap
+        // address, which the egress filter drops (10.0.0.0/8); loopback is allowed.
+        a.extend(["--port-driver=builtin".into(), "-p".into(), format!("{ip}:{port}:127.0.0.1:{port}/tcp")]);
     }
-    a.extend(["/bin/sh".into(), "-ec".into(), format!("{RK_SETUP}; shift; exec \"$@\""), "sh".into(), dir.join("egress.nft").display().to_string()]);
+    a.extend(["/bin/sh".into(), "-ec".into(), format!("{RK_SETUP}; shift; exec {DROP_CAPS} \"$@\""), "sh".into(), dir.join("egress.nft").display().to_string()]);
     a.extend_from_slice(qemu);
     a
 }
@@ -911,10 +1056,9 @@ pub async fn egress_ready(app: &App, force: bool) -> Result<(), String> {
 }
 
 async fn egress_probe(app: &App) -> Result<()> {
-    for bin in ["rootlesskit", "slirp4netns", "nft"] {
-        let found = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()));
-        if !found {
-            bail!("{bin} not found; install: sudo apt install rootlesskit slirp4netns nftables uidmap");
+    for bin in ["rootlesskit", "slirp4netns", "nft", "setpriv"] {
+        if !which(bin) {
+            bail!("{bin} not found; install: sudo apt install rootlesskit slirp4netns nftables uidmap util-linux");
         }
     }
     let cfg = app.cfg();
@@ -925,7 +1069,7 @@ async fn egress_probe(app: &App) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&dir).await;
     tokio::fs::create_dir_all(&dir).await?;
     let nft = dir.join("egress.nft");
-    tokio::fs::write(&nft, EGRESS_NFT).await?;
+    tokio::fs::write(&nft, egress_nft(cfg.docker_mirror)).await?;
     let mut cmd = Command::new("rootlesskit");
     cmd.args(rk_base(&dir.join("rk")))
         .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some()), "sh"])
@@ -1404,6 +1548,7 @@ mod tests {
             ssh: None,
             ssh_port: None,
             hold_until: None,
+            ssh_hostkeys: vec![],
             egress: String::new(),
         }
     }
@@ -1415,14 +1560,18 @@ mod tests {
         let at = |x: &str| a.iter().position(|v| v == x).unwrap();
         assert!(a.contains(&"--state-dir".into()) && a.contains(&"/d/vm 1/rk".into()));
         assert!(!a.iter().any(|v| v == "--disable-host-loopback"));
-        assert_eq!(a[at("-p") + 1], "100.1.2.3:2201:2201/tcp");
+        assert_eq!(a[at("-p") + 1], "100.1.2.3:2201:127.0.0.1:2201/tcp");
         assert!(a.contains(&"--port-driver=builtin".into()));
         // qemu args follow the script and nft path as separate argv entries
         assert_eq!(&a[a.len() - 3..], &q[..]);
         assert_eq!(a[a.len() - 4], "/d/vm 1/egress.nft");
-        assert!(a[at("-ec") + 1].ends_with("exec \"$@\""));
+        assert!(a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all"));
         assert!(!rk_args(Path::new("/d"), None, &q).contains(&"-p".into()));
-        assert!(EGRESS_NFT.contains("ct state established,related accept") && EGRESS_NFT.contains("tcp dport 25 drop"));
+        let on = egress_nft(true);
+        assert!(on.contains("ct state established,related accept") && on.contains("tcp dport 25 drop"));
+        assert!(on.contains("dnat to 10.0.2.2:5000") && on.contains("ip daddr 10.0.2.2 tcp dport 5000 accept"));
+        let off = egress_nft(false);
+        assert!(!off.contains("5000") && off.contains("tcp dport 25 drop") && off.contains("masquerade"));
     }
 
     #[test]
@@ -1533,12 +1682,28 @@ mod tests {
     fn hold_decisions() {
         let f = Some("Failed");
         assert_eq!(decide_msg(decide(30, true, true, f)), "hold 1800\n");
-        assert_eq!(decide_msg(decide(30, true, true, None)), "hold 1800\n"); // runner crashed
+        assert_eq!(decide_msg(decide(30, true, true, None)), "release\n"); // no verdict yet: forced early ask
         assert_eq!(decide_msg(decide(30, true, true, Some("Succeeded"))), "release\n");
         assert_eq!(decide_msg(decide(0, true, true, f)), "release\n");
         assert_eq!(decide_msg(decide(30, false, true, f)), "release\n"); // no way in
         assert_eq!(decide_msg(decide(30, true, false, None)), "release\n"); // never ran a job
         assert_eq!(decide_msg(decide(30, true, true, Some("Cancelled"))), "hold 1800\n");
+    }
+
+    #[test]
+    fn hostkeys_and_caps() {
+        let mut v = vm("a", State::Busy, None);
+        assert!(!apply_line(&mut v, "kiln: hostkey 256 SHA256:x", 1)); // only while held
+        v.state = State::Held;
+        for i in 0..6 {
+            apply_line(&mut v, &format!("[   32.24] kiln-job[1395]: kiln: hostkey 256 SHA256:{i} (ED25519)\n"), 1);
+        }
+        assert_eq!(v.ssh_hostkeys.len(), 4);
+        assert_eq!(v.ssh_hostkeys[0], "256 SHA256:0 (ED25519)");
+        assert_eq!(room(10, 5), 5);
+        assert_eq!(room(LOG_CAP - 2, 5), 2);
+        assert_eq!(room(LOG_CAP, 5), 0);
+        assert!(hmp_failed("Could not set up host forwarding rule 'tcp::1-:22'") && !hmp_failed("(qemu) "));
     }
 
     #[test]
@@ -1574,8 +1739,11 @@ mod tests {
 
     #[test]
     fn cache_trust_rules() {
-        let t = |e, b, d| Ok::<_, &str>((e, b, d));
+        let t = |e, b, d| Ok::<_, &str>((e, b, d, "success"));
         assert!(cache_verdict(true, true, t("push", "main", "main")).is_ok());
+        // the console said Succeeded but GitHub disagrees (or has no conclusion yet)
+        assert!(cache_verdict(true, true, Ok(("push", "main", "main", "failure"))).unwrap_err().contains("failure"));
+        assert!(cache_verdict(true, true, Ok(("push", "main", "main", "none"))).is_err());
         assert_eq!(cache_verdict(true, true, t("pull_request", "feat", "main")).unwrap_err(), "pull_request event");
         assert!(cache_verdict(true, true, t("push", "feat", "main")).unwrap_err().contains("not the default"));
         assert!(cache_verdict(true, false, t("push", "main", "main")).is_err());

@@ -44,6 +44,18 @@ fn sha_matches(out: &str, want: &str) -> bool {
     out.split_whitespace().next().is_some_and(|h| h.eq_ignore_ascii_case(want))
 }
 
+/// `du -sm` of a directory.
+async fn dir_mb(p: &Path) -> Option<u64> {
+    let out = Command::new("du").arg("-sm").arg(p).output().await.ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.parse().ok()
+}
+
+fn over_cap(mb: u64, gb: u32) -> bool {
+    mb > gb as u64 * 1024
+}
+
+const CAP_CHECK: Duration = Duration::from_secs(600);
+
 async fn port_busy() -> bool {
     tokio::net::TcpStream::connect(ADDR).await.is_ok()
 }
@@ -139,6 +151,7 @@ pub async fn supervise(app: Arc<App>) {
             Ok(mut child) => {
                 set(&app, true, None);
                 let mut err = None;
+                let mut checked = Instant::now();
                 loop {
                     tokio::select! {
                         s = child.wait() => {
@@ -149,6 +162,19 @@ pub async fn supervise(app: Arc<App>) {
                             if !app.cfg().docker_mirror || app.stopping.load(std::sync::atomic::Ordering::SeqCst) {
                                 child.kill().await.ok();
                                 break;
+                            }
+                            if checked.elapsed() >= CAP_CHECK {
+                                checked = Instant::now();
+                                let root = app.data.join("registry/data");
+                                let gb = app.cfg().mirror_gb;
+                                if let Some(mb) = dir_mb(&root).await && over_cap(mb, gb) {
+                                    // ponytail: no LRU; wiping is fine for a pull-through cache (it refills).
+                                    tracing::info!("docker mirror: {mb} MB over the {gb} GB cap: wiping the cache");
+                                    child.kill().await.ok();
+                                    let _ = child.wait().await;
+                                    let _ = tokio::fs::remove_dir_all(&root).await;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -171,8 +197,7 @@ pub async fn supervise(app: Arc<App>) {
 pub async fn status_json(app: &App) -> Value {
     let stale = now() >= app.mirror.lock().unwrap().cache_at + 60;
     if stale {
-        let out = Command::new("du").arg("-sm").arg(app.data.join("registry/data")).output().await;
-        let mb = out.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next()?.parse().ok());
+        let mb = dir_mb(&app.data.join("registry/data")).await;
         let mut s = app.mirror.lock().unwrap();
         s.cache_mb = mb;
         s.cache_at = now();
@@ -209,6 +234,12 @@ mod tests {
         assert!(sha_matches(&format!("{}  x", SHA256.to_uppercase()), SHA256));
         assert!(!sha_matches("deadbeef  x", SHA256));
         assert!(!sha_matches("", SHA256));
+    }
+
+    #[test]
+    fn cap() {
+        assert!(!over_cap(20 * 1024, 20));
+        assert!(over_cap(20 * 1024 + 1, 20));
     }
 
     #[test]
