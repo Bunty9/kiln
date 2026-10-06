@@ -35,6 +35,7 @@ type R<T> = Result<T, Error>;
 
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let addr = app.cfg().listen;
+    load_key(&app.data)?;
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
         .route("/api/state", get(state))
@@ -69,9 +70,10 @@ static WHOIS: LazyLock<Mutex<HashMap<IpAddr, (String, u64)>>> = LazyLock::new(Mu
 
 async fn whois(ip: IpAddr) -> Option<String> {
     if let Some((login, at)) = WHOIS.lock().unwrap().get(&ip)
-        && now() - at < 300 {
-            return Some(login.clone());
-        }
+        && now() - at < 300
+    {
+        return Some(login.clone());
+    }
     let out = Command::new("tailscale").args(["whois", "--json", &ip.to_string()]).output().await.ok()?;
     let v: Value = serde_json::from_slice(&out.stdout).ok()?;
     let login = v["UserProfile"]["LoginName"].as_str()?.to_string();
@@ -79,30 +81,120 @@ async fn whois(ip: IpAddr) -> Option<String> {
     Some(login)
 }
 
-/// Network gate + CSRF gate + optional tailnet-identity allowlist.
+/// This machine's own tailnet IPs and the login that owns it, from
+/// `tailscale status`. Refreshed every 5 minutes.
+#[derive(Clone, Default)]
+struct SelfInfo {
+    ips: Vec<IpAddr>,
+    owner: Option<String>,
+    at: u64,
+}
+static SELF: LazyLock<Mutex<SelfInfo>> = LazyLock::new(Mutex::default);
+
+async fn self_info() -> SelfInfo {
+    let cached = SELF.lock().unwrap().clone();
+    if cached.at != 0 && now() - cached.at < 300 {
+        return cached;
+    }
+    let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output().await else { return cached };
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let ips = v["Self"]["TailscaleIPs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|ip| ip.as_str()?.parse().ok())
+        .collect();
+    let uid = v["Self"]["UserID"].to_string();
+    let owner = v["User"][uid.as_str()]["LoginName"].as_str().map(String::from);
+    let info = SelfInfo { ips, owner, at: now() };
+    *SELF.lock().unwrap() = info.clone();
+    info
+}
+
+/// Secret for requests that originate on this machine (see `guard`).
+/// Generated once, stored next to the config, mode 0600.
+static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn load_key(data: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = data.join("dashboard.key");
+    let key = match std::fs::read_to_string(&path) {
+        Ok(k) if k.trim().len() >= 32 => k.trim().to_string(),
+        _ => {
+            let mut raw = [0u8; 24];
+            std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+            let k: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
+            std::io::Write::write_all(&mut f, k.as_bytes())?;
+            k
+        }
+    };
+    let _ = KEY.set(key);
+    Ok(())
+}
+
+fn key_ok(given: Option<&str>) -> bool {
+    let (Some(given), Some(key)) = (given, KEY.get()) else { return false };
+    // Constant-time compare.
+    given.len() == key.len() && given.bytes().zip(key.bytes()).fold(0, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// Reject DNS-rebinding: a page on evil.example resolving to our IP would
+/// otherwise be same-origin with us and could add our headers.
+fn host_ok(host: Option<&str>) -> bool {
+    let Some(host) = host else { return false };
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(h, p)| if p.parse::<u16>().is_ok() { h } else { host }),
+    };
+    name.parse::<IpAddr>().is_ok()
+        || name == "localhost"
+        || name.ends_with(".ts.net")
+        // MagicDNS short name, e.g. http://ryzen7:7878
+        || (!name.is_empty() && !name.contains('.'))
+}
+
+/// Who may talk to kiln:
+/// - Tailnet peers whose `tailscale whois` login is in `allowed_users`
+///   (default: the owner of this machine, so shared-in nodes are out).
+/// - Requests from this machine itself only with the dashboard key. Job VMs
+///   reach the host through QEMU's NAT and arrive as loopback or as this
+///   host's own tailnet IP, so a local source address proves nothing.
 async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
     let ip = peer.ip().to_canonical();
-    let deny = |msg: &str| (StatusCode::FORBIDDEN, msg.to_string()).into_response();
-    if !ip.is_loopback() && !is_tailnet(ip) {
-        return deny("kiln only answers on loopback and the tailnet");
+    let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
+    // Owned copies: `req` (its body) is not Sync, so no borrows across awaits.
+    let (host, csrf, key) = {
+        let h = |k: &str| req.headers().get(k).and_then(|v| v.to_str().ok()).map(String::from);
+        (h("host"), h("x-kiln"), h("x-kiln-key"))
+    };
+    let api = req.uri().path().starts_with("/api/");
+    let get = req.method() == Method::GET;
+    if !host_ok(host.as_deref()) {
+        return deny(StatusCode::FORBIDDEN, "unexpected Host header");
     }
     // Browsers can't add custom headers cross-origin without a CORS preflight
     // we never grant, so this blocks drive-by POSTs from other sites.
-    if req.method() != Method::GET && !req.headers().contains_key("x-kiln") {
-        return deny("missing x-kiln header");
+    if api && !get && csrf.is_none() {
+        return deny(StatusCode::FORBIDDEN, "missing x-kiln header");
     }
-    let allowed = app.cfg().allowed_users;
-    if !allowed.is_empty() {
-        // Behind `tailscale serve` the TCP peer is loopback and tailscaled
-        // vouches for the caller in this header.
-        let login = if ip.is_loopback() {
-            req.headers().get("tailscale-user-login").and_then(|v| v.to_str().ok()).map(String::from)
-        } else {
-            whois(ip).await
-        };
-        if !login.is_some_and(|l| allowed.iter().any(|a| a.eq_ignore_ascii_case(&l))) {
-            return deny("your tailnet identity is not in allowed_users");
+    let me = self_info().await;
+    if ip.is_loopback() || me.ips.contains(&ip) {
+        if api && !key_ok(key.as_deref()) {
+            return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
         }
+    } else if is_tailnet(ip) {
+        let mut allowed = app.cfg().allowed_users;
+        if allowed.is_empty() {
+            allowed.extend(me.owner);
+        }
+        let login = whois(ip).await;
+        if !login.is_some_and(|l| allowed.iter().any(|a| a.eq_ignore_ascii_case(&l))) {
+            return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
+        }
+    } else {
+        return deny(StatusCode::FORBIDDEN, "kiln only answers on the tailnet");
     }
     next.run(req).await
 }
@@ -235,7 +327,8 @@ struct PingBody {
     peer: String,
 }
 async fn ts_ping(Json(b): Json<PingBody>) -> R<Json<Value>> {
-    if b.peer.is_empty() || !b.peer.chars().all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c)) {
+    let ok_chars = b.peer.chars().all(|c| c.is_ascii_alphanumeric() || ".-:".contains(c));
+    if b.peer.is_empty() || b.peer.starts_with('-') || !ok_chars {
         bail_r("bad peer name")?;
     }
     let out = tailscale(&["ping", "--c", "1", "--timeout", "3s", &b.peer]).await?;
@@ -279,9 +372,8 @@ async fn gh_proxy(
     q: axum::extract::RawQuery,
     body: Bytes,
 ) -> R<Response> {
-    let allowed = app.cfg().repos.iter().any(|r| path.starts_with(&format!("repos/{r}/actions/")));
-    if !allowed || path.contains("..") {
-        bail_r("only repos/<configured repo>/actions/... is proxied")?;
+    if !proxy_path_ok(&path, &app.cfg().repos) {
+        bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
     }
     if method != Method::GET && method != Method::POST {
         bail_r("only GET and POST are proxied")?;
@@ -297,9 +389,59 @@ async fn gh_proxy(
     Ok((StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_GATEWAY), h, r.body).into_response())
 }
 
+/// Strict allowlist: plain characters only (so nothing like `%2e%2e` can be
+/// re-decoded into `..` by the URL parser), no dot segments, and only the
+/// workflow/run/job APIs — not runners, secrets or variables.
+fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
+    path.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c))
+        && !path.split('/').any(|seg| seg == "." || seg == "..")
+        && repos.iter().any(|r| {
+            path.strip_prefix(&format!("repos/{r}/actions/")).is_some_and(|rest| {
+                rest == "runs" || ["workflows", "runs/", "jobs/"].iter().any(|p| rest.starts_with(p))
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_allowlist() {
+        let repos = vec!["Bunty9/kiln".to_string()];
+        let ok = |p: &str| proxy_path_ok(p, &repos);
+        assert!(ok("repos/Bunty9/kiln/actions/runs"));
+        assert!(ok("repos/Bunty9/kiln/actions/runs/123/jobs"));
+        assert!(ok("repos/Bunty9/kiln/actions/workflows/ci.yml/dispatches"));
+        assert!(ok("repos/Bunty9/kiln/actions/jobs/9/logs"));
+        assert!(!ok("repos/Bunty9/kiln/actions/runners/generate-jitconfig"));
+        assert!(!ok("repos/Bunty9/kiln/actions/secrets"));
+        assert!(!ok("repos/Bunty9/kiln/actions/runs/../../../other/x/actions/runs"));
+        assert!(!ok("repos/Bunty9/kiln/actions/runs/%2e%2e/%2e%2e"));
+        assert!(!ok("repos/Bunty9/kiln-evil/actions/runs"));
+        assert!(!ok("repos/Other/repo/actions/runs"));
+    }
+
+    #[test]
+    fn host_header() {
+        assert!(host_ok(Some("100.73.48.98:7878")));
+        assert!(host_ok(Some("[fd7a:115c:a1e0::7001:307a]:7878")));
+        assert!(host_ok(Some("ryzen7:7878")));
+        assert!(host_ok(Some("ryzen7.tailedf5ce.ts.net:8443")));
+        assert!(host_ok(Some("localhost:7878")));
+        assert!(!host_ok(Some("evil.example.com:7878")));
+        assert!(!host_ok(Some("evil.example.com")));
+        assert!(!host_ok(None));
+    }
+
+    #[test]
+    fn key_compare() {
+        let _ = KEY.set("a".repeat(48));
+        assert!(key_ok(Some(&"a".repeat(48))));
+        assert!(!key_ok(Some(&"a".repeat(47))));
+        assert!(!key_ok(Some(&"b".repeat(48))));
+        assert!(!key_ok(None));
+    }
     #[test]
     fn tailnet_ranges() {
         assert!(is_tailnet("100.73.48.98".parse().unwrap()));

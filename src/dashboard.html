@@ -234,14 +234,26 @@ function badge(text) {
 }
 
 /* ---------- API ---------- */
+// Requests from the CI box itself (or via `tailscale serve`) must carry the
+// dashboard key; tailnet peers are identified by Tailscale and never need it.
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+let keyPrompted = false;
 async function api(path, opts = {}) {
   const init = { method: opts.method || 'GET', headers: {} };
+  const key = lsGet('kiln-key');
+  if (key) init.headers['x-kiln-key'] = key;
   if (init.method !== 'GET') {
     init.headers['x-kiln'] = '1';
     init.headers['content-type'] = 'application/json';
     if (opts.body !== undefined) init.body = JSON.stringify(opts.body);
   }
   const r = await fetch(path, init);
+  if (r.status === 401 && !keyPrompted) {
+    keyPrompted = true;
+    const k = prompt('Dashboard key (cat ~/.local/share/kiln/dashboard.key on the CI box):');
+    if (k) { lsSet('kiln-key', k.trim()); keyPrompted = false; return api(path, opts); }
+  }
   const text = await r.text();
   if (!r.ok) {
     let msg = text;

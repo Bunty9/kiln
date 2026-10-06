@@ -67,10 +67,20 @@ kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this
 - **Tailscale:** connection state, peers (direct vs DERP), ping, netcheck, and the HTTPS serve toggle.
 - **Settings:** limits and timeouts, token, rebaking the base image.
 
-Access rules:
-- The dashboard only answers loopback and tailnet addresses (100.64.0.0/10, fd7a:115c:a1e0::/48).
-- Requests that change state need an `x-kiln` header, which blocks cross-site POSTs.
-- `allowed_users` can restrict access to particular tailnet logins. kiln checks them with `tailscale whois`, or with the `Tailscale-User-Login` header when the dashboard is behind `tailscale serve`.
+## Security model
+
+The dashboard holds a GitHub token, so who can call it matters:
+
+- **Tailnet peers** are identified with `tailscale whois`. By default only the owner of the CI box gets in, which keeps out nodes shared in from other tailnets. Set `allowed_users` to change that.
+- **Requests from the CI box itself** need the key in `~/.local/share/kiln/dashboard.key`; the browser asks for it once. This covers loopback, the box's own tailnet IP, and `tailscale serve`. The source address can't be trusted here, because job VMs reach the host through QEMU's NAT and show up exactly like local traffic.
+- **Everything else** is refused. That includes the LAN, requests whose `Host` header isn't the tailnet name or an IP (to stop DNS rebinding), and POSTs without the `x-kiln` header (to stop CSRF).
+- **The GitHub proxy** only passes `repos/<configured>/actions/{workflows,runs,jobs}`. Runners, secrets and variables are out of reach.
+
+What a job can reach: a job VM has full outbound network through the host's
+NAT. That includes the LAN and **the tailnet** (it routes like any process on
+the host). That's fine for your own repos. Don't point kiln at repos that run
+untrusted pull requests from forks until the egress filtering on the roadmap
+is in place.
 
 ## Files
 
@@ -93,4 +103,5 @@ The base image recipe is [`guest/user-data.yaml`](guest/user-data.yaml) (cloud-i
 - **No cache between jobs yet.** *Next:* one persistent cache disk per VM slot, mounted at `/var/lib/docker` and `~/.cache`. QEMU's image locking keeps two VMs from sharing one.
 - **PAT auth.** *Next:* a GitHub App for org-wide runners and short-lived tokens.
 - **Single host, x86_64 only.** Scheduling is a per-repo count; there are no priorities or fair-share yet.
+- **Job egress filtering.** *Next:* passt or tap networking with a host firewall that allows only the internet, not the LAN or tailnet.
 - **Old runner registrations.** If kiln dies mid-boot, the runner it registered stays offline on GitHub until GitHub removes it (about 1 day).
