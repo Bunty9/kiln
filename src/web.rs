@@ -66,19 +66,21 @@ fn is_tailnet(ip: IpAddr) -> bool {
     }
 }
 
-static WHOIS: LazyLock<Mutex<HashMap<IpAddr, (String, u64)>>> = LazyLock::new(Mutex::default);
+/// (login, node StableID) of the tailnet node behind `ip`.
+type Who = (String, String);
+static WHOIS: LazyLock<Mutex<HashMap<IpAddr, (Who, u64)>>> = LazyLock::new(Mutex::default);
 
-async fn whois(ip: IpAddr) -> Option<String> {
-    if let Some((login, at)) = WHOIS.lock().unwrap().get(&ip)
+async fn whois(ip: IpAddr) -> Option<Who> {
+    if let Some((who, at)) = WHOIS.lock().unwrap().get(&ip)
         && now() - at < 300
     {
-        return Some(login.clone());
+        return Some(who.clone());
     }
     let out = Command::new("tailscale").args(["whois", "--json", &ip.to_string()]).output().await.ok()?;
     let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let login = v["UserProfile"]["LoginName"].as_str()?.to_string();
-    WHOIS.lock().unwrap().insert(ip, (login.clone(), now()));
-    Some(login)
+    let who = (v["UserProfile"]["LoginName"].as_str()?.to_string(), v["Node"]["StableID"].as_str()?.to_string());
+    WHOIS.lock().unwrap().insert(ip, (who.clone(), now()));
+    Some(who)
 }
 
 /// This machine's own tailnet IPs and the login that owns it, from
@@ -86,6 +88,7 @@ async fn whois(ip: IpAddr) -> Option<String> {
 #[derive(Clone, Default)]
 struct SelfInfo {
     ips: Vec<IpAddr>,
+    node: Option<String>,
     owner: Option<String>,
     at: u64,
 }
@@ -106,7 +109,8 @@ async fn self_info() -> SelfInfo {
         .collect();
     let uid = v["Self"]["UserID"].to_string();
     let owner = v["User"][uid.as_str()]["LoginName"].as_str().map(String::from);
-    let info = SelfInfo { ips, owner, at: now() };
+    let node = v["Self"]["ID"].as_str().map(String::from);
+    let info = SelfInfo { ips, node, owner, at: now() };
     *SELF.lock().unwrap() = info.clone();
     info
 }
@@ -180,7 +184,15 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
         return deny(StatusCode::FORBIDDEN, "missing x-kiln header");
     }
     let me = self_info().await;
-    if ip.is_loopback() || me.ips.contains(&ip) {
+    let who = if is_tailnet(ip) && !ip.is_loopback() { whois(ip).await } else { None };
+    // Fail closed: if we can't tell our own addresses or node apart from a
+    // peer (tailscale down, CLI error), treat the request as local.
+    let local = ip.is_loopback()
+        || me.ips.is_empty()
+        || me.node.is_none()
+        || me.ips.contains(&ip)
+        || who.as_ref().is_some_and(|(_, node)| Some(node) == me.node.as_ref());
+    if local {
         if api && !key_ok(key.as_deref()) {
             return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
         }
@@ -189,8 +201,7 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
         if allowed.is_empty() {
             allowed.extend(me.owner);
         }
-        let login = whois(ip).await;
-        if !login.is_some_and(|l| allowed.iter().any(|a| a.eq_ignore_ascii_case(&l))) {
+        if !who.is_some_and(|(l, _)| allowed.iter().any(|a| a.eq_ignore_ascii_case(&l))) {
             return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
         }
     } else {
