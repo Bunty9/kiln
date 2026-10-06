@@ -95,6 +95,9 @@ pub struct Vm {
     /// Job network this VM booted with: "open" | "filtered" ("" in older records).
     #[serde(default)]
     pub egress: String,
+    /// Fingerprint of the security settings baked in at boot (see `policy_id`).
+    #[serde(default)]
+    pub policy: String,
     /// Launched to fill the warm pool; cleared once it takes a job.
     #[serde(default)]
     pub warm: bool,
@@ -196,6 +199,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         hold_until: None,
         ssh_hostkeys: vec![],
         egress: app.cfg().egress,
+        policy: policy_id(&app.cfg()),
         warm,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
@@ -310,6 +314,30 @@ fn recycle_candidates(vms: &[Vm], repo: &str, recycle_secs: u64, t: u64, pending
         .filter(|v| idle_free(v) && ((v.warm && v.online_at.is_some_and(|o| o + recycle_secs < t)) || (flush && v.cache == CacheUse::Read)))
         .filter_map(|v| Some((v.id.clone(), v.runner_id?)))
         .collect()
+}
+
+/// The settings a VM fixes at boot and that must never be stale when it takes a job:
+/// egress mode, the SSH keys it would accept, and whether failures are held.
+pub fn policy_id(cfg: &crate::Config) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&cfg.egress, &cfg.debug_ssh_keys, cfg.debug_hold_mins > 0).hash(&mut h);
+    format!("{}-{:x}", cfg.egress, h.finish())
+}
+
+/// Idle job-less VMs booted under older security settings than the current ones:
+/// e.g. an open-egress VM must never pick up a job after egress was switched to
+/// filtered, nor a VM holding an SSH key that was since removed.
+fn stale_policy(vms: &[Vm], repo: &str, policy: &str) -> Vec<(String, u64)> {
+    vms.iter()
+        .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state == State::Idle && v.job_url.is_none() && v.policy != policy)
+        .filter_map(|v| Some((v.id.clone(), v.runner_id?)))
+        .collect()
+}
+
+pub async fn recycle_stale_policy(app: &App, repo: &str, policy: &str) {
+    let c = stale_policy(&app.vms.lock().unwrap(), repo, policy);
+    drop_idle(app, repo, c, "recycled: security settings changed").await;
 }
 
 pub async fn recycle_warm(app: &App, repo: &str, recycle_mins: u64) {
@@ -1612,6 +1640,7 @@ mod tests {
             hold_until: None,
             ssh_hostkeys: vec![],
             egress: String::new(),
+            policy: String::new(),
             warm: false,
         }
     }
@@ -1840,6 +1869,22 @@ mod tests {
         assert_eq!(b64(b"foo"), "Zm9v");
         assert_eq!(b64(b"foob"), "Zm9vYg==");
         assert_eq!(b64(b"ssh-a b\nssh-c d"), "c3NoLWEgYgpzc2gtYyBk");
+    }
+
+    #[test]
+    fn stale_policy_selection() {
+        let idle = |id: &str, p: &str| Vm { policy: p.into(), ..vm(id, State::Idle, Some(1)) };
+        let vms = [idle("open", "open"), idle("filtered", "filtered"), Vm { policy: "open".into(), ..vm("busy", State::Busy, Some(1)) }, Vm { job_url: Some("u".into()), ..idle("assigned", "open") }];
+        let ids: Vec<_> = stale_policy(&vms, "O/N", "filtered").into_iter().map(|(i, _)| i).collect();
+        assert_eq!(ids, ["open"]);
+        assert!(stale_policy(&vms, "o/n", "open").iter().all(|(i, _)| i == "filtered"));
+        let mut cfg = crate::Config::default();
+        let a = policy_id(&cfg);
+        cfg.debug_ssh_keys = vec!["ssh-ed25519 AAAA x".into()];
+        assert_ne!(a, policy_id(&cfg));
+        cfg.max_vms = 7; // unrelated settings don't recycle VMs
+        let same = crate::Config { debug_ssh_keys: vec!["ssh-ed25519 AAAA x".into()], ..Default::default() };
+        assert_eq!(policy_id(&cfg), policy_id(&same));
     }
 
     #[test]
