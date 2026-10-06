@@ -1,0 +1,14 @@
+name: kiln hello
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  hello:
+    runs-on: [self-hosted, kiln]
+    steps:
+      - name: Hello from kiln
+        run: |
+          echo "Running in a fresh kiln VM on your own hardware"
+          echo "vCPUs: $(nproc)  RAM: $(free -g | awk '/Mem:/{print $2}') GB"
+          docker --version
+          uname -r
