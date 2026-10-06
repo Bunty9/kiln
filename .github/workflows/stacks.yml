@@ -3,6 +3,11 @@ name: Stacks
 on:
   workflow_dispatch:
   push:
+    branches: [main]
+    paths:
+      - examples/**
+      - .github/workflows/stacks.yml
+  pull_request:
     paths:
       - examples/**
       - .github/workflows/stacks.yml
