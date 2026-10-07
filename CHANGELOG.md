@@ -6,6 +6,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- GitHub App authentication: create the App from the dashboard (manifest flow) or use an existing one. Installation tokens are minted per installation and refreshed before they expire; only the private key is stored. The repos kiln serves are the repos the App is installed on, refreshed every 5 minutes. Token auth still works.
 - `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
 - `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the set marks the image stale; so does an image baked by an older kiln (recorded as `recipe` in `base.json`).
 - `repo_cache_gb`: per-repo cache disk size, overriding `cache_gb`. Settable on the repo page.

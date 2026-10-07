@@ -98,6 +98,18 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 kiln logs through `tracing` to stderr (the systemd journal for the user unit). To set a token for the unit, add `Environment=KILN_GITHUB_TOKEN=...` to the service, or save it from the dashboard instead.
 
+## GitHub App
+
+A GitHub App is the recommended way to authenticate. kiln holds only the App's private key; the tokens it uses are minted per installation, expire after an hour, and carry exactly *Administration: write*, *Actions: write*, *Contents: read* and *Metadata: read*. The App never gets write access to code, so the hello PR is off in App mode.
+
+**Create it from the dashboard:** Settings › GitHub › Create GitHub App (enter an organization to create it there, or leave it empty for your account). GitHub shows the App with its permissions preset; confirm, and GitHub sends you back to the dashboard, which saves the App and opens its install page. No webhook is configured: kiln keeps polling.
+
+**Or use an existing App:** Settings › GitHub › Use an existing App, with its App ID and a private key (`.pem`, PKCS#1 as GitHub issues it, or PKCS#8). kiln checks the pair against GitHub before saving.
+
+**Which repos:** in App mode the repos kiln serves are exactly the repos the App is installed on, refreshed every 5 minutes. Install or uninstall it on github.com to change the list; the `repos` setting is only used with a token. If a refresh fails, kiln keeps the last list and shows the error. Per-repo settings (`warm`, `cache_branches`, `repo_cache_gb`) stay keyed by `owner/name`; entries for repos the App is not installed on are kept and ignored.
+
+**Files:** `<data>/app.pem` (mode 0600) and `<data>/app.json` (`{id, slug, html_url}`). kiln uses App mode when both load at startup; if the key is unusable it logs the error and falls back to the token. **Remove App** in Settings deletes both files and returns to token auth (the App stays on GitHub until you delete it there).
+
 ## GitHub token
 
 **Precedence at startup:** `KILN_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `<data>/token`, then the output of `gh auth token`. The dashboard shows which source is in use.
@@ -121,6 +133,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
 <data>/                          $KILN_DATA or ~/.local/share/kiln
   config.json                    settings
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
+  app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   onboard.json                   hello PRs opened from the dashboard
   images/
