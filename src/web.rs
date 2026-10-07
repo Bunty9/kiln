@@ -68,6 +68,8 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/update/check", post(update_check))
         .route("/api/update/apply", post(update_apply))
         .route("/api/update/cancel", post(update_cancel))
+        .route("/api/restart", post(restart))
+        .route("/api/restart/cancel", post(restart_cancel))
         .route("/api/tailscale", get(ts_status))
         .route("/api/tailscale/netcheck", get(ts_netcheck))
         .route("/api/tailscale/ping", post(ts_ping))
@@ -707,6 +709,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.repos()),
         "update": update::compact(&app),
+        "restart": update::restart_json(&app, RUNNING_LISTEN.get().map(String::as_str)),
     })))
 }
 
@@ -731,7 +734,7 @@ async fn doctor(State(app): S) -> R<Json<Value>> {
 }
 
 async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
-    let restart = RUNNING_LISTEN.get().is_some_and(|l| *l != c.listen);
+    let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
     app.save_cfg(c)?;
@@ -742,7 +745,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
             let _ = vm::egress_ready(&a, true).await;
         });
     }
-    Ok((Extension(crate::audit::Note(changed)), Json(json!({ "restart_required": restart }))))
+    Ok((Extension(crate::audit::Note(changed)), Json(json!({ "restart_required": !needed.is_empty(), "restart_needed": needed }))))
 }
 
 #[derive(Deserialize)]
@@ -899,10 +902,33 @@ async fn update_apply(State(app): S) -> Response {
 
 /// Stop a draining update and resume launching.
 async fn update_cancel(State(app): S) -> Response {
-    if !update::cancel(&app) {
+    if !update::cancel(&app, false) {
         return conflict("only an update that is still draining can be cancelled");
     }
     Json(update::json(&app)).into_response()
+}
+
+#[derive(Deserialize)]
+struct RestartQuery {
+    #[serde(default)]
+    now: bool,
+}
+
+/// Restart kiln in place (same binary): drain first, or with `?now=true` kill running jobs.
+/// During a restart's drain, `?now=true` ends the wait. Progress in /api/state `restart`.
+async fn restart(State(app): S, Query(q): Query<RestartQuery>) -> Response {
+    if !update::restart(&app, q.now) {
+        return conflict("an update or update check is running: try again once it is done");
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Stop a restart's drain and resume launching.
+async fn restart_cancel(State(app): S) -> Response {
+    if !update::cancel(&app, true) {
+        return conflict("only a restart that is still draining can be cancelled");
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Bound on a tailscale CLI call; `tailscale serve` gets `SERVE_LIMIT`.

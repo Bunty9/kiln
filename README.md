@@ -104,7 +104,7 @@ systemctl --user daemon-reload && systemctl --user enable --now kiln
 loginctl enable-linger $USER    # keep running while logged out
 ```
 
-The unit ([`deploy/kiln.service`](deploy/kiln.service)) runs `~/.local/bin/kiln serve` with `Restart=on-failure` and `KillMode=mixed`. On stop, kiln kills its VMs and deregisters runners that never got a job; leftovers are swept at the next start. You can also bake from the dashboard instead of the CLI.
+The unit ([`deploy/kiln.service`](deploy/kiln.service)) runs `~/.local/bin/kiln serve` with `Restart=on-failure` and `KillMode=mixed`. On stop, kiln stops launching, gives running jobs up to `stop_grace_secs` (default 25) to finish, then kills its VMs and deregisters runners that never got a job; leftovers are swept at the next start. You can also bake from the dashboard instead of the CLI.
 
 ### Open the dashboard
 
@@ -164,7 +164,7 @@ The repo cache is a trusted writer with throwaway readers, so a PR can read the 
 
 ## Configuration
 
-Settings live in `~/.local/share/kiln/config.json` (override the directory with `KILN_DATA`) and are edited from the dashboard. Everything applies without a restart except `listen` (restart) and `vm_disk_gb` (takes effect at the next bake). The ones you will most likely touch:
+Settings live in `~/.local/share/kiln/config.json` (override the directory with `KILN_DATA`) and are edited from the dashboard. Everything applies without a restart except `listen` (the Overview then offers **Restart when idle**, which lets running jobs finish first) and `vm_disk_gb` (takes effect at the next bake). The ones you will most likely touch:
 
 | Field | Default | Meaning |
 |---|---|---|

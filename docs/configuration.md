@@ -18,7 +18,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. The dashboard tells you when a restart is required. |
+| `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. After saving a new address the Overview shows "Restart needed to apply: listen" with **Restart when idle** (see [Restarting kiln](#restarting-kiln)). |
 | `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
 | `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
@@ -40,6 +40,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 | `poll_secs` | integer | `5` | at least `3` | live | Seconds between GitHub polls. 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. With a GitHub App each installation has its own limit: only the repos of the limited installation pause (shown as a repo error), the rest keep polling, and the 20% check uses the most constrained installation. |
 | `job_timeout_mins` | integer | `60` | `1` to `1440` | live (VMs started after the change) | Longest a job may run, counted from when the runner reports "Running job". |
 | `idle_timeout_mins` | integer | `10` | `1` to `1440` | live (VMs started after the change) | A VM that never gets a job (boot included) is killed after this. |
+| `stop_grace_secs` | integer | `25` | `0` to `3600` | live | On SIGTERM (`systemctl stop` or `restart`), how long running jobs get to finish before their VMs are killed. Keep it about 30 s under the unit's `TimeoutStopSec`. See [Restarting kiln](#restarting-kiln). |
 
 Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hold) x 60 + 300 seconds from its start, whatever its console prints. Warm VMs use `max(idle_timeout_mins, warm_recycle_mins + 5)` as their idle component.
 
@@ -133,6 +134,16 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 **Access to the release repo:** with a token, kiln reads releases with it. In GitHub App mode it uses the installation token if the App is installed on `update_repo`, and otherwise reads it unauthenticated (never with another installation's token), so a public repo works and a private one needs the App installed on it. A check that cannot see the repo says so in Settings › Updates.
 
 **Trust:** the signing key lives only in the release workflow's secrets; the public half is compiled into kiln. Changing `update_repo` cannot make kiln install a build not signed with that key: another repo can offer only genuine signed releases, and only ones newer than the running version (never a downgrade). If the key is ever rotated, kilns built with the old key refuse the new releases: install that one release by hand (see the README), after which updates resume.
+
+## Restarting kiln
+
+**Which settings need a restart:** only `listen`, which is bound once at startup. Every other field is read where it is used, so a dashboard save applies it within seconds (some only to VMs started afterwards, or at the next bake, as the tables say). Hand edits to `config.json` are read only at startup, so they all need a restart.
+
+**Restart when idle** (Overview banner after saving `listen`, or `POST /api/restart`) restarts without killing jobs. It drains exactly like an update: no new VMs start (warm ones included), idle VMs are reaped, and kiln waits for running VMs to finish, at most the job timeout plus 2 minutes, and for a running bake. Then it shuts down as usual and re-executes the same binary in place (if you installed a new binary over it by hand, that one), so under systemd the PID stays and the unit sees no restart. The Overview shows "Restart pending · waiting for N VMs to finish" meanwhile, the journal logs the drain every 30 s, and `/api/state` carries it as `restart: {needed, state: "draining" | "restarting", progress, running}`. **Cancel restart** (`POST /api/restart/cancel`) resumes launching. Only one drain runs at a time: a restart is refused (409) while an update or an update check runs, and an update is refused while a restart drains.
+
+**Restart now** (`POST /api/restart?now=true`, also offered during a restart's drain) does not wait: running jobs are killed and fail on GitHub with "The runner has received a shutdown signal". The dashboard asks for confirmation and says how many VMs that kills. A running bake is still waited for.
+
+**`systemctl --user restart kiln` / `stop`:** on the first SIGTERM (or Ctrl-C) kiln stops launching at once, reaps idle VMs, and waits up to `stop_grace_secs` (default 25) for running jobs to finish; VMs held for debugging are not waited for. The journal logs "stopping: waiting for N running VMs (at most S s more)" every 5 s and the dashboard keeps serving with a "kiln is stopping" banner. Then, or on a second SIGTERM/SIGINT, kiln kills what still runs and cleans up as before (runners deregistered, disks deleted). The shipped unit sets `TimeoutStopSec=600`, so `stop_grace_secs` can go up to about 570; raise both together for longer jobs. An update does not touch the installed unit: with an older one that still says `TimeoutStopSec=30`, a job still running after the 25 s grace leaves too little time for cleanup, systemd SIGKILLs kiln, and the next start sweeps the leftover runners. Reinstall the unit (`install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service && systemctl --user daemon-reload`) to get the longer timeout.
 
 ## Environment variables
 

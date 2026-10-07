@@ -74,6 +74,9 @@ pub struct Config {
     pub auto_update: bool,
     /// "owner/name" whose GitHub releases kiln updates from.
     pub update_repo: String,
+    /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
+    /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
+    pub stop_grace_secs: u64,
 }
 
 impl Default for Config {
@@ -108,6 +111,7 @@ impl Default for Config {
             warm_recycle_mins: 30,
             auto_update: false,
             update_repo: "Bunty9/kiln".into(),
+            stop_grace_secs: 25,
         }
     }
 }
@@ -229,6 +233,9 @@ impl Config {
         }
         if !(5..=1440).contains(&self.warm_recycle_mins) {
             bail!("warm_recycle_mins must be 5..=1440");
+        }
+        if self.stop_grace_secs > 3600 {
+            bail!("stop_grace_secs must be 0..=3600 (and fit systemd's TimeoutStopSec)");
         }
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
@@ -367,7 +374,7 @@ pub struct App {
     pub mirror: Mutex<mirror::Status>,
     /// One-time states of GitHub App manifest flows in progress.
     pub app_states: Mutex<app_auth::States>,
-    /// An update is draining: launch nothing (warm included), reap idle VMs.
+    /// An update, restart or stop is draining: launch nothing (warm included), reap idle VMs.
     pub draining: AtomicBool,
     pub update: Mutex<update::Status>,
 }
@@ -547,9 +554,12 @@ async fn run() -> Result<()> {
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
+            // In its own task: the dashboard keeps serving while a stop drains.
+            let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
-                r = web::serve(app.clone()) => r,
+                r = web => r?,
                 _ = stop_signal() => {
+                    stop_drain(&app).await;
                     shutdown(&app).await;
                     Ok(())
                 }
@@ -592,6 +602,46 @@ async fn stop_signal() {
     tokio::select! {
         _ = term.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+/// VMs the stop drain waits for. Held VMs are not (they keep a finished job for
+/// debugging); waiting ones are reaped by the draining scheduler meanwhile.
+fn stop_waits_for(s: vm::State) -> bool {
+    s.is_active() && s != vm::State::Held
+}
+
+/// After the first SIGTERM/SIGINT: launch nothing (idle VMs are reaped) and give running
+/// jobs up to `stop_grace_secs` to finish. A second signal ends the wait.
+async fn stop_drain(app: &Arc<App>) {
+    update::stopping(app);
+    app.draining.store(true, Ordering::SeqCst);
+    let grace = app.cfg().stop_grace_secs;
+    let deadline = now() + grace;
+    let again = stop_signal();
+    tokio::pin!(again);
+    let mut logged = 0;
+    loop {
+        let running = app.vms.lock().unwrap().iter().filter(|v| stop_waits_for(v.state)).count();
+        if running == 0 || now() >= deadline {
+            if running > 0 {
+                tracing::warn!("stop grace ({grace} s) is over: killing {running} running VM(s)");
+            }
+            return;
+        }
+        let p = format!("waiting for {running} running VM{} (at most {} s more)", if running == 1 { "" } else { "s" }, deadline - now());
+        if now() >= logged + 5 {
+            logged = now();
+            tracing::info!("stopping: {p}; signal again to stop now");
+        }
+        update::stop_progress(app, p);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = &mut again => {
+                tracing::warn!("second stop signal: killing {running} running VM(s) now");
+                return;
+            }
+        }
     }
 }
 
@@ -779,7 +829,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
-        .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
+        .then(|| ("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()))
         .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
         .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
@@ -1212,6 +1262,20 @@ mod tests {
         assert_eq!(b.allow(1060, 5, false), 1);
         assert_eq!(b.allow(1060, 0, false), 0);
         assert_eq!(b.allow(1060, 5, true), 0);
+    }
+
+    #[test]
+    fn stop_waits_for_running_jobs_only() {
+        use vm::State::*;
+        for s in [Booting, Idle, Busy] {
+            assert!(stop_waits_for(s), "{s:?}");
+        }
+        for s in [Held, Done, Failed, Killed, Lost, Unneeded] {
+            assert!(!stop_waits_for(s), "{s:?}");
+        }
+        assert_eq!(Config::default().stop_grace_secs, 25);
+        assert!(Config { stop_grace_secs: 0, ..Config::default() }.validate_for(8).is_ok());
+        assert!(Config { stop_grace_secs: 3601, ..Config::default() }.validate_for(8).is_err());
     }
 
     #[test]

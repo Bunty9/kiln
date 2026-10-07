@@ -24,6 +24,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Restarts drain running jobs first instead of killing them ([#23](https://github.com/Bunty9/kiln/issues/23)). After saving a setting that only applies at startup (`listen` is the only one), the Overview shows "Restart needed to apply: listen" with **Restart when idle**, which drains like an update (no new VMs, idle ones reaped, running jobs finish, at most the job timeout + 2 min) and re-executes kiln in place, and **Restart now**, which kills running jobs after a confirmation that says so. The drain shows as "Restart pending · waiting for N VMs" with Cancel and Restart now, is logged in the journal, and is in `/api/state` as `restart`. New endpoints: `POST /api/restart` (`?now=true` to skip the wait) and `POST /api/restart/cancel`. A restart and an update never drain at once.
+- `systemctl restart` / `stop` (SIGTERM) now stops launching at once and gives running jobs up to the new `stop_grace_secs` (default 25, Settings › Timeouts) to finish before killing their VMs; a second SIGTERM or Ctrl-C skips the wait. The journal and the dashboard show the progress. `deploy/kiln.service` raises `TimeoutStopSec` from 30 to 600 so a longer grace fits: reinstall the unit to get it (see docs/configuration.md, Restarting kiln).
 - Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
 
 ### Fixed
