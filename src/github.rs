@@ -229,7 +229,12 @@ impl Gh {
         // on that branch (identical to it or an ancestor of it).
         if event == "push" && (branch == default || writers.contains(&branch)) {
             let sha = run["head_sha"].as_str().context("run has no head_sha")?;
-            let cmp = self.get(&format!("repos/{repo}/compare/{branch}...{sha}")).await?;
+            // Resolve the branch tip through refs/heads explicitly: a bare name in
+            // compare/ may resolve to a same-named tag, which anyone who can push a
+            // tag controls.
+            let tip = self.get(&format!("repos/{repo}/git/ref/heads/{branch}")).await?;
+            let tip = tip["object"]["sha"].as_str().context("branch ref has no sha")?;
+            let cmp = self.get(&format!("repos/{repo}/compare/{tip}...{sha}")).await?;
             if !matches!(cmp["status"].as_str(), Some("identical" | "behind")) {
                 return Ok((event, format!("{branch} (commit {:.7} not on {branch})", sha), default, conclusion));
             }
