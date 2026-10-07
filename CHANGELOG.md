@@ -4,9 +4,12 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
 ### Added
 
 - GitHub App authentication: create the App from the dashboard (manifest flow) or use an existing one. Installation tokens are minted per installation and refreshed before they expire; only the private key is stored. The repos kiln serves are the repos the App is installed on, refreshed every 5 minutes (every 30 s while it serves none), or at once with `POST /api/app/refresh`. Token auth still works.
+- Installable dashboard (PWA) over HTTPS (`tailscale serve`): app icon, web manifest with shortcuts, a versioned service worker that never caches `/api` and falls back to the last loaded shell or an offline page, and an **Install app** button.
 - `app_accounts`: in App mode, accounts whose installations are served besides the App owner's.
 - `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
 - `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the set marks the image stale; so does an image baked by an older kiln (recorded as `recipe` in `base.json`).
@@ -15,10 +18,13 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - `bake_apt_packages`: extra apt packages baked into the image. Changing the set marks the image stale.
 - `/var/cache/apt/archives` lives on the repo cache disk, so `apt-get install` reuses downloaded packages.
 - `kiln doctor` names the missing token permission per repo; the dashboard shows the token's expiry and save time and warns before it expires.
+- Over-the-air updates from signed GitHub releases (Settings › Updates): kiln checks `update_repo` (default `Bunty9/kiln`) at startup and every 6 hours, shows the release notes, and on **Update** downloads the tarball for its build, verifies its Ed25519 signature and SHA-256, drains (no new or warm VMs, running jobs finish), swaps its binary keeping `<exe>.prev`, and re-execs in place. A version that fails to start twice (counted from the very start of `kiln serve`) is rolled back, and `auto_update` never installs it again, only a newer release. `auto_update` (default off) applies updates when no job runs and no VM is held (idle warm VMs do not count). No bake starts during the drain, and the drain waits for a running one. Open dashboards, including an installed app's cached page, reload into the new version. API: `GET /api/update`, `POST /api/update/{check,apply,cancel}`.
+- Releases include a fully static `x86_64-linux-musl` build next to the glibc one, and a `.sig` (Ed25519) for each tarball.
 - Dashboard polish: elevated surfaces instead of outlines, an icon set, hover and focus tooltips on states, stats and actions, no layout shift between pages, and Settings › Appearance (theme, density, accent, reduced motion; per browser). In App mode, Setup and Repos show the App install button and a Refresh, and a failed App creation can be retried.
 
 ### Security
 
+- Self-update installs only tarballs signed with the release key compiled into kiln; a new key needs one manual install.
 - GitHub App mode serves only installations on the App owner's account (matched by account id, read from GitHub at each refresh) or listed in `app_accounts`; others are ignored and reported. A call for a repo the App does not serve never borrows another installation's token.
 - `app.pem`, `app.json` and the setup states are written atomically with mode 0600, also when the files already existed.
 - Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. The hook also refuses `workflow_run` runs triggered from a fork (only the hook can see those).
@@ -66,5 +72,6 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Bunty9/kiln/releases/tag/v0.1.0

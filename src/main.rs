@@ -1,6 +1,7 @@
 mod app_auth;
 mod github;
 mod mirror;
+mod update;
 mod vm;
 mod web;
 
@@ -66,6 +67,10 @@ pub struct Config {
     pub warm: BTreeMap<String, u32>,
     /// Idle warm VMs older than this are replaced so they never go stale.
     pub warm_recycle_mins: u64,
+    /// Apply a newer signed release by itself when the box is idle.
+    pub auto_update: bool,
+    /// "owner/name" whose GitHub releases kiln updates from.
+    pub update_repo: String,
 }
 
 impl Default for Config {
@@ -98,6 +103,8 @@ impl Default for Config {
             egress: "open".into(),
             warm: BTreeMap::new(),
             warm_recycle_mins: 30,
+            auto_update: false,
+            update_repo: "Bunty9/kiln".into(),
         }
     }
 }
@@ -149,11 +156,12 @@ impl Config {
             if self.repos[..i].iter().any(|p| p.eq_ignore_ascii_case(r)) {
                 bail!("repo listed twice (GitHub names are case-insensitive): {r:?}");
             }
-            let ok = r.split('/').count() == 2
-                && r.split('/').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
-            if !ok {
+            if !valid_repo(r) {
                 bail!("repo must look like owner/name: {r:?}");
             }
+        }
+        if !valid_repo(&self.update_repo) {
+            bail!("update_repo must look like owner/name: {:?}", self.update_repo);
         }
         if self.listen.parse::<std::net::SocketAddr>().is_err() {
             bail!("listen must look like 0.0.0.0:7878");
@@ -229,6 +237,12 @@ impl Config {
     }
 }
 
+/// "owner/name" of plain characters, no dot segments.
+fn valid_repo(r: &str) -> bool {
+    r.split('/').count() == 2
+        && r.split('/').all(|p| !p.is_empty() && p != "." && p != ".." && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+}
+
 /// GitHub login: 1-39 alphanumerics or single hyphens, not at either end.
 fn valid_login(l: &str) -> bool {
     (1..=39).contains(&l.len())
@@ -280,6 +294,9 @@ pub struct App {
     pub mirror: Mutex<mirror::Status>,
     /// One-time states of GitHub App manifest flows in progress.
     pub app_states: Mutex<app_auth::States>,
+    /// An update is draining: launch nothing (warm included), reap idle VMs.
+    pub draining: AtomicBool,
+    pub update: Mutex<update::Status>,
 }
 
 impl App {
@@ -365,8 +382,14 @@ async fn main() -> Result<()> {
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
+    // First, before anything that can fail (a bad config.json included), so a new version
+    // that dies early still counts its boots and gets rolled back. CLI runs never count.
+    if is_serve(std::env::args().nth(1).as_deref()) {
+        update::on_start(&data);
+    }
     std::fs::create_dir_all(data.join("vms"))?;
     std::fs::create_dir_all(data.join("images"))?;
+    std::fs::create_dir_all(data.join("update"))?;
     let cfg: Config = match std::fs::read(data.join("config.json")) {
         Ok(b) => serde_json::from_slice(&b)?,
         Err(_) => Config::default(),
@@ -392,6 +415,8 @@ async fn main() -> Result<()> {
         backoff: Default::default(),
         mirror: Default::default(),
         app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+        draining: Default::default(),
+        update: Mutex::new(update::Status::load(&data)),
         data,
     });
 
@@ -407,7 +432,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some("serve") | None => {
+        a if is_serve(a) => {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             if app.cfg().egress == "filtered" {
@@ -420,6 +445,7 @@ async fn main() -> Result<()> {
             }
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
+            tokio::spawn(update::supervise(app.clone()));
             tokio::select! {
                 r = web::serve(app.clone()) => r,
                 _ = stop_signal() => {
@@ -435,6 +461,11 @@ async fn main() -> Result<()> {
             std::process::exit(2)
         }
     }
+}
+
+/// `kiln` or `kiln serve`: the service (what systemd runs, and what an update re-execs).
+fn is_serve(arg: Option<&str>) -> bool {
+    matches!(arg, Some("serve") | None)
 }
 
 async fn stop_signal() {
@@ -567,7 +598,8 @@ fn should_rebake(cfg: &Config, stale: bool, baking: bool, t: u64, last: u64) -> 
 fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     static LAST: AtomicU64 = AtomicU64::new(0);
     let stale = vm::image_info(&app.data, app.gh.latest_cached(), cfg)["stale"] == true;
-    let baking = app.baking.load(Ordering::SeqCst);
+    // vm::bake would refuse: do not spend the 6 h slot on it.
+    let baking = app.baking.load(Ordering::SeqCst) || app.draining.load(Ordering::SeqCst);
     if !should_rebake(cfg, stale, baking, now(), LAST.load(Ordering::Relaxed)) {
         return;
     }
@@ -610,8 +642,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
     // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
-    let mut blocked = old_image
-        .then(|| "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())
+    let draining = app.draining.load(Ordering::SeqCst);
+    let mut blocked = draining
+        .then(|| "draining for a kiln update: running jobs finish, then kiln restarts".to_string())
+        .or_else(|| old_image.then(|| "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string()))
         .or_else(|| egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")))
         .or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
     let mut budget = {
@@ -661,8 +695,9 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 let waiting = vms.iter().filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.cpus == n && v.state.is_waiting()).count();
                 (waiting, vms.iter().filter(|v| v.state.is_active()).count())
             };
-            let target = cfg.warm_target(repo, n);
-            let surplus = vm::surplus(waiting, queued, target);
+            // Draining: every waiting VM is surplus, and none are kept warm.
+            let target = if draining { 0 } else { cfg.warm_target(repo, n) };
+            let surplus = if draining { waiting } else { vm::surplus(waiting, queued, target) };
             if surplus > 0 {
                 vm::reap(app, repo, n, surplus).await;
             }
@@ -670,7 +705,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if queued > waiting && blocked.is_none() {
                 blocked = gate.clone();
             }
-            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -738,6 +773,15 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_serve_counts_update_boots() {
+        assert!(is_serve(None));
+        assert!(is_serve(Some("serve")));
+        for a in ["bake", "doctor", "--version", "-V", "version", "help", ""] {
+            assert!(!is_serve(Some(a)), "{a}");
+        }
+    }
 
     #[test]
     fn config_validation() {
@@ -828,6 +872,12 @@ mod tests {
         assert!(ok(|c| c.warm_recycle_mins = 5));
         assert!(!ok(|c| c.warm_recycle_mins = 4));
         assert!(!ok(|c| c.warm_recycle_mins = 1441));
+        assert_eq!((Config::default().update_repo.as_str(), Config::default().auto_update), ("Bunty9/kiln", false));
+        assert!(ok(|c| c.update_repo = "my-org/kiln.fork".into()));
+        for r in ["", "kiln", "a/b/c", "a/../b", "a/b?x", "/kiln"] {
+            let c = Config { update_repo: r.into(), ..Config::default() };
+            assert!(c.validate_for(8).is_err(), "{r}");
+        }
     }
 
     #[test]

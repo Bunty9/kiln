@@ -80,12 +80,47 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | `debug_hold_mins` | integer | `0` | `0` to `120` | live (new VMs) | Keep a job VM whose job ended with a verdict other than success alive for SSH this long. `0` is off. Needs at least one key in `debug_ssh_keys`. |
 | `debug_ssh_keys` | string array | `[]` | single-line public keys starting `ssh-`, `ecdsa-` or `sk-` | live (new VMs) | Keys allowed into a held VM (login as `runner`, key-only). Changing keys, or turning the hold on or off, recycles idle VMs that booted with the old values. |
 
+### Updates
+
+| Field | Type | Default | Valid values | Applies | What it does |
+|---|---|---|---|---|---|
+| `auto_update` | bool | `false` | | live | Install a newer signed release by itself, once no job runs, no demand VM waits for one, no VM is held for debugging and no bake runs (looked at every minute after a successful check). Idle warm VMs do not hold it back; the drain reaps them. A version that was rolled back is never installed by itself again, only a newer one. See [Updates](#updates). |
+| `update_repo` | string | `"Bunty9/kiln"` | `owner/name` | live (next check) | Repository whose GitHub releases kiln checks and installs. Only releases signed with kiln's release key are installed, whatever the repo. |
+
 ### Warm pool
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `warm` | object | `{}` | `{"owner/name": 0..4}`; entries for repos kiln does not serve are ignored | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
 | `warm_recycle_mins` | integer | `30` | `5` to `1440` | live | Idle warm VMs older than this are deregistered and replaced so they never go stale. |
+
+## Install as an app
+
+The dashboard is an installable web app: its own window, a dock or home-screen icon, and shortcuts to Jobs, Repos and Settings. Browsers allow this only over HTTPS (or on `localhost`), so:
+
+1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only.
+2. Open that URL. In Chrome or Edge click **Install app** at the top right (or the install icon in the address bar). On iOS use Share › Add to Home Screen; on Android, the menu's Install app.
+
+Over plain `http://<box>:7878` nothing is installed and Settings › Notifications says so. The app talks to the same server as the tab; the API is never cached. If kiln is unreachable, the app shows the last loaded dashboard (or a short "kiln is unreachable" page) and retries on its own. A new kiln release installs a new service worker on the next load.
+
+## Updates
+
+kiln can update itself from GitHub releases (Settings › Updates, or `POST /api/update/apply`). It checks `update_repo`'s latest release 60 seconds after starting, every 6 hours and on demand (**Check now**). Drafts and pre-releases are never offered, and only a version newer than the running one (`X.Y.Z`) is.
+
+**Applying an update:**
+
+1. **Download** the tarball for this build: `kiln-X.Y.Z-x86_64-linux.tar.gz` for the glibc build, `kiln-X.Y.Z-x86_64-linux-musl.tar.gz` for the static musl build (Settings › Updates shows which one runs), with its `.sha256` and `.sig`.
+2. **Verify** the Ed25519 signature against the release key built into the running kiln, then the SHA-256. Anything unsigned, signed with another key or corrupted is refused before it is unpacked. Only the `kiln` binary is extracted, and it must report the release's version.
+3. **Drain:** kiln launches no new VMs (warm ones included), reaps idle ones, and waits for running jobs to finish, at most the job timeout plus 2 minutes; whatever still runs then is stopped as on a normal shutdown. A running bake is always waited for (it has its own 30-minute cap), and no bake can start while kiln drains. VMs held for debugging (`debug_hold_mins`) keep `auto_update` from starting, but not a manual update: its drain waits for them like for running jobs, up to the same deadline. Queued jobs wait. **Cancel** (Settings › Updates or the Overview banner, `POST /api/update/cancel`) stops a drain and resumes launching.
+4. **Restart:** the executable is replaced atomically (the old one is kept as `<exe>.prev`, for example `~/.local/bin/kiln.prev`) and kiln re-executes itself in place with the same arguments. Under systemd the PID stays the same, so the unit sees no restart. Open dashboards reload themselves, including an installed app showing a page it kept from the old version.
+
+kiln must be able to write the directory its binary lives in (`~/.local/bin` in the standard install). If it cannot, the update fails before draining.
+
+**Rollback:** if the new version fails to start twice (systemd's `Restart=on-failure` restarts it), the next start puts `<exe>.prev` back, runs it, and shows why on the dashboard. A start counts from the moment `kiln serve` runs, before it reads `config.json`, so a version that dies early is rolled back too; `kiln bake`, `kiln doctor` and `kiln --version` never count. A start is confirmed after 60 seconds of serving, so restarting kiln twice by hand within 60 seconds of an update also counts as two failed starts and rolls it back. The rolled-back version is recorded in `<data>/update/skip`: `auto_update` never retries it, only a newer release; **Update** in Settings › Updates installs it anyway and clears the record. To roll back by hand, stop kiln and `mv ~/.local/bin/kiln.prev ~/.local/bin/kiln`.
+
+**Access to the release repo:** with a token, kiln reads releases with it. In GitHub App mode it uses the installation token if the App is installed on `update_repo`, and otherwise reads it unauthenticated (never with another installation's token), so a public repo works and a private one needs the App installed on it. A check that cannot see the repo says so in Settings › Updates.
+
+**Trust:** the signing key lives only in the release workflow's secrets; the public half is compiled into kiln. Changing `update_repo` cannot make kiln install a build not signed with that key: another repo can offer only genuine signed releases, and only ones newer than the running version (never a downgrade). If the key is ever rotated, kilns built with the old key refuse the new releases: install that one release by hand (see the README), after which updates resume.
 
 ## Environment variables
 
@@ -138,6 +173,8 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   onboard.json                   hello PRs opened from the dashboard
+  update/                        self-update: pending.json (an update not yet confirmed), error (why
+                                 the last one was rolled back), the release being unpacked
   images/
     base.qcow2                   frozen base image
     base.vmlinuz                 kernel the VMs boot (direct kernel boot)

@@ -184,6 +184,14 @@ On SIGTERM or SIGINT kiln stops launching, marks active VMs "kiln shutting down"
 
 Under systemd, the unit's cgroup kill takes QEMU down with kiln; outside systemd QEMU can outlive a SIGKILLed kiln, and `kiln doctor` reports it as stray. On the next `serve`, any VM recorded as active is marked `lost` and its disk, cache overlay and JIT secret are deleted, and the scheduler's startup sweep deletes offline idle `kiln-*` runners from GitHub. A parked cache overlay survives and is committed by a later tick.
 
+## Self-update
+
+See [configuration.md](configuration.md#updates) for the user-facing side. `update.rs` fetches `repos/{update_repo}/releases/latest` and, on apply, the three assets of this build's flavor (`kiln-X.Y.Z-x86_64-linux[-musl].tar.gz`, `.sha256`, `.sig`) with `Accept: application/octet-stream`. The Ed25519 signature is checked against the key compiled into the binary before anything else, then the SHA-256. `tar -tzf` must list only paths under `kiln-X.Y.Z-.../` with no `..`, and only `kiln-X.Y.Z-.../kiln` is extracted (into `<data>/update/`); it must print `kiln X.Y.Z` for `--version` (so a validly signed old tarball under a new tag is refused). It is copied to `<exe>.new` (mode 755) next to `/proc/self/exe`.
+
+Draining sets `App.draining`: `tick` launches nothing, keeps no warm VMs, treats every waiting VM as surplus (reaped through runner deregistration as usual) and reports "draining" as the blocked reason. When no VM is active and no bake runs (or after the job timeout + 2 minutes), kiln writes `<data>/update/pending.json` `{from, to, attempts: 0}`, hard-links the executable to `<exe>.prev`, renames `<exe>.new` over it, runs the normal shutdown, waits for the mirror registry to stop, and `exec`s the new binary with the same arguments: the PID stays (systemd sees no restart) and every fd std and tokio opened is close-on-exec. If the exec fails it exits 1 so systemd starts the new binary.
+
+At `serve` start, `pending.json` (if its `to` is the running version) gets `attempts + 1`; above 2 the previous binary is renamed back and exec'd, and the reason is kept in `<data>/update/error` for the dashboard. After 60 s of serving, `pending.json` is deleted. A version that hangs without exiting is not detected.
+
 ## API
 
 Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All writes need the `x-kiln` header, and requests from the box itself need `x-kiln-key`.
@@ -207,6 +215,10 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/onboard` | Hello PRs this kiln has opened |
 | `POST /api/onboard/hello` | Open a PR adding `.github/workflows/kiln-hello.yml` to a configured repo |
 | `POST /api/bake` | Start a bake (202; refused while one runs) |
+| `GET /api/update` | Update status: `{current, latest, available, notes, published_at, flavor, state, error, progress, rollback, checked_at, auto, repo}`; `state` is `idle`, `checking`, `downloading`, `verifying`, `draining`, `applying` or `error`. `/api/state` carries a compact copy as `update` |
+| `POST /api/update/check` | Check for a release now; returns the status (a failed check is in its `error`). 409 while a check or update runs |
+| `POST /api/update/apply` | Download, verify, drain and restart into the latest release (202). 409 while a check or update runs |
+| `POST /api/update/cancel` | Stop a draining update and resume launching. 409 unless one is draining |
 | `GET /api/tailscale` | Tailscale status and serve config |
 | `GET /api/tailscale/netcheck` | `tailscale netcheck` |
 | `POST /api/tailscale/ping` | Ping a peer (`{"peer": "..."}`, restricted characters) |

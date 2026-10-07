@@ -103,6 +103,18 @@ pub struct Vm {
     pub warm: bool,
 }
 
+impl Vm {
+    /// Holds off `auto_update`: a job (or a demand VM about to take one) or a debug hold.
+    /// Idle warm VMs do not: the drain reaps them.
+    pub fn blocks_auto_update(&self) -> bool {
+        match self.state {
+            State::Busy | State::Held => true,
+            State::Booting | State::Idle => !self.warm || self.job_url.is_some(),
+            _ => false,
+        }
+    }
+}
+
 const KEEP_HISTORY: usize = 200;
 /// console.log and steps.log stop growing here (parsing continues).
 const LOG_CAP: usize = 64 << 20;
@@ -1245,6 +1257,12 @@ pub async fn bake(app: Arc<App>) -> Result<()> {
     if app.baking.swap(true, Ordering::SeqCst) {
         bail!("a bake is already running");
     }
+    // Checked after claiming `baking` (SeqCst): a drain that saw `baking` false has set
+    // `draining` before, so no bake slips in between a finished drain and the re-exec.
+    if let Some(why) = bake_refused(app.draining.load(Ordering::SeqCst), app.stopping.load(Ordering::SeqCst)) {
+        app.baking.store(false, Ordering::SeqCst);
+        bail!("{why}");
+    }
     // Held until the bake ends; also keeps a second kiln process out.
     let lock = std::fs::OpenOptions::new().create(true).append(true).open(images(&app.data).join("bake.lock"));
     let lock = lock.map_err(anyhow::Error::from).and_then(|f| match f.try_lock() {
@@ -1265,6 +1283,17 @@ pub async fn bake(app: Arc<App>) -> Result<()> {
     }
     app.baking.store(false, Ordering::SeqCst);
     r
+}
+
+/// Why a bake may not start now: an update drains (and re-execs) or kiln stops.
+pub fn bake_refused(draining: bool, stopping: bool) -> Option<&'static str> {
+    if stopping {
+        Some("kiln is stopping")
+    } else if draining {
+        Some("kiln is updating")
+    } else {
+        None
+    }
 }
 
 async fn append(path: &Path, s: &str) -> Result<()> {
@@ -1991,6 +2020,30 @@ mod tests {
         assert_eq!(launch_split(2, 2, 1), (0, 1));
         assert_eq!(launch_split(5, 0, 0), (5, 0));
         assert_eq!((surplus(3, 1, 1), surplus(2, 1, 1), surplus(1, 2, 1), surplus(2, 0, 0)), (1, 0, 0, 2));
+    }
+
+    #[test]
+    fn no_bake_while_updating_or_stopping() {
+        assert_eq!(bake_refused(false, false), None);
+        assert_eq!(bake_refused(true, false), Some("kiln is updating"));
+        assert_eq!(bake_refused(false, true), Some("kiln is stopping"));
+        assert!(bake_refused(true, true).is_some());
+    }
+
+    #[test]
+    fn auto_update_blockers() {
+        let w = |s| Vm { warm: true, ..vm("w", s, None) };
+        // real work blocks: a job, a demand VM about to take one, a debug hold
+        for v in [vm("a", State::Busy, None), vm("b", State::Booting, None), vm("c", State::Idle, Some(1)), vm("d", State::Held, None)] {
+            assert!(v.blocks_auto_update(), "{:?}", v.state);
+        }
+        // the warm pool does not (the drain reaps it), unless GitHub already gave it a job
+        assert!(!w(State::Booting).blocks_auto_update());
+        assert!(!w(State::Idle).blocks_auto_update());
+        assert!(Vm { job_url: Some("u".into()), ..w(State::Idle) }.blocks_auto_update());
+        for s in [State::Done, State::Failed, State::Killed, State::Lost] {
+            assert!(!vm("x", s, None).blocks_auto_update());
+        }
     }
 
     #[test]
