@@ -4,9 +4,33 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- **QEMU is confined.** Every VM's QEMU runs with libvirt's seccomp policy (`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`): no exec, no setuid, no obsolete syscalls. A job VM's QEMU also starts through `kiln __confine`, which applies a Landlock ruleset first: QEMU sees the system directories, `/dev/kvm` and the standard character devices, the images directory and its repo's cache disk (read-only), and writes only `vms/<id>/q/` (its disks, JIT secret and sockets; kiln's record and logs sit outside it, and QEMU can only append to the console log through its own output). It never inherits a token from kiln's environment (`KILN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`). kiln refuses to start with its data directory under a path QEMU may read (such as `/opt`), connects to QEMU's sockets without following symlinks, and notes on a VM's page when the kernel has no Landlock. It cannot read the GitHub token, App key, dashboard key, other jobs or other repos' caches, or ptrace kiln or other VMs; on Linux 6.12+ it cannot signal them either. A trusted cache overlay is committed only if its qcow2 header names exactly the repo's cache disk and no external data file. New doctor checks "qemu sandbox" and "landlock". A QEMU built without seccomp now fails to start VMs instead of running unfiltered.
+- **Release builds run cold.** A job for a pushed tag or a `release` event detaches the repo cache before its first step, so a toolchain planted in the cache by a compromised dependency in some default-branch job never reaches a release build. After every job, `cargo login` and `huggingface-cli login` tokens (`token` and `stored_tokens`) are deleted from the cache before it can be saved. This needs a rebake (recipe 5): launching waits until the image is rebaked, which `auto_rebake` does by itself.
+- **Audit log.** Every admitted API write is appended to `<data>/audit.log` as a JSON line (who, from where, what, status, which config keys changed); refused writes go to kiln's log.
+- **Stricter dashboard headers:** a hash-based `Content-Security-Policy` (only the page's own inline scripts run), `nosniff`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy` and `Permissions-Policy`. The page links only to `https://github.com/` URLs from the API and refuses repo names with dot segments when building GitHub proxy paths.
+- **The GitHub proxy writes less:** POST is allowed only to rerun or cancel a run and to dispatch a workflow (no run approvals or deployment reviews).
+- **Private files.** The data directory is set to mode 0700 at every start (it inherited the umask before, usually 0775, so other local users could read job logs and repo caches), the systemd unit sets `UMask=0077`, and the token and dashboard key are written atomically with mode 0600 even over an existing looser file.
+- rootlesskit's state directory moved to `<data>/rk/<id>`, out of the confined QEMU's reach, and VM records are used at startup only if their id names their own directory.
+- **Fail-closed config.** `config.json` is validated at startup with the dashboard's rules; kiln refuses to start on an invalid or unreadable file (only a missing one means the defaults) instead of, for example, treating an unknown `egress` value as open networking.
+- `tailscale` CLI calls in the access guard time out after 20 s and fail closed (unknown identity, or local when kiln cannot read its own addresses); failures are logged.
+- CI checks dependencies with `cargo deny` (RustSec advisories, licenses, sources), pins `actions/checkout` by SHA, and releases of the public repository carry build provenance attestations.
+
+### Added
+
+- **Host graphs on the Overview.** The Host card's CPU and memory bars are split by job VM, one colour per VM (the same colour marks its tile under Now running), with grey for the rest of the host. Opening the card shows stacked area charts of both over the last 5 minutes, 15 minutes or an hour, scrolling continuously, with a crosshair readout per VM. kiln samples `/proc` every 2 s and keeps an hour in memory (`GET /api/host`).
+- **On crates.io as `kiln-ci`:** `cargo install kiln-ci --locked --root ~/.local` installs the `kiln` binary. Every `v*` tag publishes there after the GitHub release.
+
 ### Changed
 
 - Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
+
+### Fixed
+
+- **"Saved this month" counts every job.** It summed only the last 100 jobs the dashboard loads, so a busy month read low (one box ran 239 jobs in two days). kiln now keeps job minutes per UTC day and VM size in `<data>/usage.json`, seeded from the VM history on first start. Each job counts from start to its result as GitHub bills it, so a debug hold is no longer billed (jobs recorded before this version, and jobs killed before a result, count until the VM ended), and is priced at the current GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute; the old figures predated GitHub's 2026 price cut). The month is the UTC calendar month GitHub bills by. A custom flat rate still overrides.
+
+- VM records (`meta.json`) are written atomically, so a crash mid-write no longer hides a VM from the startup cleanup.
 
 ## [0.2.3] - 2026-10-07
 

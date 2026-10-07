@@ -222,7 +222,7 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
 }
 
 /// This process's executable (/proc/self/exe), refused once it was replaced on disk.
-fn current_exe() -> Result<PathBuf> {
+pub fn current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving /proc/self/exe")?;
     if exe.to_string_lossy().ends_with(" (deleted)") {
         bail!("kiln's binary was replaced on disk since it started: restart kiln first");

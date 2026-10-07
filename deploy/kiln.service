@@ -14,6 +14,8 @@ RestartSec=5
 # (leftovers are swept at the next start), then the rest of the cgroup is SIGKILLed.
 KillMode=mixed
 TimeoutStopSec=30
+# Files kiln and its VMs create (logs, overlays, sockets) are private to this user.
+UMask=0077
 # Optional: Environment=KILN_GITHUB_TOKEN=... (or set it from the dashboard)
 
 [Install]

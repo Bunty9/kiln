@@ -89,6 +89,9 @@ pub struct Vm {
     #[serde(default)]
     pub online_at: Option<u64>,
     pub busy_since: Option<u64>,
+    /// The runner reported the job's result: where GitHub would stop billing.
+    #[serde(default)]
+    pub done_at: Option<u64>,
     pub ended: Option<u64>,
     pub note: Option<String>,
     /// Size this VM was booted with (0 in records from before size labels).
@@ -159,27 +162,101 @@ pub fn image_ready(data: &Path) -> bool {
     images(data).join("base.qcow2").exists() && images(data).join("base.vmlinuz").exists()
 }
 
+/// Remove what a VM directory may hold that must not outlive the VM: its disks, JIT secret
+/// and rootlesskit state. Goes by the directory, never by what a record inside it claims.
+fn scrub_vm_dir(dir: &Path) {
+    let _ = std::fs::remove_dir_all(qemu_dir(dir));
+    let _ = std::fs::remove_dir_all(rk_dir(dir));
+    // Layout before 0.2.4: QEMU's files sat in the VM directory itself.
+    for f in ["disk.qcow2", "cache.qcow2", "jit", "ssh"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+}
+
 pub fn load_history(data: &Path) -> Vec<Vm> {
+    let seed = !data.join("usage.json").exists();
     let mut vms: Vec<Vm> = std::fs::read_dir(data.join("vms"))
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path().join("meta.json")).ok()?).ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let meta = e.path().join("meta.json");
+            match std::fs::read(&meta).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Vm>(&b).map_err(|e| e.to_string()))
+            {
+                // A record is used to delete files by its id: it must name its own directory.
+                Ok(v) if check_id(&v.id).is_ok() && e.file_name().to_str() == Some(v.id.as_str()) => return Some(v),
+                Ok(v) => tracing::warn!("ignoring {}: its id {:?} does not name its directory", meta.display(), v.id),
+                Err(err) => tracing::warn!("ignoring {}: {err}", meta.display()),
+            }
+            scrub_vm_dir(&e.path());
+            None
+        })
         .collect();
     for v in &mut vms {
         if v.state.is_active() {
             v.state = State::Lost;
-            v.ended.get_or_insert(v.started);
+            // The real end is unknown: the last thing known to have happened.
+            v.ended.get_or_insert(v.busy_since.unwrap_or(v.started));
             // The crash skipped the normal cleanup: don't leave a disk or a credential behind.
-            let dir = data.join("vms").join(&v.id);
-            let _ = std::fs::remove_file(dir.join("disk.qcow2"));
-            let _ = std::fs::remove_file(dir.join("cache.qcow2"));
-            let _ = std::fs::remove_file(dir.join("jit"));
+            scrub_vm_dir(&data.join("vms").join(&v.id));
             write_meta(data, v);
+            // It never reached the end of `launch`, where finished jobs are counted.
+            if !seed {
+                record_usage(data, v);
+            }
         }
     }
     vms.sort_by_key(|v| v.started);
+    // First start with the ledger: seed it from the history still on disk.
+    if seed {
+        vms.iter().for_each(|v| record_usage(data, v));
+    }
     vms
+}
+
+/// Job minutes per UTC day and VM size, kept beyond the VM history so a month's
+/// total survives `prune`: day -> cpus -> [jobs, minutes].
+type Usage = std::collections::BTreeMap<u64, std::collections::BTreeMap<u32, [u64; 2]>>;
+
+fn read_usage(data: &Path) -> std::io::Result<Usage> {
+    match std::fs::read(data.join("usage.json")) {
+        Ok(b) => serde_json::from_slice(&b).map_err(std::io::Error::other),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Usage::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Add a finished job, counted the way GitHub bills it: from the job starting to its
+/// result, rounded up to the minute. A debug hold after the result is not counted.
+pub fn record_usage(data: &Path, v: &Vm) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (Some(from), Some(to)) = (v.busy_since, v.done_at.or(v.ended)) else { return };
+    let _g = LOCK.lock().unwrap();
+    let path = data.join("usage.json");
+    let mut u = read_usage(data).unwrap_or_else(|e| {
+        // Kept for a look, never silently overwritten.
+        let aside = path.with_extension("json.corrupt");
+        tracing::warn!("{}: {e}; moved to {} and starting a new ledger", path.display(), aside.display());
+        let _ = std::fs::rename(&path, &aside);
+        Usage::default()
+    });
+    let e = u.entry(to / 86400).or_default().entry(v.cpus).or_default();
+    e[0] += 1;
+    e[1] += to.saturating_sub(from).div_ceil(60).max(1);
+    // ponytail: rewrites the whole file per job; ~400 days x 4 sizes stays a few KB.
+    while u.len() > 400 {
+        u.pop_first();
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, serde_json::to_vec(&u).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, &path)) {
+        tracing::warn!("write {}: {e}", path.display());
+    }
+}
+
+/// Usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
+pub fn usage_since(data: &Path, since: u64) -> Vec<[u64; 4]> {
+    read_usage(data).unwrap_or_default().range(since..).flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n])).collect()
 }
 
 fn update(app: &App, id: &str, f: impl FnOnce(&mut Vm)) -> Option<Vm> {
@@ -191,7 +268,12 @@ fn update(app: &App, id: &str, f: impl FnOnce(&mut Vm)) -> Option<Vm> {
 
 fn write_meta(data: &Path, v: &Vm) {
     let path = data.join("vms").join(&v.id).join("meta.json");
-    if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(v).unwrap_or_default()) {
+    // Temp file + rename: a crash mid-write must not leave a record `load_history` skips,
+    // or the next start never cleans up that VM's disk and JIT secret.
+    let tmp = path.with_extension("json.tmp");
+    let Ok(json) = serde_json::to_vec_pretty(v) else { return tracing::warn!("{}: record not serializable", v.id) };
+    let r = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path));
+    if let Err(e) = r {
         tracing::warn!("write {}: {e}", path.display());
     }
 }
@@ -223,6 +305,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         started: now(),
         online_at: None,
         busy_since: None,
+        done_at: None,
         ended: None,
         note: None,
         cpus,
@@ -251,12 +334,10 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         let mint = outcome.as_ref().err().and_then(|e| e.downcast_ref::<crate::github::MintError>()).map(|m| (m.github_wide(), m.status));
         finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
         // Never leave a big overlay or a credential behind, whatever happened.
-        let _ = tokio::fs::remove_file(dir.join("disk.qcow2")).await;
-        let _ = tokio::fs::remove_file(dir.join("jit")).await;
+        // remove_dir_all never follows symlinks, whatever QEMU left in its directory.
+        let _ = tokio::fs::remove_dir_all(qemu_dir(&dir)).await;
         let _ = tokio::fs::remove_file(dir.join("egress.nft")).await;
-        let _ = tokio::fs::remove_file(dir.join("steps.sock")).await;
-        let _ = tokio::fs::remove_file(dir.join("mon.sock")).await;
-        let _ = tokio::fs::remove_dir_all(dir.join("rk")).await;
+        let _ = tokio::fs::remove_dir_all(rk_dir(&dir)).await;
         let v = update(&app, &id, |v| {
             v.ended = Some(now());
             v.state = match outcome {
@@ -307,6 +388,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             if dir.exists() {
                 persist(&app, &v);
             }
+            record_usage(&app.data, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
         app.releases.lock().unwrap().remove(&id);
@@ -411,6 +493,8 @@ pub fn cache_busy(app: &App, repo: &str) -> bool {
 /// (a `github::MintError` when GitHub refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
     let cfg = app.cfg();
+    // Checked before registering a runner: QEMU is started through this binary.
+    let exe = crate::update::current_exe()?;
     let v = update(app, id, |_| {}).context("vm vanished")?;
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
@@ -424,16 +508,17 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
     // Recorded before anything else can fail, so cleanup deregisters it.
     let reg = update(app, id, |v| v.runner_id = Some(runner_id));
-    tokio::fs::create_dir_all(dir).await?;
+    let q = qemu_dir(dir);
+    tokio::fs::create_dir_all(&q).await?;
     if let Some(r) = reg {
         persist(app, &r);
     }
     // Delivered as an SMBIOS OEM string: works with the stock cloud kernel
     // (fw_cfg needs a module it lacks), and `path=` keeps it out of `ps`.
-    write_secret(&dir.join("jit"), &format!("kiln.jit={jit}")).await?;
+    write_secret(&q.join("jit"), &format!("kiln.jit={jit}")).await?;
 
     let base = images(&app.data).join("base.qcow2");
-    let disk = dir.join("disk.qcow2");
+    let disk = q.join("disk.qcow2");
     let out = Command::new("qemu-img")
         .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
         .arg(&base)
@@ -474,7 +559,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             if filtered {
                 fwd = format!(",hostfwd=tcp::{port}-:22");
             }
-            write_secret(&dir.join("ssh"), &format!("kiln.ssh={}", b64(cfg.debug_ssh_keys.join("\n").as_bytes()))).await?;
+            write_secret(&q.join("ssh"), &format!("kiln.ssh={}", b64(cfg.debug_ssh_keys.join("\n").as_bytes()))).await?;
             ssh_host = Some((ip, port));
         } else {
             note(app, id, "no free ssh port (2200-2299): this VM will not be held");
@@ -492,26 +577,43 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // make a kernel panic end the VM instead of hanging until the timeout.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
     cmd.args(["-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"]);
-    cmd.arg("-smbios").arg(format!("type=11,path={}", dir.join("jit").display()));
+    cmd.arg("-smbios").arg(format!("type=11,path={}", q.join("jit").display()));
     if ssh_host.is_some() {
-        cmd.arg("-smbios").arg(format!("type=11,path={}", dir.join("ssh").display()));
+        cmd.arg("-smbios").arg(format!("type=11,path={}", q.join("ssh").display()));
     }
     // stdio is the guest's ttyS0: its input is the host->guest control channel (hold/release).
     cmd.arg("-serial").arg("stdio");
     // ttyS1 (steps) is a unix socket kiln copies into a capped steps.log.
-    cmd.arg("-chardev").arg(format!("socket,id=s1,path={},server=on,wait=off", dir.join("steps.sock").display()));
+    cmd.arg("-chardev").arg(format!("socket,id=s1,path={},server=on,wait=off", q.join("steps.sock").display()));
     cmd.args(["-serial", "chardev:s1"]);
     if ssh_host.is_some() && publish == Publish::Monitor {
-        cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", dir.join("mon.sock").display()));
+        cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", q.join("mon.sock").display()));
     }
+    // QEMU starts through `kiln __confine`: it writes only `q/`, reads the images directory
+    // and its repo's cache disk, and sees nothing else of kiln's (token, keys, other jobs).
+    let policy = crate::confine::Policy {
+        rw: vec![q.clone()],
+        ro: std::iter::once(images(&app.data)).chain(cache_ov.as_ref().map(|_| cache_file(&app.data, repo))).collect(),
+    };
+    let confined: Vec<String> = std::iter::once(exe.into_os_string())
+        .chain(policy.args())
+        .chain(std::iter::once(cmd.as_std().get_program().to_owned()))
+        .chain(cmd.as_std().get_args().map(ToOwned::to_owned))
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if filtered {
         tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror)).await?;
-        let std = cmd.as_std();
-        let q: Vec<String> = std::iter::once(std.get_program()).chain(std.get_args()).map(|a| a.to_string_lossy().into_owned()).collect();
         let mut rk = Command::new("rootlesskit");
         let stat = ssh_host.as_ref().filter(|_| publish == Publish::Static);
-        rk.args(rk_args(dir, stat.map(|(ip, p)| (ip.as_str(), *p)), &q)).kill_on_drop(true);
+        rk.args(rk_args(dir, stat.map(|(ip, p)| (ip.as_str(), *p)), &confined)).kill_on_drop(true);
         cmd = rk;
+    } else {
+        cmd = Command::new(&confined[0]);
+        cmd.args(&confined[1..]).kill_on_drop(true);
+    }
+    no_secrets(&mut cmd);
+    if !crate::confine::ENFORCED.load(std::sync::atomic::Ordering::Relaxed) {
+        note(app, id, "QEMU runs unconfined: this kernel has no Landlock (see Diagnostics)");
     }
     let console = tokio::fs::File::create(dir.join("console.log")).await?;
     if filtered {
@@ -525,18 +627,18 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if let Some(err) = child.stderr.take() {
         // rootlesskit warns on every start that we keep host loopback; we do on purpose
         // (the mirror), and nft blocks every other loopback port. Keep the rest.
-        let path = dir.join("console.log");
+        let mut out = tokio::fs::OpenOptions::new().append(true).open(dir.join("console.log")).await?;
         tokio::spawn(async move {
             let mut lines = BufReader::new(err).lines();
             while let Ok(Some(l)) = lines.next_line().await {
                 if !l.contains("--disable-host-loopback is highly recommended") {
-                    let _ = append(&path, &format!("{l}\n")).await;
+                    let _ = out.write_all(format!("{l}\n").as_bytes()).await;
                 }
             }
         });
     }
 
-    tokio::spawn(copy_steps(dir.join("steps.sock"), steps));
+    tokio::spawn(copy_steps(q.join("steps.sock"), steps));
     let mut log = tokio::fs::OpenOptions::new().append(true).open(dir.join("console.log")).await?;
     let mut stdin = child.stdin.take();
     let mut lines = BufReader::new(child.stdout.take().unwrap());
@@ -567,8 +669,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 if first {
                     // QEMU read the SMBIOS file before the guest printed anything.
                     first = false;
-                    let _ = tokio::fs::remove_file(dir.join("jit")).await;
-                    let _ = tokio::fs::remove_file(dir.join("ssh")).await;
+                    let _ = tokio::fs::remove_file(q.join("jit")).await;
+                    let _ = tokio::fs::remove_file(q.join("ssh")).await;
                 }
                 if logged < LOG_CAP {
                     log.write_all(&buf).await?;
@@ -763,7 +865,7 @@ async fn publish_ssh(dir: &Path, how: Publish, ip: &str, port: u16) -> Result<()
         Publish::Rootless => {
             let o = Command::new("rootlessctl")
                 .arg("--socket")
-                .arg(dir.join("rk/api.sock"))
+                .arg(rk_dir(dir).join("api.sock"))
                 .arg("add-ports")
                 .arg(format!("{ip}:{port}:127.0.0.1:{port}/tcp"))
                 .output()
@@ -775,7 +877,7 @@ async fn publish_ssh(dir: &Path, how: Publish, ip: &str, port: u16) -> Result<()
             Ok(())
         }
         Publish::Monitor => {
-            let mut s = tokio::net::UnixStream::connect(dir.join("mon.sock")).await.context("qemu monitor")?;
+            let mut s = connect_own(&qemu_dir(dir).join("mon.sock")).await.context("qemu monitor")?;
             s.write_all(format!("hostfwd_add n0 tcp:{ip}:{port}-:22\n").as_bytes()).await?;
             // HMP is silent on success and prints the error otherwise; wait briefly for either.
             let mut out = Vec::new();
@@ -815,13 +917,28 @@ fn which(bin: &str) -> bool {
         .is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()))
 }
 
+/// Connect to a socket QEMU made in its `q/` directory. The confined QEMU can write there, so
+/// the path could be a symlink to another VM's monitor: open it without following links, check
+/// it is a socket, and connect through that very inode (`/proc/self/fd/N`), so no swap can race.
+async fn connect_own(p: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+    use std::os::unix::io::AsRawFd;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(p)?;
+    if !f.metadata()?.file_type().is_socket() {
+        return Err(std::io::Error::other(format!("{} is not a socket", p.display())));
+    }
+    let s = tokio::net::UnixStream::connect(format!("/proc/self/fd/{}", f.as_raw_fd())).await;
+    drop(f);
+    s
+}
+
 /// Copy the guest's ttyS1 (QEMU serves it on a unix socket) into steps.log, capped like
 /// console.log. Reads in 64 KiB chunks, so a flood costs disk up to LOG_CAP and no memory.
 async fn copy_steps(sock: PathBuf, mut out: tokio::fs::File) {
     let mut s = None;
     // QEMU creates the socket at start; in filtered mode that is after rootlesskit's setup.
     for _ in 0..100 {
-        if let Ok(c) = tokio::net::UnixStream::connect(&sock).await {
+        if let Ok(c) = connect_own(&sock).await {
             s = Some(c);
             break;
         }
@@ -985,7 +1102,7 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
         }
         v.cache = CacheUse::Read;
     }
-    let (backing, ov) = (cache_file(&app.data, repo), dir.join("cache.qcow2"));
+    let (backing, ov) = (cache_file(&app.data, repo), qemu_dir(dir).join("cache.qcow2"));
     let made = async {
         let _g = INIT.lock().await;
         if !backing.exists() {
@@ -1012,7 +1129,7 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
 /// After QEMU exited: commit the overlay into the repo cache if the job earned
 /// it, else just drop it.
 async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
-    let ov = dir.join("cache.qcow2");
+    let ov = qemu_dir(dir).join("cache.qcow2");
     let Some(v) = update(app, id, |_| {}) else { return };
     if v.cache != CacheUse::Read {
         let _ = tokio::fs::remove_file(&ov).await;
@@ -1031,6 +1148,12 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
     let verdict = if v.job.is_none() { Err("no job ran".to_string()) } else { cache_verdict(cfg.cache, succeeded, &writers, t) };
+    // The overlay file was QEMU's to write: its header (backing file, external data file) is
+    // the job's if QEMU was ever compromised, and `qemu-img commit` writes wherever it points.
+    let verdict = match verdict {
+        Ok(()) => overlay_header(&ov, &cache_file(&app.data, repo)).await,
+        e => e,
+    };
     let (state, note) = match verdict {
         Err(why) => {
             let _ = tokio::fs::remove_file(&ov).await;
@@ -1099,6 +1222,37 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
     };
     app.committing.lock().unwrap().remove(&key);
     Some(out)
+}
+
+/// Is `ov` a plain qcow2 overlay of exactly `backing`? Err says why it may not be committed.
+async fn overlay_header(ov: &Path, backing: &Path) -> Result<(), String> {
+    if !tokio::fs::symlink_metadata(ov).await.is_ok_and(|m| m.is_file()) {
+        return Err("overlay is not a regular file".into());
+    }
+    let o = Command::new("qemu-img")
+        .args(["info", "--output=json", "-f", "qcow2"])
+        .arg(ov)
+        .output()
+        .await
+        .map_err(|e| format!("qemu-img: {e}"))?;
+    let info: serde_json::Value = serde_json::from_slice(&o.stdout).map_err(|_| "unreadable overlay header".to_string())?;
+    header_ok(&info, backing)
+}
+
+/// `qemu-img info --output=json` of an overlay: qcow2, backed by `backing` (as qcow2), no
+/// external data file, not marked corrupt.
+fn header_ok(info: &serde_json::Value, backing: &Path) -> Result<(), String> {
+    let d = &info["format-specific"]["data"];
+    if info["format"] != "qcow2" || info["format-specific"]["type"] != "qcow2" {
+        return Err("overlay is not qcow2".into());
+    }
+    if info["backing-filename"].as_str() != backing.to_str() || info["backing-filename-format"] != "qcow2" {
+        return Err(format!("overlay names another backing file ({})", info["backing-filename"]));
+    }
+    if !d["data-file"].is_null() || d["corrupt"] != false {
+        return Err("overlay has an external data file or is corrupt".into());
+    }
+    Ok(())
 }
 
 fn is_lock_refusal(err: &str) -> bool {
@@ -1189,6 +1343,7 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
     } else if let Some((_, result)) = line.split_once("completed with result: ") {
         if v.result.is_none() && v.state == State::Busy {
             v.result = Some(result.trim().to_string());
+            v.done_at = Some(t);
         }
         false
     } else if line.contains("Runner update") {
@@ -1206,11 +1361,26 @@ async fn write_secret(path: &Path, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop GitHub tokens from a VM process's environment: kiln may have read its own from there,
+/// and Landlock does not stop QEMU reading `/proc/self/environ`.
+fn no_secrets(c: &mut Command) -> &mut Command {
+    for k in crate::TOKEN_ENV {
+        c.env_remove(k);
+    }
+    c
+}
+
+/// QEMU's `-sandbox` setting for every VM kiln starts.
+const SANDBOX: &str = "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny";
+
 /// Common QEMU flags for both bake and job VMs.
 /// `netdev_extra`: more `-netdev user` options, e.g. `,hostfwd=...`.
 fn qemu(cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
     let mut c = Command::new("qemu-system-x86_64");
     c.args(["-machine", "q35,accel=kvm", "-cpu", "host", "-nodefaults", "-display", "none", "-no-reboot"])
+        // libvirt's seccomp policy: no exec, no setuid, no obsolete syscalls, no scheduler or
+        // CPU-affinity changes. A QEMU built without seccomp refuses this: the VM fails closed.
+        .args(["-sandbox", SANDBOX])
         .args(["-smp", &cpus.to_string(), "-m", &mem_mb.to_string()])
         // cache=unsafe: the overlay is discarded after the job anyway, so skip fsyncs.
         .arg("-drive")
@@ -1263,6 +1433,20 @@ const DROP_CAPS: &str = "setpriv --bounding-set=-all --inh-caps=-all --ambient-c
 /// Namespace setup shared by jobs and the doctor: `$1` is the nft file.
 const RK_SETUP: &str = "sysctl -qw net.ipv4.conf.all.route_localnet=1; nft -f \"$1\"";
 
+/// The part of a VM's directory its confined QEMU may write: disks, JIT secret, sockets.
+/// kiln's own files (meta.json, logs, the nft rules) sit one level up, where QEMU can't
+/// plant a symlink for kiln to write through.
+fn qemu_dir(vm_dir: &Path) -> PathBuf {
+    vm_dir.join("q")
+}
+
+/// rootlesskit's state (its API socket can publish ports) for the VM in `vm_dir`:
+/// `<data>/rk/<id>`, outside the VM directory the confined QEMU may use.
+fn rk_dir(vm_dir: &Path) -> PathBuf {
+    let id = vm_dir.file_name().unwrap_or_default();
+    vm_dir.parent().and_then(Path::parent).map_or_else(|| vm_dir.join("rk"), |data| data.join("rk").join(id))
+}
+
 fn rk_base(state: &Path) -> Vec<String> {
     ["--state-dir", &state.display().to_string(), "--net=slirp4netns", "--copy-up=/etc"].map(String::from).into()
 }
@@ -1272,7 +1456,7 @@ fn rk_base(state: &Path) -> Vec<String> {
 /// positional parameters, never spliced into the script. `publish`: host (ip, port)
 /// forwarded to the same port in the namespace, for the debug-SSH hostfwd.
 fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<String> {
-    let mut a = rk_base(&dir.join("rk"));
+    let mut a = rk_base(&rk_dir(dir));
     a.extend(["--mtu=65520", "--slirp4netns-sandbox=auto", "--slirp4netns-seccomp=auto"].map(String::from));
     if let Some((ip, port)) = publish {
         // Child IP 127.0.0.1: by default the port driver dials the namespace's tap
@@ -1548,7 +1732,7 @@ async fn bake_inner(app: &App) -> Result<()> {
     cmd.arg("-drive").arg(format!("file={},if=virtio,format=raw,readonly=on", seed.display()));
     cmd.arg("-serial").arg(format!("file:{}", work.join("console.log").display()));
     let qemu_err = std::fs::OpenOptions::new().append(true).open(&log)?;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(qemu_err).spawn()?;
+    let mut child = no_secrets(&mut cmd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(qemu_err).spawn()?;
     // Mirror the guest console into bake.log as it grows, so the dashboard can follow along.
     let console = work.join("console.log");
     let mut off = 0;
@@ -1609,10 +1793,12 @@ fn runner_version(tag: &str) -> Result<String> {
 /// depends on; such images are stale (and rebaked by auto_rebake).
 /// 2: fork-refusal job hook, apt archives on the cache disk, bake_node_versions.
 /// 3: the hook also refuses workflow_run from forks; Node tarballs checked against SHASUMS256.txt.
-const RECIPE: u64 = 3;
+/// 4: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
+const RECIPE: u64 = 5;
 
 /// Was the image at `base` (base.json) baked from the current recipe? kiln launches
-/// nothing on an older one: it may lack the fork-refusal hook. No marker = recipe 1.
+/// nothing on an older one: it may lack the current job hooks (fork refusal, cold release
+/// builds). No marker = recipe 1.
 pub fn image_recipe_ok(base: &serde_json::Value) -> bool {
     base["recipe"].as_u64().unwrap_or(1) >= RECIPE
 }
@@ -1621,7 +1807,7 @@ pub fn image_recipe_ok(base: &serde_json::Value) -> bool {
 /// Images from before `node_wanted` was recorded carried Node 24 only, and no extra apt packages.
 fn rebake_reason(base: &serde_json::Value, node: &[String], apt: &[String]) -> Option<String> {
     if !image_recipe_ok(base) {
-        return Some("baked by an older kiln: rebake for the fork-refusal hook".into());
+        return Some("baked by an older kiln: rebake for the current job hooks".into());
     }
     let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
     let baked = |k: &str, old: &[&str]| -> Vec<String> {
@@ -1862,6 +2048,15 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         });
     }
 
+    // `-version` exits right after the options are parsed, and a QEMU without seccomp
+    // rejects `-sandbox` while parsing.
+    out.push(match output("qemu-system-x86_64", &["-sandbox", SANDBOX, "-version"]).await {
+        Ok(_) => check("qemu sandbox", true, "seccomp: no exec, setuid or obsolete syscalls in job VMs"),
+        Err(e) => check("qemu sandbox", false, format!("QEMU rejects -sandbox (built without seccomp?), so VMs fail to start: {e:#}")),
+    });
+    let (ok, detail) = crate::confine::probe();
+    out.push(check("landlock", ok, detail));
+
     let disk = disk_free_gb(&app.data).await;
     out.push(match disk {
         Some(g) => check("disk", g >= MIN_DISK_GB, format!("{g} GB free (need {MIN_DISK_GB})")),
@@ -2031,6 +2226,125 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_is_seeded_once_and_corrupt_ledgers_are_kept() {
+        let d = std::env::temp_dir().join(format!("kiln-test-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let day = 20_000 * 86400;
+        std::fs::create_dir_all(d.join("vms/kiln-1-0")).unwrap();
+        let v = Vm {
+            id: "kiln-1-0".into(),
+            busy_since: Some(day),
+            done_at: Some(day + 90),
+            ended: Some(day + 95),
+            ..vm("x", State::Done, None)
+        };
+        write_meta(&d, &v);
+        load_history(&d);
+        load_history(&d); // a restart must not count the history again
+        assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 1, 2]]);
+        // A job that was running when kiln died is counted once, at startup.
+        std::fs::create_dir_all(d.join("vms/kiln-2-0")).unwrap();
+        write_meta(&d, &Vm { id: "kiln-2-0".into(), busy_since: Some(day), ..vm("x", State::Busy, None) });
+        load_history(&d);
+        load_history(&d);
+        assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 2, 3]]);
+        std::fs::write(d.join("usage.json"), "{oops").unwrap();
+        record_usage(&d, &v);
+        assert_eq!(std::fs::read_to_string(d.join("usage.json.corrupt")).unwrap(), "{oops");
+        assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 1, 2]]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn sockets_in_q_are_never_followed() {
+        let d = std::env::temp_dir().join(format!("kiln-test-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let _l = std::os::unix::net::UnixListener::bind(d.join("mon.sock")).unwrap();
+        assert!(connect_own(&d.join("mon.sock")).await.is_ok());
+        std::os::unix::fs::symlink(d.join("mon.sock"), d.join("planted.sock")).unwrap();
+        assert!(connect_own(&d.join("planted.sock")).await.is_err(), "a symlink to another VM's socket");
+        std::fs::write(d.join("file"), "").unwrap();
+        assert!(connect_own(&d.join("file")).await.is_err());
+        // A planted overlay symlink is refused before qemu-img ever reads it.
+        std::os::unix::fs::symlink(d.join("file"), d.join("cache.qcow2")).unwrap();
+        assert_eq!(overlay_header(&d.join("cache.qcow2"), &d.join("file")).await, Err("overlay is not a regular file".into()));
+        let mut c = Command::new("true");
+        let envs: Vec<_> = no_secrets(&mut c).as_std().get_envs().map(|(k, v)| (k.to_owned(), v.is_none())).collect();
+        assert!(crate::TOKEN_ENV.iter().all(|k| envs.contains(&(k.into(), true))), "tokens removed from VM processes");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn usage_counts_job_minutes_as_github_bills_them() {
+        let d = std::env::temp_dir().join(format!("kiln-test-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let day = 20_000 * 86400;
+        let job = |busy, done, ended, cpus| Vm { busy_since: busy, done_at: done, ended, cpus, ..vm("a", State::Done, None) };
+        record_usage(&d, &job(Some(day), Some(day + 61), Some(day + 3600), 4)); // held an hour after: 2 min
+        record_usage(&d, &job(Some(day), None, Some(day + 5), 4)); // killed, no result: up to the end, at least 1
+        record_usage(&d, &job(Some(day), Some(day + 600), Some(day + 610), 8));
+        record_usage(&d, &job(None, None, Some(day + 9), 4)); // never ran a job: free
+        assert_eq!(usage_since(&d, 20_000), vec![[20_000, 4, 2, 3], [20_000, 8, 1, 10]]);
+        assert!(usage_since(&d, 20_001).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn history_trusts_only_records_naming_their_own_directory() {
+        let d = std::env::temp_dir().join(format!("kiln-test-hist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let rec = |dir: &str, id: &str| {
+            std::fs::create_dir_all(d.join("vms").join(dir).join("q")).unwrap();
+            std::fs::write(d.join("vms").join(dir).join("meta.json"), serde_json::to_vec(&vm(id, State::Busy, None)).unwrap()).unwrap();
+        };
+        // a QEMU that rewrote its record to point at another VM, or out of vms/
+        rec("kiln-1-0", "kiln-2-0");
+        rec("kiln-3-0", "..");
+        rec("kiln-2-0", "kiln-2-0");
+        std::fs::write(d.join("vms/kiln-2-0/q/disk.qcow2"), "x").unwrap();
+        std::fs::write(d.join("keep"), "x").unwrap();
+        let h = load_history(&d);
+        assert_eq!(h.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["kiln-2-0"]);
+        assert_eq!(h[0].state, State::Lost, "an active record is marked lost");
+        assert!(!d.join("vms/kiln-2-0/q").exists(), "its QEMU files are cleaned up");
+        assert!(d.join("keep").exists() && d.join("vms/kiln-1-0/meta.json").exists(), "forged ids delete nothing else");
+        let m: Vm = serde_json::from_slice(&std::fs::read(d.join("vms/kiln-2-0/meta.json")).unwrap()).unwrap();
+        assert_eq!(m.state, State::Lost);
+        assert!(!d.join("vms/kiln-2-0/meta.json.tmp").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn tampered_overlays_never_commit() {
+        let b = Path::new("/d/cache/o__n.qcow2");
+        let ok = serde_json::json!({ "format": "qcow2", "backing-filename": "/d/cache/o__n.qcow2", "backing-filename-format": "qcow2",
+            "format-specific": { "type": "qcow2", "data": { "corrupt": false } } });
+        assert!(header_ok(&ok, b).is_ok());
+        let bad = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut v = ok.clone();
+            f(&mut v);
+            header_ok(&v, b).is_err()
+        };
+        assert!(bad(&|v| v["backing-filename"] = "/d/token".into()), "another backing file");
+        assert!(bad(&|v| v["backing-filename"] = "/d/cache/other__repo.qcow2".into()), "another repo's cache");
+        assert!(bad(&|v| v["backing-filename-format"] = "raw".into()));
+        assert!(bad(&|v| v["format-specific"]["data"]["data-file"] = "/d/config.json".into()), "external data file");
+        assert!(bad(&|v| v["format-specific"]["data"]["corrupt"] = true.into()));
+        assert!(bad(&|v| v["format"] = "raw".into()));
+        assert!(bad(&|v| *v = serde_json::Value::Null));
+    }
+
+    #[test]
+    fn qemu_writes_nothing_kiln_trusts() {
+        let dir = Path::new("/d/vms/kiln-1-0");
+        // rootlesskit's API and kiln's own files are outside what the confined QEMU may write
+        assert!(!rk_dir(dir).starts_with(qemu_dir(dir)) && !rk_dir(dir).starts_with(dir));
+        assert!(qemu_dir(dir).starts_with(dir) && qemu_dir(dir) != dir);
+    }
+
+    #[test]
     fn unknown_states_from_newer_versions_load_as_ended() {
         let s: State = serde_json::from_str("\"frozen\"").unwrap();
         assert_eq!(s, State::Unknown);
@@ -2052,6 +2366,7 @@ mod tests {
             started: 0,
             online_at,
             busy_since: None,
+            done_at: None,
             ended: None,
             note: None,
             cpus: 4,
@@ -2084,15 +2399,16 @@ mod tests {
     #[test]
     fn egress_wrapping() {
         let q: Vec<String> = ["qemu-system-x86_64", "-drive", "file=/a b/disk.qcow2"].map(String::from).into();
-        let a = rk_args(Path::new("/d/vm 1"), Some(("100.1.2.3", 2201)), &q);
+        let a = rk_args(Path::new("/d/vms/vm 1"), Some(("100.1.2.3", 2201)), &q);
         let at = |x: &str| a.iter().position(|v| v == x).unwrap();
-        assert!(a.contains(&"--state-dir".into()) && a.contains(&"/d/vm 1/rk".into()));
+        // rootlesskit's state (API socket) lives outside the VM directory QEMU can write
+        assert!(a.contains(&"--state-dir".into()) && a.contains(&"/d/rk/vm 1".into()));
         assert!(!a.iter().any(|v| v == "--disable-host-loopback"));
         assert_eq!(a[at("-p") + 1], "100.1.2.3:2201:127.0.0.1:2201/tcp");
         assert!(a.contains(&"--port-driver=builtin".into()));
         // qemu args follow the script and nft path as separate argv entries
         assert_eq!(&a[a.len() - 3..], &q[..]);
-        assert_eq!(a[a.len() - 4], "/d/vm 1/egress.nft");
+        assert_eq!(a[a.len() - 4], "/d/vms/vm 1/egress.nft");
         assert!(
             a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all")
         );
@@ -2202,7 +2518,7 @@ mod tests {
         assert!(apply_line(&mut v, "x: Running job: build\n", 120));
         assert_eq!((v.state, v.job.as_deref(), v.busy_since), (State::Busy, Some("build"), Some(120)));
         assert!(!apply_line(&mut v, "x: Job build completed with result: Failed", 130));
-        assert_eq!(v.result.as_deref(), Some("Failed"));
+        assert_eq!((v.result.as_deref(), v.done_at), (Some("Failed"), Some(130)));
         assert!(!apply_line(&mut v, "Runner update in progress, do not shutdown runner.", 140));
         assert!(v.note.as_deref().unwrap().contains("self-updating"));
         // A job echoing lifecycle lines itself can't rewind state, restart its
@@ -2211,6 +2527,7 @@ mod tests {
         assert!(!apply_line(&mut v, "x: Running job: again", 600));
         apply_line(&mut v, "Job x completed with result: Succeeded", 700);
         assert_eq!((v.state, v.busy_since, v.job.as_deref(), v.result.as_deref()), (State::Busy, Some(120), Some("build"), Some("Failed")));
+        assert_eq!(v.done_at, Some(130), "an echoed result line must not move the billed end");
         let cfg = crate::Config { idle_timeout_mins: 10, job_timeout_mins: 60, debug_hold_mins: 30, ..Default::default() };
         assert_eq!(start_cap(&cfg, false), 100 * 60 + 300);
         let cfg = crate::Config { warm_recycle_mins: 30, ..cfg };

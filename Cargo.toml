@@ -1,5 +1,5 @@
 [package]
-name = "kiln"
+name = "kiln-ci"
 version = "0.2.3"
 edition = "2024"
 rust-version = "1.89"
@@ -10,8 +10,12 @@ repository = "https://github.com/Bunty9/kiln"
 readme = "README.md"
 keywords = ["ci", "github-actions", "self-hosted", "kvm", "qemu"]
 categories = ["command-line-utilities", "development-tools"]
-# Distributed as GitHub Release binaries, not on crates.io.
-publish = false
+# Also on crates.io as kiln-ci (`kiln` is taken there); the binary is still `kiln`.
+include = ["src/**", "assets/**", "guest/**", "deploy/**", "README.md", "CHANGELOG.md", "LICENSE-*"]
+
+[[bin]]
+name = "kiln"
+path = "src/main.rs"
 
 [profile.release]
 strip = true
@@ -22,6 +26,8 @@ anyhow = "1.0.104"
 axum = "0.8.9"
 base64 = "0.22"
 bytes = "1.12.1"
+landlock = "0.4.7"
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 ring = "0.17"
 serde = { version = "1.0.229", features = ["derive"] }

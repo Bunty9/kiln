@@ -3,7 +3,7 @@
 use crate::{App, Config, mirror, now, update, vm};
 use anyhow::{Context, anyhow};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
@@ -49,6 +49,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/icon.svg", get(|| async { icon_file("icon.svg") }))
         .route("/icons/{name}", get(|Path(name): Path<String>| async move { icon_file(&name) }))
         .route("/api/state", get(state))
+        .route("/api/host", get(|| async { Json(crate::host::recent(usize::MAX)) }))
         .route("/api/config", post(set_config))
         .route("/api/token", post(set_token))
         .route("/api/app", post(app_manual).delete(app_remove))
@@ -197,7 +198,7 @@ async fn whois(ip: IpAddr) -> Option<Who> {
     {
         return Some(who.clone());
     }
-    let out = tailscale(&["whois", "--json", &ip.to_string()]).await.ok()?;
+    let out = tailscale(&["whois", "--json", &ip.to_string()]).await.inspect_err(|e| tracing::warn!("tailscale whois {ip}: {e:#}")).ok()?;
     let v: Value = serde_json::from_slice(&out.stdout).ok()?;
     let who = (v["UserProfile"]["LoginName"].as_str()?.to_string(), v["Node"]["StableID"].as_str()?.to_string());
     WHOIS.lock().unwrap().insert(ip, (who.clone(), now()));
@@ -233,7 +234,11 @@ async fn self_info(max_age: u64) -> SelfInfo {
         s.tried = now();
         s.clone()
     };
-    let Ok(out) = tailscale(&["status", "--json"]).await else { return cached };
+    let Ok(out) =
+        tailscale(&["status", "--json"]).await.inspect_err(|e| tracing::warn!("tailscale status: {e:#}; keeping the last known addresses"))
+    else {
+        return cached;
+    };
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     let ips = v["Self"]["TailscaleIPs"].as_array().into_iter().flatten().filter_map(|ip| ip.as_str()?.parse().ok()).collect();
     let uid = v["Self"]["UserID"].to_string();
@@ -250,7 +255,6 @@ static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn load_key(data: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
     let path = data.join("dashboard.key");
     let key = match std::fs::read_to_string(&path) {
         Ok(k) if k.trim().len() >= 32 => k.trim().to_string(),
@@ -258,8 +262,7 @@ pub fn load_key(data: &std::path::Path) -> anyhow::Result<()> {
             let mut raw = [0u8; 24];
             std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
             let k: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
-            std::io::Write::write_all(&mut f, k.as_bytes())?;
+            crate::app_auth::write_private(&path, k.as_bytes())?;
             k
         }
     };
@@ -301,9 +304,13 @@ async fn guard(State(app): S, ConnectInfo(via): ConnectInfo<Via>, req: Request, 
     let mut r = admit(app, via, req, next).await;
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    // No script-src: the dashboard uses an inline script.
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("frame-ancestors 'none'"));
+    h.insert(header::CONTENT_SECURITY_POLICY, CSP.clone());
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // The GitHub proxy passes GitHub's content types through: never let a browser guess.
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    h.insert("cross-origin-resource-policy", HeaderValue::from_static("same-origin"));
+    h.insert("permissions-policy", HeaderValue::from_static("camera=(), microphone=(), geolocation=(), usb=(), payment=()"));
     // The page is embedded in the binary: no-cache so a redeploy shows up on reload.
     // Icons set their own (longer) Cache-Control; the API is always no-store.
     if api || !h.contains_key(header::CACHE_CONTROL) {
@@ -319,6 +326,30 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The dashboard, stamped with the version that serves it: a page the service worker kept
 /// from an older kiln sees the server's version differ and reloads (see doPoll).
 static PAGE: LazyLock<String> = LazyLock::new(|| include_str!("dashboard.html").replace("{{KILN_VERSION}}", VERSION));
+
+/// Content-Security-Policy for every response. Scripts run only if they are the page's own
+/// inline blocks (by hash, computed from the embedded page), so an injected `<script>` or
+/// handler never runs even if some string escaped `esc()`. Forms post only to GitHub (the
+/// App manifest flow); nothing else leaves the origin.
+static CSP: LazyLock<HeaderValue> = LazyLock::new(|| HeaderValue::from_str(&csp(&PAGE)).expect("CSP is a valid header value"));
+
+fn csp(page: &str) -> String {
+    use base64::Engine;
+    let hashes: Vec<String> = page
+        .split("<script>")
+        .skip(1)
+        .filter_map(|s| s.split_once("</script>"))
+        .map(|(js, _)| {
+            let d = ring::digest::digest(&ring::digest::SHA256, js.as_bytes());
+            format!("'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(d.as_ref()))
+        })
+        .collect();
+    format!(
+        "default-src 'none'; script-src {}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
+         manifest-src 'self'; worker-src 'self'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'",
+        hashes.join(" ")
+    )
+}
 
 /// Dashboard dark background; the installed window's title bar and splash.
 const THEME: &str = "#0A0A0A";
@@ -514,8 +545,52 @@ pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
     })
 }
 
-async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Response {
-    let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
+/// Admission, then the handler. Admitted API writes go to the audit log; refused ones only to
+/// kiln's log (see `audited`).
+async fn admit(app: Arc<App>, via: Via, req: Request, next: Next) -> Response {
+    let (method, path) = (req.method().clone(), req.uri().path().to_string());
+    let (admitted, who) = admission(&app, via, req).await;
+    let admitted_ok = admitted.is_ok();
+    let resp = match admitted {
+        Ok(req) => next.run(req).await,
+        Err(denied) => denied,
+    };
+    if audited(&method, &path, admitted_ok) {
+        let mut e =
+            json!({ "actor": who.actor, "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
+        if let Some(n) = resp.extensions().get::<crate::audit::Note>() {
+            e["note"] = n.0.clone().into();
+        }
+        crate::audit::record(&app.data, e);
+    } else if audited(&method, &path, true) {
+        tracing::info!(target: "audit", "audit: refused {method} {path} from {} ({}): {}", who.from, who.actor, resp.status());
+    }
+    resp
+}
+
+/// Does this request go to audit.log? API writes that passed admission. Refusals do not: a
+/// job VM can send them in a loop, and must not roll the real entries out of the file.
+fn audited(method: &Method, path: &str, admitted: bool) -> bool {
+    admitted && path.starts_with("/api/") && method != Method::GET
+}
+
+/// Who made a request, as far as admission got: for the audit log.
+struct Requester {
+    /// Tailnet login, "local" (loopback or the box itself, with the key), or for refusals
+    /// "local, without the key" or "unknown".
+    actor: String,
+    /// Source address, or "tailscale serve" until the request names a tailnet address.
+    from: String,
+}
+
+/// Ok: the request may proceed. Err: the refusal to send. And who asked, either way.
+async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Response>, Requester) {
+    let from = match via {
+        Via::Tcp(peer) => peer.ip().to_canonical().to_string(),
+        Via::Serve => "tailscale serve".into(),
+    };
+    let mut who = Requester { actor: "unknown".into(), from };
+    let deny = |code: StatusCode, msg: &str, who: Requester| (Err((code, msg.to_string()).into_response()), who);
     // tailscaled sends `Host: localhost` to a unix socket and the name the browser
     // used in X-Forwarded-Host; put that back so the Host check and handlers see it.
     if matches!(via, Via::Serve)
@@ -532,15 +607,15 @@ async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Respons
     let api = req.uri().path().starts_with("/api/");
     let get = req.method() == Method::GET;
     if !host_ok(host.as_deref()) {
-        return deny(StatusCode::FORBIDDEN, "unexpected Host header");
+        return deny(StatusCode::FORBIDDEN, "unexpected Host header", who);
     }
     // Browsers can't add custom headers cross-origin without a CORS preflight
     // we never grant, so this blocks drive-by POSTs from other sites.
     if api && !get && csrf.is_none() {
-        return deny(StatusCode::FORBIDDEN, "missing x-kiln header");
+        return deny(StatusCode::FORBIDDEN, "missing x-kiln header", who);
     }
     if let Claim::Outside(msg) = claim {
-        return deny(StatusCode::FORBIDDEN, msg);
+        return deny(StatusCode::FORBIDDEN, msg, who);
     }
     // The identity headers mean something only if tailscaled's web proxy is all that reaches the socket.
     let claim = if matches!(via, Via::Serve) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
@@ -552,27 +627,34 @@ async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Respons
         Claim::Peer(ip) | Claim::Login(_, ip) => Some(ip),
         _ => None,
     };
+    if let Some(ip) = ip {
+        who.from = ip.to_string();
+    }
     let mut me = self_info(300).await;
     if let Some(ip) = ip
         && !me.ips.contains(&ip)
     {
         me = self_info(10).await;
     }
-    let who = match ip {
+    let whois = match ip {
         Some(ip) => whois(ip).await,
         None => None,
     };
-    let user = identify(claim, &me, who);
+    let user = identify(claim, &me, whois);
+    who.actor = match &user {
+        None => "local".into(),
+        Some(login) => login.clone().unwrap_or_else(|| "unknown".into()),
+    };
     match user {
         None if api && !key_ok(key.as_deref()) => {
-            return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
+            who.actor = "local, without the key".into();
+            deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)", who)
         }
         Some(login) if !login.as_deref().is_some_and(|l| peer_allowed(&app.cfg().allowed_users, me.owner.clone(), l)) => {
-            return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
+            deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)", who)
         }
-        _ => {}
+        _ => (Ok(req), who),
     }
-    next.run(req).await
 }
 
 async fn host_stats(app: &App) -> Value {
@@ -583,6 +665,8 @@ async fn host_stats(app: &App) -> Value {
         "mem_total_mb": vm::meminfo_kb("MemTotal:") / 1024,
         "mem_avail_mb": vm::mem_avail_mb(),
         "disk_free_gb": vm::disk_free_gb(&app.data).await,
+        // A few, so a poll that lands between samples still gets every one.
+        "samples": crate::host::recent(3),
     })
 }
 
@@ -613,6 +697,8 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
+        // 32 days covers the current month in any timezone.
+        "usage": vm::usage_since(&app.data, now() / 86400 - 32),
         "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
@@ -644,9 +730,10 @@ async fn doctor(State(app): S) -> R<Json<Value>> {
     Ok(Json(json!({ "checks": vm::doctor(&app, false).await })))
 }
 
-async fn set_config(State(app): S, Json(c): Json<Config>) -> R<Json<Value>> {
+async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
     let restart = RUNNING_LISTEN.get().is_some_and(|l| *l != c.listen);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
+    let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
     app.save_cfg(c)?;
     if to_filtered {
         // Probe now so the dashboard shows the result and the scheduler has it cached.
@@ -655,7 +742,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<Json<Value>> {
             let _ = vm::egress_ready(&a, true).await;
         });
     }
-    Ok(Json(json!({ "restart_required": restart })))
+    Ok((Extension(crate::audit::Note(changed)), Json(json!({ "restart_required": restart }))))
 }
 
 #[derive(Deserialize)]
@@ -737,9 +824,9 @@ async fn release(State(app): S, Path(id): Path<String>) -> R<StatusCode> {
 struct RepoBody {
     repo: String,
 }
-async fn cache_clear(State(app): S, Json(b): Json<RepoBody>) -> R<StatusCode> {
+async fn cache_clear(State(app): S, Json(b): Json<RepoBody>) -> R<(StatusCode, Extension<crate::audit::Note>)> {
     vm::clear_cache(&app, &b.repo)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok((StatusCode::NO_CONTENT, Extension(crate::audit::Note(b.repo))))
 }
 
 /// {"o/n": {"pr_url", "at"}} of hello PRs this kiln opened; survives restarts.
@@ -1066,8 +1153,8 @@ async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: ax
     if !proxy_path_ok(&path, &app.repos()) {
         bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
     }
-    if method != Method::GET && method != Method::POST {
-        bail_r("only GET and POST are proxied")?;
+    if method != Method::GET && (method != Method::POST || !proxy_post_ok(&path)) {
+        bail_r("only GET, and POST to rerun or cancel a run or dispatch a workflow, are proxied")?;
     }
     let full = match q.0 {
         Some(q) => format!("{path}?{q}"),
@@ -1092,9 +1179,64 @@ fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
         })
 }
 
+/// The writes the dashboard makes through the proxy: rerun or cancel a run, dispatch a
+/// workflow. Not run approvals, deployment reviews or log deletion.
+fn proxy_post_ok(path: &str) -> bool {
+    let mut seg = path.split('/').skip(4);
+    match (seg.next(), seg.next(), seg.next(), seg.next()) {
+        (Some("runs"), Some(id), Some("rerun" | "rerun-failed-jobs" | "cancel"), None) => {
+            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+        }
+        (Some("workflows"), Some(_), Some("dispatches"), None) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_admitted_writes_are_audited() {
+        assert!(audited(&Method::POST, "/api/config", true));
+        assert!(audited(&Method::DELETE, "/api/app", true));
+        assert!(!audited(&Method::POST, "/api/config", false), "refusals stay out of audit.log");
+        assert!(!audited(&Method::GET, "/api/state", true));
+        assert!(!audited(&Method::POST, "/", true));
+    }
+
+    #[test]
+    fn proxy_writes() {
+        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun"));
+        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun-failed-jobs"));
+        assert!(proxy_post_ok("repos/o/n/actions/runs/123/cancel"));
+        assert!(proxy_post_ok("repos/o/n/actions/workflows/ci.yml/dispatches"));
+        for p in [
+            "repos/o/n/actions/runs/123/approve",
+            "repos/o/n/actions/runs/123/pending_deployments",
+            "repos/o/n/actions/runs/123/deployment_protection_rule",
+            "repos/o/n/actions/runs/x/cancel",
+            "repos/o/n/actions/runs//cancel",
+            "repos/o/n/actions/runs/123/cancel/x",
+            "repos/o/n/actions/runs",
+            "repos/o/n/actions/workflows/ci.yml/enable",
+        ] {
+            assert!(!proxy_post_ok(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn csp_hashes_every_inline_script() {
+        let c = csp("<script>a()</script><p>x</p><script>\nb()\n</script>");
+        // sha256("a()") and sha256("\nb()\n"), base64
+        assert_eq!(c.matches("'sha256-").count(), 2);
+        assert!(c.contains("script-src 'sha256-"));
+        assert!(!c.contains("'unsafe-inline' ;") && !c.contains("script-src 'self'"));
+        // the real page: one hash per inline block, and no stray `<script ` with attributes
+        let real = CSP.to_str().unwrap();
+        assert_eq!(real.matches("'sha256-").count(), PAGE.matches("<script").count());
+        assert!(real.contains("frame-ancestors 'none'") && real.contains("default-src 'none'"));
+    }
 
     #[test]
     fn kill_bin_prefers_absolute_paths() {

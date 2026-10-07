@@ -41,6 +41,8 @@
 :root{color-scheme:dark;
  /* surfaces, low to high: page, card, raised (buttons, menus), overlay; sunk = wells (code, logs) */
  --bg:#0A0A0A;--s1:#171717;--s2:#202020;--s3:#242424;--sunk:#000;
+ /* per-VM series, fixed order (validated for CVD on #171717): identity only, never state */
+ --v1:#3987e5;--v2:#d95926;--v3:#199e70;--v4:#c98500;--v5:#d55181;--v6:#008300;--v7:#9085e9;--v8:#e66767;
  --surface:var(--s1);--raised:var(--s2);--muted:#262626;--field:rgb(255 255 255/.035);--seg-on:#0A0A0A;
  --line:rgb(255 255 255/.18);--line-strong:rgb(255 255 255/.36);
  --hover:rgb(255 255 255/.06);--active:rgb(255 255 255/.1);
@@ -67,6 +69,7 @@
 }
 :root[data-scheme=light]{color-scheme:light;
  --bg:#F5F5F5;--s1:#FFF;--s2:#FFF;--s3:#FAFAFA;--sunk:#EBEBEB;--muted:#EBEBEB;--field:#FFF;--seg-on:#FFF;
+ --v1:#2a78d6;--v2:#eb6834;--v3:#1baf7a;--v4:#eda100;--v5:#e87ba4;--v6:#008300;--v7:#4a3aa7;--v8:#e34948;
  --line:rgb(0 0 0/.21);--line-strong:rgb(0 0 0/.45);
  --hover:rgb(0 0 0/.04);--active:rgb(0 0 0/.07);
  --fg:#0A0A0A;--fg-2:#404040;--fg-3:#575757;
@@ -190,6 +193,26 @@ a.stat:hover{background:var(--s2)}
 .meter .b{height:6px;background:var(--muted);border-radius:999px;margin-top:6px;overflow:hidden}
 .meter .b i{display:block;height:100%;border-radius:999px;background:var(--fg-2);transition:width var(--ease)}
 .meter.hot .b i{background:var(--warn)}
+.meter .b.st{display:flex;gap:2px;background:var(--muted)}
+/* polls land every 2 s: a 2 s linear ease makes the bar move continuously instead of stepping */
+.meter .b.st i{flex:none;border-radius:0;transition:width 2s linear}
+.meter .b.st i.o{background:var(--fg-3);opacity:.55}
+.hh{all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;cursor:pointer;border-radius:var(--r1)}
+.hh:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.hh .i{margin-left:auto;color:var(--fg-3);transition:transform var(--ease)}.hh[aria-expanded=true] .i{transform:rotate(90deg)}
+#ov-host>h2{margin-bottom:0}#ov-host>h2+*{border-top:0;margin-top:12px;padding-top:0}
+.hx{display:grid;gap:16px}.hx[hidden]{display:none}
+.hx figure{margin:0}.hx figcaption{display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px}
+.hx .cv{position:relative;height:112px}.hx canvas{display:block;width:100%;height:100%;border-radius:4px;touch-action:pan-y}
+.hx canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hx .ax{display:flex;justify-content:space-between;font-size:11px;color:var(--fg-3);margin-top:4px;font-variant-numeric:tabular-nums}
+.lg{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:12px}
+.vk{flex:none;width:8px;height:8px;border-radius:2px;background:var(--c)}
+.lg li{display:flex;align-items:center;gap:8px;min-width:0}.lg .k{flex:none;width:10px;height:10px;border-radius:2px;background:var(--c)}
+.lg .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg-2)}.lg b{font-weight:500;font-variant-numeric:tabular-nums}
+#htip{position:fixed;z-index:70;left:0;top:0;min-width:150px;max-width:260px;padding:8px 10px;border-radius:var(--r1);background:var(--s2);color:var(--fg);box-shadow:var(--e1),0 6px 18px -4px rgb(0 0 0/.5);font-size:12px;pointer-events:none;display:none}
+#htip.on{display:block}#htip .t{color:var(--fg-3);margin-bottom:4px}#htip div.r{display:flex;align-items:center;gap:8px}
+#htip .r i{flex:none;width:10px;height:2px;border-radius:1px;background:var(--c)}#htip .r b{font-weight:600;font-variant-numeric:tabular-nums;min-width:44px}#htip .r span{color:var(--fg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* lists */
 .list{list-style:none;padding:0;background:var(--s1);border-radius:var(--r2);overflow:hidden;box-shadow:var(--e1)}
 .list>li{position:relative;border-top:1px solid var(--line)}.list>li:first-child{border-top:0}
@@ -667,7 +690,11 @@ function ghMsg(m) {
   if (i < 0) return m;
   try { const j = JSON.parse(m.slice(i)); return m.slice(0, i).replace(/^(GET|POST|PUT|DELETE|PATCH) \S+: /, '').trim() + (j.message ? ': ' + j.message : ''); } catch { return m; }
 }
-const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
+// A repo from a hash route must not walk the API path elsewhere (`..` segments, `?`).
+const okRepo = r => { const p = String(r).split('/'); return p.length === 2 && p.every(x => /^[\w.-]+$/.test(x) && x !== '.' && x !== '..'); };
+const gh = (repo, rest) => { if (!okRepo(repo)) throw new Error('not a repo name: ' + repo); return `/api/gh/repos/${repo}/actions/${rest}`; };
+// Links to GitHub only: a URL from the API that is anything else becomes inert.
+const ghUrl = u => /^https:\/\/github\.com\//.test(String(u ?? '')) ? esc(u) : '#';
 // Served repos: the GitHub App's installations in App mode, else the configured list.
 const REPOS = () => S.app ? S.app.repos : S.config.repos;
 // Per-repo maps (warm, cache_branches, repo_cache_gb) are keyed by owner/name; GitHub names are
@@ -680,7 +707,7 @@ const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_ac
 // A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
 let appConv = null;
 const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › GitHub.')}>Dismiss</button></div>`;
-const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
+const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${ghUrl(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
   s.textContent = msg; t.innerHTML = ic(bad ? 'alert' : 'check'); t.append(s); if (bad) t.setAttribute('role', 'alert');
@@ -957,36 +984,191 @@ function banners() {
 // Status line in the page header: always present, so banners never move the title.
 const statusLine = n => `<span class="d${n ? ' w' : ''}"></span><span>${n ? `${n} item${n > 1 ? 's' : ''} need${n > 1 ? '' : 's'} attention` : 'Healthy'}</span>
   <span${kt('Last successful check with GitHub for queued jobs')}>· polled ${relH(S.poll.last_ok)}</span><span${kt('Actions runner version in the base image')}>· image ${esc(S.image?.runner_version || '—')}</span>${S.version ? `<span>· kiln ${esc(S.version)}</span>` : ''}${S.poll.rate ? `<span${kt('GitHub API requests left this hour')}>· API ${S.poll.rate.remaining}/${S.poll.rate.limit}</span>` : ''}`;
-const rate = () => { const r = parseFloat(lsGet('kiln-rate')); if (r > 0) return r; const c = S.config.vm_cpus; return c <= 2 ? 0.008 : c <= 4 ? 0.016 : c <= 8 ? 0.032 : 0.064; };
+// GitHub-hosted Linux x64 $/min by size (docs.github.com/en/billing/reference/actions-runner-pricing, checked 2026-10).
+const ghRate = c => c <= 2 ? 0.006 : c <= 4 ? 0.012 : c <= 8 ? 0.022 : 0.042;
+const myRate = () => { const r = parseFloat(lsGet('kiln-rate')); return r > 0 ? r : 0; };
+const rate = c => myRate() || ghRate(c || S.config.vm_cpus);
 const median = a => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 function stats() {
-  const n = now(), d0 = new Date(); const day = d0.setHours(0, 0, 0, 0) / 1000, mo = new Date(d0.getFullYear(), d0.getMonth(), 1) / 1000;
+  const n = now(), d0 = new Date(), m0 = Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), 1) / 86400000; const day = d0.setHours(0, 0, 0, 0) / 1000;
   const ran = S.vms.filter(v => v.busy_since);
   const f24 = S.vms.filter(v => isFail(v) && (v.ended || v.started) > n - 86400).length;
   const med = median(ran.filter(v => v.ended).map(v => v.ended - v.busy_since));
-  const saved = ran.filter(v => v.ended && v.started >= mo).reduce((s, v) => s + Math.ceil((v.ended - v.busy_since) / 60), 0) * rate();
+  // GitHub bills by UTC calendar month; usage rows are [utc day, cpus, jobs, minutes].
+  const use = (S.usage || []).filter(u => u[0] >= m0);
+  const mins = use.reduce((s, u) => s + u[3], 0), saved = use.reduce((s, u) => s + u[3] * rate(u[1]), 0);
   const st = (l, v, t, x = '') => `<div class="stat" tabindex="0"${tip(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
   return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length, 'Jobs that started running since midnight, your time')}
     <a class="stat" href="#/jobs?f=failed"${tip('Jobs that failed, were lost, or were killed mid-job in the last 24 hours. Click to list them.')}><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
-    ${st('Median job time', med == null ? '—' : dur(med), 'Median time from a job starting to its VM ending, over the last 100 jobs')}${st('Saved this month', '≈ $' + saved.toFixed(2), "This month's job minutes, each rounded up as GitHub bills them, times the rate below for a hosted runner of this size")}</div>
-    <p class="foot">from last 100 jobs · billed at <button class="lnk" data-act="rate"${tip('Change the per-minute rate used for savings')}>$${rate()}/min</button></p>`;
+    ${st('Median job time', med == null ? '—' : dur(med), 'Median time from a job starting to its VM ending, over the last 100 jobs')}${st('Saved this month', '≈ $' + saved.toFixed(2), `${mins} job minutes since the 1st (UTC, GitHub's billing month), each job rounded up to the minute as GitHub bills it, priced at the hosted runner of the same size`)}</div>
+    <p class="foot">median from last 100 jobs · saved: ${mins} min at <button class="lnk" data-act="rate"${tip('Set one flat $/min for savings; leave empty for GitHub-hosted rates by VM size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042)')}>${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}</button></p>`;
 }
 function meter(l, val, max, txt, t) {
   const p = max > 0 ? Math.min(100, val / max * 100) : 0;
   return `<div class="meter ${p > 85 ? 'hot' : ''}"${kt(t)}><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
 }
+/* ---------- host graphs: per-VM CPU and memory, sampled every 2 s by kiln ---------- */
+// Drawn LAG behind real time, so the right edge always sits between two samples it already has:
+// the chart interpolates, never guesses, and scrolls every frame instead of jumping per sample.
+const LAG = 4500, HV = { open: lsGet('kiln-hostx') === '1', win: +lsGet('kiln-hostwin') || 300, buf: [], base: -Infinity, shown: null, raf: 0, hover: null, tipKey: '' };
+const still = () => { const m = document.documentElement.dataset.motion; return m === 'reduce' || (m !== 'full' && matchMedia('(prefers-reduced-motion: reduce)').matches); };
+const vcol = k => `var(--v${k + 1})`;
+const vmName = id => { const v = S.vms.find(x => x.id === id); return v ? `${v.repo.split('/').pop()} / ${jt(v)}` : id; };
+const fmtC = c => c.toFixed(1) + ' cores', fmtM = mb => (mb / 1024).toFixed(1) + ' GB';
+const winTxt = w => w < 3600 ? w / 60 + 'm' : '1h';
+function hvMerge(a) {
+  let gap = false;
+  for (const s of a || []) {
+    const last = HV.buf[HV.buf.length - 1];
+    if (last && s.t <= last.t) continue;
+    if (last && s.t - last.t > 5000) gap = true;
+    HV.buf.push(s); HV.base = Math.max(HV.base, s.t - performance.now());
+  }
+  if (HV.buf.length > 1800) HV.buf.splice(0, HV.buf.length - 1800);
+  return gap;
+}
+async function hvLoad() {
+  const e = $('#hxe');
+  try { const a = await api('/api/host'); HV.buf = []; hvMerge(a); if (e) e.hidden = true; }
+  catch (err) { console.warn('host history', err); if (e) { e.textContent = `Host history unavailable (${err.message || err}); showing samples from now on.`; e.hidden = false; } }
+  hvKick();
+}
+function hvKick() { if (HV.open && !HV.raf) HV.raf = requestAnimationFrame(hvDraw); }
+// Stack layers of one sample, bottom to top: VMs by colour slot, then the rest of the host.
+function layers(s, key) {
+  const i = key === 'cpu' ? 2 : 3, out = s.vms.map(v => ({ k: v[0], id: v[1], v: v[i] }));
+  out.push({ k: 'h', id: 'h', v: Math.max(0, s[key] - out.reduce((a, l) => a + l.v, 0)) });
+  return out;
+}
+function chart(id, key, max, tR, cs) {
+  const cv = document.getElementById(id); if (!cv || !max) return;
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1, W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+  if (!W || !H) return;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const g = cv.getContext('2d'), win = HV.win * 1000, t0 = tR - win, X = t => (t - t0) / win * W, Y = v => H - Math.min(v, max) / max * (H - dpr) - .5 * dpr;
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = cs.getPropertyValue('--muted'); g.globalAlpha = .45; g.fillRect(0, 0, W, H); g.globalAlpha = 1;
+  g.strokeStyle = cs.getPropertyValue('--line'); g.lineWidth = dpr;
+  for (const f of [.5, 1]) { const y = Math.round(Y(max * f)) + .5; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  // One sample either side of the window, so the edges are interpolated too.
+  let a = HV.buf.findIndex(s => s.t >= t0); if (a < 0) return; a = Math.max(0, a - 1);
+  let b = HV.buf.findIndex(s => s.t > tR); b = b < 0 ? HV.buf.length : b + 1;
+  const vis = HV.buf.slice(a, b); if (vis.length < 2) return;
+  const keys = [...new Set(vis.flatMap(s => s.vms.map(v => v[0])))].sort((x, y) => x - y).concat('h');
+  const stacks = vis.map(s => { const m = new Map(layers(s, key).map(l => [l.k, l.v])); let acc = 0; return keys.map(k => [acc, acc += m.get(k) || 0]); });
+  const xs = vis.map(s => X(s.t));
+  keys.forEach((k, j) => {
+    const c = k === 'h' ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--v${k + 1}`);
+    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
+    for (let i = xs.length - 1; i >= 0; i--) g.lineTo(xs[i], Y(stacks[i][j][0]));
+    g.closePath(); g.fillStyle = c; g.globalAlpha = k === 'h' ? .18 : .32; g.fill();
+    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
+    g.strokeStyle = c; g.globalAlpha = k === 'h' ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
+  });
+  const h = HV.hover; if (!h || h.id !== id) return;
+  // Only samples on screen: vis also holds one past each edge, for the interpolation.
+  const t = t0 + h.x / r.width * win; let n = -1;
+  vis.forEach((s, i) => { if (s.t >= t0 && s.t <= tR && (n < 0 || Math.abs(s.t - t) < Math.abs(vis[n].t - t))) n = i; });
+  if (n < 0) return hvTip(null);
+  const x = Math.round(xs[n]) + .5;
+  g.strokeStyle = cs.getPropertyValue('--fg-2'); g.lineWidth = dpr; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+  hvTip(vis[n], key, r.left + x / dpr, r.top);
+}
+function hvTip(s, key, x, y) {
+  let el = document.getElementById('htip');
+  if (!s) { if (el) el.className = ''; HV.tipKey = ''; return; }
+  if (!el) { el = document.createElement('div'); el.id = 'htip'; el.setAttribute('aria-hidden', 'true'); document.body.append(el); }
+  const k = key + s.t;
+  if (HV.tipKey !== k) {
+    HV.tipKey = k; const f = key === 'cpu' ? fmtC : fmtM, ago = Math.max(0, Math.round((Date.now() - s.t) / 1000));
+    const t = document.createElement('div'); t.className = 't'; t.textContent = `${ago < 5 ? 'now' : dur(ago) + ' ago'} · ${f(s[key])} in use`;
+    const rows = layers(s, key).reverse().map(l => {
+      const r = document.createElement('div'), i = document.createElement('i'), b = document.createElement('b'), n = document.createElement('span');
+      r.className = 'r'; i.style.setProperty('--c', l.k === 'h' ? 'var(--fg-3)' : vcol(l.k)); b.textContent = f(l.v); n.textContent = l.k === 'h' ? 'Host, not VMs' : vmName(l.id);
+      r.append(i, b, n); return r;
+    });
+    el.replaceChildren(t, ...rows);
+  }
+  el.className = 'on';
+  const w = el.offsetWidth, h = el.offsetHeight;
+  // Left of the crosshair: the card sits on the right, so that side is the open page.
+  el.style.transform = `translate(${Math.round(x - 12 - w >= 8 ? x - 12 - w : x + 12)}px,${Math.round(Math.min(y, innerHeight - h - 8))}px)`;
+}
+function hvDraw() {
+  HV.raf = 0;
+  if (!HV.open || !document.getElementById('hc-cpu')) return;
+  HV.shown = HV.shown == null || !isFinite(HV.shown) ? HV.base : HV.shown + (HV.base - HV.shown) * .05;
+  const tR = performance.now() + HV.shown - LAG, cs = getComputedStyle(document.documentElement);
+  chart('hc-cpu', 'cpu', S.host.cpus, tR, cs);
+  chart('hc-mem', 'mem', S.host.mem_total_mb, tR, cs);
+  if (!HV.hover) hvTip(null);
+  if (!still()) HV.raf = requestAnimationFrame(hvDraw);
+}
+// Stacked bar: segments keep their element (and so their width transition) across polls.
+function stackBar(el, parts) {
+  parts = parts.filter(p => p.w >= .4);
+  const sig = parts.map(p => p.k).join();
+  if (el.dataset.sig !== sig) {
+    const old = Object.fromEntries([...el.children].map(i => [i.dataset.k, i.style.width]));
+    el.innerHTML = parts.map(p => `<i data-k="${p.k}" class="${p.k === 'h' ? 'o' : ''}" style="background:${p.k === 'h' ? '' : vcol(p.k)};width:${old[p.k] || '0%'}"></i>`).join('');
+    el.dataset.sig = sig; void el.offsetWidth;
+  }
+  parts.forEach((p, i) => { el.children[i].style.width = Math.min(100, p.w).toFixed(2) + '%'; });
+}
+function hostCard() {
+  const h = S.host, s = h.samples?.at(-1), used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
+  if (hvMerge(h.samples) && HV.open) hvLoad();
+  const m = (id, val, max, txt, parts, t) => {
+    const el = $('#' + id), b = $('.b', el); el.dataset.tip = t; $('[data-v]', el).textContent = txt;
+    el.classList.toggle('hot', max > 0 && val / max > .85); b.setAttribute('aria-valuemax', max); b.setAttribute('aria-valuenow', +val.toFixed(2));
+    stackBar(b, parts);
+  };
+  const cpu = s ? s.cpu : l[0], mem = s ? s.mem : used;
+  m('hm-cpu', cpu, h.cpus, `${cpu.toFixed(1)} / ${h.cpus} cores`, s ? layers(s, 'cpu').map(x => ({ k: x.k, w: x.v / h.cpus * 100 })) : [{ k: 'h', w: l[0] / h.cpus * 100 }],
+    `CPU in use, coloured by job VM; grey is the host itself. Load average ${l.map(x => x.toFixed(2)).join(' ')} (1, 5, 15 min) on ${h.cpus} CPUs.`);
+  m('hm-mem', mem, h.mem_total_mb, `${fmtM(mem)} / ${fmtM(h.mem_total_mb)}`, s ? layers(s, 'mem').map(x => ({ k: x.k, w: x.v / h.mem_total_mb * 100 })) : [{ k: 'h', w: used / h.mem_total_mb * 100 }],
+    "Host memory in use, coloured by job VM (its QEMU's resident memory); grey is the rest. kiln holds back launches when there isn't enough left for another VM.");
+  $('#hm-disk [data-v]').textContent = h.disk_free_gb + ' GB';
+  setHTML($('#hlg'), s ? layers(s, 'cpu').map((x, i) => `<li><span class="k" style="--c:${x.k === 'h' ? 'var(--fg-3)' : vcol(x.k)}"></span><span class="n">${esc(x.k === 'h' ? 'Host, not VMs' : vmName(x.id))}</span><b>${x.v.toFixed(1)}</b><span class="fg2">· ${fmtM(layers(s, 'mem')[i].v)}</span></li>`).reverse().join('') : '<li class="fg2">Collecting samples…</li>');
+  if (still()) hvKick();
+}
+const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="${HV.open}" aria-controls="hx">Host${ic('next')}</button></h2>
+  <div><div class="meter" id="hm-cpu" tabindex="0"><div class="l"><span>CPU</span><span data-v></span></div><div class="b st" role="meter" aria-label="CPU" aria-valuemin="0"></div></div>
+  <div class="meter" id="hm-mem" tabindex="0" style="margin-top:12px"><div class="l"><span>Memory</span><span data-v></span></div><div class="b st" role="meter" aria-label="Memory" aria-valuemin="0"></div></div>
+  <div class="meter" id="hm-disk" tabindex="0" style="margin-top:12px" data-tip="Free disk where kiln keeps the image, repo caches and VM disks"><div class="l"><span>Disk free</span><span data-v></span></div></div></div>
+  <div class="hx" id="hx"${HV.open ? '' : ' hidden'}><div class="seg" role="radiogroup" aria-label="Time window">${[300, 900, 3600].map(w => `<button role="radio" aria-checked="${HV.win === w}" data-act="hostwin" data-w="${w}">${winTxt(w)}</button>`).join('')}</div>
+  ${[['cpu', 'CPU', 'cores'], ['mem', 'Memory', 'GB']].map(([k, t, u]) => `<figure><figcaption><span>${t}</span><span class="fg2 sm">by VM, ${u}</span></figcaption><div class="cv"><canvas id="hc-${k}" tabindex="0" role="img" data-title="${t}" aria-label="${t} use by job VM over the last ${winTxt(HV.win)}; values are listed below"></canvas></div><div class="ax"><span data-wl>−${winTxt(HV.win)}</span><span>now</span></div></figure>`).join('')}
+  <p class="fg2 sm" id="hxe" hidden></p><ul class="lg" id="hlg" aria-label="Now, by VM: cores · memory"></ul></div>`;
+function hostWire() {
+  const hx = $('#hx'), at = (c, x) => { HV.hover = { id: c.id, x }; hvKick(); };
+  if (HV.open) hvLoad();
+  hx.addEventListener('pointermove', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.clientX - e.target.getBoundingClientRect().left); });
+  hx.addEventListener('pointerleave', () => {
+    const f = document.activeElement;
+    if (f?.tagName === 'CANVAS' && hx.contains(f)) at(f, f.getBoundingClientRect().width - 1); else { HV.hover = null; hvTip(null); }
+  });
+  hx.addEventListener('focusin', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.target.getBoundingClientRect().width - 1); });
+  hx.addEventListener('focusout', () => { HV.hover = null; hvTip(null); });
+  hx.addEventListener('keydown', e => {
+    const c = e.target; if (c.tagName !== 'CANVAS' || !HV.hover || !/^Arrow(Left|Right)$/.test(e.key)) return;
+    e.preventDefault(); const w = c.getBoundingClientRect().width; at(c, Math.max(0, Math.min(w - 1, HV.hover.x + (e.key === 'ArrowLeft' ? -w / 20 : w / 20))));
+  });
+}
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.overview = {
   mount() {
-    $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host"></div></aside></div>`;
+    $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host">${hostSkel()}</div></aside></div>`;
+    hostWire(); rove($('#hx'));
   },
+  unmount() { cancelAnimationFrame(HV.raf); HV.raf = 0; HV.hover = null; hvTip(null); },
   update() {
     const c = S.config, h = S.host, act = S.vms.filter(ACTIVE).sort((a, b) => a.started - b.started), bn = banners();
     setHTML($('#ov-st'), bn.join('')); setHTML($('#ov-hl'), statusLine(bn.length));
+    const sl = new Map((S.host.samples?.at(-1)?.vms || []).map(v => [v[1], v[0]]));
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(STATE[status(v)]?.[1])}><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(STATE[status(v)]?.[1])}>${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
         : `<div class="ch"${(i === act.length ? kt : tip)('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
@@ -996,10 +1178,7 @@ pages.overview = {
     const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
     setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400;margin-left:auto">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
-    const used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
-    setHTML($('#ov-host'), `<h2>Host</h2>${meter('Load', l[0], h.cpus, `${l.map(x => x.toFixed(2)).join(' ')}`, `1, 5 and 15 minute load averages. The bar compares the first with this box's ${h.cpus} CPUs.`)}
-      ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`, "Host memory in use. kiln holds back launches when there isn't enough left for another VM.")}
-      <div class="meter"${kt('Free disk where kiln keeps the image, repo caches and VM disks')}><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
+    hostCard();
   },
 };
 const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
@@ -1059,7 +1238,7 @@ pages.job = {
     }
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
@@ -1243,7 +1422,7 @@ pages.repos = {
       const rs = REPOS();
       setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
         const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
-        return `<li><div class="row rr"><a class="nm" href="#/repos/${r}">${esc(r)}</a>
+        return `<li><div class="row rr"><a class="nm" href="#/repos/${esc(r)}">${esc(r)}</a>
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
           <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
@@ -1271,7 +1450,7 @@ function runHTML(run) {
   }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
     <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn ic" href="${esc(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
+    <span style="display:flex;gap:8px"><a class="btn ic" href="${ghUrl(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
   try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
@@ -1332,7 +1511,7 @@ const G = {
       const a = S.app;
       const acc = a ? appAccounts(a) : [];
       setHTML($('#app-st'), appConvHTML() + (a ? `${a.repos.length ? '' : `<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> It is on none yet, so kiln has nothing to serve.</span>${appInstall(1)}</div>`}
-        <dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)}</a></dd>${a.owner ? `<dt>Owner</dt><dd>${esc(a.owner)}</dd>` : ''}
+        <dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${ghUrl(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)}</a></dd>${a.owner ? `<dt>Owner</dt><dd>${esc(a.owner)}</dd>` : ''}
         <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? relH(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}${(a.notes || []).length ? `<dt>Skipped</dt><dd class="fg2">${a.notes.map(esc).join('<br>')}</dd>` : ''}</dl>
         ${acc.length ? `<p class="fg2 sm" style="margin-bottom:12px">Only installations on ${acc.map(x => `<b>${esc(x)}</b>`).join(', ')} are served. Installing the App on another account does nothing until that account is added to <span class="mono">app_accounts</span>.</p>` : ''}
         <div class="bar" style="margin:0">${a.repos.length ? appInstall() : ''}${appRefresh()}<span class="sp"></span><button class="btn dng" data-act="rmapp"${tip('Go back to token auth. The App stays on GitHub.')}>${ic('trash')}Remove App</button></div>
@@ -1518,7 +1697,7 @@ async function loadHello() {
 function helloBtn(repo, pri = true) {
   if (S.app) return '<p class="fg2 sm">Test PRs are off with the GitHub App, which cannot write code. Add the snippet below to a workflow instead.</p>';
   const h = hello[repo], e = helloErr[repo];
-  const btn = h ? `<a class="btn" href="${esc(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened · branch <code>${esc(h.branch)}</code>` : 'Test PR'}${ic('ext')}</a>`
+  const btn = h ? `<a class="btn" href="${ghUrl(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened · branch <code>${esc(h.branch)}</code>` : 'Test PR'}${ic('ext')}</a>`
     : `<button class="btn${pri ? ' pri' : ''}" data-act="hello" data-id="${esc(repo)}" ${helloSt[repo] ? 'disabled' : ''}>${helloSt[repo] ? 'Opening PR…' : 'Open a test PR'}</button>`;
   return `<div class="hello">${btn}${e && !h ? `<div class="cal">${esc(e)}${/workflow/i.test(e) ? ` ${md(WFSCOPE)} <button class="btn" data-act="updtok">Update token</button>` : ''}</div>` : ''}</div>`;
 }
@@ -1554,7 +1733,7 @@ pages.setup = {
       const intro = `<p class="fg2">kiln can open a pull request in <b>${esc(repo)}</b> adding one small workflow, <code>kiln-hello.yml</code>. The PR itself triggers the job, so you'll see kiln work in about a minute. Close or merge it afterwards.</p>`;
       if (!h) return intro + sel + helloBtn(repo) + alt;
       const vm = S.vms.find(v => v.repo === repo && (ACTIVE(v) || v.started >= h.at - 5)), q = ((S.poll.queued || {})[repo] || 0) > 0 || !!vm;
-      const rows = [[1, `<a href="${esc(h.pr_url)}" target="_blank" rel="noopener">PR opened ↗</a>`], [q, 'GitHub queued the job'], [!!vm, 'VM booting'],
+      const rows = [[1, `<a href="${ghUrl(h.pr_url)}" target="_blank" rel="noopener">PR opened ↗</a>`], [q, 'GitHub queued the job'], [!!vm, 'VM booting'],
         [!!vm?.busy_since, vm?.busy_since ? `Running <span data-t="${vm.busy_since}" data-k="dur"></span>` : 'Running']];
       return `${sel}<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${ic(on ? 'check' : 'dot')}</span><span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>
         ${S.image_ready ? '' : '<p class="fg2 sm">The job starts as soon as the image is ready.</p>'}
@@ -1634,6 +1813,9 @@ pages.guides = {
 
 /* ---------- actions ---------- */
 const ACT = {
+  hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
+  hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
+    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
   async mkapp() {
     const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;
@@ -1699,7 +1881,7 @@ const ACT = {
   resettips() { Object.keys(TIPS).forEach(k => lsSet('kiln-tip-' + k, null)); toast('Tips will show again'); },
   guides() { dlg.close(); location.hash = '#/guides'; },
   gdsel: s => (location.hash = '#/guides/' + s.value),
-  rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" value="${rate()}"><button class="btn pri">Save</button></form>`); },
+  rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" placeholder="GitHub-hosted, by size" value="${myRate() || ''}"><button class="btn pri">Save</button></form>`); },
   jf(b) { jf.f = b.dataset.v; pages.jobs.update(); },
   jfrepo(s) { jf.repo = s.value; pages.jobs.update(); },
   route(b) { pages.repos.sn = pages.repos.sn === b.dataset.id ? null : b.dataset.id; pages.repos.update(); },
@@ -1804,7 +1986,7 @@ document.addEventListener('submit', async e => {
   const f = e.target, k = f.dataset.form; if (!k) return;
   e.preventDefault(); const inp = $('input', f), btn = $('button', f); btn.disabled = true;
   try {
-    if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast('Rate saved'); }
+    if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast(myRate() ? 'Rate saved' : 'Using GitHub-hosted rates'); }
     else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
     else if (k === 'warm') {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), r = pages.repos.r;
