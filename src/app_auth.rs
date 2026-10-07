@@ -151,13 +151,24 @@ pub fn load(data: &std::path::Path) -> Option<Result<AppAuth>> {
     })())
 }
 
-/// Write the App's files (key mode 0600) and load them.
+/// Replace `path` atomically with a 0600 file (temp file + rename).
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.display()));
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    // `mode` only applies to a new file: a leftover temp file keeps its own.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    std::io::Write::write_all(&mut f, bytes)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Write the App's files (key mode 0600) and load them. app.json goes last: it is
+/// what marks the App as configured, so a crash never leaves it without its key.
 pub fn save(data: &std::path::Path, id: u64, slug: &str, html_url: &str, pem: &str) -> Result<AppAuth> {
-    use std::os::unix::fs::OpenOptionsExt;
     let a = AppAuth::new(id, slug.into(), html_url.into(), pem)?;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(data.join("app.pem"))?;
-    std::io::Write::write_all(&mut f, pem.as_bytes())?;
-    std::fs::write(data.join("app.json"), serde_json::json!({ "id": id, "slug": slug, "html_url": html_url }).to_string())?;
+    write_private(&data.join("app.pem"), pem.as_bytes())?;
+    write_private(&data.join("app.json"), serde_json::json!({ "id": id, "slug": slug, "html_url": html_url }).to_string().as_bytes())?;
     Ok(a)
 }
 
@@ -227,6 +238,34 @@ mod tests {
         let insts =
             serde_json::json!([{ "id": 1, "suspended_at": null }, { "id": 2, "suspended_at": "2026-10-01T00:00:00Z" }, { "id": 3 }]);
         assert_eq!(live_installations(insts.as_array().unwrap()), [1, 3]);
+    }
+
+    /// A per-test scratch dir under the system temp dir.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("kiln-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn private_files_are_0600_even_if_they_existed() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("private");
+        let p = d.join("app.pem");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // a leftover temp file from a crash must not keep its looser mode either
+        std::fs::write(d.join("app.pem.tmp"), "junk").unwrap();
+        std::fs::set_permissions(d.join("app.pem.tmp"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&p, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!d.join("app.pem.tmp").exists());
+        let a = save(&d, 42, "kiln-x", "https://github.com/apps/kiln-x", PEM).unwrap();
+        assert_eq!(a.id, 42);
+        assert_eq!(std::fs::metadata(d.join("app.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load(&d).unwrap().unwrap().slug, "kiln-x");
     }
 
     #[test]
