@@ -557,7 +557,7 @@ const TIPS = {
 };
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
-const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v4\n`;
+const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v7\n`;
 
 /* ---------- api, dialogs, toasts ---------- */
 let keyWait = null;
