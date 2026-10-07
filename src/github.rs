@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode, header};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
@@ -22,6 +22,8 @@ pub struct Gh {
     // URL -> (etag, body). Conditional GETs that return 304 are free against
     // the rate limit, which is what makes 5s polling of several repos viable.
     etags: Mutex<HashMap<String, (String, Value)>>,
+    /// GitHub App mode: tokens come from the App's installations, not `token`.
+    app: std::sync::RwLock<Option<std::sync::Arc<crate::app_auth::AppAuth>>>,
     /// Unix time the token expires, from GitHub's response header (None = no expiry seen).
     pub expires: std::sync::Mutex<Option<u64>>,
     /// repo -> (default branch, fetched at unix time); renames are rare, so 1h.
@@ -48,6 +50,7 @@ impl Gh {
             etags: Mutex::default(),
             defaults: Default::default(),
             expires: Default::default(),
+            app: Default::default(),
         }
     }
 
@@ -58,7 +61,16 @@ impl Gh {
     }
 
     pub fn source(&self) -> &'static str {
-        *self.source.read().unwrap()
+        if self.app().is_some() { "app" } else { *self.source.read().unwrap() }
+    }
+
+    pub fn set_app(&self, a: Option<std::sync::Arc<crate::app_auth::AppAuth>>) {
+        *self.app.write().unwrap() = a;
+        *self.expires.lock().unwrap() = None;
+    }
+
+    pub fn app(&self) -> Option<std::sync::Arc<crate::app_auth::AppAuth>> {
+        self.app.read().unwrap().clone()
     }
 
     pub fn paused_until(&self) -> Option<u64> {
@@ -66,11 +78,42 @@ impl Gh {
     }
 
     pub fn has_token(&self) -> bool {
-        !self.token.read().unwrap().is_empty()
+        self.app().is_some() || !self.token.read().unwrap().is_empty()
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        self.request_with(&self.token.read().unwrap(), method, path)
+    /// Bearer for `path`: the PAT, the App JWT for `app/...`, or the owning installation's token.
+    async fn token_for(&self, path: &str) -> Result<String> {
+        let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
+        if path.trim_start_matches('/').starts_with("app/") {
+            return a.jwt(crate::now());
+        }
+        let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap()).context("the GitHub App has no installations")?;
+        self.mint(&a, inst).await
+    }
+
+    /// Cached installation token, minted when missing or within 5 min of expiry.
+    async fn mint(&self, a: &crate::app_auth::AppAuth, inst: u64) -> Result<String> {
+        let mut tokens = a.tokens.lock().await;
+        if let Some((t, exp)) = tokens.get(&inst)
+            && !crate::app_auth::needs_mint(*exp, crate::now())
+        {
+            return Ok(t.clone());
+        }
+        let jwt = a.jwt(crate::now())?;
+        let r = self.request_with(&jwt, Method::POST, &format!("app/installations/{inst}/access_tokens")).send().await?;
+        let status = r.status();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            bail!("minting an installation token: {status} {}", v["message"].as_str().unwrap_or(""));
+        }
+        let t = v["token"].as_str().context("no token in response")?.to_string();
+        let exp = v["expires_at"].as_str().and_then(parse_rfc3339).context("no expires_at")?;
+        tokens.insert(inst, (t.clone(), exp));
+        Ok(t)
+    }
+
+    async fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
+        Ok(self.request_with(&self.token_for(path).await?, method, path))
     }
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -93,9 +136,16 @@ impl Gh {
         // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
         // Every successful API response says it, so a rotated token without one clears it.
         // Not a redirected log download: blob storage never sends it.
-        if r.status().is_success() && r.url().host_str() == Some("api.github.com") {
+        if r.status().is_success() && r.url().host_str() == Some("api.github.com") && self.app().is_none() {
             *self.expires.lock().unwrap() =
                 r.headers().get("github-authentication-token-expiration").and_then(|v| v.to_str().ok()).and_then(parse_rfc3339);
+        }
+        if r.status() == StatusCode::UNAUTHORIZED
+            && let Some(a) = self.app()
+            && let Ok(mut t) = a.tokens.try_lock()
+        {
+            // ponytail: drops every cached installation token on any 401; per-installation if it matters.
+            t.clear();
         }
         if let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
             self.paused_until.fetch_max(t, Ordering::Relaxed);
@@ -142,7 +192,7 @@ impl Gh {
     /// Raw call for the dashboard proxy. Follows redirects (job logs redirect
     /// to a signed blob URL; reqwest drops the auth header cross-origin).
     pub async fn raw(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
-        let mut rb = self.request(method, path);
+        let mut rb = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
         }
@@ -163,7 +213,7 @@ impl Gh {
             }
             c.get(path).cloned()
         };
-        let mut rb = self.request(Method::GET, path);
+        let mut rb = self.request(Method::GET, path).await?;
         if let Some((etag, _)) = &cached {
             rb = rb.header(header::IF_NONE_MATCH, etag);
         }
@@ -188,7 +238,7 @@ impl Gh {
     }
 
     async fn send(&self, method: Method, path: &str, body: Value) -> Result<Value> {
-        let r = self.exec(self.request(method.clone(), path).json(&body)).await?;
+        let r = self.exec(self.request(method.clone(), path).await?.json(&body)).await?;
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
@@ -295,6 +345,56 @@ impl Gh {
         Ok((by_size, ours, forks.len()))
     }
 
+    /// App mode: map every repo of every installation to its installation id.
+    /// Leaves the previous map in place on any error.
+    pub async fn discover(&self) -> Result<usize> {
+        let a = self.app().context("not in GitHub App mode")?;
+        let jwt = a.jwt(crate::now())?;
+        let (mut map, mut names) = (BTreeMap::new(), vec![]);
+        let mut page = 1;
+        loop {
+            let r = self.request_with(&jwt, Method::GET, &format!("app/installations?per_page=100&page={page}")).send().await?;
+            if !r.status().is_success() {
+                bail!("listing App installations: {}", r.status());
+            }
+            let insts: Vec<Value> = r.json().await?;
+            for i in &insts {
+                let id = i["id"].as_u64().context("installation id")?;
+                let token = self.mint(&a, id).await?;
+                let mut p = 1;
+                loop {
+                    let path = format!("installation/repositories?per_page=100&page={p}");
+                    let r = self.request_with(&token, Method::GET, &path).send().await?;
+                    if !r.status().is_success() {
+                        bail!("listing repos of installation {id}: {}", r.status());
+                    }
+                    let v: Value = r.json().await?;
+                    let repos = v["repositories"].as_array().cloned().unwrap_or_default();
+                    for repo in &repos {
+                        if let Some(n) = repo["full_name"].as_str() {
+                            map.insert(n.to_ascii_lowercase(), id);
+                            names.push(n.to_string());
+                        }
+                    }
+                    if repos.len() < 100 {
+                        break;
+                    }
+                    p += 1;
+                }
+            }
+            if insts.len() < 100 {
+                break;
+            }
+            page += 1;
+        }
+        names.sort_by_key(|n| n.to_ascii_lowercase());
+        let n = names.len();
+        *a.repos.write().unwrap() = map;
+        *a.names.write().unwrap() = names;
+        a.discovered_at.store(crate::now(), Ordering::Relaxed);
+        Ok(n)
+    }
+
     /// Delete offline, idle `kiln-*` runners left behind by a crash.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
@@ -386,7 +486,7 @@ impl Gh {
 
     /// Unused JIT registrations linger as offline runners; clean them up.
     pub async fn delete_runner(&self, repo: &str, id: u64) -> Result<()> {
-        let r = self.exec(self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}"))).await?;
+        let r = self.exec(self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?).await?;
         // 404 = the ephemeral runner already deregistered itself after its job.
         if !r.status().is_success() && r.status() != StatusCode::NOT_FOUND {
             bail!("delete runner {id}: {}", r.status());

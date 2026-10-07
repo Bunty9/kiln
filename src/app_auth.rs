@@ -56,6 +56,64 @@ pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
     repos.values().next().copied()
 }
 
+pub struct AppAuth {
+    pub id: u64,
+    pub slug: String,
+    pub html_url: String,
+    key: RsaKeyPair,
+    /// installation id -> (token, expires_at unix)
+    pub tokens: tokio::sync::Mutex<std::collections::HashMap<u64, (String, u64)>>,
+    /// "owner/name" (lowercase) -> installation id
+    pub repos: std::sync::RwLock<BTreeMap<String, u64>>,
+    /// The same repos as GitHub spells them ("Bunty9/kiln").
+    pub names: std::sync::RwLock<Vec<String>>,
+    pub discovered_at: std::sync::atomic::AtomicU64,
+}
+
+impl AppAuth {
+    pub fn new(id: u64, slug: String, html_url: String, pem: &str) -> Result<Self> {
+        Ok(Self {
+            id,
+            slug,
+            html_url,
+            key: parse_key(pem)?,
+            tokens: Default::default(),
+            repos: Default::default(),
+            names: Default::default(),
+            discovered_at: Default::default(),
+        })
+    }
+
+    pub fn jwt(&self, now: u64) -> Result<String> {
+        jwt(&self.key, self.id, now)
+    }
+}
+
+/// `<data>/app.json` + `<data>/app.pem`; None when no App is configured.
+pub fn load(data: &std::path::Path) -> Option<Result<AppAuth>> {
+    let meta = std::fs::read(data.join("app.json")).ok()?;
+    Some((|| {
+        let m: serde_json::Value = serde_json::from_slice(&meta).context("app.json")?;
+        let pem = std::fs::read_to_string(data.join("app.pem")).context("app.pem")?;
+        AppAuth::new(
+            m["id"].as_u64().context("app.json has no id")?,
+            m["slug"].as_str().unwrap_or("").into(),
+            m["html_url"].as_str().unwrap_or("").into(),
+            &pem,
+        )
+    })())
+}
+
+/// Write the App's files (key mode 0600) and load them.
+pub fn save(data: &std::path::Path, id: u64, slug: &str, html_url: &str, pem: &str) -> Result<AppAuth> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let a = AppAuth::new(id, slug.into(), html_url.into(), pem)?;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(data.join("app.pem"))?;
+    std::io::Write::write_all(&mut f, pem.as_bytes())?;
+    std::fs::write(data.join("app.json"), serde_json::json!({ "id": id, "slug": slug, "html_url": html_url }).to_string())?;
+    Ok(a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
