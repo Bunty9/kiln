@@ -1,5 +1,7 @@
 # kiln
 
+![kiln: self-hosted CI that boots one fresh rootless VM per GitHub Actions job](docs/cover.jpg)
+
 Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions job.
 
 kiln is a single Rust binary with an embedded dashboard. It polls GitHub for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no tap devices, no runner fleet to babysit.
