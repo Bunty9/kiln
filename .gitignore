@@ -4,3 +4,13 @@ node_modules/
 .superpowers/
 .claude/worktrees/
 .playwright-mcp/
+.remember/
+posts/
+logs/
+marketing/
+security-review/
+docs/superpowers/
+*.pem
+!src/testdata/*.pem
+.env
+*.key
