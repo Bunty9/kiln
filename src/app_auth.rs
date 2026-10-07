@@ -107,7 +107,8 @@ pub fn served_installations(insts: &[serde_json::Value], owner_id: u64, accounts
 /// to the dashboard page (not an API route, so no headers are needed) with ?code&state.
 pub fn manifest(origin: &str, host: &str) -> serde_json::Value {
     serde_json::json!({
-        "name": format!("kiln-{host}"),
+        // GitHub caps App names at 34 characters
+        "name": format!("kiln-{}", host.chars().take(29).collect::<String>().trim_end_matches('-')),
         "url": "https://github.com/Bunty9/kiln",
         "redirect_url": format!("{}/", origin.trim_end_matches('/')),
         "public": false,
@@ -323,6 +324,18 @@ mod tests {
             serde_json::json!({"administration": "write", "actions": "write", "contents": "read", "metadata": "read"})
         );
         assert_eq!(m["default_events"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn manifest_name_fits_githubs_34_char_limit() {
+        // "kiln-" + 29 chars, cut where a '-' would end the name
+        let m = manifest("http://x", "build-server-with-a-very-long-hostname");
+        assert_eq!(m["name"], "kiln-build-server-with-a-very-long");
+        let m = manifest("http://x", "build-server-with-a-very-lon-hostname");
+        assert_eq!(m["name"], "kiln-build-server-with-a-very-lon");
+        let m = manifest("http://x", "abcdefghijklmnopqrstuvwxyz0123456789");
+        assert_eq!(m["name"], "kiln-abcdefghijklmnopqrstuvwxyz012");
+        assert_eq!(m["name"].as_str().unwrap().len(), 34);
     }
 
     #[test]

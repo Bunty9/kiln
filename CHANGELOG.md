@@ -4,6 +4,15 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-07
+
+### Fixed
+
+- Dashboard tooltips meet WCAG 1.4.13: a tooltip stays open while the pointer moves onto it, Escape dismisses it, and it hides shortly after the pointer leaves both. Tips on badges, meters, status-line items and job metadata can be reached by keyboard; a job row shows its status and start time when focused.
+- The Repos page switches between the add-repo form and the GitHub App layout when App mode is turned on or off while it is open.
+- An image too old to launch VMs from shows one banner, with Rebake, instead of two.
+- The GitHub App manifest name stays within GitHub's 34-character limit on long hostnames.
+
 ## [0.2.0] - 2026-10-07
 
 ### Added
@@ -72,6 +81,7 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Bunty9/kiln/releases/tag/v0.1.0
