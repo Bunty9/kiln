@@ -4,6 +4,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-07
+
 ### Fixed
 
 - **Serve over HTTPS** no longer hangs and leaks a `tailscale serve` process on a tailnet without HTTPS certificates (#15). kiln reads `CertDomains` from `tailscale status` first and refuses with "This tailnet can't issue HTTPS certificates. Enable DNS › HTTPS Certificates in the Tailscale admin console…". Every tailscale CLI call now runs with stdin closed in its own process group, bounded (15 s for `serve`, 20 s otherwise; turning serve on takes at most 35 s end to end: the ≤20 s `tailscale status` preflight plus the ≤15 s `serve`), and the whole group is killed on timeout or when the client goes away, so the request always returns and nothing is left behind.
@@ -113,7 +115,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0
