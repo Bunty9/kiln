@@ -1,3 +1,4 @@
+mod app_auth;
 mod github;
 mod mirror;
 mod vm;
