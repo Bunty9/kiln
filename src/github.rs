@@ -286,6 +286,9 @@ impl Gh {
         // tag named like a writer branch looks like a push to it. Only trust the run
         // if the commit is really on that branch (identical to it or an ancestor of it).
         if event == "push" && (branch == default || writers.contains(&branch)) {
+            if let Some(marked) = unsafe_branch(&branch) {
+                return Ok((event, marked, default, conclusion));
+            }
             let sha = run["head_sha"].as_str().context("run has no head_sha")?;
             // Resolve the branch tip through refs/heads explicitly: a bare name in
             // compare/ may resolve to a same-named tag, which anyone who can push a
@@ -608,6 +611,12 @@ pub fn size_mem_mb(cpus: u32) -> u32 {
     (cpus * 2048).min(24576)
 }
 
+/// `branch` marked up (so no writer matches it) when it is not a plain branch name
+/// that is safe to put in an API path unencoded ([A-Za-z0-9._/-], no ".."); None if it is.
+fn unsafe_branch(branch: &str) -> Option<String> {
+    (!crate::valid_branch(branch)).then(|| format!("{branch} (not a plain branch name)"))
+}
+
 /// Did this run's code come from another repository (a fork PR)? Fails closed:
 /// a run whose head repository is gone (deleted fork) counts as a fork.
 fn is_fork_run(run: &Value) -> bool {
@@ -686,6 +695,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn cache_trust_branch_names() {
+        assert_eq!(unsafe_branch("main"), None);
+        assert_eq!(unsafe_branch("release/1.x"), None);
+        // would change the API path built from it: refused, marked up so cache_verdict says no
+        for b in ["a#b", "x?y", "dev%2F..%2Fmain", "../../main", "dev branch", ""] {
+            let m = unsafe_branch(b).unwrap_or_else(|| panic!("{b:?}"));
+            assert_ne!(m, b);
+        }
+    }
 
     #[test]
     fn rfc3339() {

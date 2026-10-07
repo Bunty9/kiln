@@ -41,13 +41,13 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 **VM supervisor** (`vm.rs`). One async task per VM. It creates the overlay, spawns QEMU, reads the console, tracks the runner's lifecycle, enforces timeouts, takes the debug-hold decision, commits or discards the cache overlay, and deletes everything when the VM ends. The same module holds the launch gates, the resource budget, the reaper, the egress ruleset and probe, `bake`, and the `doctor` checks.
 
-**Bake** (`vm.rs`, `guest/user-data.yaml`). Builds `images/base.qcow2`: downloads the Ubuntu 24.04 cloud image and its kernel (all together so they match), fetches the latest `actions/runner` release, renders the cloud-init recipe, boots a one-off VM that installs packages and the runner, then freezes the result. Image and kernel are swapped in by rename, so a job never sees a half-copied file.
+**Bake** (`vm.rs`, `guest/user-data.yaml`). Builds `images/base.qcow2`: downloads the Ubuntu 24.04 cloud image and its kernel (all together so they match), fetches the latest `actions/runner` release, renders the cloud-init recipe, boots a one-off VM that installs packages, the runner and Node (each tarball checked against nodejs.org's `SHASUMS256.txt`), then freezes the result. Image and kernel are swapped in by rename, so a job never sees a half-copied file. `base.json` records the recipe version; kiln launches nothing on an image from an older recipe until it is rebaked.
 
 **Mirror** (`mirror.rs`). Supervises a pinned `registry` binary as a Docker Hub pull-through cache on host loopback. Details under [Docker mirror](#docker-mirror).
 
 **Web and API** (`web.rs`). An axum server that serves the dashboard (one HTML file embedded in the binary with `include_str!`) and a JSON API, behind an access guard. See [API](#api).
 
-**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk. `kiln-bake` is the one-time setup.
+**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk. `kiln-prejob.sh` is the runner's job-started hook: it fails a job whose event is a pull request, or a `workflow_run` triggered by one, from another repository. `kiln-bake` is the one-time setup.
 
 ## Job lifecycle
 

@@ -179,12 +179,14 @@ impl Config {
         if let Some((n, _)) = self.size_mem_mb.iter().find(|(n, m)| !(1..=host).contains(*n) || !(1024..=1_048_576).contains(*m)) {
             bail!("size_mem_mb: size {n} must be 1..={host} vCPUs with 1024..=1048576 MB");
         }
+        // A trailing '-' makes apt-get install *remove* the package (and '+' is an action too).
         let apt_ok = |p: &String| {
             p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !p.ends_with(['-', '+'])
                 && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".+-".contains(c))
         };
         if self.bake_apt_packages.len() > 32 || !self.bake_apt_packages.iter().all(apt_ok) {
-            bail!("bake_apt_packages: up to 32 apt package names (a-z 0-9 . + -)");
+            bail!("bake_apt_packages: up to 32 apt package names (a-z 0-9 . + -, not ending in - or +)");
         }
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
@@ -574,9 +576,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
     // Fail closed: filtered jobs never fall back to open networking.
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
-    let mut blocked = egress_err
-        .as_ref()
-        .map(|e| format!("egress filtering unavailable: {e}"))
+    // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
+    let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
+    let mut blocked = old_image
+        .then(|| "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())
+        .or_else(|| egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")))
         .or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
     let mut budget = {
         let vms = app.vms.lock().unwrap();
@@ -634,7 +638,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if queued > waiting && blocked.is_none() {
                 blocked = gate.clone();
             }
-            let held = backed_off || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -775,6 +779,11 @@ mod tests {
         assert!(!ok(|c| c.bake_apt_packages = vec!["-y".into()]));
         assert!(!ok(|c| c.bake_apt_packages = vec!["a; reboot".into()]));
         assert!(!ok(|c| c.bake_apt_packages = vec!["".into()]));
+        // apt-get install reads a trailing '-' as "remove" ('+' as install, '=' / '/' as version / release)
+        for p in ["openssh-server-", "docker.io-", "libc6+", "libc6=2.39", "libc6/noble"] {
+            let c = Config { bake_apt_packages: vec![p.into()], ..Config::default() };
+            assert!(c.validate_for(8).is_err(), "{p}");
+        }
         assert!(!ok(|c| c.bake_apt_packages = (0..33).map(|i| format!("p{i}")).collect()));
         assert!(ok(|c| c.size_mem_mb = [(8, 12288), (2, 1024)].into()));
         assert!(!ok(|c| c.size_mem_mb = [(9, 12288)].into()));
