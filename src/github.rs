@@ -343,6 +343,33 @@ impl Gh {
         Ok((by_size, ours, forks.len()))
     }
 
+    /// Exchange a manifest-flow code for the new App's id, slug, html_url and pem (no auth).
+    pub async fn manifest_conversion(&self, code: &str) -> Result<Value> {
+        let r = self
+            .http
+            .post(format!("https://api.github.com/app-manifests/{code}/conversions"))
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await?;
+        let status = r.status();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            bail!("GitHub refused the setup code ({status}): it is single use and expires after an hour, start again");
+        }
+        Ok(v)
+    }
+
+    /// GET /app with this App's JWT: proves the id and key belong together.
+    pub async fn app_info(&self, a: &crate::app_auth::AppAuth) -> Result<Value> {
+        let r = self.request_with(&a.jwt(crate::now())?, Method::GET, "app").send().await?;
+        let status = r.status();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            bail!("GitHub rejected the App id or key: {status} {}", v["message"].as_str().unwrap_or(""));
+        }
+        Ok(v)
+    }
+
     /// App mode: map every repo of every installation to its installation id.
     /// Leaves the previous map in place on any error.
     pub async fn discover(&self) -> Result<usize> {

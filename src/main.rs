@@ -266,6 +266,8 @@ pub struct App {
     /// repo -> (consecutive launch failures, retry_at unix time).
     pub backoff: Mutex<HashMap<String, (u32, u64)>>,
     pub mirror: Mutex<mirror::Status>,
+    /// One-time states of GitHub App manifest flows in progress.
+    pub app_states: Mutex<app_auth::States>,
 }
 
 impl App {
@@ -376,6 +378,7 @@ async fn main() -> Result<()> {
         stopping: Default::default(),
         backoff: Default::default(),
         mirror: Default::default(),
+        app_states: Default::default(),
     });
 
     match std::env::args().nth(1).as_deref() {

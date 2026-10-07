@@ -56,6 +56,39 @@ pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
     repos.values().next().copied()
 }
 
+/// App manifest for GitHub's one-click creation flow. GitHub sends the browser back
+/// to the dashboard page (not an API route, so no headers are needed) with ?code&state.
+pub fn manifest(origin: &str, host: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": format!("kiln-{host}"),
+        "url": "https://github.com/Bunty9/kiln",
+        "redirect_url": format!("{}/#/app", origin.trim_end_matches('/')),
+        "public": false,
+        "hook_attributes": { "url": "https://example.invalid/kiln", "active": false },
+        "default_permissions": { "administration": "write", "actions": "write", "contents": "read", "metadata": "read" },
+        "default_events": [],
+    })
+}
+
+/// One-time `state` values for the manifest flow (1 h, single use).
+#[derive(Default)]
+pub struct States(std::collections::HashMap<String, u64>);
+
+impl States {
+    pub fn issue(&mut self, now: u64) -> String {
+        let mut b = [0u8; 16];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("system rng");
+        let s: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        self.0.retain(|_, at| now < *at + 3600);
+        self.0.insert(s.clone(), now);
+        s
+    }
+
+    pub fn take(&mut self, s: &str, now: u64) -> bool {
+        self.0.remove(s).is_some_and(|at| now < at + 3600)
+    }
+}
+
 pub struct AppAuth {
     pub id: u64,
     pub slug: String,
@@ -143,6 +176,32 @@ mod tests {
         assert!(parse_key(&PEM.replace("RSA PRIVATE KEY", "EC PRIVATE KEY")).is_err(), "only RSA keys");
         // a PKCS#1 body under a PKCS#8 label is rejected, not misparsed
         assert!(parse_key(&PEM.replace("RSA PRIVATE KEY", "PRIVATE KEY")).is_err());
+    }
+
+    #[test]
+    fn manifest_shape() {
+        let m = manifest("http://ryzen7.tail1234.ts.net:7878", "ryzen7");
+        assert_eq!(m["redirect_url"], "http://ryzen7.tail1234.ts.net:7878/#/app");
+        assert_eq!(m["name"], "kiln-ryzen7");
+        assert_eq!(m["public"], false);
+        assert_eq!(m["hook_attributes"]["active"], false);
+        assert_eq!(
+            m["default_permissions"],
+            serde_json::json!({"administration": "write", "actions": "write", "contents": "read", "metadata": "read"})
+        );
+        assert_eq!(m["default_events"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn states_are_single_use_and_expire() {
+        let mut s = States::default();
+        let a = s.issue(1000);
+        assert_eq!(a.len(), 32);
+        assert!(!s.take("nope", 1000));
+        assert!(s.take(&a, 1000));
+        assert!(!s.take(&a, 1000), "single use");
+        let b = s.issue(1000);
+        assert!(!s.take(&b, 1000 + 3601), "expired");
     }
 
     #[test]
