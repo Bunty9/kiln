@@ -388,7 +388,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
 
     // Cache overlay (second disk, so root stays /dev/vda1) and the debug SSH forward.
-    let cache_ov = if cfg.cache { setup_cache(app, id, repo, dir, cfg.cache_gb).await } else { None };
+    let cache_ov = if cfg.cache { setup_cache(app, id, repo, dir, cfg.cache_gb_for(repo)).await } else { None };
     let filtered = v.egress == "filtered";
     let mut ssh_host = None;
     let mut fwd = String::new();
@@ -941,10 +941,11 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
             let _ = tokio::fs::remove_file(&backing).await;
             (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}")))
         }
-        Ok(()) if cache_too_big(big, cfg.cache_gb) => {
+        Ok(()) if cache_too_big(big, cfg.cache_gb_for(repo)) => {
+            let gb = cfg.cache_gb_for(repo);
             let _ = tokio::fs::remove_file(&backing).await;
-            tracing::info!("cache for {repo} grew to {} MB, over {} GB x 1.2: reset", big >> 20, cfg.cache_gb);
-            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB", cfg.cache_gb as f64 * 1.2)))
+            tracing::info!("cache for {repo} grew to {} MB, over {gb} GB x 1.2: reset", big >> 20);
+            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB", gb as f64 * 1.2)))
         }
         Ok(()) => (CacheUse::Committed, None),
     };
@@ -1283,6 +1284,9 @@ async fn sh(log: &Path, cmd: &mut Command) -> Result<()> {
 
 async fn bake_inner(app: &App) -> Result<()> {
     let cfg = app.cfg();
+    // config.json may be hand-edited and is only validated on dashboard saves; apt
+    // names and Node versions reach the bake's root shell, so check them here too.
+    cfg.validate().context("config.json is invalid, not baking")?;
     let img = images(&app.data);
     let log = img.join("bake.log");
     tokio::fs::write(&log, "").await?;
@@ -1337,8 +1341,10 @@ async fn bake_inner(app: &App) -> Result<()> {
         .context("nodejs.org release index")?;
     let node = resolve_node(&index, &cfg.bake_node_versions)?;
     say(format!("node {}", node.join(" "))).await?;
-    let user_data =
-        include_str!("../guest/user-data.yaml").replace("{{RUNNER_VERSION}}", &version).replace("{{NODE_VERSIONS}}", &node.join(" "));
+    let user_data = include_str!("../guest/user-data.yaml")
+        .replace("{{RUNNER_VERSION}}", &version)
+        .replace("{{NODE_VERSIONS}}", &node.join(" "))
+        .replace("{{APT_PACKAGES}}", &cfg.bake_apt_packages.join(" "));
     tokio::fs::write(work.join("seed/user-data"), user_data).await?;
     tokio::fs::write(work.join("seed/meta-data"), "instance-id: kiln-bake\nlocal-hostname: kiln\n").await?;
     let seed = work.join("seed.iso");
@@ -1398,6 +1404,7 @@ async fn bake_inner(app: &App) -> Result<()> {
         "runner_version": version,
         "node_versions": node,
         "node_wanted": cfg.bake_node_versions,
+        "apt_wanted": cfg.bake_apt_packages,
     });
     tokio::fs::write(img.join("base.json.tmp"), meta.to_string()).await?;
     tokio::fs::rename(img.join("base.json.tmp"), img.join("base.json")).await?;
@@ -1413,14 +1420,19 @@ async fn bake_inner(app: &App) -> Result<()> {
 const RECIPE: u64 = 2;
 
 /// Why the image at `base` (base.json) must be rebaked for the current config, if so.
-/// Images from before `node_wanted` was recorded carried Node 24 only.
-fn rebake_reason(base: &serde_json::Value, node: &[String]) -> Option<String> {
+/// Images from before `node_wanted` was recorded carried Node 24 only, and no extra apt packages.
+fn rebake_reason(base: &serde_json::Value, node: &[String], apt: &[String]) -> Option<String> {
     if base["recipe"].as_u64().unwrap_or(1) < RECIPE {
         return Some("baked by an older kiln: rebake for the fork-refusal hook and apt cache".into());
     }
     let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
-    let baked: Vec<String> = serde_json::from_value(base["node_wanted"].clone()).unwrap_or_else(|_| vec!["24".into()]);
-    (set(&baked) != set(node)).then(|| "bake_node_versions changed since this bake".into())
+    let baked = |k: &str, old: &[&str]| -> Vec<String> {
+        serde_json::from_value(base[k].clone()).unwrap_or_else(|_| old.iter().map(|s| s.to_string()).collect())
+    };
+    if set(&baked("node_wanted", &["24"])) != set(node) {
+        return Some("bake_node_versions changed since this bake".into());
+    }
+    (set(&baked("apt_wanted", &[])) != set(apt)).then(|| "bake_apt_packages changed since this bake".into())
 }
 
 /// Exact Node versions to bake for `wanted` (majors like "20" or exact "20.19.5"),
@@ -1580,8 +1592,8 @@ fn image_age(baked_at: u64, version: &str, latest: Option<&str>, t: u64) -> (u64
 }
 
 /// images/base.json plus runner_latest, age_days, rebake (reason or null) and stale; null when
-/// never baked. `node` is the configured bake_node_versions (see `rebake_reason`).
-pub fn image_info(data: &Path, latest: Option<String>, node: &[String]) -> serde_json::Value {
+/// never baked. `cfg` supplies the bake settings (see `rebake_reason`).
+pub fn image_info(data: &Path, latest: Option<String>, cfg: &crate::Config) -> serde_json::Value {
     let Some(mut v) = std::fs::read(images(data).join("base.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
@@ -1590,7 +1602,7 @@ pub fn image_info(data: &Path, latest: Option<String>, node: &[String]) -> serde
         return serde_json::Value::Null;
     };
     let (age, stale) = image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
-    let rebake = rebake_reason(&v, node);
+    let rebake = rebake_reason(&v, &cfg.bake_node_versions, &cfg.bake_apt_packages);
     v["runner_latest"] = latest.into();
     v["age_days"] = age.into();
     v["stale"] = (stale || rebake.is_some()).into();
@@ -1663,7 +1675,7 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     ));
 
     app.gh.refresh_latest().await;
-    let info = image_info(&app.data, app.gh.latest_cached(), &cfg.bake_node_versions);
+    let info = image_info(&app.data, app.gh.latest_cached(), &cfg);
     out.push(if !image_ready(&app.data) {
         check("image", false, "not baked: run `kiln bake`")
     } else {
@@ -2074,15 +2086,20 @@ mod tests {
     fn rebake_reasons() {
         let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let cur = |w: &[&str]| serde_json::json!({ "recipe": RECIPE, "node_wanted": w });
-        assert_eq!(rebake_reason(&cur(&["24"]), &n(&["24"])), None);
+        assert_eq!(rebake_reason(&cur(&["24"]), &n(&["24"]), &[]), None);
         // order does not matter: the bake sorts anyway
-        assert_eq!(rebake_reason(&cur(&["20", "24"]), &n(&["24", "20"])), None);
-        assert!(rebake_reason(&cur(&["24"]), &n(&["20", "24"])).unwrap().contains("bake_node_versions"));
+        assert_eq!(rebake_reason(&cur(&["20", "24"]), &n(&["24", "20"]), &[]), None);
+        assert!(rebake_reason(&cur(&["24"]), &n(&["20", "24"]), &[]).unwrap().contains("bake_node_versions"));
         // an image from before the recipe marker lacks the fork hook, whatever its Node list
-        assert!(rebake_reason(&serde_json::json!({ "runner_version": "2.338.0" }), &n(&["24"])).unwrap().contains("older kiln"));
-        assert!(rebake_reason(&serde_json::json!({ "recipe": 1, "node_wanted": ["24"] }), &n(&["24"])).is_some());
+        assert!(rebake_reason(&serde_json::json!({ "runner_version": "2.338.0" }), &n(&["24"]), &[]).unwrap().contains("older kiln"));
+        assert!(rebake_reason(&serde_json::json!({ "recipe": 1, "node_wanted": ["24"] }), &n(&["24"]), &[]).is_some());
         // current recipe, no node_wanted recorded: Node 24
-        assert_eq!(rebake_reason(&serde_json::json!({ "recipe": RECIPE }), &n(&["24"])), None);
+        assert_eq!(rebake_reason(&serde_json::json!({ "recipe": RECIPE }), &n(&["24"]), &[]), None);
+        // apt packages: compared as sets; an image without apt_wanted had none
+        let apt = |w: &[&str]| serde_json::json!({ "recipe": RECIPE, "node_wanted": ["24"], "apt_wanted": w });
+        assert_eq!(rebake_reason(&apt(&["a", "b"]), &n(&["24"]), &n(&["b", "a"])), None);
+        assert!(rebake_reason(&apt(&["a"]), &n(&["24"]), &n(&["a", "b"])).unwrap().contains("bake_apt_packages"));
+        assert!(rebake_reason(&cur(&["24"]), &n(&["24"]), &n(&["chromium"])).unwrap().contains("bake_apt_packages"));
     }
 
     #[test]

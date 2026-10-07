@@ -323,7 +323,7 @@ const HELP = {
   serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it.", "network"],
   doctor: ["Diagnostics", "Runs `kiln doctor`: KVM, tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
   queued: ["Queued", "Jobs GitHub is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
-  stale: ["Stale image", "The image needs a rebake: its runner is older than GitHub's latest, it is over 25 days old, the baked Node versions changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
+  stale: ["Stale image", "The image needs a rebake: its runner is older than GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
   timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
@@ -889,7 +889,8 @@ pages.repos = {
     }
     const wn = (S.config.warm || {})[this.r] || 0;
     const cb = ((S.config.cache_branches || {})[this.r] || []).join(', ');
-    setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div>`);
+    const cg = Object.entries(S.config.repo_cache_gb || {}).find(([k]) => k.toLowerCase() === this.r.toLowerCase())?.[1];
+    setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">Retry</button></div>` : '');
     setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}">Run</button></div></li>`).join('')}</ul>` : '<div class="empty"><p>No workflows in this repository.</p></div>' : '<div class="sk" style="height:48px"></div>'));
     setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : '<div class="empty"><p>No runs yet. Run a workflow or push a commit.</p></div>' : '<div class="sk" style="height:48px"></div>'));
@@ -928,6 +929,7 @@ const G = {
         <div class="fld"><span class="lb">Pause new jobs</span><div class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></div></div>
         ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus))}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5))}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb))}
+        ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
         ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`, 'label')}
         ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
         <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
@@ -962,14 +964,15 @@ const G = {
     html: () => `<div class="card"><h2>Image options</h2>
       <div class="fld"><span class="lb">Docker mirror</span>${hq('mirror')}<div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
       <div class="fld"><span class="lb">Auto rebake</span>${hq('autorebake')}<div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated, the image is over 25 days old, or Node versions changed.</span></div></div>
-      ${fld('f-bake_node_versions', 'Node versions', `<input id="f-bake_node_versions" data-k="bake_node_versions" value="${esc((draft.bake_node_versions || ['24']).join(', '))}" style="width:200px">`, 'Pre-installed for setup-node, e.g. <span class="mono">20, 24</span> (a major means its newest release). The newest is the plain <span class="mono">node</span>. Applies at the next bake.')}</div>
+      ${fld('f-bake_node_versions', 'Node versions', `<input id="f-bake_node_versions" data-k="bake_node_versions" value="${esc((draft.bake_node_versions || ['24']).join(', '))}" style="width:200px">`, 'Pre-installed for setup-node, e.g. <span class="mono">20, 24</span> (a major means its newest release). The newest is the plain <span class="mono">node</span>. Applies at the next bake.')}
+      ${fld('f-bake_apt_packages', 'Extra apt packages', `<input id="f-bake_apt_packages" data-k="bake_apt_packages" placeholder="chromium, fonts-liberation" value="${esc((draft.bake_apt_packages || []).join(', '))}" style="width:280px">`, 'Installed into the image so jobs skip <span class="mono">apt-get install</span>. Up to 32 names. Applies at the next bake.')}</div>
       <div class="card"><h2>Image</h2><div id="img-info"></div><details id="bake-d"><summary>Bake log</summary><div id="bake-log"></div></details></div>`,
     open() { this.lv = new Log($('#bake-log'), { id: 'bake', live: () => !!S.baking, sources: [{ k: 'console', label: 'Console', src: 'bake', file: 'console' }] }); $('#bake-d').open = !!S.baking; },
     close() { this.lv?.destroy(); },
     live() {
       const im = S.image, mi = S.mirror;
       $('#mir').textContent = !mi ? 'Caches Docker pulls for job VMs.' : !mi.enabled ? 'Off.' : mi.running ? `Running${mi.cache_mb != null ? `, cache ${(mi.cache_mb / 1024).toFixed(1)} GB` : ''}.` : 'Enabled but not running.' + (mi.error ? ' ' + mi.error : '');
-      setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd><dt>Node</dt><dd>${esc((im?.node_versions || (im ? ['24'] : ['—'])).join(', '))}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
+      setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd>${im?.apt_wanted?.length ? `<dt>Extra apt</dt><dd>${esc(im.apt_wanted.join(', '))}</dd>` : ''}<dt>Node</dt><dd>${esc((im?.node_versions || (im ? ['24'] : ['—'])).join(', '))}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
         ${im?.rebake ? `<div class="cal w">Rebake needed: ${esc(im.rebake)}.</div>` : ''}
         ${im?.stale && im.runner_latest && im.runner_latest !== im.runner_version ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}</div>` : ''}
         <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
@@ -1162,7 +1165,7 @@ const GUIDES = [
     <ul><li>Tailnet devices are let in by their Tailscale login. By default that is only this box's owner; see Settings › Access.</li><li>A browser on the CI box itself needs the key from <code>~/.local/share/kiln/dashboard.key</code>.</li><li>LAN access is always refused.</li></ul>`],
   ['image', 'Keeping the image fresh', () => `<h2>Keeping the image fresh</h2>
     <p>Every job boots from one base image: Ubuntu 24.04 with Docker, build tools and a pinned Actions runner.</p>
-    <p><b>Why rebake:</b> GitHub stops sending jobs to runners that are about 30 days out of date. The image is <i>stale</i> when its runner is behind GitHub's latest, it is over 25 days old, the baked Node versions changed, or an older kiln baked it.</p>
+    <p><b>Why rebake:</b> GitHub stops sending jobs to runners that are about 30 days out of date. The image is <i>stale</i> when its runner is behind GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it.</p>
     <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in.</p>
     <p><b>By hand:</b> Settings › Image › Rebake image. It takes ~4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
     <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
@@ -1236,7 +1239,7 @@ const ACT = {
   async rmrepo(b) {
     const r = b.dataset.id;
     if (!await ask({ title: 'Remove repo?', body: `Stop picking up jobs from <b>${esc(r)}</b>? Running jobs finish.`, action: `Remove ${r}`, danger: 1 })) return;
-    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), cache_branches: Object.fromEntries(Object.entries(S.config.cache_branches || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
+    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), cache_branches: Object.fromEntries(Object.entries(S.config.cache_branches || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), repo_cache_gb: Object.fromEntries(Object.entries(S.config.repo_cache_gb || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
   runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
@@ -1303,7 +1306,8 @@ document.addEventListener('input', e => {
   if (k === 'adduser') { $('#dbar').hidden = false; return; }
   const v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value.trim();
   if (k === 'debug_ssh_keys') draft[k] = t.value.split('\n').map(x => x.trim()).filter(Boolean); else
-  if (k === 'bake_node_versions') draft[k] = t.value.split(',').map(x => x.trim()).filter(Boolean); else
+  if (k === 'bake_node_versions' || k === 'bake_apt_packages') draft[k] = t.value.split(',').map(x => x.trim()).filter(Boolean); else
+  if (k === 'size_mem_gb') draft.size_mem_mb = Object.fromEntries(t.value.split(',').map(x => x.split('=').map(y => +y.trim())).filter(([n, g]) => n > 0 && g > 0).map(([n, g]) => [n, Math.round(g * 1024)])); else
   if (k === 'vm_mem_gb') draft.vm_mem_mb = Math.round(v * 1024); else draft[k] = v;
   pages.settings.live();
 });
@@ -1329,6 +1333,12 @@ document.addEventListener('submit', async e => {
       const r = pages.repos.r, list = inp.value.split(',').map(x => x.trim()).filter(Boolean), m = { ...(S.config.cache_branches || {}) };
       if (list.length) m[r] = list; else delete m[r];
       await saveCfg({ ...S.config, cache_branches: m }); toast(list.length ? `Cache branches for ${r}: ${list.join(', ')}` : 'Only the default branch saves the cache');
+    }
+    else if (k === 'cachegb') {
+      const r = pages.repos.r, n = Math.round(+inp.value) || 0, m = Object.fromEntries(Object.entries(S.config.repo_cache_gb || {}).filter(([x]) => x.toLowerCase() !== r.toLowerCase()));
+      if (n && (n < 5 || n > 500)) return toast('Cache size must be 5 to 500 GB', true);
+      if (n) m[r] = n;
+      await saveCfg({ ...S.config, repo_cache_gb: m }); toast(n ? `Cache size for ${r}: ${n} GB` : `Cache size for ${r}: global ${S.config.cache_gb} GB`);
     }
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {
