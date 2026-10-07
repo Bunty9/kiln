@@ -4,6 +4,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-08
+
 ### Security
 
 - **QEMU is confined.** Every VM's QEMU runs with libvirt's seccomp policy (`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`): no exec, no setuid, no obsolete syscalls. A job VM's QEMU also starts through `kiln __confine`, which applies a Landlock ruleset first: QEMU sees the system directories, `/dev/kvm` and the standard character devices, the images directory and its repo's cache disk (read-only), and writes only `vms/<id>/q/` (its disks, JIT secret and sockets; kiln's record and logs sit outside it, and QEMU can only append to the console log through its own output). It never inherits a token from kiln's environment (`KILN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`). kiln refuses to start with its data directory under a path QEMU may read (such as `/opt`), connects to QEMU's sockets without following symlinks, and notes on a VM's page when the kernel has no Landlock. It cannot read the GitHub token, App key, dashboard key, other jobs or other repos' caches, or ptrace kiln or other VMs; on Linux 6.12+ it cannot signal them either. A trusted cache overlay is committed only if its qcow2 header names exactly the repo's cache disk and no external data file. New doctor checks "qemu sandbox" and "landlock". A QEMU built without seccomp now fails to start VMs instead of running unfiltered.
@@ -146,7 +148,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1
