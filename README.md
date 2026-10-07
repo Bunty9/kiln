@@ -88,7 +88,7 @@ The unit ([`deploy/kiln.service`](deploy/kiln.service)) runs `~/.local/bin/kiln 
 
 ### Open the dashboard
 
-Open `http://<box>:7878` from your own devices on the tailnet (or users in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve from Settings > Network, which publishes it at `https://<box>.<tailnet>.ts.net:8443`.
+Open `http://<box>:7878` from your own devices on the tailnet (or users in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve from Settings > Network, which publishes it at `https://<box>.<tailnet>.ts.net:8443`. The tailnet must have HTTPS certificates enabled (Tailscale admin console › DNS › HTTPS Certificates); without them kiln refuses and says so.
 
 ### Setup
 

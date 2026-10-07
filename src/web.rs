@@ -15,7 +15,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 use tokio::process::Command;
 
 type S = State<Arc<App>>;
@@ -195,7 +197,7 @@ async fn whois(ip: IpAddr) -> Option<Who> {
     {
         return Some(who.clone());
     }
-    let out = Command::new("tailscale").args(["whois", "--json", &ip.to_string()]).output().await.ok()?;
+    let out = tailscale(&["whois", "--json", &ip.to_string()]).await.ok()?;
     let v: Value = serde_json::from_slice(&out.stdout).ok()?;
     let who = (v["UserProfile"]["LoginName"].as_str()?.to_string(), v["Node"]["StableID"].as_str()?.to_string());
     WHOIS.lock().unwrap().insert(ip, (who.clone(), now()));
@@ -231,7 +233,7 @@ async fn self_info(max_age: u64) -> SelfInfo {
         s.tried = now();
         s.clone()
     };
-    let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output().await else { return cached };
+    let Ok(out) = tailscale(&["status", "--json"]).await else { return cached };
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     let ips = v["Self"]["TailscaleIPs"].as_array().into_iter().flatten().filter_map(|ip| ip.as_str()?.parse().ok()).collect();
     let uid = v["Self"]["UserID"].to_string();
@@ -818,8 +820,63 @@ async fn update_cancel(State(app): S) -> Response {
     Json(update::json(&app)).into_response()
 }
 
-async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
-    Command::new("tailscale").args(args).output().await.context("running tailscale CLI")
+/// Bound on a tailscale CLI call; `tailscale serve` gets `SERVE_LIMIT`.
+const TS_LIMIT: Duration = Duration::from_secs(20);
+const SERVE_LIMIT: Duration = Duration::from_secs(15);
+
+/// What `ts_serve` says when the tailnet has HTTPS certificates off.
+const NO_CERTS: &str = "This tailnet can't issue HTTPS certificates. Enable DNS › HTTPS Certificates in the Tailscale admin console (https://login.tailscale.com/admin/dns), then try again.";
+
+/// The tailscale CLI, bounded by `TS_LIMIT`.
+pub async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    bounded("tailscale", args, TS_LIMIT).await
+}
+
+/// Run `prog` with stdin closed, in its own process group, for at most `limit`. On timeout,
+/// or when the caller is dropped (the HTTP client went away), the whole group is SIGKILLed:
+/// `tailscale serve --https` on a tailnet without certs prints an enable-HTTPS URL and waits
+/// forever, and a forked helper that still holds stdout would keep `output()` waiting even
+/// after the direct child is gone, which `kill_on_drop` alone does not reach.
+async fn bounded(prog: &str, args: &[&str], limit: Duration) -> anyhow::Result<std::process::Output> {
+    let child = Command::new(prog)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("running {prog}"))?;
+    let mut group = KillGroup(child.id());
+    let out = tokio::time::timeout(limit, child.wait_with_output()).await;
+    match out {
+        Ok(r) => {
+            group.0 = None;
+            Ok(r.with_context(|| format!("running {prog}"))?)
+        }
+        Err(_) => Err(anyhow!("`{prog} {}` did not finish within {} s, so kiln stopped it", args.join(" "), limit.as_secs())),
+    }
+}
+
+/// SIGKILLs process group `.0` when dropped, unless disarmed with `None`.
+struct KillGroup(Option<u32>);
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        if let Some(pg) = self.0 {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pg}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// `tailscale status --json` of a running node whose tailnet issues no HTTPS certificates:
+/// `CertDomains` lists the names it may get certs for, and is null when DNS › HTTPS
+/// Certificates is off.
+pub fn no_certs(status: &Value) -> bool {
+    status["BackendState"] == "Running" && status["CertDomains"].as_array().is_none_or(|a| a.is_empty())
 }
 
 async fn ts_status() -> R<Json<Value>> {
@@ -865,9 +922,17 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
         let port = RUNNING_LISTEN.get().and_then(|l| l.rsplit_once(':')).map_or("7878", |(_, p)| p).to_string();
         format!("http://127.0.0.1:{port}")
     };
+    if b.on
+        && let Ok(o) = tailscale(&["status", "--json"]).await
+        && no_certs(&serde_json::from_slice(&o.stdout).unwrap_or_default())
+    {
+        bail_r(NO_CERTS)?;
+    }
     let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
-    let out = tailscale(&args).await?;
+    let out = bounded("tailscale", &args, SERVE_LIMIT).await;
+    // Even a timed-out attempt may have changed the config.
     *SERVE_CHECK.lock().unwrap() = None;
+    let out = out?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         bail_r(text.trim())?;
@@ -1021,6 +1086,70 @@ fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Processes whose argv mentions `marker`.
+    fn alive(marker: &str) -> Vec<String> {
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| std::fs::read(e.path().join("cmdline")).ok())
+            .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+            .filter(|c| c.contains(marker))
+            .collect()
+    }
+
+    /// Fake `tailscale` scripts that hang: each one's long-lived processes carry the
+    /// script path in argv (`sh -c '…; :' "$0"`), so survivors can be found in /proc.
+    #[tokio::test]
+    async fn bounded_kills_the_whole_group() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kiln-fake-ts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hang = "sh -c 'sleep 1000; :' \"$0\"";
+        for (name, body) in [
+            // (a) blocks forever
+            ("sleeps", hang.to_string()),
+            // (b) exits at once, but a forked grandchild keeps stdout open
+            ("forks", format!("{hang} &\necho started")),
+            // (c) what `tailscale serve --https` does without certs
+            ("url", format!("echo 'To enable, visit: https://login.tailscale.com/f/serve?node=x'\n{hang}")),
+        ] {
+            let f = dir.join(name);
+            std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let t = std::time::Instant::now();
+            let r = bounded(f.to_str().unwrap(), &["serve"], Duration::from_millis(300)).await;
+            assert!(r.unwrap_err().to_string().contains("did not finish"), "{name}");
+            assert!(t.elapsed() < Duration::from_secs(2), "{name} took {:?}", t.elapsed());
+        }
+        // SIGKILL is asynchronous: give the kernel a moment.
+        let marker = dir.to_str().unwrap();
+        for _ in 0..50 {
+            if alive(marker).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(alive(marker), Vec::<String>::new());
+        // stdin is closed: a CLI that reads it does not wait on kiln.
+        let r = bounded("cat", &[], Duration::from_secs(2)).await.unwrap();
+        assert!(r.status.success() && r.stdout.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn https_certs_preflight() {
+        let st = |j: &str| no_certs(&serde_json::from_str(j).unwrap());
+        // Shape seen on luxora (tailscale 1.102.4, HTTPS certificates off).
+        assert!(st(r#"{"BackendState":"Running","CertDomains":null}"#));
+        assert!(st(r#"{"BackendState":"Running","CertDomains":[]}"#));
+        assert!(st(r#"{"BackendState":"Running"}"#));
+        assert!(!st(r#"{"BackendState":"Running","CertDomains":["box.tail1234.ts.net"]}"#));
+        // Not logged in: certs are not the problem, let the CLI say what is.
+        assert!(!st(r#"{"BackendState":"NeedsLogin","CertDomains":null}"#));
+        assert!(!no_certs(&Value::Null));
+    }
 
     #[test]
     fn proxy_allowlist() {

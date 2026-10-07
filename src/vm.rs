@@ -1814,16 +1814,24 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ),
     });
 
-    out.push(match output("tailscale", &["status", "--json"]).await {
-        Ok(j) => {
-            let v: serde_json::Value = serde_json::from_str(&j).unwrap_or_default();
+    let mut no_certs = false;
+    out.push(match crate::web::tailscale(&["status", "--json"]).await {
+        Ok(o) if o.status.success() => {
+            let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
+            no_certs = crate::web::no_certs(&v);
             let st = v["BackendState"].as_str().unwrap_or("unknown");
             check("tailscale up", st == "Running", format!("BackendState {st}"))
         }
+        Ok(o) => check("tailscale up", false, format!("tailscale exited with {}", o.status)),
         Err(e) => check("tailscale up", false, format!("{e:#}")),
     });
-    if let Some((ok, detail)) = crate::web::serve_doctor(&app.data).await {
-        out.push(check("tailscale serve", ok, detail));
+    // An unsafe serve config always shows; otherwise a tailnet without certs says so, as
+    // "not served" would read as merely not set up.
+    match crate::web::serve_doctor(&app.data).await {
+        Some((false, detail)) => out.push(check("tailscale serve", false, detail)),
+        _ if no_certs => out.push(check("tailscale HTTPS", true, "unavailable on this tailnet (DNS › HTTPS Certificates is off)")),
+        Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
+        None => {}
     }
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
