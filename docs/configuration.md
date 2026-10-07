@@ -84,7 +84,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `warm` | object | `{}` | `{"owner/name": 0..4}`; each repo must be in `repos` | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
+| `warm` | object | `{}` | `{"owner/name": 0..4}`; entries for repos kiln does not serve are ignored | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
 | `warm_recycle_mins` | integer | `30` | `5` to `1440` | live | Idle warm VMs older than this are deregistered and replaced so they never go stale. |
 
 ## Environment variables
