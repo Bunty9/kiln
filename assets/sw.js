@@ -25,7 +25,8 @@ self.addEventListener('fetch', e => {
     }).catch(() => caches.match('/').then(m => m || offline())));
     return;
   }
-  if (SHELL.includes(u.pathname)) e.respondWith(caches.match(u.pathname).then(m => m || fetch(r)));
+  // '/' outside a navigation (the offline page's probe) must reach kiln, not the cache.
+  if (u.pathname !== '/' && SHELL.includes(u.pathname)) e.respondWith(caches.match(u.pathname).then(m => m || fetch(r)));
 });
 
 function offline() {

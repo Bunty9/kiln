@@ -41,7 +41,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let _ = RUNNING_LISTEN.set(addr.clone());
     load_key(&app.data)?;
     let router = Router::new()
-        .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
+        .route("/", get(|| async { Html(PAGE.as_str()) }))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(sw))
         .route("/icon.svg", get(|| async { icon_file("icon.svg") }))
@@ -200,6 +200,10 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
 /* ---------- installable app (PWA): manifest, service worker, icons ---------- */
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The dashboard, stamped with the version that serves it: a page the service worker kept
+/// from an older kiln sees the server's version differ and reloads (see doPoll).
+static PAGE: LazyLock<String> = LazyLock::new(|| include_str!("dashboard.html").replace("{{KILN_VERSION}}", VERSION));
 
 /// Dashboard dark background; the installed window's title bar and splash.
 const THEME: &str = "#14110E";
@@ -838,6 +842,15 @@ mod tests {
         let shell = js.lines().find(|l| l.starts_with("const SHELL")).unwrap();
         assert!(shell.contains("'/'") && !shell.contains("/api"), "precache list: {shell}");
         assert!(js.contains("skipWaiting") && js.contains("clients.claim"));
+        // Only navigations get the cached shell: a fetch('/') probe (the offline page) reaches kiln.
+        assert!(js.contains("u.pathname !== '/' && SHELL.includes(u.pathname)"));
+    }
+
+    #[test]
+    fn page_carries_the_server_version() {
+        assert!(PAGE.contains(&format!(r#"<meta name="kiln-version" content="{VERSION}">"#)));
+        assert!(!PAGE.contains("{{KILN_VERSION}}"));
+        assert!(PAGE.contains(r#"querySelector('meta[name="kiln-version"]')"#), "the page reads its own version");
     }
 
     #[tokio::test]
