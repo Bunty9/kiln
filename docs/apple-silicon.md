@@ -61,7 +61,7 @@ tail -f ~/Library/Logs/kiln.log
 ```
 
 - **launchd**: the LaunchAgent runs `~/.local/bin/kiln serve` with `RunAtLoad` and `KeepAlive` `{SuccessfulExit: false}`, the equivalent of systemd's `Restart=on-failure`, so self-update rollback (a new version that fails to start twice is replaced by the previous one) works the same way. It adds Homebrew to `PATH`, since launchd's default `PATH` lacks it. Stop it with `launchctl bootout gui/$(id -u)/dev.kiln`. A LaunchAgent only runs while you are logged in: on an always-on Mac turn on automatic login (and keep the Mac from sleeping: System Settings › Energy, "Prevent automatic sleeping").
-- **Tailscale**: the Mac App Store or standalone app works. kiln uses `tailscale` from `PATH`, else `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. The dashboard access rules are unchanged.
+- **Tailscale**: the Mac App Store or standalone app works. kiln uses `tailscale` from `PATH`, else `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. The dashboard access rules are unchanged. **Serve over HTTPS** points `tailscale serve` at the unix socket `<data>/serve.sock`; whether the macOS app's tailscaled may open a socket in your home directory is untested (the sandboxed App Store build may not; the standalone build or the open-source `tailscaled` should). Without it, HTTPS needs the dashboard key, as before 0.2.2.
 - **Self-update** replaces `~/.local/bin/kiln` by rename and re-executes it in place, as on Linux. Downloads made by kiln carry no quarantine attribute, and the Rust toolchain ad-hoc signs arm64 binaries, so Gatekeeper does not get involved.
 - `kiln doctor` checks Hypervisor.framework, `qemu-system-aarch64`, `qemu-img`, `xorriso`, `curl` and the Tailscale CLI, then the usual disk, memory, image, token and repo checks.
 
@@ -108,5 +108,5 @@ On the Mac, from a checkout of this branch:
 8. Labels: an x64 job (`runs-on: [self-hosted, kiln]`) is not picked up by the Mac; the Mac's runners show `ARM64` and `kiln-arm64...` labels on GitHub.
 9. Service: install the LaunchAgent, reboot (with automatic login), check kiln comes back; `launchctl bootout` stops it and its VMs; `kill -9` of kiln is restarted by launchd, and `kiln doctor` reports stray QEMUs only while they live.
 10. Self-update: with a test release that has an `aarch64-macos` tarball, **Update** swaps `~/.local/bin/kiln` and re-execs; a deliberately broken build is rolled back after two failed starts under launchd.
-11. Dashboard: host memory, load and CPU numbers look right (compare with Activity Monitor); memory gating stops launches when memory runs out.
+11. Dashboard: Settings › Network › Serve over HTTPS works with the Tailscale app (the `tailscale serve` doctor check passes) and logs you in without the dashboard key; host memory, load and CPU numbers look right (compare with Activity Monitor); memory gating stops launches when memory runs out.
 12. Then set `KILN_MACOS_RELEASE` (see [Releases](#releases)).
