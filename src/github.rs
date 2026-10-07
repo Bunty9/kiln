@@ -116,10 +116,8 @@ impl Gh {
     /// Cached installation token, minted when missing or within 5 min of expiry.
     async fn mint(&self, a: &crate::app_auth::AppAuth, inst: u64) -> Result<String> {
         let mut tokens = a.tokens.lock().await;
-        if let Some((t, exp)) = tokens.get(&inst)
-            && !crate::app_auth::needs_mint(*exp, crate::now())
-        {
-            return Ok(t.clone());
+        if let Some(t) = a.cached(&mut tokens, inst, crate::now()) {
+            return Ok(t);
         }
         let jwt = a.jwt(crate::now())?;
         let r = self.request_with(&jwt, Method::POST, &format!("app/installations/{inst}/access_tokens")).send().await?;
@@ -166,10 +164,9 @@ impl Gh {
         }
         if r.status() == StatusCode::UNAUTHORIZED
             && let Some(a) = self.app()
-            && let Ok(mut t) = a.tokens.try_lock()
         {
-            // ponytail: drops every cached installation token on any 401; per-installation if it matters.
-            t.clear();
+            // Not a try_lock clear: that is lost whenever a mint holds the lock.
+            a.mark_stale();
         }
         if let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
             self.paused_until.fetch_max(t, Ordering::Relaxed);

@@ -176,6 +176,8 @@ pub struct AppAuth {
     pub error: std::sync::Mutex<Option<String>>,
     /// One discovery at a time: (when the last one finished, its error if it failed outright).
     pub discovery: tokio::sync::Mutex<(u64, Option<String>)>,
+    /// GitHub answered 401 to a cached token: drop the cache at the next mint.
+    stale: std::sync::atomic::AtomicBool,
 }
 
 impl AppAuth {
@@ -193,11 +195,26 @@ impl AppAuth {
             discovered_at: Default::default(),
             error: Default::default(),
             discovery: Default::default(),
+            stale: Default::default(),
         })
     }
 
     pub fn jwt(&self, now: u64) -> Result<String> {
         jwt(&self.key, self.id, now)
+    }
+
+    // ponytail: a 401 drops every cached installation token; per-installation if it matters.
+    pub fn mark_stale(&self) {
+        self.stale.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The cached token of `inst` (`tokens` is the locked cache) unless it is near expiry
+    /// or a 401 made the cache stale.
+    pub fn cached(&self, tokens: &mut std::collections::HashMap<u64, (String, u64)>, inst: u64, now: u64) -> Option<String> {
+        if self.stale.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            tokens.clear();
+        }
+        tokens.get(&inst).filter(|(_, exp)| !needs_mint(*exp, now)).map(|(t, _)| t.clone())
     }
 
     /// Record the owner's login, in app.json too when the App is saved.
@@ -417,6 +434,20 @@ mod tests {
         assert!(!reuse_discovery(1000, 1061 - 60));
         assert!(reuse_discovery(1005, 1005));
         assert!(!reuse_discovery(1004, 1005));
+    }
+
+    #[test]
+    fn a_401_makes_cached_tokens_stale() {
+        let a = AppAuth::new(1, String::new(), String::new(), PEM).unwrap();
+        let mut t = std::collections::HashMap::from([(5, ("tok".to_string(), 10_000))]);
+        assert_eq!(a.cached(&mut t, 5, 1000).as_deref(), Some("tok"));
+        assert_eq!(a.cached(&mut t, 5, 10_000 - 300), None, "about to expire");
+        // marked while someone else held the cache lock: still honoured at the next mint
+        a.mark_stale();
+        assert_eq!(a.cached(&mut t, 5, 1000), None);
+        assert!(t.is_empty());
+        t.insert(5, ("new".into(), 10_000));
+        assert_eq!(a.cached(&mut t, 5, 1000).as_deref(), Some("new"), "a fresh mint is used again");
     }
 
     #[test]
