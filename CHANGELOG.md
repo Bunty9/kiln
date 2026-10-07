@@ -7,6 +7,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Changed
 
 - **Serve over HTTPS** no longer asks for the dashboard key. `tailscale serve` now proxies to a unix socket, `<data>/serve.sock` (mode 0600), and kiln identifies the tailnet user from the `Tailscale-User-Login` header tailscaled sets there, applying the usual `allowed_users` rule. Before, every HTTPS request arrived from `127.0.0.1` and looked local. A browser on the box itself still needs the key; Funnel requests are refused; identity headers on the TCP port are ignored. If Serve was already on, turn it off and on again in Settings › Network to switch to the socket.
+- **Dashboard look:** a neutral monochrome theme on near-black (and a neutral light theme) with higher contrast throughout (body text 15:1+, secondary 8:1+, meta 6:1+), 1px borders defining surfaces, and colour kept for the accent and job states; the warm card glow is gone. Selects, switches, number and file inputs, details, focus rings and form errors are restyled to match, and Appearance gains a Mono accent.
 
 ### Fixed
 
