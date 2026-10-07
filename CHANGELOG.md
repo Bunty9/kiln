@@ -7,7 +7,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Added
 
 - `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
-- `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the list marks the image stale.
+- `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the set marks the image stale; so does an image baked by an older kiln (recorded as `recipe` in `base.json`).
 - `/var/cache/apt/archives` lives on the repo cache disk, so `apt-get install` reuses downloaded packages.
 - `kiln doctor` names the missing token permission per repo; the dashboard shows the token's expiry and save time and warns before it expires.
 

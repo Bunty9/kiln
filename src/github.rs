@@ -91,8 +91,10 @@ impl Gh {
             *self.rate.lock().unwrap() = Some((rem, lim, reset));
         }
         // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
-        if let Some(t) = r.headers().get("github-authentication-token-expiration").and_then(|v| v.to_str().ok()).and_then(parse_rfc3339) {
-            *self.expires.lock().unwrap() = Some(t);
+        // Every successful response says it, so a rotated token without one clears it.
+        if r.status().is_success() {
+            *self.expires.lock().unwrap() =
+                r.headers().get("github-authentication-token-expiration").and_then(|v| v.to_str().ok()).and_then(parse_rfc3339);
         }
         if let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
             self.paused_until.fetch_max(t, Ordering::Relaxed);
@@ -200,7 +202,7 @@ impl Gh {
     /// `writers` are the extra cache-writer branches besides the default.
     pub async fn cache_trust(&self, repo: &str, job: u64, writers: &[String]) -> Result<(String, String, String, String)> {
         // The VM powers off a moment before GitHub records the job's conclusion;
-        // without waiting, trusted saves on the default branch would be lost to the race.
+        // without waiting, trusted saves on a writer branch would be lost to the race.
         let mut j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
         for _ in 0..6 {
             if j["status"] == "completed" {
@@ -224,9 +226,9 @@ impl Gh {
                 b
             }
         };
-        // A pushed *tag* named like a writer branch also arrives as
-        // event=push, head_branch=main. Only trust it if the commit is really
-        // on that branch (identical to it or an ancestor of it).
+        // A pushed *tag* arrives as event=push with head_branch = the tag's name, so a
+        // tag named like a writer branch looks like a push to it. Only trust the run
+        // if the commit is really on that branch (identical to it or an ancestor of it).
         if event == "push" && (branch == default || writers.contains(&branch)) {
             let sha = run["head_sha"].as_str().context("run has no head_sha")?;
             // Resolve the branch tip through refs/heads explicitly: a bare name in
@@ -518,6 +520,8 @@ mod tests {
     #[test]
     fn rfc3339() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        // GitHub's token expiry header format
+        assert_eq!(parse_rfc3339("2026-10-06 10:51:50 UTC"), Some(1791283910));
         assert_eq!(parse_rfc3339("2026-10-06T10:51:50Z"), Some(1791283910));
         assert_eq!(parse_rfc3339("2024-02-29T23:59:59Z"), Some(1709251199));
         assert_eq!(parse_rfc3339("garbage"), None);

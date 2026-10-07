@@ -597,11 +597,12 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
 
 /// Copy job page and queue time onto the VM whose runner picked the job up.
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
-/// matching job) is killed; the guest's pre-job hook has already failed it.
+/// matching job) is killed. The guest's pre-job hook fails it before its first
+/// step; this kill is the backstop.
 fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
     for (id, _) in runners.iter().filter(|(_, r)| r.2) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
-            v.note.get_or_insert("refused: pull request from a fork".into());
+            v.note = Some("refused: pull request from a fork".into());
         });
         if hit.is_some()
             && let Some(k) = app.kills.lock().unwrap().get(id)
@@ -681,6 +682,11 @@ mod tests {
             c.validate_for(8).is_ok()
         };
         assert!(branches("A/B", "dev"));
+        assert!(!branches("a/b", "dev/") && !branches("a/b", ".dev") && !branches("a/b", "dev?x") && !branches("a/b", "release/*"));
+        let mut c = Config::default();
+        c.cache_branches.insert("Owner/Repo".into(), vec!["dev".into()]);
+        assert_eq!(c.cache_branches("owner/repo"), ["dev"]);
+        assert!(c.cache_branches("other/repo").is_empty());
         assert!(branches("a/b", "release/1.x"));
         assert!(!branches("x/y", "dev"));
         assert!(!branches("a/b", ""));

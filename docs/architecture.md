@@ -116,7 +116,7 @@ Not busy: `idle_timeout_mins` from VM start, which covers boot as well as waitin
 
 ## Cache
 
-Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2`, created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches` and `~/.m2/repository`. `/opt/hostedtoolcache` is not cached because the pre-seeded Node lives there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip.
+Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2`, created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository` and `/var/cache/apt/archives`. `/opt/hostedtoolcache` is not cached because the baked Node versions (`bake_node_versions`) live there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip.
 
 ### Trust model: trusted writer, throwaway readers
 
@@ -124,8 +124,8 @@ Every job VM gets its own private qcow2 overlay of the repo's cache as a second 
 
 - `cache` is enabled and the job succeeded on the console;
 - GitHub's API reports the job's conclusion as `success` (the console result is controlled by the job, so it alone never earns a commit; kiln waits up to 30 s for GitHub to record the conclusion);
-- the run's event is `push` and its branch is the repo's default branch (looked up through the API, cached for an hour);
-- the pushed commit is really on the default branch (compare API says identical or behind), because a pushed tag named like the default branch also arrives as `event=push`.
+- the run's event is `push` and its branch is the repo's default branch (looked up through the API, cached for an hour) or one of its `cache_branches`;
+- the pushed commit is really on that branch: the branch tip is resolved through `git/ref/heads/<branch>` and the compare API says the commit is identical to it or behind it. A pushed tag named like a writer branch also arrives as `event=push` with that name, and resolving the bare name could pick the tag.
 
 Anything else is discarded with the overlay, and the job page says why ("cache not saved: pull_request event"). This mirrors GitHub's branch-scope rule for `actions/cache`: a PR can read the cache but can never poison it.
 

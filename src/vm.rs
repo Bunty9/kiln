@@ -745,7 +745,7 @@ pub fn b64(data: &[u8]) -> String {
 //
 // Trusted writer, throwaway readers: every job VM gets a private qcow2 overlay
 // of its repo's cache disk, so any job starts warm. Only a successful `push`
-// to the default branch may merge its overlay back, so PRs and other branches
+// to the default branch (or a configured cache branch) may merge its overlay back, so PRs and other branches
 // read the cache but can never poison it (GitHub's branch-scope rule for
 // actions/cache, kept on a disk).
 
@@ -1393,6 +1393,7 @@ async fn bake_inner(app: &App) -> Result<()> {
     tokio::fs::rename(&disk, img.join("base.qcow2")).await?;
     tokio::fs::rename(&new_kernel, img.join("base.vmlinuz")).await?;
     let meta = serde_json::json!({
+        "recipe": RECIPE,
         "baked_at": now(),
         "runner_version": version,
         "node_versions": node,
@@ -1405,12 +1406,36 @@ async fn bake_inner(app: &App) -> Result<()> {
     Ok(())
 }
 
+/// Version of the guest recipe (guest/user-data.yaml) that the host relies on.
+/// Bump it when an image baked from an older recipe lacks something kiln
+/// depends on; such images are stale (and rebaked by auto_rebake).
+/// 2: fork-refusal job hook, apt archives on the cache disk, bake_node_versions.
+const RECIPE: u64 = 2;
+
+/// Why the image at `base` (base.json) must be rebaked for the current config, if so.
+/// Images from before `node_wanted` was recorded carried Node 24 only.
+fn rebake_reason(base: &serde_json::Value, node: &[String]) -> Option<String> {
+    if base["recipe"].as_u64().unwrap_or(1) < RECIPE {
+        return Some("baked by an older kiln: rebake for the fork-refusal hook and apt cache".into());
+    }
+    let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let baked: Vec<String> = serde_json::from_value(base["node_wanted"].clone()).unwrap_or_else(|_| vec!["24".into()]);
+    (set(&baked) != set(node)).then(|| "bake_node_versions changed since this bake".into())
+}
+
 /// Exact Node versions to bake for `wanted` (majors like "20" or exact "20.19.5"),
 /// looked up in nodejs.org's dist/index.json (newest first, "version": "v24.21.0").
 /// Returned oldest to newest, without duplicates: the bake loop symlinks the last
 /// one as the bare `node`. Unknown versions are an error, so a typo fails the bake.
 fn resolve_node(index: &serde_json::Value, wanted: &[String]) -> Result<Vec<String>> {
-    let releases: Vec<&str> = index.as_array().into_iter().flatten().filter_map(|r| r["version"].as_str()?.strip_prefix('v')).collect();
+    // Only plain x.y.z strings: they end up in the bake's shell script.
+    let releases: Vec<&str> = index
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["version"].as_str()?.strip_prefix('v'))
+        .filter(|v| v.split('.').count() == 3 && v.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
+        .collect();
     let key = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
     let mut out = wanted
         .iter()
@@ -1554,8 +1579,8 @@ fn image_age(baked_at: u64, version: &str, latest: Option<&str>, t: u64) -> (u64
     (age, age > 25 || latest.is_some_and(|l| l != version))
 }
 
-/// images/base.json plus runner_latest, age_days, node_changed and stale; null when never baked.
-/// `node` is the configured bake_node_versions: an image baked from another list is stale.
+/// images/base.json plus runner_latest, age_days, rebake (reason or null) and stale; null when
+/// never baked. `node` is the configured bake_node_versions (see `rebake_reason`).
 pub fn image_info(data: &Path, latest: Option<String>, node: &[String]) -> serde_json::Value {
     let Some(mut v) = std::fs::read(images(data).join("base.json"))
         .ok()
@@ -1565,13 +1590,11 @@ pub fn image_info(data: &Path, latest: Option<String>, node: &[String]) -> serde
         return serde_json::Value::Null;
     };
     let (age, stale) = image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
-    // Images baked before bake_node_versions existed carried Node 24 only.
-    let baked: Vec<String> = serde_json::from_value(v["node_wanted"].clone()).unwrap_or_else(|_| vec!["24".into()]);
-    let node_changed = baked != node;
+    let rebake = rebake_reason(&v, node);
     v["runner_latest"] = latest.into();
     v["age_days"] = age.into();
-    v["node_changed"] = node_changed.into();
-    v["stale"] = (stale || node_changed).into();
+    v["stale"] = (stale || rebake.is_some()).into();
+    v["rebake"] = rebake.into();
     v
 }
 
@@ -1648,8 +1671,8 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             .as_array()
             .map_or("24 (older image)".into(), |a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "));
         let facts = format!("runner {}, node {node}, {} days old", info["runner_version"], info["age_days"]);
-        if info["node_changed"] == true {
-            check("image", true, format!("warning: rebake needed: bake_node_versions changed since this bake ({facts})"))
+        if let Some(why) = info["rebake"].as_str() {
+            check("image", false, format!("rebake needed: {why} ({facts})"))
         } else if info["stale"] == true {
             check("image", true, format!("warning: stale: {facts} (runner latest {})", info["runner_latest"]))
         } else {
@@ -1675,27 +1698,32 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ("commits?per_page=1", "Contents: read (verify cache-writer pushes)"),
     ];
     for repo in &cfg.repos {
-        let mut missing = vec![];
-        let mut err = None;
+        let (mut missing, mut errs) = (vec![], vec![]);
         for (path, perm) in NEEDS {
             match app.gh.raw(reqwest::Method::GET, &format!("repos/{repo}/{path}"), None).await {
-                Ok(r) if r.status == 200 => {}
+                // 409: commits of an empty repo; the permission is there.
+                Ok(r) if r.status == 200 || r.status == 409 => {}
                 Ok(r) if matches!(r.status, 403 | 404) => missing.push(perm),
-                Ok(r) => err = Some(format!("{path} returned {}", r.status)),
-                Err(e) => err = Some(format!("{e:#}")),
+                Ok(r) => errs.push(format!("{path} returned {}", r.status)),
+                Err(e) => errs.push(format!("{path}: {e:#}")),
             }
         }
-        out.push(match (missing.is_empty(), err) {
-            (_, Some(e)) => check(&format!("repo {repo}"), false, e),
-            (true, None) => check(&format!("repo {repo}"), true, "runners, actions and contents reachable"),
-            (false, None) => {
-                check(&format!("repo {repo}"), false, format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")))
-            }
+        let mut why = vec![];
+        if !missing.is_empty() {
+            why.push(format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")));
+        }
+        why.extend(errs);
+        out.push(if why.is_empty() {
+            check(&format!("repo {repo}"), true, "runners, actions and contents reachable")
+        } else {
+            check(&format!("repo {repo}"), false, why.join("; "))
         });
     }
     if let Some(t) = *app.gh.expires.lock().unwrap() {
         let days = t.saturating_sub(now()) / 86400;
-        out.push(check("token expiry", days >= 7, format!("{}expires in {days} days", if days < 14 { "warning: " } else { "" })));
+        let detail =
+            if t <= now() { "expired".to_string() } else { format!("{}expires in {days} days", if days < 14 { "warning: " } else { "" }) };
+        out.push(check("token expiry", days >= 7, detail));
     }
 
     let (ok, detail) = crate::mirror::check(app).await;
@@ -2043,6 +2071,21 @@ mod tests {
     }
 
     #[test]
+    fn rebake_reasons() {
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cur = |w: &[&str]| serde_json::json!({ "recipe": RECIPE, "node_wanted": w });
+        assert_eq!(rebake_reason(&cur(&["24"]), &n(&["24"])), None);
+        // order does not matter: the bake sorts anyway
+        assert_eq!(rebake_reason(&cur(&["20", "24"]), &n(&["24", "20"])), None);
+        assert!(rebake_reason(&cur(&["24"]), &n(&["20", "24"])).unwrap().contains("bake_node_versions"));
+        // an image from before the recipe marker lacks the fork hook, whatever its Node list
+        assert!(rebake_reason(&serde_json::json!({ "runner_version": "2.338.0" }), &n(&["24"])).unwrap().contains("older kiln"));
+        assert!(rebake_reason(&serde_json::json!({ "recipe": 1, "node_wanted": ["24"] }), &n(&["24"])).is_some());
+        // current recipe, no node_wanted recorded: Node 24
+        assert_eq!(rebake_reason(&serde_json::json!({ "recipe": RECIPE }), &n(&["24"])), None);
+    }
+
+    #[test]
     fn node_resolution() {
         let index = serde_json::json!([
             { "version": "v24.21.0" }, { "version": "v24.20.1" },
@@ -2058,6 +2101,14 @@ mod tests {
         assert!(r(&["2"]).is_err());
         assert!(r(&["18"]).is_err());
         assert!(r(&["20.19.9"]).is_err());
+        // numeric, not textual: 20.10.0 is newer than 20.9.0, and 8 is older than 10
+        let index = serde_json::json!([
+            { "version": "v20.9.0" }, { "version": "v10.0.0" }, { "version": "v20.10.0" }, { "version": "v8.17.0" },
+            { "version": "v20.11.0;reboot" },
+        ]);
+        let r = |w: &[&str]| resolve_node(&index, &w.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(r(&["20"]).unwrap(), ["20.10.0"]);
+        assert_eq!(r(&["10", "8"]).unwrap(), ["8.17.0", "10.0.0"]);
     }
 
     #[test]

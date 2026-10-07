@@ -36,7 +36,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 
 | Stack | Status | Notes |
 |-------|--------|-------|
-| setup-node / npm / pnpm / yarn | ✓ Works | Node LTS 24 pre-installed in `/opt/hostedtoolcache` |
+| setup-node / npm / pnpm / yarn | ✓ Works | Versions in `bake_node_versions` (default 24) pre-installed in `/opt/hostedtoolcache`; see [Node versions](#node-versions) |
 | setup-python / uv / poetry | ✓ Works | Python 3.12+ available; uv recommended |
 | setup-go | ✓ Works | ImageOS=ubuntu24 set for cache hits |
 | Rust (rust-toolchain, rust-cache) | ✓ Works | libssl-dev, libffi-dev included; `~/.cargo` and `~/.rustup` live on the cache disk, so the toolchain is warm |
@@ -46,7 +46,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 | setup-php | ✓ Works | Set `env: runner: self-hosted` per setup-php wiki |
 | erlef/setup-beam (Erlang/OTP) | ✓ Works | ImageOS=ubuntu24 required; now set |
 | Docker buildx / build-push / services | ✓ Works | Real Docker in VM; Docker Hub pulls cached by kiln's built-in mirror at 10.0.2.2:5000 (on by default) |
-| container: jobs | ✓ Works | Image pulls go through local mirror. The job runs inside the container, which does not see the VM's cache mounts: `~/.npm` and friends start cold every time unless you mount them, e.g. `options: -v /home/runner/.npm:/root/.npm`. Jobs work either way; they are just never warm. |
+| container: jobs | ✓ Works | Image pulls go through local mirror. The job runs inside the container, which does not see the VM's cache mounts: `~/.npm` and friends start cold every time unless you mount them. The runner sets `HOME=/github/home` in the container, so e.g. `options: -v /home/runner/.npm:/github/home/.npm`. Jobs work either way; they are just never warm. |
 | Playwright | ✓ Works | `install --with-deps` adds 1–2 min; xvfb pre-installed |
 | Cypress | ◐ Partial | Needs GTK/NSS libs via apt in a setup step |
 | Android build (setup-java + setup-android) | ✓ Works | setup-android installs the SDK, NDK and build tools |
@@ -72,7 +72,7 @@ jobs:
     runs-on: [self-hosted, kiln]
 ```
 
-- **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, the whole `~/.cargo` and `~/.rustup` (so the Rust toolchain is already there), Go modules, Gradle caches and `~/.m2/repository` are warm without any workflow change. Every job reads it; only a successful push to the default branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
+- **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, the whole `~/.cargo` and `~/.rustup` (so the Rust toolchain is already there), Go modules, Gradle caches, `~/.m2/repository` and apt's downloaded packages are warm without any workflow change. Every job reads it; only a successful push to the default branch or a configured cache branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
 - **Debugging:** set `debug_hold_mins` and `debug_ssh_keys` in Settings > Debugging and a failed job's VM stays up for SSH (see [architecture](architecture.md#debug-hold-and-the-control-channel)).
 - **Image pulls:** Docker Hub limits 100 pulls/6h per IP; kiln's built-in pull-through mirror (live, `docker_mirror` in settings; 10.0.2.2:5000 from the VM) avoids this, with a fallback to Docker Hub if it is down.
 - **Parallelism:** Use `concurrency:` groups to avoid overwhelming your host.

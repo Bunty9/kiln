@@ -24,7 +24,9 @@ kiln is a single Rust binary with an embedded dashboard. It polls GitHub for que
 - Debug hold: a failed job's VM stays up for SSH for a while.
 - Optional warm pool of pre-booted idle VMs per repo.
 - Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
-- Auto-rebake of the base image when the runner version or image age goes stale.
+- Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
+- Fork pull requests refused by kiln itself, before any of their code runs.
+- Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.
 
 ## Requirements
 

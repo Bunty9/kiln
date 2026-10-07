@@ -306,7 +306,8 @@ struct TokenBody {
     token: String,
 }
 /// Check the token against GitHub before saving it: it must authenticate, and
-/// each configured repo's runners API is probed so a missing permission shows now.
+/// each configured repo's runners API is probed so a missing Administration
+/// permission shows now (doctor checks the others).
 async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<Json<Value>> {
     let token = b.token.trim().to_string();
     let (status, scopes, user) = app.gh.probe(&token, "user").await?;
