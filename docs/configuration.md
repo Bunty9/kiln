@@ -77,8 +77,18 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `debug_hold_mins` | integer | `0` | `0` to `120` | live (new VMs) | Keep a job VM whose job ended with a verdict other than success alive for SSH this long. `0` is off. Needs at least one key in `debug_ssh_keys`. |
+| `debug_hold_mins` | integer | `0` | `0` to `120` | live (new VMs) | Keep a job VM whose job failed alive for SSH this long. `0` is off. Needs at least one key in `debug_ssh_keys`. A held VM keeps its VM slot; see [Debug holds and the queue](#debug-holds-and-the-queue). |
 | `debug_ssh_keys` | string array | `[]` | single-line public keys starting `ssh-`, `ecdsa-` or `sk-` | live (new VMs) | Keys allowed into a held VM (login as `runner`, key-only). Changing keys, or turning the hold on or off, recycles idle VMs that booted with the old values. |
+
+#### Debug holds and the queue
+
+A held VM keeps its memory and one of the `max_vms` slots, so holds compete with queued jobs. kiln keeps that cost bounded:
+
+- **Only failures are held.** A job whose result is `Failed` (or `Abandoned`, the runner losing the job) is held. A cancelled job never is: usually it is `concurrency: cancel-in-progress` on a branch someone is pushing to, and there is nothing to inspect. Succeeded, skipped, and jobs kiln itself stopped (job timeout, kill) are not held either, nor a VM that never ran a job. A job that hits its workflow `timeout-minutes` is cancelled by GitHub and is therefore not held.
+- **Never the last slot.** At most `max_vms - 1` VMs are held at once, so one slot always stays free for the queue. With `max_vms: 1` nothing is held. A failure that finds no room is released at once, with the note "not held: holds never take the last free VM slot".
+- **Early release when jobs wait.** When a job is queued and every slot is taken, with at least one held, kiln releases the hold that would expire first (one per poll). Its VM's note says "hold released early: a queued job needed the slot", and the journal logs it. Until the slot frees, the Overview shows "N of M slots held for debugging — jobs are waiting" (`poll.blocked_kind` `held`) with **Release oldest**.
+
+In practice a hold lasts `debug_hold_mins` only while the box has spare slots; under load, SSH in quickly.
 
 ### Updates
 
@@ -98,7 +108,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 The dashboard is an installable web app: its own window, a dock or home-screen icon, and shortcuts to Jobs, Repos and Settings. Browsers allow this only over HTTPS (or on `localhost`), so:
 
-1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only.
+1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only. The tailnet must have HTTPS certificates enabled ([admin console › DNS](https://login.tailscale.com/admin/dns) › HTTPS Certificates): without them `tailscale serve` waits forever, so kiln checks first and refuses with that message, and `kiln doctor` shows `tailscale HTTPS: unavailable on this tailnet`. Every tailscale CLI call kiln makes is bounded (15 s for `serve`, 20 s otherwise) and killed with its whole process group when it overruns, so turning serve on answers within 35 s at worst (the ≤20 s `tailscale status` preflight plus the ≤15 s `serve`).
 2. Open that URL. In Chrome or Edge click **Install app** at the top right (or the install icon in the address bar). On iOS use Share › Add to Home Screen; on Android, the menu's Install app.
 
 No dashboard key is needed over HTTPS: `tailscale serve` proxies to kiln's unix socket `<data>/serve.sock` and tells kiln who you are (`Tailscale-User-Login`), and the same `allowed_users` rule applies as over plain HTTP. A browser on the CI box itself still needs the key; a tagged node is refused unless `tagged-devices` is in `allowed_users`. Never point a raw TCP forward (`--tcp`, `--tls-terminated-tcp`) or Funnel at the socket: kiln then stops trusting it and asks for the key (see SECURITY.md). Funnel (serving to the public internet) is refused. If you turned Serve on with kiln 0.2.1 or older, turn it off and on again once: the old setting proxies to `127.0.0.1:7878`, where every request looks local and needs the key. The macOS App Store build of Tailscale is sandboxed and may not be able to reach the socket; the standalone `tailscaled` can.
@@ -162,7 +172,7 @@ A GitHub App is the recommended way to authenticate. kiln holds only the App's p
 - Classic PAT: the `repo` scope (plus `workflow` for the hello PR).
 - Fine-grained token, on each repo: *Administration: write* (register and delete runners), *Actions: read and write* (list and rerun or cancel runs, dispatch workflows, read jobs), *Contents: read* (check that a cache-saving push is really on its branch; without it caches never save). *Contents: write* and *Workflows: write* are needed only for the optional hello PR. *Metadata: read* is implicit.
 
-`kiln doctor` (and Settings › Diagnostics) probes each repo once per permission and names the one that is missing, for example "token lacks Contents: read". When GitHub reports an expiry for the token (fine-grained tokens, and classic ones created with one), the dashboard shows it under Settings › GitHub and warns from 14 days before.
+`kiln doctor` (and Settings › Diagnostics) probes each repo once per permission and names the one that is missing, for example "token lacks Contents: read". Reads can work while GitHub refuses to register runners, so it also exercises the write path: it mints a runner registration token (`POST …/actions/runners/registration-token`; harmless, it expires in an hour and nothing uses it) and reports "runner registration works" or "runner registration failing: HTTP 500". The result is cached for 10 minutes per repo, since the dashboard runs the checks periodically. When GitHub reports an expiry for the token (fine-grained tokens, and classic ones created with one), the dashboard shows it under Settings › GitHub and warns from 14 days before.
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
 
@@ -205,5 +215,5 @@ kiln --version    print the version (also -V and version)
 
 - `kiln serve` is what the systemd unit runs. Only `serve` touches leftovers from a previous run, so `bake` and `doctor` are safe to run next to a live `serve`.
 - `kiln bake` downloads the Ubuntu 24.04 cloud image and matching kernel (re-downloading only changed files), fetches the latest actions/runner version, boots a bake VM that runs the recipe in `guest/user-data.yaml`, and swaps the result into `images/` atomically. It takes about 5 minutes and times out after 30. Bake VMs always use open networking. Running job VMs keep using the old base until they exit.
-- `kiln doctor` checks: KVM (Hypervisor.framework on macOS), `qemu-system-x86_64` (`qemu-system-aarch64` on arm64 hosts), `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing), the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
+- `kiln doctor` checks: KVM (Hypervisor.framework on macOS), `qemu-system-x86_64` (`qemu-system-aarch64` on arm64 hosts), `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing) and whether GitHub registers runners for it, the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
 - Any other argument prints usage and exits with status 2.

@@ -475,8 +475,8 @@ mod tests {
 
     #[test]
     fn installation_choice() {
-        let m: BTreeMap<String, u64> = [("bunty9/kiln".to_string(), 7), ("org/x".to_string(), 9)].into();
-        assert_eq!(install_for("repos/Bunty9/Kiln/actions/runs", &m), Some(7));
+        let m: BTreeMap<String, u64> = [("acme/kiln".to_string(), 7), ("org/x".to_string(), 9)].into();
+        assert_eq!(install_for("repos/Acme/Kiln/actions/runs", &m), Some(7));
         assert_eq!(install_for("repos/org/x/compare/a...b", &m), Some(9));
         // a repo the App does not serve never borrows another installation's token
         assert_eq!(install_for("repos/other/repo/actions/runners", &m), None);

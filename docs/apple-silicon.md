@@ -43,9 +43,11 @@ Install kiln (a release build once macOS releases are on, or from source):
 
 ```sh
 v=0.3.0                                           # once a release ships an aarch64-macos tarball
-gh release download "v$v" -R Bunty9/kiln -p "kiln-$v-aarch64-macos.tar.gz*"
-shasum -a 256 -c "kiln-$v-aarch64-macos.tar.gz.sha256"
-tar -xzf "kiln-$v-aarch64-macos.tar.gz" && cd "kiln-$v-aarch64-macos"
+f=kiln-$v-aarch64-macos.tar.gz url=https://github.com/Bunty9/kiln/releases/download/v$v
+cd "$(mktemp -d)"
+curl -fLO "$url/$f" -fLO "$url/$f.sha256"
+shasum -a 256 -c "$f.sha256"
+tar -xzf "$f" && cd "kiln-$v-aarch64-macos"
 # or from source: cargo build --release, then use target/release/kiln and deploy/kiln.plist
 install -d ~/.local/bin && install -m 755 kiln ~/.local/bin/kiln
 ```

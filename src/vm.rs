@@ -28,6 +28,25 @@ pub enum State {
     Held,
     /// Was active when kiln stopped; its QEMU died with us.
     Lost,
+    /// The runner came online but no job reached it (another runner took it, or it
+    /// was cancelled), and it exited. Normal, not a failure.
+    Unneeded,
+    /// A state written by a newer kiln (read after a rollback): ended, shown neutrally,
+    /// so the record stays in the history instead of being dropped.
+    #[serde(other)]
+    Unknown,
+}
+
+const NO_ROOM: &str = "not held: holds never take the last free VM slot";
+const NOT_NEEDED: &str = "not needed: the queued job went to another runner or was cancelled";
+
+/// End state and note of a VM whose guest powered off cleanly without a job result.
+fn exit_without_result(online: bool, job: bool) -> (State, &'static str) {
+    match (online, job) {
+        (true, false) => (State::Unneeded, NOT_NEEDED),
+        (_, true) => (State::Failed, "runner exited without a result"),
+        (false, false) => (State::Failed, "runner exited before coming online"),
+    }
 }
 
 impl State {
@@ -101,6 +120,10 @@ pub struct Vm {
     /// Launched to fill the warm pool; cleared once it takes a job.
     #[serde(default)]
     pub warm: bool,
+    /// GitHub refused the runner registration: no VM booted, no job touched. Memory-only
+    /// (no directory) and not counted as a job failure on the dashboard.
+    #[serde(default)]
+    pub mint_failed: bool,
 }
 
 impl Vm {
@@ -213,6 +236,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         egress: app.cfg().egress,
         policy: policy_id(&app.cfg()),
         warm,
+        mint_failed: false,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -223,6 +247,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     tokio::spawn(async move {
         let dir = app.data.join("vms").join(&id);
         let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
+        // A refused runner registration: no VM was booted and no directory created.
+        let mint = outcome.as_ref().err().and_then(|e| e.downcast_ref::<crate::github::MintError>()).map(|m| (m.github_wide(), m.status));
         finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
         // Never leave a big overlay or a credential behind, whatever happened.
         let _ = tokio::fs::remove_file(dir.join("disk.qcow2")).await;
@@ -240,14 +266,28 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                     State::Failed
                 }
             };
+            v.mint_failed = mint.is_some();
             // Failed means kiln or the host broke; a job's own verdict is Done.
             if v.result.is_some() {
                 v.state = State::Done;
             }
         });
         if let Some(v) = v {
-            tracing::info!("{} {:?} job={:?} result={:?}", v.id, v.state, v.job, v.result);
-            {
+            let note = v.note.as_deref().unwrap_or("-");
+            // GitHub-wide: one warning per backoff step, not one per VM or tick.
+            let step = match mint {
+                Some((true, status)) => {
+                    let mut a = app.api_backoff.lock().unwrap();
+                    a.fail(status, now()).then(|| a.retry_at.saturating_sub(now()).div_ceil(60))
+                }
+                _ => None,
+            };
+            match (mint, step) {
+                (Some((true, _)), Some(mins)) => tracing::warn!("{} {note}: all launches paused {mins} min", v.id),
+                (Some((false, _)), _) => tracing::warn!("{} {note}", v.id),
+                _ => tracing::info!("{} {:?} job={:?} result={:?}: {note}", v.id, v.state, v.job, v.result),
+            }
+            if mint.is_none_or(|(wide, _)| !wide) {
                 let mut b = app.backoff.lock().unwrap();
                 if v.job.is_some() {
                     b.remove(&v.repo);
@@ -263,7 +303,10 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             {
                 tracing::warn!("{}: {e:#}", v.id);
             }
-            persist(&app, &v);
+            // A failed mint (or anything else before boot) never made a directory: memory only.
+            if dir.exists() {
+                persist(&app, &v);
+            }
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
         app.releases.lock().unwrap().remove(&id);
@@ -364,19 +407,26 @@ pub fn cache_busy(app: &App, repo: &str) -> bool {
     pending_file(&app.data, repo).exists() || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
 }
 
-/// The state the VM ends in (Killed, Failed or Done); Err = infrastructure failure.
+/// The state the VM ends in (Killed, Failed, Unneeded or Done); Err = infrastructure failure
+/// (a `github::MintError` when GitHub refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
     let cfg = app.cfg();
-    tokio::fs::create_dir_all(dir).await?;
-    if let Some(v) = update(app, id, |_| {}) {
-        persist(app, &v);
-    }
-
     let v = update(app, id, |_| {}).context("vm vanished")?;
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
+    // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (runner_id, jit) = app.gh.jit_config(repo, id, &cfg.runner_labels(cpus)).await?;
-    if let Some(v) = update(app, id, |v| v.runner_id = Some(runner_id)) {
-        persist(app, &v);
+    {
+        let mut b = app.api_backoff.lock().unwrap();
+        if b.fails > 0 {
+            tracing::info!("runner registration works again after {} failed attempt(s): launches resume", b.fails);
+        }
+        *b = Default::default();
+    }
+    // Recorded before anything else can fail, so cleanup deregisters it.
+    let reg = update(app, id, |v| v.runner_id = Some(runner_id));
+    tokio::fs::create_dir_all(dir).await?;
+    if let Some(r) = reg {
+        persist(app, &r);
     }
     // Handed over as a file QEMU reads at start (fw_cfg, plus SMBIOS on x86: see job_args).
     write_secret(&dir.join("jit"), &format!("kiln.jit={jit}")).await?;
@@ -523,7 +573,14 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 observe(app, id, &text);
                 if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
+                    let max_vms = app.cfg().max_vms;
+                    let held = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Held).count();
                     let mut hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
+                    // Checked again when granting; this skips publishing a port for nothing.
+                    if hold.is_some() && !hold_room(held, max_vms) {
+                        note(app, id, NO_ROOM);
+                        hold = None;
+                    }
                     if let (Some(_), Some((ip, port))) = (hold, &ssh_host)
                         && let Err(e) = publish_ssh(dir, publish, ip, *port).await
                     {
@@ -532,14 +589,28 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         hold = None;
                     }
                     if let (Some(secs), Some((ip, port))) = (hold, &ssh_host) {
-                        let v = update(app, id, |v| {
-                            v.state = State::Held;
-                            v.hold_until = Some(now() + secs);
-                            v.ssh = Some(format!("ssh -p {port} runner@{ip}"));
-                            v.ssh_port = Some(*port);
-                        });
+                        // Count and grant under one lock: two verdicts at once cannot both take the last free slot.
+                        let v = {
+                            let mut vms = app.vms.lock().unwrap();
+                            let n = vms.iter().filter(|v| v.state == State::Held).count();
+                            let room = hold_room(n, max_vms);
+                            vms.iter_mut().find(|v| v.id == id).map(|v| {
+                                if room {
+                                    v.state = State::Held;
+                                    v.hold_until = Some(now() + secs);
+                                    v.ssh = Some(format!("ssh -p {port} runner@{ip}"));
+                                    v.ssh_port = Some(*port);
+                                } else {
+                                    v.note = Some(NO_ROOM.into());
+                                }
+                                v.clone()
+                            })
+                        };
                         if let Some(v) = v {
                             persist(app, &v);
+                            if v.state != State::Held {
+                                hold = None;
+                            }
                         }
                     }
                     send(&mut stdin, &decide_msg(hold)).await;
@@ -559,7 +630,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             _ = tokio::time::sleep(left) => {
                 child.kill().await.ok();
                 if v.state == State::Held {
-                    note(app, id, "debug hold expired");
+                    note(app, id, hold_expired_note(v.note.as_deref()));
                     return Ok(State::Killed);
                 } else if v.busy_since.is_some() {
                     note(app, id, &format!("job timeout after {} min", cfg.job_timeout_mins));
@@ -577,9 +648,11 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if !status.success() {
         bail!("qemu exited with {status}; see console log");
     }
-    if update(app, id, |_| {}).context("vm vanished")?.result.is_none() {
-        note(app, id, "runner exited without a result");
-        return Ok(State::Failed);
+    let v = update(app, id, |_| {}).context("vm vanished")?;
+    if v.result.is_none() {
+        let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
+        note(app, id, why);
+        return Ok(state);
     }
     Ok(State::Done)
 }
@@ -591,13 +664,76 @@ async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
     }
 }
 
-/// Seconds to hold the VM, if at all. Only a job that started and ended with a
-/// verdict other than success is worth keeping, and only when there is a way in.
-/// The guest asking early (no verdict yet) is answered "release", so a job
-/// cannot force a hold by printing `kiln: decide` itself.
+/// Seconds to hold the VM, if at all. Only a job that started and failed is worth
+/// keeping, and only when there is a way in. A cancelled job (often `cancel-in-progress`
+/// on a branch being pushed to) has nothing to inspect. "Abandoned" is the runner's
+/// verdict when it lost the job. The guest asking early (no verdict yet) is answered
+/// "release", so a job cannot force a hold by printing `kiln: decide` itself.
 fn decide(hold_mins: u64, can_ssh: bool, job_started: bool, result: Option<&str>) -> Option<u64> {
-    (hold_mins > 0 && can_ssh && job_started && result.is_some_and(|r| r != "Succeeded")).then_some(hold_mins * 60)
+    let failed = matches!(result, Some("Failed" | "Abandoned"));
+    (hold_mins > 0 && can_ssh && job_started && failed).then_some(hold_mins * 60)
 }
+
+/// One more hold leaves a slot free: at most `max_vms - 1` VMs are held, so holds can
+/// slow the queue but never stop it. With `max_vms` 1, nothing is held.
+fn hold_room(held: usize, max_vms: usize) -> bool {
+    held + 1 < max_vms
+}
+
+/// The hold to end early for a queued job: the one expiring first. A hold already
+/// released (its `hold_until` passed) is powering off and is not picked again.
+fn oldest_hold(vms: &[Vm], t: u64) -> Option<String> {
+    vms.iter().filter(|v| v.state == State::Held && v.hold_until.is_some_and(|u| u > t)).min_by_key(|v| v.hold_until).map(|v| v.id.clone())
+}
+
+/// The hold to end for `waiting` queued jobs that found no free slot, if any. A released
+/// hold stays Held until its guest powers off (up to the 60 s safety net): it is a slot
+/// on its way, so each waiting job ends at most one hold, however many ticks pass.
+fn hold_to_release(vms: &[Vm], t: u64, waiting: usize) -> Option<String> {
+    let releasing = vms.iter().filter(|v| v.state == State::Held && v.hold_until.is_some_and(|u| u <= t)).count();
+    if waiting > releasing { oldest_hold(vms, t) } else { None }
+}
+
+/// Ends the oldest debug hold if `waiting` queued jobs need more slots than holds already
+/// on their way out. Returns true if one was.
+pub fn release_oldest_hold(app: &App, waiting: usize) -> bool {
+    let id = hold_to_release(&app.vms.lock().unwrap(), now(), waiting);
+    id.is_some_and(|id| release_hold(app, &id, Some(EARLY_RELEASE)))
+}
+
+/// Ends a hold now: the guest is told to power off, and `hold_until` = now puts the run
+/// loop's 60 s safety net on a guest that ignores it. Returns false if `id` is not held.
+pub fn release_hold(app: &App, id: &str, why: Option<&str>) -> bool {
+    let v = {
+        let mut vms = app.vms.lock().unwrap();
+        let Some(v) = vms.iter_mut().find(|v| v.id == id && v.state == State::Held) else { return false };
+        end_hold(v, now(), why);
+        v.clone()
+    };
+    persist(app, &v);
+    tracing::info!("{}: {}", v.id, why.unwrap_or("hold released"));
+    if let Some(n) = app.releases.lock().unwrap().get(&v.id) {
+        n.notify_one();
+    }
+    true
+}
+
+fn end_hold(v: &mut Vm, t: u64, why: Option<&str>) {
+    v.hold_until = Some(v.hold_until.map_or(t, |u| u.min(t)));
+    if let Some(w) = why {
+        v.note = Some(w.into());
+    }
+}
+
+/// The note of a hold the safety net killed: an early release keeps saying why it ended.
+fn hold_expired_note(note: Option<&str>) -> &str {
+    match note {
+        Some(EARLY_RELEASE) => EARLY_RELEASE,
+        _ => "debug hold expired",
+    }
+}
+
+const EARLY_RELEASE: &str = "hold released early: a queued job needed the slot";
 
 /// How a held VM's SSH port reaches the host.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1285,8 +1421,23 @@ async fn egress_probe(app: &App) -> Result<()> {
     bail!("{}", why.unwrap_or_else(|| format!("rootlesskit exited with {}", o.status)))
 }
 
+/// Mint-failure records kept: during an outage they say the same thing, one per backoff step.
+const KEEP_MINT_FAILURES: usize = 5;
+
+/// Drop all but the latest `KEEP_MINT_FAILURES` mint failures (`vms` is oldest first),
+/// so an outage never pushes real job history out of `KEEP_HISTORY`.
+fn cap_mint_failures(vms: &mut Vec<Vm>) {
+    let mut extra = vms.iter().filter(|v| v.mint_failed).count().saturating_sub(KEEP_MINT_FAILURES);
+    vms.retain(|v| {
+        let drop = extra > 0 && v.mint_failed;
+        extra -= drop as usize;
+        !drop
+    });
+}
+
 fn prune(app: &App) {
     let mut vms = app.vms.lock().unwrap();
+    cap_mint_failures(&mut vms);
     while vms.len() > KEEP_HISTORY {
         let Some(pos) = vms.iter().position(|v| !v.state.is_active()) else { break };
         let old = vms.remove(pos);
@@ -1709,7 +1860,12 @@ fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
 }
 
 async fn output(bin: &str, args: &[&str]) -> Result<String> {
-    let o = Command::new(bin).args(args).output().await.with_context(|| format!("running {bin}"))?;
+    // Every tailscale call is bounded: the CLI can wait forever on a wedged tailscaled.
+    let o = if bin == host::tailscale() {
+        crate::web::tailscale(args).await?
+    } else {
+        Command::new(bin).args(args).output().await.with_context(|| format!("running {bin}"))?
+    };
     if !o.status.success() {
         bail!("{bin} exited with {}", o.status);
     }
@@ -1816,8 +1972,13 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             why.push(format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")));
         }
         why.extend(errs);
+        // Reads can pass while GitHub refuses to register runners: exercise the write path too.
+        let (reg_ok, reg) = app.gh.registration_probe(repo).await;
+        if !reg_ok {
+            why.push(reg.clone());
+        }
         out.push(if why.is_empty() {
-            check(&format!("repo {repo}"), true, "runners, actions and contents reachable")
+            check(&format!("repo {repo}"), true, format!("runners, actions and contents reachable; {reg}"))
         } else {
             check(&format!("repo {repo}"), false, why.join("; "))
         });
@@ -1842,16 +2003,24 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ),
     });
 
-    out.push(match output(host::tailscale(), &["status", "--json"]).await {
-        Ok(j) => {
-            let v: serde_json::Value = serde_json::from_str(&j).unwrap_or_default();
+    let mut no_certs = false;
+    out.push(match crate::web::tailscale(&["status", "--json"]).await {
+        Ok(o) if o.status.success() => {
+            let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
+            no_certs = crate::web::no_certs(&v);
             let st = v["BackendState"].as_str().unwrap_or("unknown");
             check("tailscale up", st == "Running", format!("BackendState {st}"))
         }
+        Ok(o) => check("tailscale up", false, format!("tailscale exited with {}", o.status)),
         Err(e) => check("tailscale up", false, format!("{e:#}")),
     });
-    if let Some((ok, detail)) = crate::web::serve_doctor(&app.data).await {
-        out.push(check("tailscale serve", ok, detail));
+    // An unsafe serve config always shows; otherwise a tailnet without certs says so, as
+    // "not served" would read as merely not set up.
+    match crate::web::serve_doctor(&app.data).await {
+        Some((false, detail)) => out.push(check("tailscale serve", false, detail)),
+        _ if no_certs => out.push(check("tailscale HTTPS", true, "unavailable on this tailnet (DNS › HTTPS Certificates is off)")),
+        Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
+        None => {}
     }
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
@@ -1880,6 +2049,15 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn unknown_states_from_newer_versions_load_as_ended() {
+        let s: State = serde_json::from_str("\"frozen\"").unwrap();
+        assert_eq!(s, State::Unknown);
+        assert!(!s.is_active() && !s.is_waiting());
+        let s: State = serde_json::from_str("\"unneeded\"").unwrap();
+        assert_eq!(s, State::Unneeded);
+    }
+
     fn vm(id: &str, state: State, online_at: Option<u64>) -> Vm {
         Vm {
             id: id.into(),
@@ -1906,7 +2084,20 @@ mod tests {
             egress: String::new(),
             policy: String::new(),
             warm: false,
+            mint_failed: false,
         }
+    }
+
+    #[test]
+    fn mint_failures_keep_only_the_latest() {
+        let m = |id: &str| Vm { mint_failed: true, ..vm(id, State::Failed, None) };
+        let mut vms = vec![vm("a", State::Done, None), m("m1"), m("m2"), vm("b", State::Done, None)];
+        vms.extend((3..=KEEP_MINT_FAILURES + 2).map(|i| m(&format!("m{i}"))));
+        cap_mint_failures(&mut vms);
+        let ids: Vec<&str> = vms.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids.len(), KEEP_MINT_FAILURES + 2);
+        assert_eq!(&ids[..2], ["a", "b"]);
+        assert_eq!(ids[2], "m3");
     }
 
     #[test]
@@ -1985,23 +2176,35 @@ mod tests {
             std::process::Command::new("bash")
                 .args(["-c", &script])
                 .env("GITHUB_EVENT_PATH", &p)
-                .env("GITHUB_REPOSITORY", "Bunty9/kiln")
+                .env("GITHUB_REPOSITORY", "Acme/kiln")
                 .output()
                 .unwrap()
                 .status
                 .success()
         };
         let pr = |head: serde_json::Value| serde_json::json!({ "pull_request": { "head": { "repo": head } } });
-        assert!(run(Some(pr(serde_json::json!({ "full_name": "bunty9/KILN" })))), "same-repo PR");
+        assert!(run(Some(pr(serde_json::json!({ "full_name": "acme/KILN" })))), "same-repo PR");
         assert!(!run(Some(pr(serde_json::json!({ "full_name": "evil/kiln" })))), "fork PR");
         assert!(!run(Some(pr(serde_json::Value::Null))), "deleted fork");
         assert!(run(Some(serde_json::json!({ "ref": "refs/heads/main", "head_commit": {} }))), "push");
         let wr = |head: serde_json::Value| serde_json::json!({ "workflow_run": { "head_repository": head } });
         assert!(!run(Some(wr(serde_json::json!({ "full_name": "evil/kiln" })))), "workflow_run from a fork");
-        assert!(run(Some(wr(serde_json::json!({ "full_name": "Bunty9/kiln" })))), "workflow_run same repo");
+        assert!(run(Some(wr(serde_json::json!({ "full_name": "Acme/kiln" })))), "workflow_run same repo");
         assert!(!run(Some(serde_json::json!({ "workflow_run": {} }))), "workflow_run, head repo missing");
         assert!(!run(None), "missing payload");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_exit_without_result() {
+        // Online, never handed a job: GitHub gave the job to another runner or it was cancelled.
+        assert_eq!(exit_without_result(true, false), (State::Unneeded, NOT_NEEDED));
+        // A job started but no result came back: the runner or the guest broke.
+        assert_eq!(exit_without_result(true, true).0, State::Failed);
+        // Never came online: registration or boot broke.
+        assert_eq!(exit_without_result(false, false), (State::Failed, "runner exited before coming online"));
+        assert!(!State::Unneeded.is_active() && !State::Unneeded.is_waiting());
+        assert_eq!(serde_json::to_string(&State::Unneeded).unwrap(), "\"unneeded\"");
     }
 
     #[test]
@@ -2162,7 +2365,68 @@ mod tests {
         assert_eq!(decide_msg(decide(0, true, true, f)), "release\n");
         assert_eq!(decide_msg(decide(30, false, true, f)), "release\n"); // no way in
         assert_eq!(decide_msg(decide(30, true, false, None)), "release\n"); // never ran a job
-        assert_eq!(decide_msg(decide(30, true, true, Some("Cancelled"))), "hold 1800\n");
+        // A cancel has no failure to inspect (often cancel-in-progress): never held.
+        for r in ["Canceled", "Cancelled", "Skipped", "SucceededWithIssues", "whatever"] {
+            assert_eq!(decide_msg(decide(30, true, true, Some(r))), "release\n", "{r}");
+        }
+        assert_eq!(decide_msg(decide(30, true, true, Some("Abandoned"))), "hold 1800\n");
+    }
+
+    #[test]
+    fn holds_never_take_the_last_slot() {
+        assert!(!hold_room(0, 0) && !hold_room(0, 1)); // max_vms 1: a hold would stop the queue
+        assert!(hold_room(0, 2) && !hold_room(1, 2));
+        assert!(hold_room(2, 4) && !hold_room(3, 4));
+    }
+
+    #[test]
+    fn oldest_hold_released_first() {
+        let held = |id: &str, until: Option<u64>| Vm { hold_until: until, ..vm(id, State::Held, None) };
+        let vms = [vm("a", State::Busy, None), held("b", Some(900)), held("c", Some(500)), held("d", Some(100))];
+        // "d" was already released (hold_until passed) and is powering off: not picked again
+        assert_eq!(oldest_hold(&vms, 200).as_deref(), Some("c"));
+        assert_eq!(oldest_hold(&vms, 1000), None);
+        assert_eq!(oldest_hold(&[vm("a", State::Busy, None)], 0), None);
+    }
+
+    #[test]
+    fn one_release_per_waiting_job_across_ticks() {
+        let held = |id: &str, until: u64| Vm { hold_until: Some(until), ..vm(id, State::Held, None) };
+        let mut vms = vec![vm("a", State::Busy, None), held("b", 900), held("c", 500)];
+        let tick = |vms: &mut Vec<Vm>, t: u64, waiting: usize| {
+            let id = hold_to_release(vms, t, waiting)?;
+            vms.iter_mut().find(|v| v.id == id).unwrap().hold_until = Some(t);
+            Some(id)
+        };
+        // One queued job: release "c", then wait for it to power off (up to 60 s), however many ticks.
+        assert_eq!(tick(&mut vms, 100, 1).as_deref(), Some("c"));
+        assert_eq!(tick(&mut vms, 100, 1), None); // same tick, another size: already covered
+        assert_eq!(tick(&mut vms, 110, 1), None);
+        assert_eq!(tick(&mut vms, 150, 1), None);
+        // A second job queues: one more release, and no third.
+        assert_eq!(tick(&mut vms, 160, 2).as_deref(), Some("b"));
+        assert_eq!(tick(&mut vms, 170, 2), None);
+        assert_eq!(tick(&mut vms, 170, 3), None); // nothing left to release
+        // "c" powered off and its job took the slot; "b" still on its way for the other.
+        vms.retain(|v| v.id != "c");
+        assert_eq!(tick(&mut vms, 180, 1), None);
+    }
+
+    #[test]
+    fn release_bounds_the_hold_now() {
+        // Manual release: hold_until = now so the 60 s safety net catches a guest that ignores it.
+        let mut v = Vm { hold_until: Some(900), ..vm("a", State::Held, None) };
+        end_hold(&mut v, 100, None);
+        assert_eq!((v.hold_until, v.note.as_deref()), (Some(100), None));
+        end_hold(&mut v, 150, Some(EARLY_RELEASE)); // never pushed later
+        assert_eq!((v.hold_until, v.note.as_deref()), (Some(100), Some(EARLY_RELEASE)));
+    }
+
+    #[test]
+    fn safety_net_keeps_early_release_note() {
+        assert_eq!(hold_expired_note(Some(EARLY_RELEASE)), EARLY_RELEASE);
+        assert_eq!(hold_expired_note(None), "debug hold expired");
+        assert_eq!(hold_expired_note(Some("something else")), "debug hold expired");
     }
 
     #[test]
