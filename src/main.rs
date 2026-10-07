@@ -174,9 +174,7 @@ impl Config {
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
         }
-        if let Some((r, _)) =
-            self.repo_cache_gb.iter().find(|(r, g)| !(5..=500).contains(*g) || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
-        {
+        if let Some((r, _)) = self.repo_cache_gb.iter().find(|(r, g)| !(5..=500).contains(*g) || !served(r)) {
             bail!("repo_cache_gb: {r:?} must be a configured repo with 5..=500 GB");
         }
         if let Some((n, _)) = self.size_mem_mb.iter().find(|(n, m)| !(1..=host).contains(*n) || !(1024..=1_048_576).contains(*m)) {
@@ -761,7 +759,7 @@ mod tests {
         let sized = |r: &str, g: u32| {
             let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
             c.repo_cache_gb.insert(r.into(), g);
-            c.validate_for(8).is_ok()
+            c.validate_for(8, false).is_ok()
         };
         assert!(sized("A/B", 60) && sized("a/b", 5) && sized("a/b", 500));
         assert!(!sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
@@ -802,6 +800,7 @@ mod tests {
         let mut c = Config::default();
         c.warm.insert("gone/repo".into(), 1);
         c.cache_branches.insert("gone/repo".into(), vec!["dev".into()]);
+        c.repo_cache_gb.insert("gone/repo".into(), 60);
         assert!(c.validate_for(8, true).is_ok());
         assert!(c.validate_for(8, false).is_err());
         // shape is still checked
