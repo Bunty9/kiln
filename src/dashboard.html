@@ -87,6 +87,21 @@ button,input,select{font:inherit;color:inherit}
 :focus-visible{outline:0;box-shadow:var(--focus)}
 [hidden]{display:none!important}
 ::selection{background:color-mix(in srgb,var(--accent) 35%,transparent)}
+/* Scrollbars follow the theme: a muted thumb that warms to the accent on hover, on a track that
+   blends into whatever surface it sits on. Standard properties first (Firefox, Chrome 121+);
+   the ::-webkit-* rules cover Safari. The page keeps a full-width bar (easy target); panes are thin. */
+:root{--sb-thumb:color-mix(in srgb,var(--fg-3) 45%,transparent);--sb-hover:color-mix(in srgb,var(--accent) 70%,transparent)}
+html{scrollbar-color:var(--sb-thumb) var(--bg)}
+*{scrollbar-width:thin;scrollbar-color:var(--sb-thumb) transparent}
+html{scrollbar-width:auto}
+*:hover{scrollbar-color:var(--sb-hover) transparent}
+html:hover{scrollbar-color:var(--sb-thumb) var(--bg)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--sb-hover);background-clip:padding-box}
+html::-webkit-scrollbar{width:12px}
+html::-webkit-scrollbar-track{background:var(--bg)}
 .mono{font-family:var(--mono)}.fg2{color:var(--fg-2)}.fg3{color:var(--fg-3)}.sm{font-size:12px}.sp{flex:1}
 .ok{color:var(--ok)}.fail{color:var(--fail)}.warn{color:var(--warn)}.q{color:var(--queued)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
