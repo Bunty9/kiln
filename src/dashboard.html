@@ -570,8 +570,9 @@ const badge = (s, c = s, tip, f) => {
   return `<span class="bdg s-${c.replace(/ /g, '-')}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
-// The hold kiln ends first when jobs wait: the one expiring first.
-const oldestHeld = () => S.vms.filter(v => v.state === 'held').sort((a, b) => (a.hold_until || 0) - (b.hold_until || 0))[0];
+// The hold kiln ends first when jobs wait: the one expiring first. A released hold
+// (hold_until passed) is already powering off and is not released again.
+const oldestHeld = () => S.vms.filter(v => v.state === 'held' && (v.hold_until || 0) > now()).sort((a, b) => (a.hold_until || 0) - (b.hold_until || 0))[0];
 function status(v) {
   const r = String(v.result || '').toLowerCase();
   switch (v.state) {

@@ -640,7 +640,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             _ = tokio::time::sleep(left) => {
                 child.kill().await.ok();
                 if v.state == State::Held {
-                    note(app, id, "debug hold expired");
+                    note(app, id, hold_expired_note(v.note.as_deref()));
                     return Ok(State::Killed);
                 } else if v.busy_since.is_some() {
                     note(app, id, &format!("job timeout after {} min", cfg.job_timeout_mins));
@@ -696,23 +696,51 @@ fn oldest_hold(vms: &[Vm], t: u64) -> Option<String> {
     vms.iter().filter(|v| v.state == State::Held && v.hold_until.is_some_and(|u| u > t)).min_by_key(|v| v.hold_until).map(|v| v.id.clone())
 }
 
-/// Ends the oldest debug hold because a queued job needs its slot. Returns true if one was.
-pub fn release_oldest_hold(app: &App) -> bool {
+/// The hold to end for `waiting` queued jobs that found no free slot, if any. A released
+/// hold stays Held until its guest powers off (up to the 60 s safety net): it is a slot
+/// on its way, so each waiting job ends at most one hold, however many ticks pass.
+fn hold_to_release(vms: &[Vm], t: u64, waiting: usize) -> Option<String> {
+    let releasing = vms.iter().filter(|v| v.state == State::Held && v.hold_until.is_some_and(|u| u <= t)).count();
+    if waiting > releasing { oldest_hold(vms, t) } else { None }
+}
+
+/// Ends the oldest debug hold if `waiting` queued jobs need more slots than holds already
+/// on their way out. Returns true if one was.
+pub fn release_oldest_hold(app: &App, waiting: usize) -> bool {
+    let id = hold_to_release(&app.vms.lock().unwrap(), now(), waiting);
+    id.is_some_and(|id| release_hold(app, &id, Some(EARLY_RELEASE)))
+}
+
+/// Ends a hold now: the guest is told to power off, and `hold_until` = now puts the run
+/// loop's 60 s safety net on a guest that ignores it. Returns false if `id` is not held.
+pub fn release_hold(app: &App, id: &str, why: Option<&str>) -> bool {
     let v = {
         let mut vms = app.vms.lock().unwrap();
-        let Some(id) = oldest_hold(&vms, now()) else { return false };
-        let Some(v) = vms.iter_mut().find(|v| v.id == id) else { return false };
-        // Also the run loop's safety net: the guest gets 60 s to power off.
-        v.hold_until = Some(now());
-        v.note = Some(EARLY_RELEASE.into());
+        let Some(v) = vms.iter_mut().find(|v| v.id == id && v.state == State::Held) else { return false };
+        end_hold(v, now(), why);
         v.clone()
     };
     persist(app, &v);
-    tracing::info!("{}: {EARLY_RELEASE}", v.id);
+    tracing::info!("{}: {}", v.id, why.unwrap_or("hold released"));
     if let Some(n) = app.releases.lock().unwrap().get(&v.id) {
         n.notify_one();
     }
     true
+}
+
+fn end_hold(v: &mut Vm, t: u64, why: Option<&str>) {
+    v.hold_until = Some(v.hold_until.map_or(t, |u| u.min(t)));
+    if let Some(w) = why {
+        v.note = Some(w.into());
+    }
+}
+
+/// The note of a hold the safety net killed: an early release keeps saying why it ended.
+fn hold_expired_note(note: Option<&str>) -> &str {
+    match note {
+        Some(EARLY_RELEASE) => EARLY_RELEASE,
+        _ => "debug hold expired",
+    }
 }
 
 const EARLY_RELEASE: &str = "hold released early: a queued job needed the slot";
@@ -2339,6 +2367,46 @@ mod tests {
         assert_eq!(oldest_hold(&vms, 200).as_deref(), Some("c"));
         assert_eq!(oldest_hold(&vms, 1000), None);
         assert_eq!(oldest_hold(&[vm("a", State::Busy, None)], 0), None);
+    }
+
+    #[test]
+    fn one_release_per_waiting_job_across_ticks() {
+        let held = |id: &str, until: u64| Vm { hold_until: Some(until), ..vm(id, State::Held, None) };
+        let mut vms = vec![vm("a", State::Busy, None), held("b", 900), held("c", 500)];
+        let tick = |vms: &mut Vec<Vm>, t: u64, waiting: usize| {
+            let id = hold_to_release(vms, t, waiting)?;
+            vms.iter_mut().find(|v| v.id == id).unwrap().hold_until = Some(t);
+            Some(id)
+        };
+        // One queued job: release "c", then wait for it to power off (up to 60 s), however many ticks.
+        assert_eq!(tick(&mut vms, 100, 1).as_deref(), Some("c"));
+        assert_eq!(tick(&mut vms, 100, 1), None); // same tick, another size: already covered
+        assert_eq!(tick(&mut vms, 110, 1), None);
+        assert_eq!(tick(&mut vms, 150, 1), None);
+        // A second job queues: one more release, and no third.
+        assert_eq!(tick(&mut vms, 160, 2).as_deref(), Some("b"));
+        assert_eq!(tick(&mut vms, 170, 2), None);
+        assert_eq!(tick(&mut vms, 170, 3), None); // nothing left to release
+        // "c" powered off and its job took the slot; "b" still on its way for the other.
+        vms.retain(|v| v.id != "c");
+        assert_eq!(tick(&mut vms, 180, 1), None);
+    }
+
+    #[test]
+    fn release_bounds_the_hold_now() {
+        // Manual release: hold_until = now so the 60 s safety net catches a guest that ignores it.
+        let mut v = Vm { hold_until: Some(900), ..vm("a", State::Held, None) };
+        end_hold(&mut v, 100, None);
+        assert_eq!((v.hold_until, v.note.as_deref()), (Some(100), None));
+        end_hold(&mut v, 150, Some(EARLY_RELEASE)); // never pushed later
+        assert_eq!((v.hold_until, v.note.as_deref()), (Some(100), Some(EARLY_RELEASE)));
+    }
+
+    #[test]
+    fn safety_net_keeps_early_release_note() {
+        assert_eq!(hold_expired_note(Some(EARLY_RELEASE)), EARLY_RELEASE);
+        assert_eq!(hold_expired_note(None), "debug hold expired");
+        assert_eq!(hold_expired_note(Some("something else")), "debug hold expired");
     }
 
     #[test]

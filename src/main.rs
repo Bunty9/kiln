@@ -748,7 +748,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut errors = vec![];
     let mut repo_errors = HashMap::new();
     let mut refused_forks = HashMap::new();
-    let mut released = false;
+    // Queued jobs this tick that found every slot taken while holds take some.
+    let mut waiting_on_holds = 0;
     // Rotate the start so the first repo doesn't always win scarce slots.
     let repos = app.repos();
     let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
@@ -812,9 +813,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
             let want = api.allow(now(), want, probing);
             probing |= want > 0;
-            // A debug hold must not keep a queued job waiting: end the oldest (one per tick).
-            if let (false, Some(m)) = (held, held_block(demand, cfg.max_vms, active, holds)) {
-                released = released || vm::release_oldest_hold(app);
+            // A debug hold must not keep a queued job waiting: end the oldest, one per waiting job.
+            // Not while GitHub is refusing runner registration: the freed slot couldn't be used.
+            if let (false, Some(m)) = (held || api.fails > 0, held_block(demand, cfg.max_vms, active, holds)) {
+                waiting_on_holds += demand;
+                vm::release_oldest_hold(app, waiting_on_holds);
                 if blocked.is_none() {
                     blocked = Some(("held", m));
                 }
