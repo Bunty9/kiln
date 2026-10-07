@@ -1099,8 +1099,9 @@ const ARM64: Guest = Guest {
 const GUEST: Guest = if host::ARM64 { ARM64 } else { X64 };
 
 /// Job VM flags after the kernel: its command line, the secrets (JIT config, debug SSH
-/// keys) and the serial channels. Secrets go in as fw_cfg files, which every guest reads,
-/// and on x86 also as SMBIOS OEM strings (the older path); `path=`/`file=` keep them out of `ps`.
+/// keys) and the serial channels. Secrets go in as fw_cfg files (read by guests that have the
+/// qemu_fw_cfg module: arm64 bakes install it) and on x86 also as SMBIOS OEM strings (what x86
+/// guests read: their image lacks the module); `path=`/`file=` keep them out of `ps`.
 /// panic=1 + -no-reboot make a kernel panic end the VM instead of hanging until the timeout.
 fn job_args(g: &Guest, dir: &Path, ssh: bool) -> Vec<String> {
     let mut a = vec!["-append".into(), format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console)];
@@ -2385,6 +2386,8 @@ mod tests {
         assert!(a.contains("actions-runner-linux-arm64-$V.tar.gz") && a.contains("T=node-v$N-linux-arm64.tar.xz"));
         assert!(a.contains("serial-getty@ttyAMA0.service") && a.contains("exec 3</dev/ttyAMA0"));
         assert!(a.contains("exec >/dev/virtio-ports/kiln.steps") && a.contains("KILN_BAKE_OK > /dev/ttyAMA0"));
+        // The cloud image lacks qemu_fw_cfg: arm64 bakes add it (x86 still has SMBIOS).
+        assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
     }
 
     #[test]

@@ -112,6 +112,12 @@ write_files:
       apt-get purge -y snapd unattended-upgrades || true
       systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer motd-news.timer \
         e2scrub_reap.service fwupd-refresh.timer
+      # arm64 guests get kiln's secrets over fw_cfg only (no SMBIOS without UEFI). Its module,
+      # qemu_fw_cfg, is in linux-modules-extra of the kernel kiln boots (the one running now).
+      if [ "$(dpkg --print-architecture)" = arm64 ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+        modinfo qemu_fw_cfg >/dev/null
+      fi
       # Extra packages from bake_apt_packages (names validated by kiln); none = skip.
       APT_EXTRA="{{APT_PACKAGES}}"
       if [ -n "$APT_EXTRA" ]; then
@@ -134,8 +140,8 @@ write_files:
       #!/bin/bash
       # Boot entry of a job VM: read the JIT config kiln passed in, run exactly
       # one job, power off. QEMU exits and the overlay is deleted.
-      # kiln's secrets ("kiln.<name>=<value>"): a fw_cfg file (every guest; arm64 has
-      # nothing else), else an SMBIOS OEM string (x86 gets both, should the module be missing).
+      # kiln's secrets ("kiln.<name>=<value>"): a fw_cfg file where the qemu_fw_cfg module
+      # exists (arm64 bakes install it; arm64 has nothing else), else an SMBIOS OEM string (x86).
       secret() {
         local f=/sys/firmware/qemu_fw_cfg/by_name/opt/kiln/$1/raw
         modprobe qemu_fw_cfg 2>/dev/null
