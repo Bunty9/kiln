@@ -382,6 +382,11 @@ async fn main() -> Result<()> {
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
+    // First, before anything that can fail (a bad config.json included), so a new version
+    // that dies early still counts its boots and gets rolled back. CLI runs never count.
+    if is_serve(std::env::args().nth(1).as_deref()) {
+        update::on_start(&data);
+    }
     std::fs::create_dir_all(data.join("vms"))?;
     std::fs::create_dir_all(data.join("images"))?;
     std::fs::create_dir_all(data.join("update"))?;
@@ -427,8 +432,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some("serve") | None => {
-            update::on_start(&app.data);
+        a if is_serve(a) => {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             if app.cfg().egress == "filtered" {
@@ -457,6 +461,11 @@ async fn main() -> Result<()> {
             std::process::exit(2)
         }
     }
+}
+
+/// `kiln` or `kiln serve`: the service (what systemd runs, and what an update re-execs).
+fn is_serve(arg: Option<&str>) -> bool {
+    matches!(arg, Some("serve") | None)
 }
 
 async fn stop_signal() {
@@ -764,6 +773,15 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_serve_counts_update_boots() {
+        assert!(is_serve(None));
+        assert!(is_serve(Some("serve")));
+        for a in ["bake", "doctor", "--version", "-V", "version", "help", ""] {
+            assert!(!is_serve(Some(a)), "{a}");
+        }
+    }
 
     #[test]
     fn config_validation() {
