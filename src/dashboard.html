@@ -436,6 +436,7 @@ dialog input{width:100%;margin-top:16px}
 <symbol id="i-monitor" viewBox="0 0 20 20"><rect x="2.75" y="3.5" width="14.5" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/></symbol>
 <symbol id="i-key" viewBox="0 0 20 20"><circle cx="6.5" cy="13.5" r="3.25"/><path d="m8.8 11.2 7.45-7.45M14 6l2 2M12 8l1.5 1.5"/></symbol>
 <symbol id="i-tip" viewBox="0 0 20 20"><path d="M7.5 14.5h5M8.25 17h3.5M10 2.75a5 5 0 0 0-2.9 9.1c.25.2.4.5.4.85v.8h5v-.8c0-.35.15-.65.4-.85A5 5 0 0 0 10 2.75Z"/></symbol>
+<symbol id="i-update" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 13.75v-7.5M6.75 9.5 10 6.25l3.25 3.25"/></symbol>
 </defs></svg>
 <header class="top"><div>
   <a class="logo" href="#/" data-tip="kiln: one fresh VM per GitHub Actions job, on this box"><svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
@@ -654,7 +655,7 @@ function fillTimes(r = document) { $$('[data-t]', r).forEach(e => (e.textContent
 const relH = t => t ? `<span data-t="${t}" data-k="rel"></span>` : '—';
 
 /* ---------- state polling ---------- */
-let S = null, fails = 0, down = false, pollT, retryAt = 0, okUntil = 0;
+let S = null, fails = 0, down = false, pollT, retryAt = 0, okUntil = 0, bootV = null;
 const DELAYS = [2, 2, 4, 8, 15];
 const notifyOn = () => lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted';
 let inflight = null;
@@ -665,6 +666,9 @@ async function doPoll() {
     const s = await api('/api/state');
     s.config.repos ||= []; s.config.allowed_users ||= []; s.poll ||= {}; s.vms ||= []; s.host ||= { load: [0, 0, 0], cpus: 0, mem_total_mb: 0, mem_avail_mb: 0, disk_free_gb: 0 };
     S = s;
+    // kiln re-execs into a new version after an update: reload once so this page is the new one too.
+    if (bootV && S.version && S.version !== bootV) { lsSet('kiln-updated', S.version); return location.reload(); }
+    if (!bootV) { bootV = S.version; if (S.version && lsGet('kiln-updated') === S.version) { lsSet('kiln-updated', null); toast(`kiln updated to ${S.version}`); } }
     if (down) okUntil = now() + 2;
     fails = 0; down = false; renderConn(); onState();
   } catch (e) {
@@ -840,7 +844,11 @@ function banners() {
       <span class="ph-steps">${PH.map(([, n], k) => k === i ? `<b>${n}</b>` : `<span>${n}</span>`).join('')}</span>${i === 2 && last ? `<span class="mono sm fg2" style="display:block;margin-top:4px">${esc(last.slice(0, 120))}</span>` : ''}`, A('View log', '#/settings/image'));
   } else if (bakeFailed()) B('fail', 'Image bake failed.', A('View log', '#/settings/image'));
   else if (!S.image_ready) B('fail', 'Base image not baked. VMs can\'t start.', X('Bake image', 'bake', 1));
-  if (p.blocked) B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  const up = S.update || {};
+  if (up.rollback) B('fail', 'Update rolled back: ' + esc(up.rollback), A('Updates', '#/settings/updates'));
+  if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
+  else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
+  if (p.blocked && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
@@ -1185,10 +1193,10 @@ async function loadLast(r) {
 }
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', appearance: 'Appearance' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', updates: 'Updates', appearance: 'Appearance' };
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5']];
-const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', appearance: 'palette' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', updates: 'update', appearance: 'palette' };
 let ncHTML = '', tsOpen = false;
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
 const pings = new Map();
@@ -1315,6 +1323,18 @@ const G = {
       setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
     },
   },
+  updates: {
+    html: () => `<div class="card"><h2>Updates</h2><div id="upd"></div></div>
+      <div class="card"><h2>Update settings</h2>
+      <div class="fld"><span class="lb">Auto update</span><div class="sw"><input type="checkbox" role="switch" id="f-auto_update" data-k="auto_update" aria-label="Auto update" ${draft.auto_update ? 'checked' : ''}><span class="fg2 sm">Install a newer release on its own, once no VM is running. kiln checks every 6 hours.</span></div></div>
+      ${fld('f-update_repo', 'Release repo', `<input type="text" id="f-update_repo" data-k="update_repo" value="${esc(draft.update_repo || 'Bunty9/kiln')}" spellcheck="false" class="mono">`, "owner/name whose GitHub releases kiln installs. Only releases signed with kiln's release key are accepted, whatever the repo.")}</div>`,
+    open() { loadUpd(); },
+    live() {
+      const u = S.update || {};
+      if (UP && (UP.state !== u.state || UP.latest !== u.latest || UP.rollback !== u.rollback)) loadUpd();
+      setHTML($('#upd'), updHTML());
+    },
+  },
   // Stored in this browser only (localStorage), applied by the script in <head> before first paint.
   appearance: {
     html() {
@@ -1329,6 +1349,29 @@ const G = {
     },
   },
 };
+// GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
+let UP = null, upBusy = false;
+async function loadUpd() {
+  if (upBusy) return; upBusy = true;
+  try { UP = await api('/api/update'); } catch (e) { UP = { error: e.message }; } finally { upBusy = false; }
+  const el = $('#upd'); if (el) setHTML(el, updHTML());
+}
+const UPS = { checking: 'Checking for a release…', downloading: 'Downloading…', verifying: 'Verifying the signature…', draining: 'Draining:', applying: 'Restarting into the new version…' };
+function updHTML() {
+  const u = { ...(UP || {}), ...(S.update || {}) }, busy = UPS[u.state];
+  const fl = { gnu: 'glibc build', musl: 'static musl build' }[u.flavor] || '';
+  return `<dl class="kv"><dt>Running</dt><dd>kiln ${esc(S.version || '—')}${fl ? ` <span class="fg2 sm">· ${fl}</span>` : ''}</dd>
+    <dt>Latest</dt><dd>${u.latest ? `kiln ${esc(u.latest)}${u.published_at ? ` <span class="fg2 sm">· released ${esc(when(iso(u.published_at)))}</span>` : ''}` : '—'}</dd>
+    <dt>Checked</dt><dd>${u.checked_at ? relH(u.checked_at) : 'not yet'}${u.repo ? ` <span class="fg2 sm">· ${esc(u.repo)}</span>` : ''}</dd></dl>
+    ${u.rollback ? `<div class="cal">${esc(u.rollback)}</div>` : ''}
+    ${busy ? `<div class="cal a"><b>${busy}</b>${u.progress ? ' ' + esc(u.progress) : ''}</div>` : u.state === 'error' && u.error ? `<div class="cal">${esc(u.error)}</div>`
+      : u.available ? `<div class="cal a">kiln ${esc(u.latest)} is available.</div>` : u.latest ? '<div class="cal o">kiln is up to date.</div>' : ''}
+    ${u.available && u.notes ? `<details open><summary>Release notes</summary><pre class="raw" style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(u.notes)}</pre></details>` : ''}
+    <div class="bar" style="margin:16px 0 0"><button class="btn" data-act="updcheck" ${busy ? 'disabled' : ''}${tip('Ask GitHub for the latest release now. kiln also checks at startup and every 6 hours.')}>${ic('refresh')}Check now</button>
+    ${u.available && !busy ? `<button class="btn pri" data-act="updapply"${tip('Download and verify the release, let running jobs finish, then restart into it')}>${ic('update')}Update to ${esc(u.latest)}</button>` : ''}
+    ${u.state === 'draining' ? `<button class="btn dng" data-act="updcancel"${tip('Stop waiting and resume launching VMs. Nothing is replaced.')}>${ic('cancel')}Cancel update</button>` : ''}</div>
+    <p class="fg2 sm" style="margin-top:12px">Releases are signed: kiln installs a tarball only if its signature matches the release key built into this binary, then keeps the old binary next to the new one. If the new version fails to start twice, kiln puts the old one back.</p>`;
+}
 const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
   mount(r) {
@@ -1602,6 +1645,16 @@ const ACT = {
   },
   async install() { const e = installEv; if (!e) return; e.prompt(); await e.userChoice; installEv = null; $('#inst').hidden = true; },
   doctor() { doctor = null; return runDoctor(); },
+  async updcheck() {
+    UP = await post('/api/update/check'); await poll();
+    if (UP.state === 'error') toast(UP.error, true); else toast(UP.available ? `kiln ${UP.latest} is available` : 'kiln is up to date');
+  },
+  async updapply() {
+    const u = S.update || {}, n = S.vms.filter(ACTIVE).length;
+    if (!await ask({ title: `Update to kiln ${u.latest}?`, action: 'Update', body: `kiln downloads the release and checks its signature, then drains: it starts no new VMs (warm ones included) and waits for ${n ? `the <b>${n} running VM${n > 1 ? 's' : ''}</b>` : 'running jobs'} to finish, at most the job timeout (${+S.config.job_timeout_mins} min). Queued jobs wait meanwhile. Then kiln restarts into the new version, which takes a few seconds, and this page reloads. You can cancel while it drains.` })) return;
+    await post('/api/update/apply'); toast('Update started'); await poll(); loadUpd();
+  },
+  async updcancel() { await post('/api/update/cancel'); toast('Update cancelled. Launching resumes.'); await poll(); loadUpd(); },
   look(b) { lsSet('kiln-' + b.dataset.id, b.dataset.v === { theme: 'system', density: 'comfortable', accent: 'ember' }[b.dataset.id] ? null : b.dataset.v); kilnAppearance(); pages.settings.render(); $(`[data-act=look][data-id=${b.dataset.id}][aria-checked=true]`)?.focus(); },
   motion(b) { lsSet('kiln-motion', b.checked ? 'reduce' : null); kilnAppearance(); },
   egress(b) { draft.egress = b.dataset.id; pages.settings.render(); },

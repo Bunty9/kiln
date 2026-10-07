@@ -56,6 +56,8 @@ install -Dm644 kiln-0.1.0-x86_64-linux/deploy/kiln.service ~/.config/systemd/use
 kiln --version
 ```
 
+On a host older than glibc 2.39, use the static build `kiln-*-x86_64-linux-musl.tar.gz` instead (from the first release that ships it). Each tarball also has a `.sig`, the Ed25519 signature kiln checks when it updates itself.
+
 ### Or build from source
 
 ```sh
@@ -108,6 +110,10 @@ The label picks the VM size. Plain `kiln` gets the default size (`vm_cpus` / `vm
 
 kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this way. For stack compatibility (Node, Python, Go, Rust, Java, Docker, Playwright and more), pricing and migration tips, see [docs/stacks.md](docs/stacks.md).
 
+## Updates
+
+kiln updates itself from signed GitHub releases: Settings › Updates shows when a new version is out, with its release notes. **Update** downloads the release, checks its Ed25519 signature against the key built into kiln, lets running jobs finish (no new VMs start meanwhile), swaps the binary and restarts in place. If the new version fails to start twice, kiln restores the previous one. Set `auto_update` to install new releases on its own when the box is idle. Each release ships a glibc build and a fully static musl build; kiln updates to the same kind it is. Details: [docs/configuration.md](docs/configuration.md#updates).
+
 ## Dashboard tour
 
 A first-run stepper takes over until kiln is set up. After that there are four pages:
@@ -115,7 +121,7 @@ A first-run stepper takes over until kiln is set up. After that there are four p
 - **Overview:** health banners only when something needs you (token, image, backoff, rate limit, memory, mirror), one "chamber" per VM slot with live timers, jobs today, failures, median job time and an estimate of minutes saved against GitHub-hosted prices.
 - **Jobs:** every job VM, filterable. The detail page shows a queue, boot, wait and job timeline, the exit reason, and three log sources: live **console**, live **steps** (the runner's `_diag/pages`, mirrored over a second serial port) and the **GitHub** log once the job finishes. ANSI colour, follow, wrap, copy, download, and a Kill button.
 - **Repos:** connected repos, whether jobs actually route to kiln, workflows (with dispatch), recent runs (rerun or cancel), jobs and steps.
-- **Settings:** capacity (and pause), timeouts, access, GitHub token, image (rebake, Docker mirror, auto-rebake), cache, debugging, network (egress mode, Tailscale peers, ping, netcheck, HTTPS serve), notifications and diagnostics (the same checks as `kiln doctor`).
+- **Settings:** capacity (and pause), timeouts, access, GitHub token, image (rebake, Docker mirror, auto-rebake), cache, debugging, network (egress mode, Tailscale peers, ping, netcheck, HTTPS serve), notifications, diagnostics (the same checks as `kiln doctor`) and updates.
 
 The tab title and favicon show running jobs and unseen failures. Opt-in browser notifications for failed jobs need HTTPS.
 
@@ -143,6 +149,7 @@ Settings live in `~/.local/share/kiln/config.json` (override the directory with 
 | `docker_mirror` | `true` | Docker Hub pull-through cache |
 | `warm` | `{}` | pre-booted idle VMs per repo |
 | `debug_hold_mins` | `0` | keep failed jobs for SSH |
+| `auto_update` | `false` | install new signed releases when idle |
 
 The full reference (every field, range, live-versus-restart behaviour, environment variables, the data directory layout and CLI commands) is in [docs/configuration.md](docs/configuration.md).
 

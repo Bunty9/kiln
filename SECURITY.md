@@ -62,6 +62,14 @@ Console lines may shape the timeline but cannot rewind state or extend a VM's li
 
 kiln launches no VM, warm ones included, on a base image baked from an older recipe than the binary expects (`recipe` in `images/base.json`), since such an image may lack the fork-refusal hook. The dashboard shows why, and `auto_rebake` (or Settings › Image) replaces the image. The bake refuses an `actions/runner` release tag that is not `N.N.N`, checks each Node tarball against the release's `SHASUMS256.txt` from nodejs.org before unpacking it, and accepts only plain apt package names in `bake_apt_packages` (no trailing `-` or `+`, which apt reads as remove or install, and no `=` or `/` version pins). The Node checksum guards against a corrupted or swapped tarball, not against nodejs.org itself, since the sums come from the same origin over HTTPS.
 
+### Self-update
+
+kiln installs only releases signed with its release key. Release CI signs each tarball's bytes with an Ed25519 key held in a GitHub Actions secret (written to disk only as a mode 0600 temporary file, removed in the same step); the public key is compiled into kiln. Before unpacking anything, kiln verifies the signature, then the tarball's SHA-256, then lists the archive and extracts only the `kiln` binary, which must report the release's version (so an old signed build relabelled as a new release is refused). A compromised GitHub account, release page or `update_repo` setting cannot make kiln run an unsigned binary; what it can do is withhold updates. Updates are applied only from the dashboard (or `auto_update`), behind the access guard.
+
+**Who can sign:** the release workflow signs whatever a `v*` tag points at, so anyone who can push such a tag to the repository can produce a signed release, but only of a commit already on `main` (the workflow refuses otherwise) and only when the tag matches `Cargo.toml`'s version. Protect `main` and restrict who can push `v*` tags (a tag ruleset) accordingly. The key reaches only the signing step, which runs after the build and packaging, runs no project code and fetches nothing; the next step checks every signature against the public key in `src/update.rs`, so a wrong key never publishes.
+
+**Key rotation:** a kiln trusts only the key it was built with. Releases signed with a new key are refused by older kilns, so after a rotation install one release by hand; later updates are automatic again. If the private key leaks, rotate it and reinstall by hand everywhere, since every kiln built with the old key would accept a release signed with it.
+
 ### Docker mirror
 
 The mirror listens on host loopback only and is a pull-only proxy of public Docker Hub images. It holds no credentials and cannot be pushed to. The registry binary it runs is pinned by version and SHA-256, and a different download is refused.

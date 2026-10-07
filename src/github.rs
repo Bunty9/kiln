@@ -92,7 +92,8 @@ impl Gh {
     /// runner release lookup, which goes unauthenticated so a bake works before any
     /// installation exists. Other paths use any installation, or none if there is none.
     /// The App JWT is never handed out here: only `mint`, `discover` and `app_info` use it.
-    async fn token_for(&self, path: &str) -> Result<String> {
+    /// `anon_unserved`: an unserved repo goes unauthenticated instead (update releases).
+    async fn token_for(&self, path: &str, anon_unserved: bool) -> Result<String> {
         let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
         if crate::app_auth::is_public(path) {
             return Ok(String::new());
@@ -102,6 +103,7 @@ impl Gh {
         let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap());
         match (inst, crate::app_auth::repo_of(path)) {
             (Some(i), Some(_)) => self.mint(&a, i).await,
+            (None, Some(_)) if anon_unserved => Ok(String::new()),
             (None, Some(r)) => {
                 found?;
                 bail!(
@@ -133,7 +135,19 @@ impl Gh {
     }
 
     async fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
-        Ok(self.request_with(&self.token_for(path).await?, method, path))
+        Ok(self.request_with(&self.token_for(path, false).await?, method, path))
+    }
+
+    /// GET from the update repo's releases (update.rs): the token, or in App mode the serving
+    /// installation's, else unauthenticated (a public repo). `asset` downloads a release asset
+    /// (follows the redirect to blob storage, which gets no auth header).
+    pub async fn release(&self, path: &str, asset: bool) -> Result<reqwest::Response> {
+        let mut req = self.request_with(&self.token_for(path, true).await?, Method::GET, path).build()?;
+        if asset {
+            req.headers_mut().insert(header::ACCEPT, header::HeaderValue::from_static("application/octet-stream"));
+            *req.timeout_mut() = Some(std::time::Duration::from_secs(600));
+        }
+        self.exec(reqwest::RequestBuilder::from_parts(self.http.clone(), req)).await
     }
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {

@@ -40,7 +40,7 @@ fn config_yaml(data: &Path) -> String {
 }
 
 /// `sha256sum` output ("<hex>  <file>") against the pinned digest.
-fn sha_matches(out: &str, want: &str) -> bool {
+pub fn sha_matches(out: &str, want: &str) -> bool {
     out.split_whitespace().next().is_some_and(|h| h.eq_ignore_ascii_case(want))
 }
 

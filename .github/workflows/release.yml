@@ -1,37 +1,93 @@
-# Tag vX.Y.Z on main to publish a release. Built on kiln itself (Ubuntu 24.04 VM),
-# so the binary needs glibc 2.39+ (Ubuntu 24.04, Debian 13 or newer).
+# Tag vX.Y.Z on a main commit to publish a release. Built on kiln itself (Ubuntu 24.04 VM):
+# kiln-X.Y.Z-x86_64-linux.tar.gz needs glibc 2.39+ (Ubuntu 24.04, Debian 13 or newer);
+# kiln-X.Y.Z-x86_64-linux-musl.tar.gz is fully static and runs on any x86_64 Linux.
+# Each tarball has a .sha256 and a .sig (raw Ed25519 signature of the tarball's bytes with the
+# key in the KILN_RELEASE_SIGNING_KEY secret); running kilns install only signed releases.
+# Only the Sign step sees the key: it runs after everything is built and packaged, executes no
+# project code, and fetches nothing.
 name: release
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
     runs-on: [self-hosted, kiln]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        run: curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
-      - name: Check tag matches Cargo.toml
+        with:
+          fetch-depth: 0
+      - name: Check the tag is on main and matches Cargo.toml
         run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main: refusing to sign it"; exit 1; }
           want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $want"; exit 1; }
+      - name: Install Rust
+        run: |
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env" && rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update -q && sudo apt-get install -y musl-tools
       - name: Build
-        run: . "$HOME/.cargo/env" && cargo build --release --locked && ./target/release/kiln --version
+        env:
+          # ring's C code; cc-rs would otherwise look for x86_64-linux-musl-gcc first.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked && ./target/release/kiln --version
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          bin=target/x86_64-unknown-linux-musl/release/kiln
+          "$bin" --version
+          # Rust's musl binaries are static-pie: file says "static-pie linked", ldd "statically linked".
+          f=$(file "$bin"); l=$(ldd "$bin" 2>&1 || true)
+          echo "$f"; echo "$l"
+          echo "$f" | grep -Eq 'static(-pie|ally) linked' && ! echo "$f" | grep -q interpreter || { echo "musl build is not static"; exit 1; }
+          echo "$l" | grep -Eq 'not a dynamic executable|statically linked' || { echo "musl build is not static"; exit 1; }
       - name: Package
         run: |
-          name="kiln-${GITHUB_REF_NAME#v}-x86_64-linux"
-          mkdir -p "dist/$name"
-          cp target/release/kiln README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
-          cp -r deploy "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          v="${GITHUB_REF_NAME#v}"
+          for flavor in ":target/release/kiln" "-musl:target/x86_64-unknown-linux-musl/release/kiln"; do
+            name="kiln-$v-x86_64-linux${flavor%%:*}"
+            mkdir -p "dist/$name"
+            cp "${flavor#*:}" README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+            cp -r deploy "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          done
+      - name: Sign
+        env:
+          KEY: ${{ secrets.KILN_RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "secret KILN_RELEASE_SIGNING_KEY is not set"; exit 1; }
+          umask 077
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$KEY" > "$key"
+          for t in dist/*.tar.gz; do
+            /usr/bin/openssl pkeyutl -sign -inkey "$key" -rawin -in "$t" -out "$t.sig"
+          done
+          rm -f "$key"
+      - name: Verify signatures with the key kiln embeds
+        # A wrong secret must never publish: check against PUBLIC_KEY in src/update.rs, as kiln will.
+        run: |
+          raw=$(sed -n 's/^pub const PUBLIC_KEY: &str = "\(.*\)";/\1/p' src/update.rs)
+          [ -n "$raw" ] || { echo "PUBLIC_KEY not found in src/update.rs"; exit 1; }
+          pub=$(mktemp)
+          # SubjectPublicKeyInfo DER for Ed25519 = fixed 12-byte prefix + the raw 32-byte key.
+          { printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; printf '%s' "$raw" | base64 -d; } > "$pub"
+          [ "$(wc -c < "$pub")" -eq 44 ] || { echo "PUBLIC_KEY is not a raw 32-byte key"; exit 1; }
+          for t in dist/*.tar.gz; do
+            [ "$(wc -c < "$t.sig")" -eq 64 ] || { echo "$t.sig is not a 64-byte Ed25519 signature"; exit 1; }
+            openssl pkeyutl -verify -pubin -keyform DER -inkey "$pub" -rawin -in "$t" -sigfile "$t.sig" \
+              || { echo "$t: signature does not verify with kiln's embedded key (wrong KILN_RELEASE_SIGNING_KEY?)"; exit 1; }
+          done
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md)
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 --title "kiln $GITHUB_REF_NAME" --notes "${notes:-See CHANGELOG.md}"
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 dist/*.sig --title "kiln $GITHUB_REF_NAME" --notes "${notes:-See CHANGELOG.md}"
