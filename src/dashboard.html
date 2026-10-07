@@ -232,6 +232,7 @@ input[role=switch]:disabled{opacity:.5;cursor:default}
 .empty>.i{width:28px;height:28px;color:var(--fg-3);stroke-width:1.25}
 .empty p{max-width:60ch}
 .empty .acts{display:flex;flex-wrap:wrap;gap:8px}
+.empty.card{padding:24px var(--pad)}
 /* job page and the firing log (timeline) */
 .jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:12px;color:var(--fg-2)}
 .tl{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--sunk)}
@@ -560,7 +561,17 @@ const post = (p, body) => api(p, { method: 'POST', body });
 const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
 // Served repos: the GitHub App's installations in App mode, else the configured list.
 const REPOS = () => S.app ? S.app.repos : S.config.repos;
-const appInstall = () => S.app ? `<a class="btn" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">Install on repos${ic('ext')}</a>` : '';
+// Per-repo maps (warm, cache_branches, repo_cache_gb) are keyed by owner/name; GitHub names are
+// case-insensitive, so read and replace entries ignoring case.
+const ciGet = (m, r) => Object.entries(m || {}).find(([k]) => k.toLowerCase() === r.toLowerCase())?.[1];
+const ciPut = (m, r, v) => { const o = Object.fromEntries(Object.entries(m || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())); if (v != null) o[r] = v; return o; };
+const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip('Ask GitHub now which repos the App is installed on. kiln also checks every 5 minutes.')}>${ic('refresh')}Refresh</button>` : '';
+// Accounts whose installations kiln serves: the App's owner plus app_accounts.
+const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_accounts || [])].filter(Boolean))];
+// A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
+let appConv = null;
+const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › GitHub.')}>Dismiss</button></div>`;
+const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
   s.textContent = msg; t.innerHTML = ic(bad ? 'alert' : 'check'); t.append(s);
@@ -710,18 +721,23 @@ function parse() {
   return { page: seg[0] || 'overview', seg: seg.slice(1), q: new URLSearchParams(q || '') };
 }
 // GitHub's manifest flow sends the browser back to /?code=…&state=….
+// The URL keeps code and state until the conversion succeeds, so a failure can be retried.
+// No window.open here: after an await it is popup-blocked. Settings › GitHub shows the install button instead.
 async function appCallback() {
   const q = new URLSearchParams(location.search);
-  history.replaceState(null, '', location.pathname + '#/settings/github');
+  appConv = { busy: true };
   try {
     const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
-    toast(`GitHub App ${r.slug} created. Now install it on your repos.`); await poll();
-    if (r.html_url) window.open(r.html_url + '/installations/new', '_blank', 'noopener');
-  } catch (e) { toast(String(e.message || e), true); }
+    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/github');
+    toast(`GitHub App ${r.slug || ''} created. Install it on your repos next.`); await poll();
+  } catch (e) {
+    appConv = { err: String(e.message || e) };
+    history.replaceState(null, '', location.pathname + location.search + '#/settings/github');
+  }
   route();
 }
 function route() {
-  if (new URLSearchParams(location.search).get('code')) return void appCallback();
+  if (new URLSearchParams(location.search).get('code') && !appConv) return void appCallback();
   cur?.unmount?.(); closePop();
   const r = parse(), pg = pages[r.page] || pages.overview;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
@@ -782,7 +798,8 @@ function banners() {
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
   const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
   if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
-  else if (/401|Bad credentials/i.test(err)) B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
+  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/github'))
+    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
   if (S.baking) {
     const i = bakeIdx(), last = plain(bk.text.trim().split('\n').pop() || '');
     B('ember', `<b>Baking image</b> · elapsed ${dur((Date.now() - bk.t0) / 1000)}, usually ~4 min
@@ -804,9 +821,10 @@ function banners() {
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
   if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
-  else if (S.app && !S.app.repos.length) B('warn', 'The GitHub App is not installed on any repo yet.', appInstall());
+  else if (S.app && !S.app.repos.length) b.push(`<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> kiln serves exactly the repos the GitHub App is installed on, and it is on none yet.</span>${appInstall(1)}</div>`);
   else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
+  if (appConv?.err) b.unshift(appConvHTML());
   return b;
 }
 // Status line in the page header: always present, so banners never move the title.
@@ -1052,7 +1070,8 @@ class Log {
 /* ---------- repos ---------- */
 const lastRun = {};
 const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
-const repoErr = e => e.status === 404 ? 'Repo not found or token lacks access.' : e.message;
+const repoErr = e => e.status === 404 ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
+  : e.status === 401 ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
 function addRepo(raw) {
   const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
@@ -1069,7 +1088,7 @@ const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs
 pages.repos = {
   mount(r) {
     this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null;
-    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? `<p class="fg2" style="margin:16px 0 8px">Repos come from the GitHub App's installations.</p>${appInstall()}` : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
+    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
     $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
@@ -1100,12 +1119,14 @@ pages.repos = {
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
           <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
-      }).join('')}</ul>` : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
+      }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 5 minutes.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
+        : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
+      if ($('#rl-app')) setHTML($('#rl-app'), rs.length ? `<p class="fg2 sm" style="margin:16px 0 8px">These are the repos the GitHub App is installed on. Install or uninstall it on GitHub to change the list.</p><div class="bar">${appInstall()}${appRefresh()}</div>` : '');
       return;
     }
-    const wn = (S.config.warm || {})[this.r] || 0;
-    const cb = ((S.config.cache_branches || {})[this.r] || []).join(', ');
-    const cg = Object.entries(S.config.repo_cache_gb || {}).find(([k]) => k.toLowerCase() === this.r.toLowerCase())?.[1];
+    const wn = ciGet(S.config.warm, this.r) || 0;
+    const cb = (ciGet(S.config.cache_branches, this.r) || []).join(', ');
+    const cg = ciGet(S.config.repo_cache_gb, this.r);
     setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
     setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button></div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>'));
@@ -1175,13 +1196,16 @@ const G = {
       <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p></div>`,
     live() {
       const a = S.app;
-      setHTML($('#app-st'), a ? `<dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)} ↗</a></dd>
-        <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? rel(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}</dl>
-        <div class="bar" style="margin:0">${appInstall()}<button class="btn dng" data-act="rmapp"${tip('Go back to token auth. The App stays on GitHub.')}>${ic('trash')}Remove App</button></div>
+      const acc = a ? appAccounts(a) : [];
+      setHTML($('#app-st'), appConvHTML() + (a ? `${a.repos.length ? '' : `<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> It is on none yet, so kiln has nothing to serve.</span>${appInstall(1)}</div>`}
+        <dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)}</a></dd>${a.owner ? `<dt>Owner</dt><dd>${esc(a.owner)}</dd>` : ''}
+        <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? relH(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}</dl>
+        ${acc.length ? `<p class="fg2 sm" style="margin-bottom:12px">Only installations on ${acc.map(x => `<b>${esc(x)}</b>`).join(', ')} are served. Installing the App on another account does nothing until that account is added to <span class="mono">app_accounts</span>.</p>` : ''}
+        <div class="bar" style="margin:0">${a.repos.length ? appInstall() : ''}${appRefresh()}<span class="sp"></span><button class="btn dng" data-act="rmapp"${tip('Go back to token auth. The App stays on GitHub.')}>${ic('trash')}Remove App</button></div>
         <p class="fg2 sm" style="margin-top:8px">kiln uses the App's installation tokens (they expire after an hour); the token below is not used.</p>`
       : `<p class="fg2" style="margin-bottom:12px">Safer than a token: the App gets only the permissions kiln needs, never write access to code, and its tokens expire after an hour. Installing it on a repo is what makes kiln serve that repo.</p>
         <div class="bar" style="margin:0"><label class="sr" for="app-org">Organization</label><input id="app-org" placeholder="org (empty = your account)" style="width:220px"><button class="btn pri" data-act="mkapp"${tip('Opens GitHub with the App already filled in. You confirm there, then come back here.')}>Create GitHub App</button></div>
-        <details style="margin-top:12px"><summary>Use an existing App</summary><form data-form="appmanual" class="bar" style="margin:8px 0 0"><label class="sr" for="app-id">App ID</label><input id="app-id" type="number" min="1" placeholder="App ID" style="width:120px" required><label class="sr" for="app-pem">Private key</label><input id="app-pem" type="file" accept=".pem" required><button class="btn">Save</button></form></details>`);
+        <details style="margin-top:12px"><summary>Use an existing App</summary><form data-form="appmanual" class="bar" style="margin:8px 0 0"><label class="sr" for="app-id">App ID</label><input id="app-id" type="number" min="1" placeholder="App ID" style="width:120px" required><label class="sr" for="app-pem">Private key</label><input id="app-pem" type="file" accept=".pem" required><button class="btn">Save</button></form></details>`));
       const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
@@ -1346,7 +1370,8 @@ pages.setup = {
         <p class="fg2">${ok ? 'Next: close or merge the test PR, then <a href="#/guides/move">move a real workflow →</a>' : 'kiln worked; the workflow failed. <a href="#/guides/debug">Debug a failed job →</a>'}</p>`);
     }
     const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
-    const sum = [tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected', `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+    const sum = [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
+      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › GitHub.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
       const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
@@ -1360,14 +1385,19 @@ pages.setup = {
         ${S.image_ready ? '' : '<p class="fg2 sm">The job starts as soon as the image is ready.</p>'}
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
-    const B = [
+    const B = S.app ? [
+      `<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/github">Settings › GitHub</a>.</p>`,
+      `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 5 minutes, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
+      test(),
+    ] : [
       `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
        <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
-       <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}`,
+       <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}
+       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/github">Create one in Settings › GitHub</a>.</p>`,
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', 'Choose a repo', 'Run a test job'].map((t, i) => {
+    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
       const d = done[i] && i !== open;
       return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
@@ -1440,6 +1470,16 @@ const ACT = {
     await api('/api/app', { method: 'DELETE' }); toast('GitHub App removed'); await poll();
   },
   retry() { fails = 0; poll(); },
+  async apprefresh(b) {
+    b.setAttribute('aria-busy', 'true');
+    try {
+      const a = await post('/api/app/refresh'); if (S.app && a) Object.assign(S.app, a); await poll();
+      if (a?.error) toast('GitHub App: ' + a.error, true); else toast(`The App is installed on ${a?.repos?.length ?? 0} repo${a?.repos?.length === 1 ? '' : 's'}`);
+    } catch (e) { throw e.status === 404 || e.status === 405 ? new Error('This kiln cannot refresh on demand yet. It checks every 5 minutes.') : e; }
+    finally { b.removeAttribute('aria-busy'); }
+  },
+  appretry() { appConv = null; return appCallback(); },
+  appdismiss() { appConv = null; history.replaceState(null, '', location.pathname + location.hash); route(); },
   async bake() { await post('/api/bake'); S.baking = true; bk.was = false; toast('Bake started'); setTimeout(poll, 300); },
   async rebake() {
     const n = S.vms.filter(ACTIVE).length;
@@ -1490,7 +1530,7 @@ const ACT = {
   async rmrepo(b) {
     const r = b.dataset.id;
     if (!await ask({ title: 'Remove repo?', body: `Stop picking up jobs from <b>${esc(r)}</b>? Running jobs finish.`, action: `Remove ${r}`, danger: 1 })) return;
-    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), cache_branches: Object.fromEntries(Object.entries(S.config.cache_branches || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), repo_cache_gb: Object.fromEntries(Object.entries(S.config.repo_cache_gb || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
+    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: ciPut(S.config.warm, r), cache_branches: ciPut(S.config.cache_branches, r), repo_cache_gb: ciPut(S.config.repo_cache_gb, r) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
   runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
@@ -1578,24 +1618,21 @@ document.addEventListener('submit', async e => {
     if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast('Rate saved'); }
     else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
     else if (k === 'warm') {
-      const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), w = { ...(S.config.warm || {}) }, r = pages.repos.r;
-      if (n) w[r] = n; else delete w[r];
-      await saveCfg({ ...S.config, warm: w }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
+      const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), r = pages.repos.r;
+      await saveCfg({ ...S.config, warm: ciPut(S.config.warm, r, n || null) }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
     }
     else if (k === 'appmanual') {
       const pem = await $('#app-pem').files[0].text(), r = await post('/api/app', { id: +$('#app-id').value, pem });
       toast(`Using GitHub App ${r.slug || ''}`); await poll();
     }
     else if (k === 'cachebr') {
-      const r = pages.repos.r, list = inp.value.split(',').map(x => x.trim()).filter(Boolean), m = { ...(S.config.cache_branches || {}) };
-      if (list.length) m[r] = list; else delete m[r];
-      await saveCfg({ ...S.config, cache_branches: m }); toast(list.length ? `Cache branches for ${r}: ${list.join(', ')}` : 'Only the default branch saves the cache');
+      const r = pages.repos.r, list = inp.value.split(',').map(x => x.trim()).filter(Boolean);
+      await saveCfg({ ...S.config, cache_branches: ciPut(S.config.cache_branches, r, list.length ? list : null) }); toast(list.length ? `Cache branches for ${r}: ${list.join(', ')}` : 'Only the default branch saves the cache');
     }
     else if (k === 'cachegb') {
-      const r = pages.repos.r, n = Math.round(+inp.value) || 0, m = Object.fromEntries(Object.entries(S.config.repo_cache_gb || {}).filter(([x]) => x.toLowerCase() !== r.toLowerCase()));
+      const r = pages.repos.r, n = Math.round(+inp.value) || 0;
       if (n && (n < 5 || n > 500)) return toast('Cache size must be 5 to 500 GB', true);
-      if (n) m[r] = n;
-      await saveCfg({ ...S.config, repo_cache_gb: m }); toast(n ? `Cache size for ${r}: ${n} GB` : `Cache size for ${r}: global ${S.config.cache_gb} GB`);
+      await saveCfg({ ...S.config, repo_cache_gb: ciPut(S.config.repo_cache_gb, r, n || null) }); toast(n ? `Cache size for ${r}: ${n} GB` : `Cache size for ${r}: global ${S.config.cache_gb} GB`);
     }
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {
