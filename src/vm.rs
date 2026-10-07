@@ -1257,6 +1257,12 @@ pub async fn bake(app: Arc<App>) -> Result<()> {
     if app.baking.swap(true, Ordering::SeqCst) {
         bail!("a bake is already running");
     }
+    // Checked after claiming `baking` (SeqCst): a drain that saw `baking` false has set
+    // `draining` before, so no bake slips in between a finished drain and the re-exec.
+    if let Some(why) = bake_refused(app.draining.load(Ordering::SeqCst), app.stopping.load(Ordering::SeqCst)) {
+        app.baking.store(false, Ordering::SeqCst);
+        bail!("{why}");
+    }
     // Held until the bake ends; also keeps a second kiln process out.
     let lock = std::fs::OpenOptions::new().create(true).append(true).open(images(&app.data).join("bake.lock"));
     let lock = lock.map_err(anyhow::Error::from).and_then(|f| match f.try_lock() {
@@ -1277,6 +1283,17 @@ pub async fn bake(app: Arc<App>) -> Result<()> {
     }
     app.baking.store(false, Ordering::SeqCst);
     r
+}
+
+/// Why a bake may not start now: an update drains (and re-execs) or kiln stops.
+pub fn bake_refused(draining: bool, stopping: bool) -> Option<&'static str> {
+    if stopping {
+        Some("kiln is stopping")
+    } else if draining {
+        Some("kiln is updating")
+    } else {
+        None
+    }
 }
 
 async fn append(path: &Path, s: &str) -> Result<()> {
@@ -2003,6 +2020,14 @@ mod tests {
         assert_eq!(launch_split(2, 2, 1), (0, 1));
         assert_eq!(launch_split(5, 0, 0), (5, 0));
         assert_eq!((surplus(3, 1, 1), surplus(2, 1, 1), surplus(1, 2, 1), surplus(2, 0, 0)), (1, 0, 0, 2));
+    }
+
+    #[test]
+    fn no_bake_while_updating_or_stopping() {
+        assert_eq!(bake_refused(false, false), None);
+        assert_eq!(bake_refused(true, false), Some("kiln is updating"));
+        assert_eq!(bake_refused(false, true), Some("kiln is stopping"));
+        assert!(bake_refused(true, true).is_some());
     }
 
     #[test]

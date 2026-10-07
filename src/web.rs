@@ -510,8 +510,13 @@ async fn onboard_hello(State(app): S, Json(b): Json<RepoBody>) -> R<Json<Value>>
 }
 
 async fn bake(State(app): S) -> R<StatusCode> {
-    if app.baking.load(std::sync::atomic::Ordering::Relaxed) {
+    use std::sync::atomic::Ordering::SeqCst;
+    if app.baking.load(SeqCst) {
         return Err(anyhow!("already baking").into());
+    }
+    // vm::bake refuses too; checked here so the dashboard gets the reason.
+    if let Some(why) = vm::bake_refused(app.draining.load(SeqCst), app.stopping.load(SeqCst)) {
+        return Err(anyhow!("{why}").into());
     }
     tokio::spawn(async move {
         if let Err(e) = vm::bake(app).await {

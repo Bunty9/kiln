@@ -589,7 +589,8 @@ fn should_rebake(cfg: &Config, stale: bool, baking: bool, t: u64, last: u64) -> 
 fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     static LAST: AtomicU64 = AtomicU64::new(0);
     let stale = vm::image_info(&app.data, app.gh.latest_cached(), cfg)["stale"] == true;
-    let baking = app.baking.load(Ordering::SeqCst);
+    // vm::bake would refuse: do not spend the 6 h slot on it.
+    let baking = app.baking.load(Ordering::SeqCst) || app.draining.load(Ordering::SeqCst);
     if !should_rebake(cfg, stale, baking, now(), LAST.load(Ordering::Relaxed)) {
         return;
     }

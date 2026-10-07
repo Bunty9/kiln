@@ -274,9 +274,12 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
             if !app.draining.load(Ordering::SeqCst) {
                 (s.state, s.progress) = ("idle", None);
                 true
-            } else if (active == 0 && !baking) || now() >= deadline {
+            } else if drain_done(active, baking, now(), deadline) {
                 (s.state, s.progress) = ("applying", None);
                 break;
+            } else if now() >= deadline {
+                s.progress = Some("waiting for a bake to finish".into());
+                false
             } else {
                 let bake = if baking { ", and a bake" } else { "" };
                 s.progress = Some(format!(
@@ -318,6 +321,12 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     // Past shutdown there is no going back: let systemd start the new binary.
     tracing::error!("re-exec {}: {e:#}; exiting so the service manager restarts kiln", exe.display());
     std::process::exit(1)
+}
+
+/// The drain is over once no VM runs, or at the deadline (shutdown stops what still runs).
+/// A bake is always waited for (it has its own 30 min cap): killing it mid-way is messier.
+fn drain_done(active: usize, baking: bool, t: u64, deadline: u64) -> bool {
+    !baking && (active == 0 || t >= deadline)
 }
 
 fn dur(s: u64) -> String {
@@ -540,6 +549,16 @@ mod tests {
         assert!(!archive_ok(&format!("{ok}other/kiln\n"), s));
         assert!(!archive_ok(&format!("{ok}kiln-0.2.0-x86_64-linux-evil/kiln\n"), s));
         assert!(!archive_ok("", s));
+    }
+
+    #[test]
+    fn drain_waits_for_a_bake() {
+        assert!(drain_done(0, false, 10, 100));
+        assert!(!drain_done(1, false, 10, 100), "a VM still runs");
+        assert!(drain_done(1, false, 100, 100), "deadline: VMs are stopped by shutdown");
+        assert!(!drain_done(0, true, 10, 100), "a bake runs");
+        assert!(!drain_done(0, true, 500, 100), "past the deadline a bake is still waited for");
+        assert!(!drain_done(3, true, 500, 100));
     }
 
     #[test]
