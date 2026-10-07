@@ -20,7 +20,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 |---|---|---|---|---|---|
 | `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. The dashboard tells you when a restart is required. |
 | `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
-| `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. |
+| `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. On an arm64 host (Apple Silicon) VMs register `<label>-arm64` and `<label>-arm64-<N>cpu` instead, never the plain label. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
 
 ### Capacity and sizes
@@ -47,7 +47,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `docker_mirror` | bool | `true` | | live (within seconds) | Run the Docker Hub pull-through cache. On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (SHA-256 verified, refused on a mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000`. Images are cached for 7 days. If port 5000 is taken kiln leaves it alone and reports "port 5000 in use". VMs reach it at `10.0.2.2:5000` and dockerd falls back to Docker Hub when it is down. Restart backoff is 5 s growing to 60 s. |
+| `docker_mirror` | bool | `true` | | live (within seconds) | Run the Docker Hub pull-through cache (Linux only: ignored on macOS, where VMs pull from Docker Hub directly). On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (SHA-256 verified, refused on a mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000`. Images are cached for 7 days. If port 5000 is taken kiln leaves it alone and reports "port 5000 in use". VMs reach it at `10.0.2.2:5000` and dockerd falls back to Docker Hub when it is down. Restart backoff is 5 s growing to 60 s. |
 | `mirror_gb` | integer | `20` | `1` to `500` | live | Cap on the mirror's storage. Every 10 minutes kiln measures `<data>/registry/data`; over the cap it stops the registry, deletes the data and restarts it. There is no LRU, wiping is acceptable for a cache that refills. |
 
 ### Repo cache
@@ -71,7 +71,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Switching to `filtered` triggers a probe at once; if it fails no jobs launch (never a fallback to open). Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
+| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Linux only: refused on macOS. Switching to `filtered` triggers a probe at once; if it fails no jobs launch (never a fallback to open). Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
 
 ### Debugging
 
@@ -121,7 +121,7 @@ kiln can update itself from GitHub releases (Settings › Updates, or `POST /api
 
 **Applying an update:**
 
-1. **Download** the tarball for this build: `kiln-X.Y.Z-x86_64-linux.tar.gz` for the glibc build, `kiln-X.Y.Z-x86_64-linux-musl.tar.gz` for the static musl build (Settings › Updates shows which one runs), with its `.sha256` and `.sig`.
+1. **Download** the tarball for this build: `kiln-X.Y.Z-x86_64-linux.tar.gz` for the glibc build, `kiln-X.Y.Z-x86_64-linux-musl.tar.gz` for the static musl build, `kiln-X.Y.Z-aarch64-macos.tar.gz` on Apple Silicon (Settings › Updates shows which one runs), with its `.sha256` and `.sig`.
 2. **Verify** the Ed25519 signature against the release key built into the running kiln, then the SHA-256. Anything unsigned, signed with another key or corrupted is refused before it is unpacked. Only the `kiln` binary is extracted, and it must report the release's version.
 3. **Drain:** kiln launches no new VMs (warm ones included), reaps idle ones, and waits for running jobs to finish, at most the job timeout plus 2 minutes; whatever still runs then is stopped as on a normal shutdown. A running bake is always waited for (it has its own 30-minute cap), and no bake can start while kiln drains. VMs held for debugging (`debug_hold_mins`) keep `auto_update` from starting, but not a manual update: its drain waits for them like for running jobs, up to the same deadline. Queued jobs wait. **Cancel** (Settings › Updates or the Overview banner, `POST /api/update/cancel`) stops a drain and resumes launching.
 4. **Restart:** the executable is replaced atomically (the old one is kept as `<exe>.prev`, for example `~/.local/bin/kiln.prev`) and kiln re-executes itself in place with the same arguments. Under systemd the PID stays the same, so the unit sees no restart. Open dashboards reload themselves, including an installed app showing a page it kept from the old version.
@@ -220,5 +220,5 @@ kiln --version    print the version (also -V and version)
 
 - `kiln serve` is what the systemd unit runs. Only `serve` touches leftovers from a previous run, so `bake` and `doctor` are safe to run next to a live `serve`.
 - `kiln bake` downloads the Ubuntu 24.04 cloud image and matching kernel (re-downloading only changed files), fetches the latest actions/runner version, boots a bake VM that runs the recipe in `guest/user-data.yaml`, and swaps the result into `images/` atomically. It takes about 5 minutes and times out after 30. Bake VMs always use open networking. Running job VMs keep using the old base until they exit.
-- `kiln doctor` checks: KVM, `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing) and whether GitHub registers runners for it, the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
+- `kiln doctor` checks: KVM (Hypervisor.framework on macOS), `qemu-system-x86_64` (`qemu-system-aarch64` on arm64 hosts), `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing) and whether GitHub registers runners for it, the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
 - Any other argument prints usage and exits with status 2.

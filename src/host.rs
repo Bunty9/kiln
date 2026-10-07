@@ -1,7 +1,8 @@
 //! Host CPU and memory sampled every 2 s, split by job VM, for the dashboard's Host card.
-//! An hour is kept in memory only: a restart starts the graph empty.
+//! An hour is kept in memory only: a restart starts the graph empty. Linux only: it reads
+//! /proc, so on macOS it logs once and the graph stays empty.
 
-use crate::{App, vm};
+use crate::{App, platform};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -120,7 +121,7 @@ pub async fn run(app: Arc<App>) {
             let s = Sample {
                 t: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
                 cpu: ((now.0.saturating_sub(prev.0)) as f32 / per_cpu * 100.0).round() / 100.0,
-                mem: (vm::meminfo_kb("MemTotal:") / 1024).saturating_sub(vm::mem_avail_mb()),
+                mem: platform::mem_total_mb().saturating_sub(platform::mem_avail_mb()),
                 vms,
             };
             let mut h = HIST.lock().unwrap();

@@ -6,7 +6,7 @@ Thanks for helping with kiln. It is a small codebase on purpose: five Rust files
 
 - Rust stable (the crate sets `rust-version = "1.89"`, edition 2024). `rustup` with the `clippy` and `rustfmt` components.
 - Node.js, only to syntax-check the dashboard script.
-- To run kiln end to end you need a Linux x86_64 box with `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale`. `kiln doctor` tells you what is missing. Unit tests do not need any of this.
+- To run kiln end to end you need a Linux x86_64 box (or, experimentally, an Apple Silicon Mac: see [docs/apple-silicon.md](docs/apple-silicon.md)) with `/dev/kvm`, `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale`. `kiln doctor` tells you what is missing. Unit tests do not need any of this.
 
 ```sh
 gh repo clone Bunty9/kiln && cd kiln

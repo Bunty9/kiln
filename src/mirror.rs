@@ -12,9 +12,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
-const URL: &str = "https://github.com/distribution/distribution/releases/download/v3.1.2/registry_3.1.2_linux_amd64.tar.gz";
-/// Pinned: a different tarball is refused, never installed.
-const SHA256: &str = "40df2224d410f72ae425c3371873b078bbdbda3b8b612be9571f0e6751f3acc8";
+/// Pinned: a different tarball is refused, never installed. (url, sha256) for this host.
+const RELEASE: (&str, &str) = if crate::platform::ARM64 {
+    (
+        "https://github.com/distribution/distribution/releases/download/v3.1.2/registry_3.1.2_linux_arm64.tar.gz",
+        "09d26f88d2c0f161bd1b8bfc6c123571cc3d291dcca8af5477b3cacc4ec95e73",
+    )
+} else {
+    (
+        "https://github.com/distribution/distribution/releases/download/v3.1.2/registry_3.1.2_linux_amd64.tar.gz",
+        "40df2224d410f72ae425c3371873b078bbdbda3b8b612be9571f0e6751f3acc8",
+    )
+};
+const URL: &str = RELEASE.0;
+const SHA256: &str = RELEASE.1;
+/// The registry has no darwin build: on macOS there is no mirror and VMs pull from Docker Hub.
+const SUPPORTED: bool = !crate::platform::MACOS;
+const UNSUPPORTED_MSG: &str = "not available on macOS; VMs pull from Docker Hub directly";
 pub const ADDR: &str = "127.0.0.1:5000";
 
 #[derive(Default)]
@@ -140,7 +154,7 @@ async fn start(app: &App) -> Result<tokio::process::Child> {
 pub async fn supervise(app: Arc<App>) {
     let mut fails = 0u32;
     while !app.stopping.load(std::sync::atomic::Ordering::SeqCst) {
-        if !app.cfg().docker_mirror {
+        if !app.cfg().docker_mirror || !SUPPORTED {
             set(&app, false, None);
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -203,7 +217,7 @@ pub async fn status_json(app: &App) -> Value {
         s.cache_at = now();
     }
     let s = app.mirror.lock().unwrap();
-    json!({ "enabled": app.cfg().docker_mirror, "running": s.running, "error": s.error, "cache_mb": s.cache_mb })
+    json!({ "enabled": app.cfg().docker_mirror && SUPPORTED, "running": s.running, "error": s.error, "cache_mb": s.cache_mb })
 }
 
 /// (ok, detail) for `kiln doctor`. A bare CLI run has no supervisor, so a
@@ -211,6 +225,9 @@ pub async fn status_json(app: &App) -> Value {
 pub async fn check(app: &App) -> (bool, String) {
     if !app.cfg().docker_mirror {
         return (true, "disabled".into());
+    }
+    if !SUPPORTED {
+        return (true, UNSUPPORTED_MSG.into());
     }
     let (running, error) = {
         let s = app.mirror.lock().unwrap();

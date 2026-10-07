@@ -1,6 +1,6 @@
 //! Dashboard + JSON API. Reachable only from loopback and the tailnet.
 
-use crate::{App, Config, mirror, now, update, vm};
+use crate::{App, Config, mirror, now, platform, update, vm};
 use anyhow::{Context, anyhow};
 use axum::{
     Extension, Json, Router,
@@ -658,12 +658,11 @@ async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Re
 }
 
 async fn host_stats(app: &App) -> Value {
-    let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     json!({
-        "load": load.split_whitespace().take(3).collect::<Vec<_>>(),
+        "load": platform::load_avg(),
         "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
-        "mem_total_mb": vm::meminfo_kb("MemTotal:") / 1024,
-        "mem_avail_mb": vm::mem_avail_mb(),
+        "mem_total_mb": platform::mem_total_mb(),
+        "mem_avail_mb": platform::mem_avail_mb(),
         "disk_free_gb": vm::disk_free_gb(&app.data).await,
         // A few, so a poll that lands between samples still gets every one.
         "samples": crate::host::recent(3),
@@ -690,6 +689,8 @@ async fn state(State(app): S) -> R<Json<Value>> {
     poll["paused_until"] = json!(app.gh.paused_until());
     Ok(Json(json!({
         "config": app.cfg(),
+        // `runs-on` label for the default size: `label`, or `<label>-arm64` on an arm64 host.
+        "job_label": app.cfg().job_label(),
         "token_set": app.gh.has_token(),
         "app": app_json(&app),
         "token_source": app.gh.source(),
@@ -847,7 +848,7 @@ async fn onboard_hello(State(app): S, Json(b): Json<RepoBody>) -> R<Json<Value>>
     }
     let repo = cfg.repos.iter().find(|r| r.eq_ignore_ascii_case(&b.repo)).ok_or_else(|| anyhow!("not a configured repo"))?;
     let t = now();
-    let (pr_url, branch) = app.gh.hello_pr(repo, &cfg.label, t).await?;
+    let (pr_url, branch) = app.gh.hello_pr(repo, &cfg.job_label(), t).await?;
     let _g = SAVE.lock().unwrap();
     let mut m = hello_prs(&app.data);
     m.insert(repo.clone(), json!({ "pr_url": pr_url, "at": t }));
@@ -914,7 +915,7 @@ const NO_CERTS: &str = "This tailnet can't issue HTTPS certificates. Enable DNS 
 
 /// The tailscale CLI, bounded by `TS_LIMIT`.
 pub async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
-    bounded("tailscale", args, TS_LIMIT).await
+    bounded(platform::tailscale(), args, TS_LIMIT).await
 }
 
 /// Run `prog` with stdin closed, in its own process group, for at most `limit`. On timeout,
@@ -1025,7 +1026,7 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
         bail_r(NO_CERTS)?;
     }
     let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
-    let out = bounded("tailscale", &args, SERVE_LIMIT).await;
+    let out = bounded(platform::tailscale(), &args, SERVE_LIMIT).await;
     // Even a timed-out attempt may have changed the config.
     *SERVE_CHECK.lock().unwrap() = None;
     let out = out?;
@@ -1247,14 +1248,7 @@ mod tests {
 
     /// Processes whose argv mentions `marker`.
     fn alive(marker: &str) -> Vec<String> {
-        std::fs::read_dir("/proc")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| std::fs::read(e.path().join("cmdline")).ok())
-            .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
-            .filter(|c| c.contains(marker))
-            .collect()
+        platform::process_cmdlines().into_iter().map(|c| c.replace('\0', " ")).filter(|c| c.contains(marker)).collect()
     }
 
     /// Fake `tailscale` scripts that hang: each one's long-lived processes carry the

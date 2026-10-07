@@ -19,11 +19,13 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- Apple Silicon (experimental, untested on a real Mac): on macOS kiln runs native linux/arm64 VMs with QEMU and Hypervisor.framework, advertising `ARM64` runners labelled `<label>-arm64` and `<label>-arm64-<N>cpu` (never the plain label). launchd LaunchAgent (`deploy/kiln.plist`), `aarch64-macos` self-update flavor, a gated macOS release build (`KILN_MACOS_RELEASE`), a `macos` CI workflow and `scripts/macos-smoke.sh`. No filtered egress and no Docker mirror on macOS. aarch64 Linux hosts with KVM work the same way. See [docs/apple-silicon.md](docs/apple-silicon.md).
 - **Host graphs on the Overview.** The Host card's CPU and memory bars are split by job VM, one colour per VM (the same colour marks its tile under Now running), with grey for the rest of the host. Opening the card shows stacked area charts of both over the last 5 minutes, 15 minutes or an hour, scrolling continuously, with a crosshair readout per VM. kiln samples `/proc` every 2 s and keeps an hour in memory (`GET /api/host`).
 - **On crates.io as `kiln-ci`:** `cargo install kiln-ci --locked --root ~/.local` installs the `kiln` binary. Every `v*` tag publishes there after the GitHub release.
 
 ### Changed
 
+- The JIT config and debug SSH keys also reach the guest as fw_cfg files; x86 VMs still get the SMBIOS strings too. The guest recipe is now 6: an image baked by an older kiln is rebaked before VMs launch (automatic with `auto_rebake`).
 - Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
 
 ### Fixed

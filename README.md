@@ -39,6 +39,7 @@ kiln is a single Rust binary with an embedded dashboard. It polls GitHub for que
 - A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
 - The release binary is built on Ubuntu 24.04, so it needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later). To build from source you need Rust 1.89 or newer.
 - For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
+- Experimental, not yet tested on real hardware: an Apple Silicon Mac running arm64 job VMs with Hypervisor.framework. See [docs/apple-silicon.md](docs/apple-silicon.md).
 
 ## Quick start
 
@@ -186,7 +187,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 - **Runner updates.** kiln pins the runner version when it bakes. GitHub stops sending jobs to runners much more than a month out of date, so kiln rebakes by itself (`auto_rebake`) once the image is stale.
 - **Network throughput.** User-mode networking (slirp) tops out well below line rate and is CPU-heavy on large `docker pull`s. A future option is `passt` (still rootless) or a one-time root setup of tap devices.
 - **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo; org-level runner groups are not implemented.
-- **Single host, x86_64, Ubuntu 24.04 guests only.** Scheduling is a per-repo count; there are no priorities or fair-share.
+- **Single host, Ubuntu 24.04 guests of the host's architecture** (x86_64; arm64 on Apple Silicon is experimental). Scheduling is a per-repo count; there are no priorities or fair-share.
 - **Filtered egress is opt-in.** It is implemented but not yet the default; DNS is not filtered.
 
 ## Documentation
@@ -195,6 +196,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 |---|---|
 | [docs/stacks.md](docs/stacks.md) | Language and tool compatibility, pricing, migration tips |
 | [docs/architecture.md](docs/architecture.md) | How kiln works: lifecycle, scheduling, cache, egress, API |
+| [docs/apple-silicon.md](docs/apple-silicon.md) | Running kiln on an Apple Silicon Mac (experimental, untested) |
 | [docs/configuration.md](docs/configuration.md) | Every setting, environment variable, file and command |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, tests, deploying |
 | [SECURITY.md](SECURITY.md) | Threat model, residual risks, reporting |
