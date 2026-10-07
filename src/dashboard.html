@@ -676,8 +676,8 @@ const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(-
 const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
-  s.textContent = msg; t.innerHTML = ic(bad ? 'alert' : 'check'); t.append(s);
-  $('#toasts').append(t); setTimeout(() => t.remove(), bad ? 7000 : 3500);
+  s.textContent = msg; t.innerHTML = ic(bad ? 'alert' : 'check'); t.append(s); if (bad) t.setAttribute('role', 'alert');
+  $('#toasts').append(t); setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 150); }, bad ? 7000 : 3500);
 }
 const fail = e => toast(e.message || String(e), true);
 const dlg = $('#dlg');
@@ -689,6 +689,7 @@ async function copy(text, what = 'Copied') {
   catch { const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
   toast(what);
 }
+const copied = b => { const u = b.querySelector('use'); if (!u) return; u.setAttribute('href', '#i-check'); setTimeout(() => u.setAttribute('href', '#i-copy'), 1500); };
 let popEl = null;
 let popAnchor = null;
 function closePop(refocus) { popEl?.remove(); popEl = null; popAnchor?.setAttribute?.('aria-expanded', 'false'); if (refocus && popAnchor?.isConnected) popAnchor.focus(); }
@@ -1011,7 +1012,7 @@ pages.jobs = {
     if (parse().seg[0]) return pages.job.update();
     $$('[data-act=jf]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === jf.f)); rove();
     const l = S.vms.filter(v => (jf.f === 'all' || (jf.f === 'running' ? ACTIVE(v) : isFail(v))) && (!jf.repo || v.repo === jf.repo));
-    setHTML($('#jl'), l.length ? jobList(l) : S.vms.length ? `<div class="empty"><p>${jf.f === 'running' ? 'Nothing running right now.' : 'No jobs match this filter.'}</p></div>` : emptyJobs());
+    setHTML($('#jl'), l.length ? jobList(l) : S.vms.length ? `<div class="empty">${ic('jobs')}<p>${jf.f === 'running' ? 'Nothing running right now.' : 'No jobs match this filter.'}</p></div>` : emptyJobs());
   },
   unmount() { pages.job.unmount(); },
 };
@@ -1085,7 +1086,7 @@ class Log {
     this.wrap = lsGet('kiln-wrap') === '1';
     el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
     const T = (a, i, l, p, t) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}"${tip(t)}>${ic(i)}<span class="lbl">${l}</span></button>`;
-    el.innerHTML = `<div class="lt"><div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div><span class="sp"></span>
+    el.innerHTML = `<div class="lt">${o.sources.length > 1 ? `<div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div>` : `<span class="ttl">${o.sources[0].label}</span>`}<span class="sp"></span>
       ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show GitHub's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
       <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">${ic('down')}Jump to latest</button></div>`;
     this.pre = $('pre', el);
@@ -1284,7 +1285,7 @@ const G = {
     html() {
       const c = draft;
       return `<div class="card"><h2>Capacity</h2>
-        <div class="fld"><span class="lb">Pause new jobs</span><div class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></div></div>
+        <div class="fld"><span class="lb">Pause new jobs</span><label class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></label></div>
         ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus), '', '', 'Default size: VMs for jobs with the plain label get this many vCPUs')}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5), '', '', 'Memory of a default-size VM. Held for as long as the VM runs.')}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb), '', '', "Size of each VM's throwaway disk, deleted with the VM")}
         ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
@@ -1305,7 +1306,7 @@ const G = {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
       ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
-      <div class="fld"><span class="lb">Dashboard key</span>${hq('key')}<div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">${ic('key')}Forget key in this browser</button></div></div></div>`,
+      <div class="fld"><div><span class="lb">Dashboard key</span>${hq('key')}</div><div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">${ic('key')}Forget key in this browser</button></div></div></div>`,
     live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
   },
   github: {
@@ -1337,8 +1338,8 @@ const G = {
   },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
-      <div class="fld"><span class="lb">Docker mirror</span>${hq('mirror')}<div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
-      <div class="fld"><span class="lb">Auto rebake</span>${hq('autorebake')}<div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated, the image is over 25 days old, or Node versions changed.</span></div></div>
+      <div class="fld"><div><span class="lb">Docker mirror</span>${hq('mirror')}</div><label class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></label></div>
+      <div class="fld"><div><span class="lb">Auto rebake</span>${hq('autorebake')}</div><label class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated, the image is over 25 days old, or Node versions changed.</span></label></div>
       ${fld('f-bake_node_versions', 'Node versions', `<input id="f-bake_node_versions" data-k="bake_node_versions" value="${esc((draft.bake_node_versions || ['24']).join(', '))}" style="width:200px">`, 'Pre-installed for setup-node, e.g. <span class="mono">20, 24</span> (a major means its newest release). The newest is the plain <span class="mono">node</span>. Applies at the next bake.')}
       ${fld('f-bake_apt_packages', 'Extra apt packages', `<input id="f-bake_apt_packages" data-k="bake_apt_packages" placeholder="chromium, fonts-liberation" value="${esc((draft.bake_apt_packages || []).join(', '))}" style="width:280px">`, 'Installed into the image so jobs skip <span class="mono">apt-get install</span>. Up to 32 names. Applies at the next bake.')}</div>
       <div class="card"><h2>Image</h2><div id="img-info"></div><details id="bake-d"><summary>Bake log</summary><div id="bake-log"></div></details></div>`,
@@ -1356,7 +1357,7 @@ const G = {
   },
   cache: {
     html: () => `<div class="card"><h2>Repo cache</h2>
-      <div class="fld"><span class="lb">Persistent cache</span><div class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (Docker layers, apt downloads, npm, Cargo and the Rust toolchain, Go, Gradle, Maven, ~/.cache). Every job reads it; only a successful push to the default branch or a repo's cache branches saves to it.</span></div></div>
+      <div class="fld"><span class="lb">Persistent cache</span><label class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (Docker layers, apt downloads, npm, Cargo and the Rust toolchain, Go, Gradle, Maven, ~/.cache). Every job reads it; only a successful push to the default branch or a repo's cache branches saves to it.</span></label></div>
       ${fld('f-cache_gb', 'Size (GB)', `<input type="number" id="f-cache_gb" data-k="cache_gb" value="${esc(draft.cache_gb)}" min="5" max="500" step="1">`, 'Applies to caches created from now on. A cache that grows past 1.2x this is reset. Clear a cache to resize it.')}</div>
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
@@ -1377,7 +1378,7 @@ const G = {
     open() { loadTs(); if (!doctor?.checks?.length) runDoctor(); },
     live() {
       const c = (doctor?.checks || []).find(x => x.name === 'filtered egress'), el = $('#eg-st');
-      if (el) setHTML(el, c ? `<span class="${c.ok ? 'ok' : 'fail'}">${c.ok ? 'Check passed' : 'Check failed'}</span> <span class="fg2">${esc(c.detail)}</span>` : '<span class="fg2">Checking…</span>');
+      if (el) setHTML(el, c ? `<span class="${c.ok ? (/^unavailable/i.test(c.detail) ? 'fg2' : 'ok') : 'fail'}">${c.ok ? (/^unavailable/i.test(c.detail) ? 'Not checked:' : 'Check passed') : 'Check failed'}</span> <span class="fg2">${esc(c.detail)}</span>` : '<span class="fg2">Checking…</span>');
       if (TS) renderTs();
     },
   },
@@ -1385,7 +1386,7 @@ const G = {
     html() {
       const on = lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted', sec = window.isSecureContext && window.Notification;
       const dns = String(TS?.status?.Self?.DNSName || '').replace(/\.$/, '') || 'your-host.ts.net';
-      return `<div class="card"><h2>Notifications</h2><div class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></div>
+      return `<div class="card"><h2>Notifications</h2><label class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></label>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
         <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
@@ -1402,7 +1403,7 @@ const G = {
   updates: {
     html: () => `<div class="card"><h2>Updates</h2><div id="upd"></div></div>
       <div class="card"><h2>Update settings</h2>
-      <div class="fld"><span class="lb">Auto update</span><div class="sw"><input type="checkbox" role="switch" id="f-auto_update" data-k="auto_update" aria-label="Auto update" ${draft.auto_update ? 'checked' : ''}><span class="fg2 sm">Install a newer release on its own, once no VM is running. kiln checks every 6 hours.</span></div></div>
+      <div class="fld"><span class="lb">Auto update</span><label class="sw"><input type="checkbox" role="switch" id="f-auto_update" data-k="auto_update" aria-label="Auto update" ${draft.auto_update ? 'checked' : ''}><span class="fg2 sm">Install a newer release on its own, once no VM is running. kiln checks every 6 hours.</span></label></div>
       ${fld('f-update_repo', 'Release repo', `<input type="text" id="f-update_repo" data-k="update_repo" value="${esc(draft.update_repo || 'Bunty9/kiln')}" spellcheck="false" class="mono">`, "owner/name whose GitHub releases kiln installs. Only releases signed with kiln's release key are accepted, whatever the repo.")}</div>`,
     open() { loadUpd(); },
     live() {
@@ -1420,7 +1421,7 @@ const G = {
         <div class="fld"><span class="lb" id="ap-theme">Theme</span><div>${R('theme', 'system', [['system', 'System', 'monitor', "Follow this device's light or dark setting"], ['light', 'Light', 'sun'], ['dark', 'Dark', 'moon']])}</div></div>
         <div class="fld"><span class="lb" id="ap-density">Density</span><div>${R('density', 'comfortable', [['comfortable', 'Comfortable', 'overview'], ['compact', 'Compact', 'jobs', 'Tighter rows and cards, more on screen']])}</div></div>
         <div class="fld"><span class="lb" id="ap-accent">Accent</span><div><div class="seg sws" role="radiogroup" aria-labelledby="ap-accent">${ACCENTS.map(([v, l, d, lt]) => `<button role="radio" aria-checked="${v === cur('accent', 'ember')}" aria-label="${l}" data-act="look" data-id="accent" data-v="${v}" style="--sw:${light ? lt : d}"${tip(l)}>${ic('check')}</button>`).join('')}</div></div><div class="h">Buttons, focus rings and the current page. Running jobs stay ember.</div></div>
-        <div class="fld"><span class="lb">Reduce motion</span><div class="sw"><input type="checkbox" role="switch" id="f-motion" data-act="motion" aria-label="Reduce motion" ${cur('motion', '') === 'reduce' ? 'checked' : ''}><span class="fg2 sm">Stops pulsing badges and transitions. Off follows your system setting.</span></div></div>
+        <div class="fld"><span class="lb">Reduce motion</span><label class="sw"><input type="checkbox" role="switch" id="f-motion" data-act="motion" aria-label="Reduce motion" ${cur('motion', '') === 'reduce' ? 'checked' : ''}><span class="fg2 sm">Stops pulsing badges and transitions. Off follows your system setting.</span></label></div>
         <p class="fg2 sm" style="margin-top:16px">Saved in this browser only.</p></div>`;
     },
   },
@@ -1657,7 +1658,7 @@ const ACT = {
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() { await post(`/api/vms/${encodeURIComponent(pages.job.id)}/release`); toast('Releasing'); await poll(); },
-  copyssh: b => copy(b.dataset.id, 'ssh command copied'),
+  copyssh: b => copy(b.dataset.id, 'ssh command copied').then(() => copied(b)),
   async clearcache(b) {
     const r = b.dataset.id;
     if (!await ask({ title: 'Clear cache?', body: `Delete the cache of <b>${esc(r)}</b>? The next job starts cold and rebuilds it.`, action: 'Clear cache', danger: 1 })) return;
@@ -1670,7 +1671,7 @@ const ACT = {
     popEl.setAttribute('role', 'dialog'); popEl.setAttribute('aria-labelledby', 'hp-t'); popEl.tabIndex = -1; b.setAttribute('aria-expanded', 'true'); popEl.focus({ preventScroll: true });
   },
   tipok(b) { lsSet(b.dataset.id, '1'); b.closest('.tip').remove(); },
-  copycode: b => copy(b.previousElementSibling.textContent, 'Copied'),
+  copycode: b => copy(b.previousElementSibling.textContent, 'Copied').then(() => copied(b)),
   async hello(b) {
     const repo = b.dataset.id; helloSt[repo] = 1; delete helloErr[repo]; cur?.update?.();
     try { const r = await post('/api/onboard/hello', { repo }); hello[repo] = { pr_url: r.pr_url, branch: r.branch, at: now() }; lsSet('kiln-hello', JSON.stringify(hello)); toast('Test PR opened'); }
@@ -1812,6 +1813,20 @@ document.addEventListener('submit', async e => {
     }
   } catch (err) { fail(err); } finally { btn.disabled = false; }
 });
+const whyBad = x => `${x.labels?.[0]?.textContent.trim() || x.placeholder || 'This field'}: ${x.validationMessage}`;
+// Required fields: no browser bubble. Mark the field and say why in a line under the form.
+addEventListener('invalid', e => {
+  const x = e.target, f = x.form; e.preventDefault(); x.setAttribute('aria-invalid', 'true');
+  if (!f || f._v) return; f._v = 1; setTimeout(() => { f._v = 0; });
+  let m = f.querySelector('.ferr');
+  if (!m) { m = document.createElement('p'); m.className = 'ferr'; m.id = 'ferr-' + (f.dataset.form || f.id || 'f'); m.setAttribute('role', 'alert'); f.append(m); }
+  m.textContent = whyBad(x); x.setAttribute('aria-describedby', m.id); x.focus();
+}, true);
+addEventListener('input', e => {
+  const x = e.target; if (x.getAttribute?.('aria-invalid') !== 'true') return;
+  x.removeAttribute('aria-invalid'); if (x.getAttribute('aria-describedby')?.startsWith('ferr-')) x.removeAttribute('aria-describedby');
+  const nx = x.form?.querySelector('[aria-invalid=true]'), m = x.form?.querySelector('.ferr'); if (m) nx ? (m.textContent = whyBad(nx)) : m.remove();
+}, true);
 addEventListener('scroll', () => { if (popEl) closePop(); }, true);
 addEventListener('keydown', e => {
   const rb = e.target.closest?.('.seg [role=radio]');
