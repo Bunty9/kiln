@@ -36,13 +36,14 @@ pub struct Status {
     /// Drain progress, for the dashboard.
     progress: Option<String>,
     checked_at: u64,
+    /// Why the last update was rolled back (<data>/update/error); cleared by the next apply.
+    rollback: Option<String>,
 }
 
 impl Status {
-    /// Idle, with the error a rollback left behind (cleared by the next apply).
     pub fn load(data: &Path) -> Self {
-        let error = std::fs::read_to_string(data.join("update/error")).ok();
-        Self { state: if error.is_some() { "error" } else { "idle" }, latest: None, error, progress: None, checked_at: 0 }
+        let rollback = std::fs::read_to_string(data.join("update/error")).ok();
+        Self { state: "idle", latest: None, error: None, progress: None, checked_at: 0, rollback }
     }
 }
 
@@ -83,6 +84,7 @@ pub fn json(app: &App) -> Value {
         "state": s.state,
         "error": s.error,
         "progress": s.progress,
+        "rollback": s.rollback,
         "checked_at": s.checked_at,
         "auto": cfg.auto_update,
         "repo": cfg.update_repo,
@@ -94,7 +96,7 @@ pub fn compact(app: &App) -> Value {
     let s = app.update.lock().unwrap();
     let latest = s.latest.as_ref().map(|r| r.version.clone());
     let available = latest.as_deref().is_some_and(|l| newer(l, VERSION));
-    json!({ "latest": latest, "available": available, "state": s.state, "error": s.error, "progress": s.progress })
+    json!({ "latest": latest, "available": available, "state": s.state, "error": s.error, "progress": s.progress, "rollback": s.rollback })
 }
 
 /// The latest release of `update_repo` (GitHub's "latest" excludes drafts and pre-releases).
@@ -143,7 +145,10 @@ pub fn start(app: &Arc<App>) -> bool {
     if !begin(app, "downloading") {
         return false;
     }
-    app.update.lock().unwrap().error = None;
+    {
+        let mut s = app.update.lock().unwrap();
+        (s.error, s.rollback) = (None, None);
+    }
     let _ = std::fs::remove_file(app.data.join("update/error"));
     let app = app.clone();
     tokio::spawn(async move {
