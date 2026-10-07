@@ -41,7 +41,11 @@ With `egress: "filtered"` each job's QEMU runs in its own rootless network names
 
 ### Cache trust
 
-The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch, and the commit is really on it. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch or one of the repo's `cache_branches`, and the commit is really on that branch. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+
+### Fork pull requests
+
+kiln refuses to run code from a fork. The scheduler does not count queued jobs of runs whose head repository differs from the repository (or is gone), so they never boot a VM, and the dashboard lists them as refused. Because a JIT runner can still be handed any queued job with matching labels, every VM also runs a runner job-started hook before the job's first step: if the event is a pull request from another repository it fails the job right there, and kiln kills the VM when it sees the assignment. This is enforced whatever the workflow says; the `if:` guard in the workflows is a second layer.
 
 ### Console and lifecycle hardening
 

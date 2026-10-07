@@ -787,7 +787,8 @@ fn job_id(url: &str) -> Option<u64> {
 /// May this job's cache overlay be committed? Err = the reason it is not.
 /// `trust` is (event, head branch, default branch, GitHub's job conclusion), or why it is
 /// unknown. The console's result alone (the job controls it) never earns a commit.
-fn cache_verdict(cache_on: bool, succeeded: bool, trust: Result<(&str, &str, &str, &str), &str>) -> Result<(), String> {
+/// `writers` are extra branches allowed to save besides the default.
+fn cache_verdict(cache_on: bool, succeeded: bool, writers: &[String], trust: Result<(&str, &str, &str, &str), &str>) -> Result<(), String> {
     if !cache_on {
         return Err("cache disabled".into());
     }
@@ -801,8 +802,9 @@ fn cache_verdict(cache_on: bool, succeeded: bool, trust: Result<(&str, &str, &st
     if event != "push" {
         return Err(format!("{event} event"));
     }
-    if branch != default {
-        return Err(format!("branch {branch} is not the default ({default})"));
+    if branch != default && !writers.iter().any(|w| w == branch) {
+        let also = if writers.is_empty() { String::new() } else { format!(" or a cache branch ({})", writers.join(", ")) };
+        return Err(format!("branch {branch} is not the default ({default}){also}"));
     }
     Ok(())
 }
@@ -869,17 +871,18 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         return;
     }
     let cfg = app.cfg();
+    let writers = cfg.cache_branches(repo);
     let succeeded = done && v.result.as_deref() == Some("Succeeded");
     let trust = if succeeded && cfg.cache {
         match v.job_url.as_deref().and_then(job_id) {
-            Some(j) => app.gh.cache_trust(repo, j).await.map_err(|e| format!("{e:#}")),
+            Some(j) => app.gh.cache_trust(repo, j, &writers).await.map_err(|e| format!("{e:#}")),
             None => Err("no job page".into()),
         }
     } else {
         Err(String::new())
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
-    let verdict = if v.job.is_none() { Err("no job ran".to_string()) } else { cache_verdict(cfg.cache, succeeded, t) };
+    let verdict = if v.job.is_none() { Err("no job ran".to_string()) } else { cache_verdict(cfg.cache, succeeded, &writers, t) };
     let (state, note) = match verdict {
         Err(why) => {
             let _ = tokio::fs::remove_file(&ov).await;
@@ -1321,7 +1324,21 @@ async fn bake_inner(app: &App) -> Result<()> {
     let work = img.join("bake");
     let _ = tokio::fs::remove_dir_all(&work).await;
     tokio::fs::create_dir_all(work.join("seed")).await?;
-    let user_data = include_str!("../guest/user-data.yaml").replace("{{RUNNER_VERSION}}", &version);
+    let index: serde_json::Value = reqwest::Client::builder()
+        .user_agent("kiln-ci")
+        .timeout(Duration::from_secs(60))
+        .build()?
+        .get("https://nodejs.org/dist/index.json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("nodejs.org release index")?;
+    let node = resolve_node(&index, &cfg.bake_node_versions)?;
+    say(format!("node {}", node.join(" "))).await?;
+    let user_data =
+        include_str!("../guest/user-data.yaml").replace("{{RUNNER_VERSION}}", &version).replace("{{NODE_VERSIONS}}", &node.join(" "));
     tokio::fs::write(work.join("seed/user-data"), user_data).await?;
     tokio::fs::write(work.join("seed/meta-data"), "instance-id: kiln-bake\nlocal-hostname: kiln\n").await?;
     let seed = work.join("seed.iso");
@@ -1375,12 +1392,41 @@ async fn bake_inner(app: &App) -> Result<()> {
     tokio::fs::copy(&kernel, &new_kernel).await?;
     tokio::fs::rename(&disk, img.join("base.qcow2")).await?;
     tokio::fs::rename(&new_kernel, img.join("base.vmlinuz")).await?;
-    let meta = serde_json::json!({ "baked_at": now(), "runner_version": version });
+    let meta = serde_json::json!({
+        "baked_at": now(),
+        "runner_version": version,
+        "node_versions": node,
+        "node_wanted": cfg.bake_node_versions,
+    });
     tokio::fs::write(img.join("base.json.tmp"), meta.to_string()).await?;
     tokio::fs::rename(img.join("base.json.tmp"), img.join("base.json")).await?;
     let _ = tokio::fs::remove_dir_all(&work).await;
     say("base image ready".into()).await?;
     Ok(())
+}
+
+/// Exact Node versions to bake for `wanted` (majors like "20" or exact "20.19.5"),
+/// looked up in nodejs.org's dist/index.json (newest first, "version": "v24.21.0").
+/// Returned oldest to newest, without duplicates: the bake loop symlinks the last
+/// one as the bare `node`. Unknown versions are an error, so a typo fails the bake.
+fn resolve_node(index: &serde_json::Value, wanted: &[String]) -> Result<Vec<String>> {
+    let releases: Vec<&str> = index.as_array().into_iter().flatten().filter_map(|r| r["version"].as_str()?.strip_prefix('v')).collect();
+    let key = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let mut out = wanted
+        .iter()
+        .map(|w| {
+            // "20" means the 20.x line ("20." prefix, so "2" never matches 20.x); exact otherwise.
+            let hit = if w.contains('.') {
+                releases.iter().find(|r| *r == w)
+            } else {
+                releases.iter().filter(|r| r.strip_prefix(w.as_str()).is_some_and(|t| t.starts_with('.'))).max_by_key(|r| key(r))
+            };
+            hit.map(|r| r.to_string()).with_context(|| format!("node {w}: no such release on nodejs.org"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    out.sort_by_key(|v| key(v));
+    out.dedup();
+    Ok(out)
 }
 
 /// Append whatever `src` gained since offset `off`.
@@ -1508,8 +1554,9 @@ fn image_age(baked_at: u64, version: &str, latest: Option<&str>, t: u64) -> (u64
     (age, age > 25 || latest.is_some_and(|l| l != version))
 }
 
-/// images/base.json plus runner_latest, age_days and stale; null when never baked.
-pub fn image_info(data: &Path, latest: Option<String>) -> serde_json::Value {
+/// images/base.json plus runner_latest, age_days, node_changed and stale; null when never baked.
+/// `node` is the configured bake_node_versions: an image baked from another list is stale.
+pub fn image_info(data: &Path, latest: Option<String>, node: &[String]) -> serde_json::Value {
     let Some(mut v) = std::fs::read(images(data).join("base.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
@@ -1518,9 +1565,13 @@ pub fn image_info(data: &Path, latest: Option<String>) -> serde_json::Value {
         return serde_json::Value::Null;
     };
     let (age, stale) = image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
+    // Images baked before bake_node_versions existed carried Node 24 only.
+    let baked: Vec<String> = serde_json::from_value(v["node_wanted"].clone()).unwrap_or_else(|_| vec!["24".into()]);
+    let node_changed = baked != node;
     v["runner_latest"] = latest.into();
     v["age_days"] = age.into();
-    v["stale"] = stale.into();
+    v["node_changed"] = node_changed.into();
+    v["stale"] = (stale || node_changed).into();
     v
 }
 
@@ -1589,17 +1640,21 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     ));
 
     app.gh.refresh_latest().await;
-    let info = image_info(&app.data, app.gh.latest_cached());
+    let info = image_info(&app.data, app.gh.latest_cached(), &cfg.bake_node_versions);
     out.push(if !image_ready(&app.data) {
         check("image", false, "not baked: run `kiln bake`")
-    } else if info["stale"] == true {
-        check(
-            "image",
-            true,
-            format!("warning: stale: {} days old, runner {} (latest {})", info["age_days"], info["runner_version"], info["runner_latest"]),
-        )
     } else {
-        check("image", true, format!("runner {}, {} days old", info["runner_version"], info["age_days"]))
+        let node = info["node_versions"]
+            .as_array()
+            .map_or("24 (older image)".into(), |a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "));
+        let facts = format!("runner {}, node {node}, {} days old", info["runner_version"], info["age_days"]);
+        if info["node_changed"] == true {
+            check("image", true, format!("warning: rebake needed: bake_node_versions changed since this bake ({facts})"))
+        } else if info["stale"] == true {
+            check("image", true, format!("warning: stale: {facts} (runner latest {})", info["runner_latest"]))
+        } else {
+            check("image", true, facts)
+        }
     });
 
     let src = app.gh.source();
@@ -1612,13 +1667,35 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ),
         (true, s) => check("token", true, format!("source: {s}")),
     });
+    // A read per permission kiln needs; 403/404 on one names the missing permission
+    // (fine-grained tokens) instead of a generic API failure.
+    const NEEDS: [(&str, &str); 3] = [
+        ("actions/runners?per_page=1", "Administration: write (register runners)"),
+        ("actions/runs?per_page=1", "Actions: read and write (find queued jobs)"),
+        ("commits?per_page=1", "Contents: read (verify cache-writer pushes)"),
+    ];
     for repo in &cfg.repos {
-        let r = app.gh.raw(reqwest::Method::GET, &format!("repos/{repo}/actions/runners?per_page=1"), None).await;
-        out.push(match r {
-            Ok(r) if r.status == 200 => check(&format!("repo {repo}"), true, "runners API reachable"),
-            Ok(r) => check(&format!("repo {repo}"), false, format!("runners API returned {}", r.status)),
-            Err(e) => check(&format!("repo {repo}"), false, format!("{e:#}")),
+        let mut missing = vec![];
+        let mut err = None;
+        for (path, perm) in NEEDS {
+            match app.gh.raw(reqwest::Method::GET, &format!("repos/{repo}/{path}"), None).await {
+                Ok(r) if r.status == 200 => {}
+                Ok(r) if matches!(r.status, 403 | 404) => missing.push(perm),
+                Ok(r) => err = Some(format!("{path} returned {}", r.status)),
+                Err(e) => err = Some(format!("{e:#}")),
+            }
+        }
+        out.push(match (missing.is_empty(), err) {
+            (_, Some(e)) => check(&format!("repo {repo}"), false, e),
+            (true, None) => check(&format!("repo {repo}"), true, "runners, actions and contents reachable"),
+            (false, None) => {
+                check(&format!("repo {repo}"), false, format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")))
+            }
         });
+    }
+    if let Some(t) = *app.gh.expires.lock().unwrap() {
+        let days = t.saturating_sub(now()) / 86400;
+        out.push(check("token expiry", days >= 7, format!("{}expires in {days} days", if days < 14 { "warning: " } else { "" })));
     }
 
     let (ok, detail) = crate::mirror::check(app).await;
@@ -1966,17 +2043,45 @@ mod tests {
     }
 
     #[test]
+    fn node_resolution() {
+        let index = serde_json::json!([
+            { "version": "v24.21.0" }, { "version": "v24.20.1" },
+            { "version": "v22.20.0" }, { "version": "v20.19.5" }, { "version": "v20.19.4" },
+        ]);
+        let r = |w: &[&str]| resolve_node(&index, &w.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(r(&["24"]).unwrap(), ["24.21.0"]);
+        // newest last whatever the configured order, no duplicates
+        assert_eq!(r(&["24", "20"]).unwrap(), ["20.19.5", "24.21.0"]);
+        assert_eq!(r(&["20", "20.19.5"]).unwrap(), ["20.19.5"]);
+        assert_eq!(r(&["20.19.4"]).unwrap(), ["20.19.4"]);
+        // "2" must not match 20.x or 24.x
+        assert!(r(&["2"]).is_err());
+        assert!(r(&["18"]).is_err());
+        assert!(r(&["20.19.9"]).is_err());
+    }
+
+    #[test]
     fn cache_trust_rules() {
         let t = |e, b, d| Ok::<_, &str>((e, b, d, "success"));
-        assert!(cache_verdict(true, true, t("push", "main", "main")).is_ok());
+        assert!(cache_verdict(true, true, &[], t("push", "main", "main")).is_ok());
         // the console said Succeeded but GitHub disagrees (or has no conclusion yet)
-        assert!(cache_verdict(true, true, Ok(("push", "main", "main", "failure"))).unwrap_err().contains("failure"));
-        assert!(cache_verdict(true, true, Ok(("push", "main", "main", "none"))).is_err());
-        assert_eq!(cache_verdict(true, true, t("pull_request", "feat", "main")).unwrap_err(), "pull_request event");
-        assert!(cache_verdict(true, true, t("push", "feat", "main")).unwrap_err().contains("not the default"));
-        assert!(cache_verdict(true, false, t("push", "main", "main")).is_err());
-        assert!(cache_verdict(false, true, t("push", "main", "main")).is_err());
-        assert!(cache_verdict(true, true, Err("rate limited")).unwrap_err().contains("rate limited"));
+        assert!(cache_verdict(true, true, &[], Ok(("push", "main", "main", "failure"))).unwrap_err().contains("failure"));
+        assert!(cache_verdict(true, true, &[], Ok(("push", "main", "main", "none"))).is_err());
+        assert_eq!(cache_verdict(true, true, &[], t("pull_request", "feat", "main")).unwrap_err(), "pull_request event");
+        assert!(cache_verdict(true, true, &[], t("push", "feat", "main")).unwrap_err().contains("not the default"));
+        assert!(cache_verdict(true, false, &[], t("push", "main", "main")).is_err());
+        assert!(cache_verdict(false, true, &[], t("push", "main", "main")).is_err());
+        assert!(cache_verdict(true, true, &[], Err("rate limited")).unwrap_err().contains("rate limited"));
+        // extra writer branches: pushes only, and they never make a PR a writer
+        let dev = ["dev".to_string()];
+        assert!(cache_verdict(true, true, &dev, t("push", "dev", "main")).is_ok());
+        assert!(cache_verdict(true, true, &dev, t("push", "main", "main")).is_ok());
+        assert_eq!(cache_verdict(true, true, &dev, t("pull_request", "dev", "main")).unwrap_err(), "pull_request event");
+        let e = cache_verdict(true, true, &dev, t("push", "feat", "main")).unwrap_err();
+        assert!(e.contains("not the default") && e.contains("(dev)"), "{e}");
+        assert!(cache_verdict(true, true, &dev, Ok(("push", "dev", "main", "failure"))).is_err());
+        // a tag named like a writer arrives with a marked-up branch from cache_trust
+        assert!(cache_verdict(true, true, &dev, t("push", "dev (commit abc1234 not on dev)", "main")).is_err());
     }
 
     #[test]

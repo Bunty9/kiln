@@ -33,8 +33,14 @@ pub struct Config {
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
     pub auto_rebake: bool,
+    /// Node versions baked into the tool cache ("20" = newest 20.x, or exact "20.19.5").
+    /// The newest is the bare `node`. Takes effect at the next bake.
+    pub bake_node_versions: Vec<String>,
     /// Per-repo persistent cache disk (see vm.rs: trusted writer, throwaway readers).
     pub cache: bool,
+    /// "owner/name" -> branches whose successful pushes may also save the cache,
+    /// besides the default branch (e.g. an integration branch like "dev").
+    pub cache_branches: BTreeMap<String, Vec<String>>,
     /// Virtual size of a new repo cache; it is reset when it grows past 1.2x this.
     pub cache_gb: u32,
     /// Docker mirror storage cap; over it (checked every 10 min) the cache is wiped.
@@ -67,7 +73,9 @@ impl Default for Config {
             allowed_users: vec![],
             docker_mirror: true,
             auto_rebake: true,
+            bake_node_versions: vec!["24".into()],
             cache: true,
+            cache_branches: BTreeMap::new(),
             cache_gb: 30,
             mirror_gb: 20,
             debug_hold_mins: 0,
@@ -95,6 +103,11 @@ impl Config {
             return 0;
         }
         self.warm.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(0, |(_, &n)| n as usize)
+    }
+
+    /// Extra cache-writer branches of `repo` (the default branch always writes).
+    pub fn cache_branches(&self, repo: &str) -> Vec<String> {
+        self.cache_branches.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map(|(_, b)| b.clone()).unwrap_or_default()
     }
 
     pub fn mem_mb(&self, cpus: u32) -> u32 {
@@ -150,6 +163,21 @@ impl Config {
         if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r))) {
             bail!("warm: {r:?} must be a configured repo with a count of 0..=4");
         }
+        for (r, bs) in &self.cache_branches {
+            if !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)) {
+                bail!("cache_branches: {r:?} is not a configured repo");
+            }
+            if let Some(b) = bs.iter().find(|b| !valid_branch(b)) {
+                bail!("cache_branches: {b:?} is not a branch name");
+            }
+        }
+        let node_ok = |v: &String| {
+            let p: Vec<&str> = v.split('.').collect();
+            (p.len() == 1 || p.len() == 3) && p.iter().all(|x| !x.is_empty() && x.len() <= 4 && x.bytes().all(|b| b.is_ascii_digit()))
+        };
+        if !(1..=4).contains(&self.bake_node_versions.len()) || !self.bake_node_versions.iter().all(node_ok) {
+            bail!("bake_node_versions: 1 to 4 entries, each a major (\"20\") or an exact version (\"20.19.5\")");
+        }
         if !(5..=1440).contains(&self.warm_recycle_mins) {
             bail!("warm_recycle_mins must be 5..=1440");
         }
@@ -158,6 +186,15 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Conservative git branch name check: no spaces, no ref syntax, no "..".
+fn valid_branch(b: &str) -> bool {
+    !b.is_empty()
+        && !b.contains("..")
+        && !b.starts_with(['/', '-', '.'])
+        && !b.ends_with(['/', '.'])
+        && b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -170,6 +207,8 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
+    /// repo -> queued fork pull request jobs kiln refuses to run.
+    pub refused_forks: HashMap<String, usize>,
 }
 
 pub struct App {
@@ -426,7 +465,7 @@ fn should_rebake(cfg: &Config, stale: bool, baking: bool, t: u64, last: u64) -> 
 
 fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let stale = vm::image_info(&app.data, app.gh.latest_cached())["stale"] == true;
+    let stale = vm::image_info(&app.data, app.gh.latest_cached(), &cfg.bake_node_versions)["stale"] == true;
     let baking = app.baking.load(Ordering::SeqCst);
     if !should_rebake(cfg, stale, baking, now(), LAST.load(Ordering::Relaxed)) {
         return;
@@ -481,10 +520,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut queued_by_repo = HashMap::new();
     let mut errors = vec![];
     let mut repo_errors = HashMap::new();
+    let mut refused_forks = HashMap::new();
     // Rotate the start so the first repo doesn't always win scarce slots.
     let start = TICK.fetch_add(1, Ordering::Relaxed) % cfg.repos.len().max(1);
     for repo in cfg.repos.iter().cycle().skip(start).take(cfg.repos.len()) {
-        let (by_size, runners) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
+        let (by_size, runners, forks) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
             Ok(r) => r,
             Err(e) => {
                 errors.push(format!("{repo}: {e:#}"));
@@ -492,6 +532,9 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 continue;
             }
         };
+        if forks > 0 {
+            refused_forks.insert(repo.clone(), forks);
+        }
         attach_jobs(app, &runners);
         let backed_off = app.backoff.lock().unwrap().get(repo).is_some_and(|&(_, at)| at > now());
         vm::recycle_warm(app, repo, cfg.warm_recycle_mins).await;
@@ -543,6 +586,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     {
         let mut p = app.poll.lock().unwrap();
         p.repo_errors = repo_errors;
+        p.refused_forks = refused_forks;
         p.blocked = blocked;
     }
     if !errors.is_empty() {
@@ -552,14 +596,26 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
 }
 
 /// Copy job page and queue time onto the VM whose runner picked the job up.
-fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64)>) {
+/// A fork PR job that reached one of our runners anyway (a JIT runner takes any
+/// matching job) is killed; the guest's pre-job hook has already failed it.
+fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
+    for (id, _) in runners.iter().filter(|(_, r)| r.2) {
+        let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
+            v.note.get_or_insert("refused: pull request from a fork".into());
+        });
+        if hit.is_some()
+            && let Some(k) = app.kills.lock().unwrap().get(id)
+        {
+            k.notify_one();
+        }
+    }
     let changed: Vec<vm::Vm> = app
         .vms
         .lock()
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at) = runners.get(&v.id)?;
+            let (url, at, _) = runners.get(&v.id)?;
             if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) {
                 return None;
             }
@@ -619,6 +675,23 @@ mod tests {
         assert!(warm(&["a/b"], "a/b", 0));
         assert!(!warm(&["a/b"], "a/b", 5));
         assert!(!warm(&["a/b"], "x/y", 1));
+        let branches = |r: &str, b: &str| {
+            let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
+            c.cache_branches.insert(r.into(), vec![b.into()]);
+            c.validate_for(8).is_ok()
+        };
+        assert!(branches("A/B", "dev"));
+        assert!(branches("a/b", "release/1.x"));
+        assert!(!branches("x/y", "dev"));
+        assert!(!branches("a/b", ""));
+        assert!(!branches("a/b", "a..b"));
+        assert!(!branches("a/b", "dev branch"));
+        assert!(!branches("a/b", "-dev"));
+        assert!(ok(|c| c.bake_node_versions = vec!["20".into(), "24.21.0".into()]));
+        assert!(!ok(|c| c.bake_node_versions = vec![]));
+        assert!(!ok(|c| c.bake_node_versions = vec!["v20".into()]));
+        assert!(!ok(|c| c.bake_node_versions = vec!["20.1".into()]));
+        assert!(!ok(|c| c.bake_node_versions = vec!["20; rm -rf /".into()]));
         assert!(ok(|c| c.warm_recycle_mins = 5));
         assert!(!ok(|c| c.warm_recycle_mins = 4));
         assert!(!ok(|c| c.warm_recycle_mins = 1441));

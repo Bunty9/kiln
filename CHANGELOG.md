@@ -4,6 +4,22 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
+- `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the list marks the image stale.
+- `/var/cache/apt/archives` lives on the repo cache disk, so `apt-get install` reuses downloaded packages.
+- `kiln doctor` names the missing token permission per repo; the dashboard shows the token's expiry and save time and warns before it expires.
+
+### Security
+
+- Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. Needs a rebake for the hook.
+- The "commit is really on the branch" check applies to every cache-writer branch, not only the default.
+
+### Fixed
+
+- The documented fine-grained token permissions now include *Contents: read*, without which caches never saved.
+
 ## [0.1.0] - 2026-10-06
 
 First release.

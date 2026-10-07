@@ -327,7 +327,7 @@ const HELP = {
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
   timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
-  cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it, but only a successful push to the default branch saves to it. Pull requests can't change it.", "cache"],
+  cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it, but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out.", "debug"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
@@ -587,9 +587,12 @@ function banners() {
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(m)}`);
+  for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on GitHub-hosted runners.`);
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   const im = S.image;
-  if (im?.stale && im.runner_latest) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
+  if (im?.node_changed) B('warn', 'Baked Node versions changed. Rebake to apply.', X('Rebake', 'rebake'));
+  else if (im?.stale && im.runner_latest) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
+  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/github'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
@@ -885,7 +888,8 @@ pages.repos = {
       return;
     }
     const wn = (S.config.warm || {})[this.r] || 0;
-    setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div>`);
+    const cb = ((S.config.cache_branches || {})[this.r] || []).join(', ');
+    setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">Retry</button></div>` : '');
     setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}">Run</button></div></li>`).join('')}</ul>` : '<div class="empty"><p>No workflows in this repository.</p></div>' : '<div class="sk" style="height:48px"></div>'));
     setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : '<div class="empty"><p>No runs yet. Run a workflow or push a commit.</p></div>' : '<div class="sk" style="height:48px"></div>'));
@@ -950,22 +954,24 @@ const G = {
       <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p></div>`,
     live() {
       const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
-      setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd></dl>
+      setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
     },
   },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
       <div class="fld"><span class="lb">Docker mirror</span>${hq('mirror')}<div class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></div></div>
-      <div class="fld"><span class="lb">Auto rebake</span>${hq('autorebake')}<div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated or the image is over 25 days old.</span></div></div></div>
+      <div class="fld"><span class="lb">Auto rebake</span>${hq('autorebake')}<div class="sw"><input type="checkbox" role="switch" id="f-auto_rebake" data-k="auto_rebake" aria-label="Auto rebake" ${draft.auto_rebake !== false ? 'checked' : ''}><span class="fg2 sm">Rebake when the runner is outdated or the image is over 25 days old.</span></div></div>
+      ${fld('f-bake_node_versions', 'Node versions', `<input id="f-bake_node_versions" data-k="bake_node_versions" value="${esc((draft.bake_node_versions || ['24']).join(', '))}" style="width:200px">`, 'Pre-installed for setup-node, e.g. <span class="mono">20, 24</span> (a major means its newest release). The newest is the plain <span class="mono">node</span>. Applies at the next bake.')}</div>
       <div class="card"><h2>Image</h2><div id="img-info"></div><details id="bake-d"><summary>Bake log</summary><div id="bake-log"></div></details></div>`,
     open() { this.lv = new Log($('#bake-log'), { id: 'bake', live: () => !!S.baking, sources: [{ k: 'console', label: 'Console', src: 'bake', file: 'console' }] }); $('#bake-d').open = !!S.baking; },
     close() { this.lv?.destroy(); },
     live() {
       const im = S.image, mi = S.mirror;
       $('#mir').textContent = !mi ? 'Caches Docker pulls for job VMs.' : !mi.enabled ? 'Off.' : mi.running ? `Running${mi.cache_mb != null ? `, cache ${(mi.cache_mb / 1024).toFixed(1)} GB` : ''}.` : 'Enabled but not running.' + (mi.error ? ' ' + mi.error : '');
-      setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
-        ${im?.stale ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}</div>` : ''}
+      setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd><dt>Node</dt><dd>${esc((im?.node_versions || (im ? ['24'] : ['—'])).join(', '))}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
+        ${im?.node_changed ? '<div class="cal w">Node versions changed since this bake. Rebake to apply.</div>' : ''}
+        ${im?.stale && im.runner_latest && im.runner_latest !== im.runner_version ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}</div>` : ''}
         <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
       if (S.baking && !this.was) $('#bake-d').open = true; this.was = S.baking;
     },
@@ -1147,7 +1153,7 @@ const GUIDES = [
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
   ['cache', 'Caching', () => `<h2>Caching</h2>
     <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
-    <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch. Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
+    <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch, or to one of the repo's <b>cache branches</b> (Repos › your repo). Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
     <p><b>Size:</b> set in Settings › Cache (default 30 GB). A cache that grows past 1.2× its size is reset.</p>
     <p><b>Clear:</b> Settings › Cache › Clear. It is refused while that repo has jobs running. Clear after resizing.</p>`],
   ['network', 'Network & security', () => `<h2>Network &amp; security</h2><p><b>What jobs can reach</b> (Settings › Network):</p>
@@ -1230,7 +1236,7 @@ const ACT = {
   async rmrepo(b) {
     const r = b.dataset.id;
     if (!await ask({ title: 'Remove repo?', body: `Stop picking up jobs from <b>${esc(r)}</b>? Running jobs finish.`, action: `Remove ${r}`, danger: 1 })) return;
-    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
+    await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: Object.fromEntries(Object.entries(S.config.warm || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())), cache_branches: Object.fromEntries(Object.entries(S.config.cache_branches || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
   runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
@@ -1297,6 +1303,7 @@ document.addEventListener('input', e => {
   if (k === 'adduser') { $('#dbar').hidden = false; return; }
   const v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value.trim();
   if (k === 'debug_ssh_keys') draft[k] = t.value.split('\n').map(x => x.trim()).filter(Boolean); else
+  if (k === 'bake_node_versions') draft[k] = t.value.split(',').map(x => x.trim()).filter(Boolean); else
   if (k === 'vm_mem_gb') draft.vm_mem_mb = Math.round(v * 1024); else draft[k] = v;
   pages.settings.live();
 });
@@ -1317,6 +1324,11 @@ document.addEventListener('submit', async e => {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), w = { ...(S.config.warm || {}) }, r = pages.repos.r;
       if (n) w[r] = n; else delete w[r];
       await saveCfg({ ...S.config, warm: w }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
+    }
+    else if (k === 'cachebr') {
+      const r = pages.repos.r, list = inp.value.split(',').map(x => x.trim()).filter(Boolean), m = { ...(S.config.cache_branches || {}) };
+      if (list.length) m[r] = list; else delete m[r];
+      await saveCfg({ ...S.config, cache_branches: m }); toast(list.length ? `Cache branches for ${r}: ${list.join(', ')}` : 'Only the default branch saves the cache');
     }
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {

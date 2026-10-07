@@ -46,7 +46,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 | setup-php | ✓ Works | Set `env: runner: self-hosted` per setup-php wiki |
 | erlef/setup-beam (Erlang/OTP) | ✓ Works | ImageOS=ubuntu24 required; now set |
 | Docker buildx / build-push / services | ✓ Works | Real Docker in VM; Docker Hub pulls cached by kiln's built-in mirror at 10.0.2.2:5000 (on by default) |
-| container: jobs | ✓ Works | Image pulls go through local mirror |
+| container: jobs | ✓ Works | Image pulls go through local mirror. The job runs inside the container, which does not see the VM's cache mounts: `~/.npm` and friends start cold every time unless you mount them, e.g. `options: -v /home/runner/.npm:/root/.npm`. Jobs work either way; they are just never warm. |
 | Playwright | ✓ Works | `install --with-deps` adds 1–2 min; xvfb pre-installed |
 | Cypress | ◐ Partial | Needs GTK/NSS libs via apt in a setup step |
 | Android build (setup-java + setup-android) | ✓ Works | setup-android installs the SDK, NDK and build tools |
@@ -55,6 +55,10 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 | Terraform / Nx / Turborepo remote cache | ✓ Works | gh CLI included; cache action works (goes over internet) |
 | GPU jobs | ✗ Unsupported | Hardware not available |
 | macOS / Windows | ✗ Unsupported | Ubuntu 24.04 only |
+
+## Node versions
+
+The image carries the Node versions in `bake_node_versions` (default `["24"]`) in the runner tool cache. `actions/setup-node` with a matching `node-version` uses them without a download. For a project pinned to an older major, add it (Settings › Image › Node versions, e.g. `20, 24`) and rebake; the bare `node` stays the newest. Other versions still work, they are just downloaded on every job.
 
 ## Tips
 
