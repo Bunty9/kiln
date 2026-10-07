@@ -7,6 +7,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Added
 
 - GitHub App authentication: create the App from the dashboard (manifest flow) or use an existing one. Installation tokens are minted per installation and refreshed before they expire; only the private key is stored. The repos kiln serves are the repos the App is installed on, refreshed every 5 minutes (every 30 s while it serves none), or at once with `POST /api/app/refresh`. Token auth still works.
+- Installable dashboard (PWA) over HTTPS (`tailscale serve`): app icon, web manifest with shortcuts, a versioned service worker that never caches `/api` and falls back to the last loaded shell or an offline page, and an **Install app** button.
 - `app_accounts`: in App mode, accounts whose installations are served besides the App owner's.
 - `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
 - `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the set marks the image stale; so does an image baked by an older kiln (recorded as `recipe` in `base.json`).
