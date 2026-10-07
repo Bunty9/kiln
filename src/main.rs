@@ -290,7 +290,7 @@ fn api_backoff_secs(fails: u32) -> u64 {
 
 /// GitHub-wide runner registration failures (5xx or unreachable): unlike a repo's own
 /// failures, retrying another repo or job would only fail the same way, so every launch waits.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ApiBackoff {
     pub fails: u32,
     pub retry_at: u64,
@@ -313,6 +313,17 @@ impl ApiBackoff {
 
     pub fn held(&self, t: u64) -> bool {
         t < self.retry_at
+    }
+
+    /// Launches allowed of `want`: all while healthy; while failing, one probe once the
+    /// pause is over and no earlier launch is still minting (`probing`). One mint attempt per
+    /// step, so a batch does not fail N times; the rest wait for a mint to succeed.
+    pub fn allow(&self, t: u64, want: usize, probing: bool) -> usize {
+        match self.fails {
+            0 => want,
+            _ if self.held(t) || probing => 0,
+            _ => want.min(1),
+        }
     }
 
     /// The Overview banner (`PollStatus.blocked`) until a mint succeeds again.
@@ -708,15 +719,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
-    let (api_held, api_banner) = {
-        let b = app.api_backoff.lock().unwrap();
-        (b.held(now()), b.banner(now()))
-    };
+    let api = app.api_backoff.lock().unwrap().clone();
+    // A launch still minting is the probe of this backoff step.
+    let mut probing = api.fails > 0 && app.vms.lock().unwrap().iter().any(|v| v.state == vm::State::Booting && v.runner_id.is_none());
+    let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
         .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
         .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())))
-        .or_else(|| api_banner.map(|m| ("github_api", m)))
+        .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
         .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
     let mut budget = {
@@ -782,19 +793,16 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if queued > waiting && blocked.is_none() {
                 blocked = gated(gate.clone());
             }
-            let held = backed_off
-                || api_held
-                || old_image
-                || gate.is_some()
-                || egress_err.is_some()
-                || draining
-                || app.stopping.load(Ordering::SeqCst);
+            any_queued |= queued > 0;
+            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
                 warm = 0;
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
+            let want = api.allow(now(), want, probing);
+            probing |= want > 0;
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
             if blocked.is_none() {
@@ -805,6 +813,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             }
         }
         queued_by_repo.insert(repo.clone(), by_size);
+    }
+    // Pause over: the banner stays only while a job waits on the probe, not indefinitely.
+    if blocked.is_none() && any_queued {
+        blocked = api.banner(now()).map(|m| ("github_api", m));
     }
     {
         let mut p = app.poll.lock().unwrap();
@@ -1092,6 +1104,20 @@ mod tests {
         // The first successful mint clears it.
         b = ApiBackoff::default();
         assert!(!b.held(2680) && b.banner(2680).is_none());
+    }
+
+    #[test]
+    fn github_wide_backoff_probes_one_launch_at_a_time() {
+        let mut b = ApiBackoff::default();
+        // Healthy: launch everything wanted.
+        assert_eq!(b.allow(0, 5, false), 5);
+        b.fail(Some(500), 1000);
+        // Paused: nothing.
+        assert_eq!(b.allow(1059, 5, false), 0);
+        // Pause over: one probe, and none while a probe is still minting.
+        assert_eq!(b.allow(1060, 5, false), 1);
+        assert_eq!(b.allow(1060, 0, false), 0);
+        assert_eq!(b.allow(1060, 5, true), 0);
     }
 
     #[test]

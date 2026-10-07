@@ -587,7 +587,7 @@ function status(v) {
 }
 const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
   : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
-const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
+const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');

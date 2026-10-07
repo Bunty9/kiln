@@ -70,6 +70,16 @@ impl std::fmt::Display for MintError {
 
 impl std::error::Error for MintError {}
 
+/// A failed request setup under a registration call (App mode: minting the installation
+/// token) is a registration failure too: its HTTP status, or none for a network error, says
+/// whose it is. Anything else (repo not served, a bad App key) stays a plain error.
+fn as_mint_error(e: anyhow::Error, endpoint: &'static str) -> anyhow::Error {
+    let Some(status) = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()).map(|r| r.status().map(|s| s.as_u16())) else {
+        return e;
+    };
+    MintError { status, endpoint, message: format!("{e:#}") }.into()
+}
+
 /// Doctor line for a registration-token probe's status (None = unreachable).
 fn registration_detail(status: Option<u16>) -> (bool, String) {
     match status {
@@ -204,10 +214,12 @@ impl Gh {
         }
         let jwt = a.jwt(crate::now())?;
         let r = self.request_with(&jwt, Method::POST, &format!("app/installations/{inst}/access_tokens")).send().await?;
-        let status = r.status();
+        // Kept as a reqwest::Error so `as_mint_error` can read the status.
+        let failed = r.error_for_status_ref().err().map(|e| e.without_url());
         let v: Value = r.json().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            bail!("minting an installation token: {status} {}", v["message"].as_str().unwrap_or(""));
+        if let Some(e) = failed {
+            let m = v["message"].as_str().map(|m| format!(" ({m})")).unwrap_or_default();
+            return Err(anyhow::Error::new(e).context(format!("minting an installation token{m}")));
         }
         let t = v["token"].as_str().context("no token in response")?.to_string();
         let exp = v["expires_at"].as_str().and_then(parse_rfc3339).context("no expires_at")?;
@@ -696,7 +708,7 @@ impl Gh {
 
     /// POST to a runner-registration endpoint; a failed call is a `MintError`.
     async fn mint_call(&self, path: &str, endpoint: &'static str, body: Option<Value>) -> Result<Value> {
-        let (mut rb, who) = self.request(Method::POST, path).await?;
+        let (mut rb, who) = self.request(Method::POST, path).await.map_err(|e| as_mint_error(e, endpoint))?;
         if let Some(b) = body {
             rb = rb.json(&b);
         }
@@ -931,6 +943,23 @@ mod tests {
         // GitHub-wide: 5xx and network errors; a 4xx is about this repo or this token.
         assert!(e(Some(500), "").github_wide() && e(Some(503), "").github_wide() && e(None, "").github_wide());
         assert!(!e(Some(403), "").github_wide() && !e(Some(404), "").github_wide() && !e(Some(422), "").github_wide());
+    }
+
+    #[test]
+    fn installation_token_failures_are_mint_errors() {
+        let class = |e: anyhow::Error| e.downcast_ref::<MintError>().map(|m| (m.status, m.github_wide()));
+        let status = |s: u16| {
+            let r = reqwest::Response::from(axum::http::Response::builder().status(s).body("").unwrap());
+            anyhow::Error::new(r.error_for_status().unwrap_err()).context("minting an installation token")
+        };
+        // GitHub down while minting the installation token: GitHub-wide, like the jitconfig call itself.
+        assert_eq!(class(as_mint_error(status(500), "generate-jitconfig")), Some((Some(500), true)));
+        let unreachable = reqwest::Client::new().get("not a url").build().unwrap_err();
+        assert_eq!(class(as_mint_error(anyhow::Error::new(unreachable), "generate-jitconfig")), Some((None, true)));
+        // The App lost access to this installation: this repo's problem.
+        assert_eq!(class(as_mint_error(status(404), "generate-jitconfig")), Some((Some(404), false)));
+        // Not an HTTP failure (repo not served, a bad key): stays a plain error.
+        assert_eq!(class(as_mint_error(anyhow::anyhow!("repo o/n is not served by the GitHub App"), "generate-jitconfig")), None);
     }
 
     #[test]

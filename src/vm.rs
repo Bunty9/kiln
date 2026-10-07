@@ -119,6 +119,10 @@ pub struct Vm {
     /// Launched to fill the warm pool; cleared once it takes a job.
     #[serde(default)]
     pub warm: bool,
+    /// GitHub refused the runner registration: no VM booted, no job touched. Memory-only
+    /// (no directory) and not counted as a job failure on the dashboard.
+    #[serde(default)]
+    pub mint_failed: bool,
 }
 
 impl Vm {
@@ -231,6 +235,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         egress: app.cfg().egress,
         policy: policy_id(&app.cfg()),
         warm,
+        mint_failed: false,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -260,6 +265,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                     State::Failed
                 }
             };
+            v.mint_failed = mint.is_some();
             // Failed means kiln or the host broke; a job's own verdict is Done.
             if v.result.is_some() {
                 v.state = State::Done;
@@ -296,8 +302,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             {
                 tracing::warn!("{}: {e:#}", v.id);
             }
-            // A failed mint never made a directory: its record stays in memory only.
-            if mint.is_none() {
+            // A failed mint (or anything else before boot) never made a directory: memory only.
+            if dir.exists() {
                 persist(&app, &v);
             }
         }
@@ -1274,8 +1280,23 @@ async fn egress_probe(app: &App) -> Result<()> {
     bail!("{}", why.unwrap_or_else(|| format!("rootlesskit exited with {}", o.status)))
 }
 
+/// Mint-failure records kept: during an outage they say the same thing, one per backoff step.
+const KEEP_MINT_FAILURES: usize = 5;
+
+/// Drop all but the latest `KEEP_MINT_FAILURES` mint failures (`vms` is oldest first),
+/// so an outage never pushes real job history out of `KEEP_HISTORY`.
+fn cap_mint_failures(vms: &mut Vec<Vm>) {
+    let mut extra = vms.iter().filter(|v| v.mint_failed).count().saturating_sub(KEEP_MINT_FAILURES);
+    vms.retain(|v| {
+        let drop = extra > 0 && v.mint_failed;
+        extra -= drop as usize;
+        !drop
+    });
+}
+
 fn prune(app: &App) {
     let mut vms = app.vms.lock().unwrap();
+    cap_mint_failures(&mut vms);
     while vms.len() > KEEP_HISTORY {
         let Some(pos) = vms.iter().position(|v| !v.state.is_active()) else { break };
         let old = vms.remove(pos);
@@ -1959,7 +1980,20 @@ mod tests {
             egress: String::new(),
             policy: String::new(),
             warm: false,
+            mint_failed: false,
         }
+    }
+
+    #[test]
+    fn mint_failures_keep_only_the_latest() {
+        let m = |id: &str| Vm { mint_failed: true, ..vm(id, State::Failed, None) };
+        let mut vms = vec![vm("a", State::Done, None), m("m1"), m("m2"), vm("b", State::Done, None)];
+        vms.extend((3..=KEEP_MINT_FAILURES + 2).map(|i| m(&format!("m{i}"))));
+        cap_mint_failures(&mut vms);
+        let ids: Vec<&str> = vms.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids.len(), KEEP_MINT_FAILURES + 2);
+        assert_eq!(&ids[..2], ["a", "b"]);
+        assert_eq!(ids[2], "m3");
     }
 
     #[test]
