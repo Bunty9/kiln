@@ -1,10 +1,12 @@
-# Tag vX.Y.Z on a main commit to publish a release. Built on kiln itself (Ubuntu 24.04 VM):
+# Tag vX.Y.Z on a main commit to publish a release. Built on kiln itself (Ubuntu 24.04 VMs):
 # kiln-X.Y.Z-x86_64-linux.tar.gz needs glibc 2.39+ (Ubuntu 24.04, Debian 13 or newer);
 # kiln-X.Y.Z-x86_64-linux-musl.tar.gz is fully static and runs on any x86_64 Linux.
-# Each tarball has a .sha256 and a .sig (raw Ed25519 signature of the tarball's bytes with the
-# key in the KILN_RELEASE_SIGNING_KEY secret); running kilns install only signed releases.
-# Only the Sign step sees the key: it runs after everything is built and packaged, executes no
-# project code, and fetches nothing.
+# Each tarball has a .sha256 and a .sig (raw Ed25519 signature of the tarball's bytes);
+# running kilns install only releases signed with the key whose public half is in src/update.rs.
+#
+# Two jobs, two fresh VMs. `build` compiles (build scripts, proc macros, rustup) and never sees
+# the key. `sign` runs no project code: it signs the built tarballs with the key from the
+# `release` environment (deployable from v* tags only), verifies them and publishes.
 name: release
 on:
   push:
@@ -13,18 +15,21 @@ on:
 permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: [self-hosted, kiln]
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Check the tag is on main and matches Cargo.toml
+        # Guards against tagging the wrong commit; not a security boundary (a tag push runs the
+        # workflow file of the tagged commit). Who may push v* tags is what protects the key.
         run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main: refusing to sign it"; exit 1; }
+          # fetch-depth: 0 above already fetched every branch, origin/main included.
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
           want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $want"; exit 1; }
       - name: Install Rust
@@ -58,6 +63,28 @@ jobs:
             tar -C dist -czf "dist/$name.tar.gz" "$name"
             (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    needs: build
+    runs-on: [self-hosted, kiln]
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      # Only reads files (CHANGELOG.md, PUBLIC_KEY in src/update.rs); nothing from the repo runs.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
       - name: Sign
         env:
           KEY: ${{ secrets.KILN_RELEASE_SIGNING_KEY }}
