@@ -134,11 +134,14 @@ impl Config {
         self.repo_cache_gb.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(self.cache_gb, |(_, &g)| g)
     }
 
-    pub fn validate(&self) -> Result<()> {
-        self.validate_for(host_threads())
+    /// `app_mode`: repos come from the GitHub App's installations, so per-repo keys
+    /// need not name a configured repo (keys for repos not installed are ignored).
+    pub fn validate(&self, app_mode: bool) -> Result<()> {
+        self.validate_for(host_threads(), app_mode)
     }
 
-    fn validate_for(&self, host: u32) -> Result<()> {
+    fn validate_for(&self, host: u32, app_mode: bool) -> Result<()> {
+        let served = |r: &str| app_mode || self.repos.iter().any(|x| x.eq_ignore_ascii_case(r));
         for (i, r) in self.repos.iter().enumerate() {
             if self.repos[..i].iter().any(|p| p.eq_ignore_ascii_case(r)) {
                 bail!("repo listed twice (GitHub names are case-insensitive): {r:?}");
@@ -195,11 +198,11 @@ impl Config {
         if let Some(k) = self.debug_ssh_keys.iter().find(|k| !vm::valid_ssh_key(k)) {
             bail!("debug_ssh_keys: not a single-line ssh-/ecdsa-/sk- public key: {:?}", k.chars().take(24).collect::<String>());
         }
-        if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r))) {
+        if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !served(r)) {
             bail!("warm: {r:?} must be a configured repo with a count of 0..=4");
         }
         for (r, bs) in &self.cache_branches {
-            if !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)) {
+            if !served(r) {
                 bail!("cache_branches: {r:?} is not a configured repo");
             }
             if let Some(b) = bs.iter().find(|b| !valid_branch(b)) {
@@ -271,13 +274,21 @@ impl App {
     }
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
-        c.validate()?;
+        c.validate(self.gh.app().is_some())?;
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
         *w = c;
         Ok(())
+    }
+
+    /// Repos kiln serves: the App's installations in App mode, else the configured list.
+    pub fn repos(&self) -> Vec<String> {
+        match self.gh.app() {
+            Some(a) => a.names.read().unwrap().clone(),
+            None => self.cfg().repos,
+        }
     }
 
     pub fn save_token(&self, t: String) -> Result<()> {
@@ -346,8 +357,14 @@ async fn main() -> Result<()> {
         Err(_) => Config::default(),
     };
     let (token, source) = load_token(&data, false);
+    let gh = github::Gh::new(token, source);
+    match app_auth::load(&data) {
+        Some(Ok(a)) => gh.set_app(Some(Arc::new(a))),
+        Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
+        None => {}
+    }
     let app = Arc::new(App {
-        gh: github::Gh::new(token, source),
+        gh,
         cfg: RwLock::new(cfg),
         vms: Mutex::default(),
         data,
@@ -434,10 +451,28 @@ async fn shutdown(app: &Arc<App>) {
     }
 }
 
+/// App mode: refresh which repos the App is installed on, at most every 5 minutes.
+/// A failure keeps the previous list (a GitHub hiccup must not unschedule every repo).
+async fn refresh_app(app: &Arc<App>) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    if app.gh.app().is_none() || now() < LAST.load(Ordering::Relaxed) + 300 {
+        return;
+    }
+    LAST.store(now(), Ordering::Relaxed);
+    match app.gh.discover().await {
+        Ok(n) => tracing::info!("GitHub App: {n} repo(s) installed"),
+        Err(e) => {
+            tracing::warn!("GitHub App discovery: {e:#}");
+            app.poll.lock().unwrap().error = Some(format!("GitHub App discovery: {e:#}"));
+        }
+    }
+}
+
 async fn scheduler(app: Arc<App>) {
+    refresh_app(&app).await;
     // Runners a crashed kiln left registered (offline) would otherwise linger for a day.
     if app.gh.has_token() {
-        for repo in &app.cfg().repos {
+        for repo in &app.repos() {
             match app.gh.sweep_runners(repo).await {
                 Ok(n) if n > 0 => tracing::info!("{repo}: removed {n} stale runner(s)"),
                 Ok(_) => {}
@@ -478,6 +513,9 @@ fn poll_sleep(poll_secs: u64, rate: Option<(u64, u64, u64)>) -> u64 {
 /// Pick up a token that appeared (keyring unlocked, env fixed) or was rotated.
 async fn reload_token(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
+    if app.gh.app().is_some() {
+        return;
+    }
     let bad = !app.gh.has_token() || app.poll.lock().unwrap().error.as_deref().is_some_and(|e| e.contains("401"));
     if !bad || now() < LAST.load(Ordering::Relaxed) + 60 {
         return;
@@ -523,6 +561,7 @@ fn auto_rebake(app: &Arc<App>, cfg: &Config) {
 async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u32, usize>>> {
     static TICK: AtomicUsize = AtomicUsize::new(0);
     reload_token(app).await;
+    refresh_app(app).await;
     if !app.gh.has_token() {
         bail!("no GitHub token: set one in the dashboard, export KILN_GITHUB_TOKEN, or `gh auth login`");
     }
@@ -557,8 +596,9 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut repo_errors = HashMap::new();
     let mut refused_forks = HashMap::new();
     // Rotate the start so the first repo doesn't always win scarce slots.
-    let start = TICK.fetch_add(1, Ordering::Relaxed) % cfg.repos.len().max(1);
-    for repo in cfg.repos.iter().cycle().skip(start).take(cfg.repos.len()) {
+    let repos = app.repos();
+    let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
+    for repo in repos.iter().cycle().skip(start).take(repos.len()) {
         let (by_size, runners, forks) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
             Ok(r) => r,
             Err(e) => {
@@ -674,7 +714,7 @@ mod tests {
         let ok = |f: fn(&mut Config)| {
             let mut c = Config::default();
             f(&mut c);
-            c.validate_for(8).is_ok()
+            c.validate_for(8, false).is_ok()
         };
         assert!(ok(|_| {}));
         assert!(ok(|c| c.max_vms = 0));
@@ -705,7 +745,7 @@ mod tests {
         let warm = |repos: &[&str], r: &str, n: u32| {
             let mut c = Config { repos: repos.iter().map(|s| s.to_string()).collect(), ..Config::default() };
             c.warm.insert(r.into(), n);
-            c.validate_for(8).is_ok()
+            c.validate_for(8, false).is_ok()
         };
         assert!(warm(&["a/b"], "A/B", 4));
         assert!(warm(&["a/b"], "a/b", 0));
@@ -714,7 +754,7 @@ mod tests {
         let branches = |r: &str, b: &str| {
             let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
             c.cache_branches.insert(r.into(), vec![b.into()]);
-            c.validate_for(8).is_ok()
+            c.validate_for(8, false).is_ok()
         };
         assert!(branches("A/B", "dev"));
         assert!(!branches("a/b", "dev/") && !branches("a/b", ".dev") && !branches("a/b", "dev?x") && !branches("a/b", "release/*"));
@@ -753,6 +793,20 @@ mod tests {
         assert!(ok(|c| c.warm_recycle_mins = 5));
         assert!(!ok(|c| c.warm_recycle_mins = 4));
         assert!(!ok(|c| c.warm_recycle_mins = 1441));
+    }
+
+    #[test]
+    fn app_mode_per_repo_keys() {
+        // In App mode the served repos come from the installation, so per-repo keys
+        // for repos not (or no longer) installed are kept and ignored, not rejected.
+        let mut c = Config::default();
+        c.warm.insert("gone/repo".into(), 1);
+        c.cache_branches.insert("gone/repo".into(), vec!["dev".into()]);
+        assert!(c.validate_for(8, true).is_ok());
+        assert!(c.validate_for(8, false).is_err());
+        // shape is still checked
+        c.cache_branches.insert("gone/repo".into(), vec!["bad branch".into()]);
+        assert!(c.validate_for(8, true).is_err());
     }
 
     #[test]

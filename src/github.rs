@@ -81,12 +81,10 @@ impl Gh {
         self.app().is_some() || !self.token.read().unwrap().is_empty()
     }
 
-    /// Bearer for `path`: the PAT, the App JWT for `app/...`, or the owning installation's token.
+    /// Bearer for `path`: the PAT, or the owning installation's token. The App JWT is
+    /// never handed out here: only `mint`, `discover` and `app_info` use it, directly.
     async fn token_for(&self, path: &str) -> Result<String> {
         let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
-        if path.trim_start_matches('/').starts_with("app/") {
-            return a.jwt(crate::now());
-        }
         let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap()).context("the GitHub App has no installations")?;
         self.mint(&a, inst).await
     }

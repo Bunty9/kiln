@@ -279,7 +279,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "host": host_stats(&app).await,
         "version": env!("CARGO_PKG_VERSION"),
         "mirror": mirror::status_json(&app).await,
-        "caches": vm::cache_stats(&app.data, &app.cfg().repos),
+        "caches": vm::cache_stats(&app.data, &app.repos()),
     })))
 }
 
@@ -315,7 +315,7 @@ async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<Json<Value>> {
         bail_r(&format!("GitHub rejected the token: {status} {}", user["message"].as_str().unwrap_or("")))?;
     }
     let mut repos = serde_json::Map::new();
-    for r in app.cfg().repos {
+    for r in app.repos() {
         let (st, _, body) = app.gh.probe(&token, &format!("repos/{r}/actions/runners?per_page=1")).await?;
         let msg = if st == 200 { "ok".to_string() } else { format!("{st} {}", body["message"].as_str().unwrap_or("")) };
         repos.insert(r, msg.into());
@@ -400,6 +400,9 @@ async fn onboard(State(app): S) -> Json<Value> {
 async fn onboard_hello(State(app): S, Json(b): Json<RepoBody>) -> R<Json<Value>> {
     static SAVE: Mutex<()> = Mutex::new(());
     let cfg = app.cfg();
+    if app.gh.app().is_some() {
+        bail_r("the hello PR is off in GitHub App mode (the App cannot write code)")?;
+    }
     let repo = cfg.repos.iter().find(|r| r.eq_ignore_ascii_case(&b.repo)).ok_or_else(|| anyhow!("not a configured repo"))?;
     let t = now();
     let (pr_url, branch) = app.gh.hello_pr(repo, &cfg.label, t).await?;
@@ -481,7 +484,7 @@ fn bail_r(msg: &str) -> R<()> {
 /// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
 /// or cancel without a dedicated endpoint per call.
 async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: axum::extract::RawQuery, body: Bytes) -> R<Response> {
-    if !proxy_path_ok(&path, &app.cfg().repos) {
+    if !proxy_path_ok(&path, &app.repos()) {
         bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
     }
     if method != Method::GET && method != Method::POST {

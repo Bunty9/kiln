@@ -964,7 +964,7 @@ fn cache_readers(vms: &[Vm], repo: &str, except: &str) -> usize {
 
 /// Dashboard "Clear": delete a repo's cache (recreated empty by the next job).
 pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
-    if !app.cfg().repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+    if !app.repos().iter().any(|r| r.eq_ignore_ascii_case(repo)) {
         bail!("not a configured repo");
     }
     let vms = app.vms.lock().unwrap();
@@ -1709,7 +1709,7 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ("actions/runs?per_page=1", "Actions: read and write (find queued jobs)"),
         ("commits?per_page=1", "Contents: read (verify cache-writer pushes)"),
     ];
-    for repo in &cfg.repos {
+    for repo in &app.repos() {
         let (mut missing, mut errs) = (vec![], vec![]);
         for (path, perm) in NEEDS {
             match app.gh.raw(reqwest::Method::GET, &format!("repos/{repo}/{path}"), None).await {
