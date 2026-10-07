@@ -277,6 +277,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
             "html_url": a.html_url,
             "repos": a.names.read().unwrap().clone(),
             "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
+            "error": a.error.lock().unwrap().clone(),
         })),
         "token_source": app.gh.source(),
         "token_expires": *app.gh.expires.lock().unwrap(),

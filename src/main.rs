@@ -464,10 +464,7 @@ async fn refresh_app(app: &Arc<App>) {
     LAST.store(now(), Ordering::Relaxed);
     match app.gh.discover().await {
         Ok(n) => tracing::info!("GitHub App: {n} repo(s) installed"),
-        Err(e) => {
-            tracing::warn!("GitHub App discovery: {e:#}");
-            app.poll.lock().unwrap().error = Some(format!("GitHub App discovery: {e:#}"));
-        }
+        Err(e) => tracing::warn!("GitHub App discovery: {e:#}"),
     }
 }
 

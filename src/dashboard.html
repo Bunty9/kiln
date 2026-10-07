@@ -374,6 +374,9 @@ async function api(path, o = {}) {
 }
 const post = (p, body) => api(p, { method: 'POST', body });
 const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
+// Served repos: the GitHub App's installations in App mode, else the configured list.
+const REPOS = () => S.app ? S.app.repos : S.config.repos;
+const appInstall = () => S.app ? `<a class="btn" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener">Install on repos ↗</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
   $('#toasts').append(t); setTimeout(() => t.remove(), bad ? 7000 : 3500);
@@ -518,7 +521,20 @@ function parse() {
   const seg = path.split('/').filter(Boolean).map(decodeURIComponent);
   return { page: seg[0] || 'overview', seg: seg.slice(1), q: new URLSearchParams(q || '') };
 }
+// GitHub's manifest flow sends the browser back to #/app?code=…&state=….
+async function appCallback() {
+  const q = new URLSearchParams(location.hash.split('?')[1] || '');
+  history.replaceState(null, '', '#/settings/github');
+  if (!q.get('code')) return route();
+  try {
+    const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
+    toast(`GitHub App ${r.slug} created. Now install it on your repos.`); await poll();
+    if (r.html_url) window.open(r.html_url + '/installations/new', '_blank', 'noopener');
+  } catch (e) { toast(String(e.message || e), true); }
+  route();
+}
 function route() {
+  if (location.hash.startsWith('#/app')) return void appCallback();
   cur?.unmount?.(); closePop();
   const r = parse(), pg = pages[r.page] || pages.overview;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
@@ -561,7 +577,7 @@ addEventListener('hashchange', async () => {
   }
   lastHash = to; route();
 });
-const setupNeeded = () => !S.token_set || !S.image_ready || !S.config.repos.length || !S.vms.length;
+const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !S.vms.length;
 
 /* ---------- overview ---------- */
 function jobRow(v) {
@@ -597,7 +613,9 @@ function banners() {
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
-  if (S.token_set && !c.repos.length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
+  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
+  else if (S.app && !S.app.repos.length) B('warn', 'The GitHub App is not installed on any repo yet.', appInstall());
+  else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
   if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.version ? ` · kiln ${esc(S.version)}` : ''}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
   return b.join('');
@@ -647,7 +665,7 @@ pages.overview = {
   },
 };
 const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
-const emptyJobs = () => { const r = S.config.repos[0]; return `<div class="empty"><p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more →</a></div>`; };
+const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty"><p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more →</a></div>`; };
 
 /* ---------- jobs ---------- */
 const jf = { f: 'all', repo: '' };
@@ -656,7 +674,7 @@ pages.jobs = {
     if (r.seg[0]) return pages.job.mount(r);
     if (r.q.get('f')) jf.f = r.q.get('f');
     markSeen();
-    const repos = [...new Set([...S.config.repos, ...S.vms.map(v => v.repo)])];
+    const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo)])];
     $('#app').innerHTML = `<div class="ph"><h1>Jobs</h1></div><div class="bar">
       <div class="seg" role="radiogroup" aria-label="Filter">${['all', 'running', 'failed'].map(k => `<button role="radio" data-act="jf" data-v="${k}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>
       <label class="sr" for="jf-repo">Repository</label><select id="jf-repo" data-act="jfrepo"><option value="">All repos</option>${repos.map(r => `<option ${r === jf.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></div><div id="jl"></div>`;
@@ -853,11 +871,11 @@ const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs
 pages.repos = {
   mount(r) {
     this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null;
-    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${repoForm}`; S.config.repos.forEach(x => loadLast(x)); return; }
+    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? `<p class="fg2" style="margin:16px 0 8px">Repos come from the GitHub App's installations.</p>${appInstall()}` : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
     $('#app').innerHTML = `<a class="back" href="#/repos">← Repos</a><div class="ph"><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener">GitHub ↗</a></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
-      <div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">Remove ${esc(this.r)}</button></div></div>`;
+      ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">Remove ${esc(this.r)}</button></div></div>`}`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
   },
   unmount() { clearInterval(this.t); },
@@ -877,7 +895,7 @@ pages.repos = {
   },
   update() {
     if (!this.r) {
-      const rs = S.config.repos;
+      const rs = REPOS();
       setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
         const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
         return `<li><div class="row rr"><a class="nm" href="#/repos/${r}">${esc(r)}</a>
@@ -951,10 +969,18 @@ const G = {
     live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip">${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}">×</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
   },
   github: {
-    html: () => `<div class="card"><h2>GitHub</h2><div id="gh-st"></div>
+    html: () => `<div class="card"><h2>GitHub App</h2><div id="app-st"></div></div><div class="card"><h2>GitHub</h2><div id="gh-st"></div>
       <form data-form="token" class="bar" style="margin:0"><label class="sr" for="tok-in">Personal access token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
       <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p></div>`,
     live() {
+      const a = S.app;
+      setHTML($('#app-st'), a ? `<dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)} ↗</a></dd>
+        <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? rel(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}</dl>
+        <div class="bar" style="margin:0">${appInstall()}<button class="btn dng" data-act="rmapp">Remove App</button></div>
+        <p class="fg2 sm" style="margin-top:8px">kiln uses the App's installation tokens (they expire after an hour); the token below is not used.</p>`
+      : `<p class="fg2" style="margin-bottom:12px">Safer than a token: the App gets only the permissions kiln needs, never write access to code, and its tokens expire after an hour. Installing it on a repo is what makes kiln serve that repo.</p>
+        <div class="bar" style="margin:0"><label class="sr" for="app-org">Organization</label><input id="app-org" placeholder="org (empty = your account)" style="width:220px"><button class="btn pri" data-act="mkapp">Create GitHub App</button></div>
+        <details style="margin-top:12px"><summary>Use an existing App</summary><form data-form="appmanual" class="bar" style="margin:8px 0 0"><label class="sr" for="app-id">App ID</label><input id="app-id" type="number" min="1" placeholder="App ID" style="width:120px" required><label class="sr" for="app-pem">Private key</label><input id="app-pem" type="file" accept=".pem" required><button class="btn">Save</button></form></details>`);
       const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
@@ -985,7 +1011,7 @@ const G = {
       ${fld('f-cache_gb', 'Size (GB)', `<input type="number" id="f-cache_gb" data-k="cache_gb" value="${esc(draft.cache_gb)}" min="5" max="500" step="1">`, 'Applies to caches created from now on. A cache that grows past 1.2x this is reset. Clear a cache to resize it.')}</div>
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
-      const c = S.caches || {}, repos = S.config.repos;
+      const c = S.caches || {}, repos = REPOS();
       setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. It is created on the first job and saved after a successful push to the default branch or a cache branch.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}">Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
     },
   },
@@ -1077,6 +1103,7 @@ async function loadHello() {
   cur?.update?.();
 }
 function helloBtn(repo, pri = true) {
+  if (S.app) return '<p class="fg2 sm">Test PRs are off with the GitHub App, which cannot write code. Add the snippet below to a workflow instead.</p>';
   const h = hello[repo], e = helloErr[repo];
   const btn = h ? `<a class="btn" href="${esc(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened ↗ · branch <code>${esc(h.branch)}</code>` : 'Test PR ↗'}</a>`
     : `<button class="btn${pri ? ' pri' : ''}" data-act="hello" data-id="${esc(repo)}" ${helloSt[repo] ? 'disabled' : ''}>${helloSt[repo] ? 'Opening PR…' : 'Open a test PR'}</button>`;
@@ -1093,7 +1120,7 @@ pages.setup = {
     setupOpen = null;
   },
   update() {
-    const c = S.config, rs = c.repos, repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
+    const c = S.config, rs = REPOS(), repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
     if (!S.image_ready && !S.baking && bk.checked && !bakeFailed() && !lsGet('kiln-bake-auto')) { lsSet('kiln-bake-auto', '1'); ACT.bake().catch(fail); }
     const [cls, st] = imgStrip(), strip = `<div class="cal ${cls}" style="margin:0 0 20px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">${st}</div>`;
     if (first) {
@@ -1188,6 +1215,16 @@ pages.guides = {
 
 /* ---------- actions ---------- */
 const ACT = {
+  async mkapp() {
+    const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim() });
+    const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;
+    const i = document.createElement('input'); i.name = 'manifest'; i.value = JSON.stringify(m.manifest); f.append(i);
+    document.body.append(f); f.submit();
+  },
+  async rmapp() {
+    if (!await ask({ title: 'Remove the GitHub App?', body: 'kiln goes back to token auth. The App itself stays on GitHub; delete it there if you no longer need it.', action: 'Remove', danger: 1 })) return;
+    await api('/api/app', { method: 'DELETE' }); toast('GitHub App removed'); await poll();
+  },
   retry() { fails = 0; poll(); },
   async bake() { await post('/api/bake'); S.baking = true; bk.was = false; toast('Bake started'); setTimeout(poll, 300); },
   async rebake() {
@@ -1328,6 +1365,10 @@ document.addEventListener('submit', async e => {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), w = { ...(S.config.warm || {}) }, r = pages.repos.r;
       if (n) w[r] = n; else delete w[r];
       await saveCfg({ ...S.config, warm: w }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
+    }
+    else if (k === 'appmanual') {
+      const pem = await $('#app-pem').files[0].text(), r = await post('/api/app', { id: +$('#app-id').value, pem });
+      toast(`Using GitHub App ${r.slug || ''}`); await poll();
     }
     else if (k === 'cachebr') {
       const r = pages.repos.r, list = inp.value.split(',').map(x => x.trim()).filter(Boolean), m = { ...(S.config.cache_branches || {}) };

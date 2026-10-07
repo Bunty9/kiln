@@ -378,6 +378,12 @@ impl Gh {
     /// Leaves the previous map in place on any error.
     pub async fn discover(&self) -> Result<usize> {
         let a = self.app().context("not in GitHub App mode")?;
+        let r = self.discover_into(&a).await;
+        *a.error.lock().unwrap() = r.as_ref().err().map(|e| format!("{e:#}"));
+        r
+    }
+
+    async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<usize> {
         let jwt = a.jwt(crate::now())?;
         let (mut map, mut names) = (BTreeMap::new(), vec![]);
         let mut page = 1;
@@ -389,7 +395,7 @@ impl Gh {
             let insts: Vec<Value> = r.json().await?;
             for i in &insts {
                 let id = i["id"].as_u64().context("installation id")?;
-                let token = self.mint(&a, id).await?;
+                let token = self.mint(a, id).await?;
                 let mut p = 1;
                 loop {
                     let path = format!("installation/repositories?per_page=100&page={p}");

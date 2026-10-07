@@ -101,6 +101,8 @@ pub struct AppAuth {
     /// The same repos as GitHub spells them ("Bunty9/kiln").
     pub names: std::sync::RwLock<Vec<String>>,
     pub discovered_at: std::sync::atomic::AtomicU64,
+    /// Why the last discovery failed (cleared by a successful one).
+    pub error: std::sync::Mutex<Option<String>>,
 }
 
 impl AppAuth {
@@ -114,6 +116,7 @@ impl AppAuth {
             repos: Default::default(),
             names: Default::default(),
             discovered_at: Default::default(),
+            error: Default::default(),
         })
     }
 
