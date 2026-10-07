@@ -1,12 +1,14 @@
 # Tag vX.Y.Z on a main commit to publish a release. Built on kiln itself (Ubuntu 24.04 VMs):
 # kiln-X.Y.Z-x86_64-linux.tar.gz needs glibc 2.39+ (Ubuntu 24.04, Debian 13 or newer);
 # kiln-X.Y.Z-x86_64-linux-musl.tar.gz is fully static and runs on any x86_64 Linux.
+# kiln-X.Y.Z-aarch64-macos.tar.gz (Apple Silicon) is built on a GitHub-hosted macos-14 runner, only
+# while the repository variable KILN_MACOS_RELEASE is "true" (see docs/apple-silicon.md).
 # Each tarball has a .sha256 and a .sig (raw Ed25519 signature of the tarball's bytes);
 # running kilns install only releases signed with the key whose public half is in src/update.rs.
 #
-# Two jobs, two fresh VMs. `build` compiles (build scripts, proc macros, rustup) and never sees
-# the key. `sign` runs no project code: it signs the built tarballs with the key from the
-# `release` environment (deployable from v* tags only), verifies them and publishes.
+# Two jobs, two fresh VMs. `build` (and `build-macos`) compile (build scripts, proc macros, rustup)
+# and never see the key. `sign` runs no project code: it signs the built tarballs with the key from
+# the `release` environment (deployable from v* tags only), verifies them and publishes.
 name: release
 on:
   push:
@@ -70,8 +72,52 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-macos:
+    # Off until the macOS build is proven on a real Mac: set the repository variable
+    # KILN_MACOS_RELEASE to "true" to publish kiln-X.Y.Z-aarch64-macos.tar.gz with each release.
+    if: vars.KILN_MACOS_RELEASE == 'true'
+    runs-on: macos-14 # Apple Silicon
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag is on main and matches Cargo.toml
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $want"; exit 1; }
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Test and build
+        run: |
+          cargo test --locked
+          cargo build --release --locked && ./target/release/kiln --version
+          file target/release/kiln | grep -q 'arm64' || { echo "not an arm64 binary"; exit 1; }
+      - name: Package
+        env:
+          COPYFILE_DISABLE: "1" # no AppleDouble ._ files in the tarball
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          name="kiln-$v-aarch64-macos"
+          mkdir -p "dist/$name"
+          cp target/release/kiln README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+          cp -r deploy "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-macos
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
   sign:
-    needs: build
+    needs: [build, build-macos]
+    # build-macos is skipped unless KILN_MACOS_RELEASE is on; a failed or cancelled build never publishes.
+    if: always() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
     runs-on: [self-hosted, kiln]
     environment: release
     permissions:
@@ -83,7 +129,9 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: dist
+          # dist (Linux) and, when built, dist-macos.
+          pattern: dist*
+          merge-multiple: true
           path: dist
       - name: Sign
         env:

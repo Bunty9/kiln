@@ -1,0 +1,28 @@
+# Lint and test kiln on Apple Silicon (GitHub-hosted macos-14). Hosted macOS minutes are
+# expensive, so this does not run on every push: run it from the Actions tab
+# (workflow_dispatch), or add the `macos` label to a pull request (it runs on labelling and
+# on every later push to that PR). It only compiles and runs unit tests: it cannot boot VMs
+# (no nested virtualization on hosted runners); see docs/apple-silicon.md for the real-Mac checklist.
+name: macos
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'macos')
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal -c clippy && rustup default stable
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
