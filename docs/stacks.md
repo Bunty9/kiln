@@ -72,6 +72,8 @@ jobs:
     runs-on: [self-hosted, kiln]
 ```
 
+  kiln also refuses fork pull requests (and `workflow_run` runs triggered by one) itself, but it cannot see a workflow started by `issue_comment`, `repository_dispatch` or `workflow_dispatch` that checks out a PR's head: run those on GitHub-hosted runners. See [SECURITY.md](../SECURITY.md#fork-pull-requests).
+
 - **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, the whole `~/.cargo` and `~/.rustup` (so the Rust toolchain is already there), Go modules, Gradle caches, `~/.m2/repository` and apt's downloaded packages are warm without any workflow change. Every job reads it; only a successful push to the default branch or a configured cache branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
 - **Debugging:** set `debug_hold_mins` and `debug_ssh_keys` in Settings > Debugging and a failed job's VM stays up for SSH (see [architecture](architecture.md#debug-hold-and-the-control-channel)).
 - **Image pulls:** Docker Hub limits 100 pulls/6h per IP; kiln's built-in pull-through mirror (live, `docker_mirror` in settings; 10.0.2.2:5000 from the VM) avoids this, with a fallback to Docker Hub if it is down.

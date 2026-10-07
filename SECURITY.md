@@ -41,7 +41,7 @@ With `egress: "filtered"` each job's QEMU runs in its own rootless network names
 
 ### Cache trust
 
-The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch or one of the repo's `cache_branches`, and the commit is really on that branch. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch or one of the repo's `cache_branches`, and the commit is really on that branch. A branch name outside `A-Z a-z 0-9 . _ / -` (or containing `..`) never writes. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
 
 ### Fork pull requests
 
@@ -57,6 +57,10 @@ Console lines may shape the timeline but cannot rewind state or extend a VM's li
 - the hold is granted only after a non-success verdict line; a job can forge that or cancel its own hold, but cannot hold a VM that never ran a job;
 - lines are capped at 64 KiB (a longer line and its remainder are never parsed) and logs at 64 MiB;
 - every VM has a **hard lifetime cap** of idle timeout + job timeout + hold time + 5 minutes, enforced by kiln outside the guest.
+
+### Base image
+
+kiln launches no VM, warm ones included, on a base image baked from an older recipe than the binary expects (`recipe` in `images/base.json`), since such an image may lack the fork-refusal hook. The dashboard shows why, and `auto_rebake` (or Settings › Image) replaces the image. The bake refuses an `actions/runner` release tag that is not `N.N.N`, checks each Node tarball against the release's `SHASUMS256.txt` from nodejs.org before unpacking it, and accepts only plain apt package names in `bake_apt_packages` (no trailing `-` or `+`, which apt reads as remove or install, and no `=` or `/` version pins). The Node checksum guards against a corrupted or swapped tarball, not against nodejs.org itself, since the sums come from the same origin over HTTPS.
 
 ### Docker mirror
 
@@ -93,7 +97,7 @@ jobs:
     runs-on: [self-hosted, kiln]
 ```
 
-  Also keep GitHub's "Require approval for all outside collaborators" setting on (Settings › Actions › General).
+  Also keep GitHub's "Require approval for all outside collaborators" setting on (Settings › Actions › General). Workflows that check out a pull request's head from an `issue_comment`, `repository_dispatch` or `workflow_dispatch` trigger must not use kiln on a public repo: kiln cannot tell (see [Fork pull requests](#fork-pull-requests)).
 
 - Set `egress` to `filtered` before running untrusted pull requests, such as ones from forks, and check Diagnostics shows "filtered egress" passing. Also consider requiring approval for workflows from outside contributors in the repository's GitHub settings.
 - Prefer a GitHub App (Settings › GitHub › Create GitHub App, see [docs/configuration.md](docs/configuration.md#github-app)): only its private key is stored, its tokens expire after an hour, and it never gets write access to code. Otherwise,
