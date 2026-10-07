@@ -271,10 +271,65 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
-    /// What `blocked` is: "draining", "old_image", "egress", "memory", "disk" or "budget".
+    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "disk" or "budget".
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
+}
+
+/// Pause after the n-th consecutive GitHub-wide registration failure: 1, 2, 5, then 10 min.
+fn api_backoff_secs(fails: u32) -> u64 {
+    match fails {
+        0 => 0,
+        1 => 60,
+        2 => 120,
+        3 => 300,
+        _ => 600,
+    }
+}
+
+/// GitHub-wide runner registration failures (5xx or unreachable): unlike a repo's own
+/// failures, retrying another repo or job would only fail the same way, so every launch waits.
+#[derive(Default)]
+pub struct ApiBackoff {
+    pub fails: u32,
+    pub retry_at: u64,
+    /// Last HTTP status (None = GitHub unreachable).
+    pub status: Option<u16>,
+}
+
+impl ApiBackoff {
+    /// Record a failure at `t`. Returns true when it starts a new backoff step (log it).
+    /// A failure inside the current pause is a sibling launch of the same batch: no escalation.
+    pub fn fail(&mut self, status: Option<u16>, t: u64) -> bool {
+        self.status = status;
+        if t < self.retry_at {
+            return false;
+        }
+        self.fails += 1;
+        self.retry_at = t + api_backoff_secs(self.fails);
+        true
+    }
+
+    pub fn held(&self, t: u64) -> bool {
+        t < self.retry_at
+    }
+
+    /// The Overview banner (`PollStatus.blocked`) until a mint succeeds again.
+    pub fn banner(&self, t: u64) -> Option<String> {
+        if self.fails == 0 {
+            return None;
+        }
+        let what = match self.status {
+            Some(s) => format!("GitHub is rejecting runner registration (HTTP {s})"),
+            None => "GitHub is unreachable for runner registration".into(),
+        };
+        Some(if self.held(t) {
+            format!("{what} — launches paused, retrying in {} min", (self.retry_at - t).div_ceil(60))
+        } else {
+            format!("{what} — retrying with the next launch")
+        })
+    }
 }
 
 pub struct App {
@@ -293,6 +348,8 @@ pub struct App {
     pub stopping: AtomicBool,
     /// repo -> (consecutive launch failures, retry_at unix time).
     pub backoff: Mutex<HashMap<String, (u32, u64)>>,
+    /// GitHub-wide registration failures: hold every launch.
+    pub api_backoff: Mutex<ApiBackoff>,
     pub mirror: Mutex<mirror::Status>,
     /// One-time states of GitHub App manifest flows in progress.
     pub app_states: Mutex<app_auth::States>,
@@ -415,6 +472,7 @@ async fn main() -> Result<()> {
         baking: Default::default(),
         stopping: Default::default(),
         backoff: Default::default(),
+        api_backoff: Default::default(),
         mirror: Default::default(),
         app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
         draining: Default::default(),
@@ -650,10 +708,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
+    let (api_held, api_banner) = {
+        let b = app.api_backoff.lock().unwrap();
+        (b.held(now()), b.banner(now()))
+    };
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
         .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
         .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())))
+        .or_else(|| api_banner.map(|m| ("github_api", m)))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
         .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
     let mut budget = {
@@ -719,7 +782,13 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if queued > waiting && blocked.is_none() {
                 blocked = gated(gate.clone());
             }
-            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off
+                || api_held
+                || old_image
+                || gate.is_some()
+                || egress_err.is_some()
+                || draining
+                || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -995,6 +1064,34 @@ mod tests {
         assert_eq!(app_refresh_secs(3, false), 30, "only an old map, never a successful discovery");
         assert_eq!(app_refresh_secs(0, true), 30, "installed nowhere yet: pick up a new install quickly");
         assert_eq!(app_refresh_secs(3, true), 300);
+    }
+
+    #[test]
+    fn github_wide_backoff() {
+        assert_eq!([1, 2, 3, 4, 9].map(api_backoff_secs), [60, 120, 300, 600, 600]);
+        let mut b = ApiBackoff::default();
+        assert!(!b.held(0) && b.banner(0).is_none());
+        // First failure: pause 1 min, and say so once.
+        assert!(b.fail(Some(500), 1000));
+        assert!(b.held(1059) && !b.held(1060));
+        // A sibling launch of the same batch failing inside the pause neither escalates nor logs again.
+        assert!(!b.fail(Some(500), 1001));
+        assert_eq!((b.fails, b.retry_at), (1, 1060));
+        assert_eq!(
+            b.banner(1000).as_deref(),
+            Some("GitHub is rejecting runner registration (HTTP 500) — launches paused, retrying in 1 min")
+        );
+        // Each retry that fails again escalates: 2, 5, then 10 min, capped.
+        assert!(b.fail(Some(502), 1060));
+        assert_eq!(b.retry_at, 1180);
+        assert!(b.fail(Some(500), 1180) && b.fail(None, 1480) && b.fail(None, 2080));
+        assert_eq!((b.fails, b.retry_at), (5, 2680));
+        assert_eq!(b.banner(2081).as_deref(), Some("GitHub is unreachable for runner registration — launches paused, retrying in 10 min"));
+        // Pause over, no new launch yet: still not healthy, but not paused either.
+        assert_eq!(b.banner(2680).as_deref(), Some("GitHub is unreachable for runner registration — retrying with the next launch"));
+        // The first successful mint clears it.
+        b = ApiBackoff::default();
+        assert!(!b.held(2680) && b.banner(2680).is_none());
     }
 
     #[test]

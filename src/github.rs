@@ -33,6 +33,50 @@ pub struct Gh {
     pub expires: std::sync::Mutex<Option<u64>>,
     /// repo -> (default branch, fetched at unix time); renames are rare, so 1h.
     defaults: std::sync::Mutex<HashMap<String, (String, u64)>>,
+    /// lowercase repo -> (probed at, registration-token status; None = unreachable).
+    reg_probes: std::sync::Mutex<HashMap<String, (u64, Option<u16>)>>,
+}
+
+/// GitHub refused (or never answered) a runner registration call.
+#[derive(Debug)]
+pub struct MintError {
+    /// None: GitHub could not be reached.
+    pub status: Option<u16>,
+    /// "generate-jitconfig" or "registration-token".
+    pub endpoint: &'static str,
+    /// GitHub's `message`, if the body had one.
+    pub message: String,
+}
+
+impl MintError {
+    /// A 5xx or no answer is GitHub's, for every repo; a 4xx is about this repo or token.
+    pub fn github_wide(&self) -> bool {
+        self.status.is_none_or(|s| s >= 500)
+    }
+}
+
+impl std::fmt::Display for MintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            Some(s) => write!(f, "runner registration failed: GitHub returned HTTP {s} ({})", self.endpoint)?,
+            None => write!(f, "runner registration failed: could not reach GitHub ({})", self.endpoint)?,
+        }
+        if !self.message.is_empty() {
+            write!(f, ": {}", self.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MintError {}
+
+/// Doctor line for a registration-token probe's status (None = unreachable).
+fn registration_detail(status: Option<u16>) -> (bool, String) {
+    match status {
+        Some(s) if (200..300).contains(&s) => (true, "runner registration works".into()),
+        Some(s) => (false, format!("runner registration failing: HTTP {s}")),
+        None => (false, "runner registration failing: could not reach GitHub".into()),
+    }
 }
 
 pub struct Resp {
@@ -58,6 +102,7 @@ impl Gh {
             app: Default::default(),
             app_accounts: Default::default(),
             spelled: Default::default(),
+            reg_probes: Default::default(),
         }
     }
 
@@ -313,18 +358,6 @@ impl Gh {
             self.etags.lock().await.insert(path.to_string(), (e, v.clone()));
         }
         Ok(v)
-    }
-
-    async fn send(&self, method: Method, path: &str, body: Value) -> Result<Value> {
-        let (rb, who) = self.request(method.clone(), path).await?;
-        let r = self.exec(rb.json(&body), who).await?;
-        if !r.status().is_success() {
-            let status = r.status();
-            let body = r.text().await.unwrap_or_default();
-            self.note_body(who, status.as_u16(), &body);
-            bail!("{method} {path}: {status} {body}");
-        }
-        Ok(r.json().await.unwrap_or(Value::Null))
     }
 
     /// (event, head branch, default branch, job conclusion) of the run behind a job, to
@@ -652,18 +685,49 @@ impl Gh {
         Ok((v["html_url"].as_str().context("PR has no html_url")?.to_string(), branch))
     }
 
-    /// Returns (runner_id, encoded_jit_config).
+    /// Returns (runner_id, encoded_jit_config). A refusal or an unreachable GitHub is a `MintError`.
     pub async fn jit_config(&self, repo: &str, name: &str, labels: &[String]) -> Result<(u64, String)> {
-        let v = self
-            .send(
-                Method::POST,
-                &format!("repos/{repo}/actions/runners/generate-jitconfig"),
-                json!({ "name": name, "runner_group_id": 1, "labels": labels, "work_folder": "_work" }),
-            )
-            .await?;
+        let body = json!({ "name": name, "runner_group_id": 1, "labels": labels, "work_folder": "_work" });
+        let v = self.mint_call(&format!("repos/{repo}/actions/runners/generate-jitconfig"), "generate-jitconfig", Some(body)).await?;
         let id = v["runner"]["id"].as_u64().context("runner.id missing")?;
         let jit = v["encoded_jit_config"].as_str().context("encoded_jit_config missing")?;
         Ok((id, jit.to_string()))
+    }
+
+    /// POST to a runner-registration endpoint; a failed call is a `MintError`.
+    async fn mint_call(&self, path: &str, endpoint: &'static str, body: Option<Value>) -> Result<Value> {
+        let (mut rb, who) = self.request(Method::POST, path).await?;
+        if let Some(b) = body {
+            rb = rb.json(&b);
+        }
+        let r = self.exec(rb, who).await.map_err(|_| MintError { status: None, endpoint, message: String::new() })?;
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap_or_default();
+        if !(200..300).contains(&status) {
+            self.note_body(who, status, &text);
+            let message =
+                serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(String::from)).unwrap_or_default();
+            return Err(MintError { status: Some(status), endpoint, message }.into());
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// Doctor: does GitHub issue runner registrations for `repo`? Mints a registration
+    /// token (harmless: it expires in an hour and nothing uses it). Cached 10 minutes per
+    /// repo, since the dashboard runs doctor periodically. Returns (ok, detail).
+    pub async fn registration_probe(&self, repo: &str) -> (bool, String) {
+        let key = repo.to_ascii_lowercase();
+        if let Some(&(at, st)) = self.reg_probes.lock().unwrap().get(&key)
+            && crate::now() < at + 600
+        {
+            return registration_detail(st);
+        }
+        let st = match self.mint_call(&format!("repos/{repo}/actions/runners/registration-token"), "registration-token", None).await {
+            Ok(_) => Some(201),
+            Err(e) => e.downcast_ref::<MintError>().and_then(|m| m.status),
+        };
+        self.reg_probes.lock().unwrap().insert(key, (crate::now(), st));
+        registration_detail(st)
     }
 
     /// Unused JIT registrations linger as offline runners; clean them up.
@@ -854,6 +918,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn mint_errors() {
+        let e = |status, message: &str| MintError { status, endpoint: "generate-jitconfig", message: message.into() };
+        assert_eq!(e(Some(500), "").to_string(), "runner registration failed: GitHub returned HTTP 500 (generate-jitconfig)");
+        assert_eq!(e(None, "").to_string(), "runner registration failed: could not reach GitHub (generate-jitconfig)");
+        assert_eq!(
+            e(Some(403), "Resource not accessible by integration").to_string(),
+            "runner registration failed: GitHub returned HTTP 403 (generate-jitconfig): Resource not accessible by integration"
+        );
+        // GitHub-wide: 5xx and network errors; a 4xx is about this repo or this token.
+        assert!(e(Some(500), "").github_wide() && e(Some(503), "").github_wide() && e(None, "").github_wide());
+        assert!(!e(Some(403), "").github_wide() && !e(Some(404), "").github_wide() && !e(Some(422), "").github_wide());
+    }
+
+    #[test]
+    fn registration_probe_text() {
+        assert_eq!(registration_detail(Some(201)), (true, "runner registration works".into()));
+        assert_eq!(registration_detail(Some(500)), (false, "runner registration failing: HTTP 500".into()));
+        assert_eq!(registration_detail(None), (false, "runner registration failing: could not reach GitHub".into()));
+    }
 
     #[test]
     fn cache_trust_branch_names() {

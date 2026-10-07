@@ -28,6 +28,20 @@ pub enum State {
     Held,
     /// Was active when kiln stopped; its QEMU died with us.
     Lost,
+    /// The runner came online but no job reached it (another runner took it, or it
+    /// was cancelled), and it exited. Normal, not a failure.
+    Unneeded,
+}
+
+const NOT_NEEDED: &str = "not needed: the queued job went to another runner or was cancelled";
+
+/// End state and note of a VM whose guest powered off cleanly without a job result.
+fn exit_without_result(online: bool, job: bool) -> (State, &'static str) {
+    match (online, job) {
+        (true, false) => (State::Unneeded, NOT_NEEDED),
+        (_, true) => (State::Failed, "runner exited without a result"),
+        (false, false) => (State::Failed, "runner exited before coming online"),
+    }
 }
 
 impl State {
@@ -223,6 +237,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     tokio::spawn(async move {
         let dir = app.data.join("vms").join(&id);
         let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
+        // A refused runner registration: no VM was booted and no directory created.
+        let mint = outcome.as_ref().err().and_then(|e| e.downcast_ref::<crate::github::MintError>()).map(|m| (m.github_wide(), m.status));
         finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
         // Never leave a big overlay or a credential behind, whatever happened.
         let _ = tokio::fs::remove_file(dir.join("disk.qcow2")).await;
@@ -246,8 +262,21 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             }
         });
         if let Some(v) = v {
-            tracing::info!("{} {:?} job={:?} result={:?}", v.id, v.state, v.job, v.result);
-            {
+            let note = v.note.as_deref().unwrap_or("-");
+            // GitHub-wide: one warning per backoff step, not one per VM or tick.
+            let step = match mint {
+                Some((true, status)) => {
+                    let mut a = app.api_backoff.lock().unwrap();
+                    a.fail(status, now()).then(|| a.retry_at.saturating_sub(now()).div_ceil(60))
+                }
+                _ => None,
+            };
+            match (mint, step) {
+                (Some((true, _)), Some(mins)) => tracing::warn!("{} {note}: all launches paused {mins} min", v.id),
+                (Some((false, _)), _) => tracing::warn!("{} {note}", v.id),
+                _ => tracing::info!("{} {:?} job={:?} result={:?}: {note}", v.id, v.state, v.job, v.result),
+            }
+            if mint.is_none_or(|(wide, _)| !wide) {
                 let mut b = app.backoff.lock().unwrap();
                 if v.job.is_some() {
                     b.remove(&v.repo);
@@ -263,7 +292,10 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             {
                 tracing::warn!("{}: {e:#}", v.id);
             }
-            persist(&app, &v);
+            // A failed mint never made a directory: its record stays in memory only.
+            if mint.is_none() {
+                persist(&app, &v);
+            }
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
         app.releases.lock().unwrap().remove(&id);
@@ -364,19 +396,26 @@ pub fn cache_busy(app: &App, repo: &str) -> bool {
     pending_file(&app.data, repo).exists() || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
 }
 
-/// The state the VM ends in (Killed, Failed or Done); Err = infrastructure failure.
+/// The state the VM ends in (Killed, Failed, Unneeded or Done); Err = infrastructure failure
+/// (a `github::MintError` when GitHub refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
     let cfg = app.cfg();
-    tokio::fs::create_dir_all(dir).await?;
-    if let Some(v) = update(app, id, |_| {}) {
-        persist(app, &v);
-    }
-
     let v = update(app, id, |_| {}).context("vm vanished")?;
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
+    // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (runner_id, jit) = app.gh.jit_config(repo, id, &cfg.runner_labels(cpus)).await?;
-    if let Some(v) = update(app, id, |v| v.runner_id = Some(runner_id)) {
-        persist(app, &v);
+    {
+        let mut b = app.api_backoff.lock().unwrap();
+        if b.fails > 0 {
+            tracing::info!("runner registration works again after {} failed attempt(s): launches resume", b.fails);
+        }
+        *b = Default::default();
+    }
+    // Recorded before anything else can fail, so cleanup deregisters it.
+    let reg = update(app, id, |v| v.runner_id = Some(runner_id));
+    tokio::fs::create_dir_all(dir).await?;
+    if let Some(r) = reg {
+        persist(app, &r);
     }
     // Delivered as an SMBIOS OEM string: works with the stock cloud kernel
     // (fw_cfg needs a module it lacks), and `path=` keeps it out of `ps`.
@@ -587,9 +626,11 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if !status.success() {
         bail!("qemu exited with {status}; see console log");
     }
-    if update(app, id, |_| {}).context("vm vanished")?.result.is_none() {
-        note(app, id, "runner exited without a result");
-        return Ok(State::Failed);
+    let v = update(app, id, |_| {}).context("vm vanished")?;
+    if v.result.is_none() {
+        let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
+        note(app, id, why);
+        return Ok(state);
     }
     Ok(State::Done)
 }
@@ -1793,8 +1834,13 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             why.push(format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")));
         }
         why.extend(errs);
+        // Reads can pass while GitHub refuses to register runners: exercise the write path too.
+        let (reg_ok, reg) = app.gh.registration_probe(repo).await;
+        if !reg_ok {
+            why.push(reg.clone());
+        }
         out.push(if why.is_empty() {
-            check(&format!("repo {repo}"), true, "runners, actions and contents reachable")
+            check(&format!("repo {repo}"), true, format!("runners, actions and contents reachable; {reg}"))
         } else {
             check(&format!("repo {repo}"), false, why.join("; "))
         });
@@ -1994,6 +2040,18 @@ mod tests {
         assert!(!run(Some(serde_json::json!({ "workflow_run": {} }))), "workflow_run, head repo missing");
         assert!(!run(None), "missing payload");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_exit_without_result() {
+        // Online, never handed a job: GitHub gave the job to another runner or it was cancelled.
+        assert_eq!(exit_without_result(true, false), (State::Unneeded, NOT_NEEDED));
+        // A job started but no result came back: the runner or the guest broke.
+        assert_eq!(exit_without_result(true, true).0, State::Failed);
+        // Never came online: registration or boot broke.
+        assert_eq!(exit_without_result(false, false), (State::Failed, "runner exited before coming online"));
+        assert!(!State::Unneeded.is_active() && !State::Unneeded.is_waiting());
+        assert_eq!(serde_json::to_string(&State::Unneeded).unwrap(), "\"unneeded\"");
     }
 
     #[test]

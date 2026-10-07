@@ -53,7 +53,7 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 1. **Queued.** The scheduler sees a queued job whose labels are ours (see [Sizes](#sizes)).
 2. **Decision.** If the repo has more queued jobs of that size than VMs that are booting or idle, and the gates and budget allow, it launches the difference.
-3. **JIT config.** kiln calls `generate-jitconfig` for the repo with a name like `kiln-<unix time>-<seq>` and the labels for that VM's size. The result is a single-use, auto-deregistering runner. The config is written to `<vm>/jit` with mode 0600 and handed to the guest as an SMBIOS OEM string (`-smbios type=11,path=...`): that works with the stock cloud kernel, and `path=` keeps it out of `ps`. kiln deletes the file as soon as the guest prints its first console line, which proves QEMU has read it.
+3. **JIT config.** kiln calls `generate-jitconfig` for the repo with a name like `kiln-<unix time>-<seq>` and the labels for that VM's size. The result is a single-use, auto-deregistering runner. The config is written to `<vm>/jit` with mode 0600 and handed to the guest as an SMBIOS OEM string (`-smbios type=11,path=...`): that works with the stock cloud kernel, and `path=` keeps it out of `ps`. kiln deletes the file as soon as the guest prints its first console line, which proves QEMU has read it. This happens before the VM's directory exists and before any disk or QEMU: if GitHub refuses (or does not answer), the attempt costs one API call, the VM record ends `failed` with a note like "runner registration failed: GitHub returned HTTP 500 (generate-jitconfig)", and nothing is left on disk (the record is kept in memory only).
 4. **Overlay.** `qemu-img create` makes `disk.qcow2` backed by `base.qcow2`. If caching is on, a second overlay backed by the repo's cache disk is attached as `vdb`.
 5. **Boot.** QEMU (q35, KVM, `-cpu host`, virtio disk, virtio-net on user-mode networking, virtio-rng) boots `base.vmlinuz` directly with no initrd. virtio and ext4 are built into the Ubuntu kernel, which gets the runner listening in about 4 seconds. `panic=1` and `-no-reboot` make a kernel panic end the VM instead of hanging. Overlay disks use `cache=unsafe` because they are thrown away anyway.
 6. **Runner.** `kiln-job` runs `run.sh --jitconfig` as user `runner`. The runner prints "Listening for Jobs" (VM state becomes idle), then GitHub assigns it a job ("Running job", state busy), and finally "completed with result: ..." ends it.
@@ -61,7 +61,8 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 8. **Cache.** The overlay is merged into the repo cache or discarded (see [Cache](#cache)).
 9. **Cleanup.** Whatever happened, kiln deletes the disk overlay, the JIT file, the nft file, sockets and the rootlesskit state, then records the end state:
    - `done`: the runner reported a result (even a failed job is `done`; the verdict is in `result`).
-   - `failed`: kiln or the host broke (QEMU exited non-zero, runner exited without a result, boot timeout).
+   - `failed`: kiln, the host or GitHub broke (runner registration refused, QEMU exited non-zero, a job started but the runner exited without a result, the runner exited before coming online, boot timeout).
+   - `unneeded` (shown as "not needed"): the runner came online but no job reached it, because the queued job went to another runner or was cancelled, and it exited. Not a failure: the dashboard does not count it, and it does not feed the backoff.
    - `killed`: killed from the dashboard, by a timeout, by the reaper, or by shutdown.
    - `lost`: it was active when kiln stopped uncleanly.
    
@@ -96,7 +97,9 @@ Before launching, a tick applies:
 
 ### Backoff
 
-When a VM ends `failed` without ever having run a job, the repo's launches pause for 30 s x 2^fails seconds (so 60, 120, 240, 480, then a 900 s ceiling). A VM that runs a job clears the repo's backoff. The dashboard shows the retry time.
+When a VM ends `failed` without ever having run a job, the repo's launches pause for 30 s x 2^fails seconds (so 60, 120, 240, 480, then a 900 s ceiling). A VM that runs a job clears the repo's backoff. The dashboard shows the retry time. A runner registration GitHub refuses with a 4xx (a missing permission, say) is such a per-repo failure.
+
+A registration that fails with a 5xx, or that cannot reach GitHub, is GitHub's problem rather than the repo's: retrying another repo or job would fail the same way. It pauses **all** launches, warm ones included, for 1, 2, 5, then 10 minutes (capped) per consecutive failure, and does not touch the per-repo backoff. VMs that fail together in one launch batch count as one step, and each step is logged once at warn level. The first successful registration clears it. Until then `poll.blocked` says "GitHub is rejecting runner registration (HTTP 500) — launches paused, retrying in N min" with `blocked_kind` `github_api`, and the Overview shows it as a banner. GitHub's status page may show nothing during such an outage.
 
 ### Reaper
 
@@ -199,7 +202,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | Method and path | Purpose |
 |---|---|
 | `GET /` | The dashboard page |
-| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `egress`, `memory`, `disk` or `budget`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
+| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `github_api`, `egress`, `memory`, `disk` or `budget`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
 | `POST /api/config` | Save settings (validated); returns `{restart_required}` |
 | `POST /api/token` | Validate and save a GitHub token |
 | `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |
