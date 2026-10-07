@@ -199,12 +199,16 @@ write_files:
     content: |
       #!/bin/bash
       # Runner job-started hook: runs before any step, while the VM is still clean.
-      # Never run a pull request's code from another repository on this hardware
-      # (kiln's scheduler refuses these too; a JIT runner can still be handed one).
-      head=$(jq -r 'if .pull_request then (.pull_request.head.repo.full_name // "deleted fork") else empty end' "$GITHUB_EVENT_PATH") || {
+      # Never run code from another repository on this hardware: pull requests
+      # (pull_request_target too) and workflow_run runs triggered by one, from a
+      # fork; an unknown head counts as a fork. kiln's scheduler refuses these
+      # too, but a JIT runner can still be handed one.
+      head=$(jq -r 'if .pull_request then (.pull_request.head.repo.full_name // "deleted fork")
+        elif .workflow_run then (.workflow_run.head_repository.full_name // "unknown head repository")
+        else empty end' "$GITHUB_EVENT_PATH") || {
         echo "::error::kiln could not read the event payload"; exit 1; }
       if [ -n "$head" ] && [ "${head,,}" != "${GITHUB_REPOSITORY,,}" ]; then
-        echo "::error::kiln refuses pull requests from forks ($head)"
+        echo "::error::kiln refuses code from forks ($head)"
         exit 1
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf

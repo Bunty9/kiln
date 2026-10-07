@@ -1886,6 +1886,50 @@ mod tests {
         assert!(!leaky.status.success() && String::from_utf8_lossy(&leaky.stdout).contains("step: dashboard port reachable"));
     }
 
+    /// Runs the guest's job-started hook (kiln-prejob.sh, cut out of the recipe)
+    /// against event payloads. Skipped where bash or jq is missing.
+    #[test]
+    fn prejob_hook_refuses_forks() {
+        let have = |b: &str| std::process::Command::new(b).arg("--version").output().is_ok_and(|o| o.status.success());
+        if !have("bash") || !have("jq") {
+            eprintln!("skipping: bash and jq needed");
+            return;
+        }
+        let yaml = include_str!("../guest/user-data.yaml");
+        let body = yaml.split("path: /usr/local/sbin/kiln-prejob.sh").nth(1).unwrap().split_once("content: |\n").unwrap().1;
+        let script: String =
+            body.lines().take_while(|l| l.is_empty() || l.starts_with("      ")).map(|l| format!("{}\n", l.get(6..).unwrap_or(""))).collect();
+        assert!(script.starts_with("#!/bin/bash"));
+        let dir = std::env::temp_dir().join(format!("kiln-prejob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |payload: Option<serde_json::Value>| {
+            let p = dir.join("event.json");
+            let _ = std::fs::remove_file(&p);
+            if let Some(v) = payload {
+                std::fs::write(&p, v.to_string()).unwrap();
+            }
+            std::process::Command::new("bash")
+                .args(["-c", &script])
+                .env("GITHUB_EVENT_PATH", &p)
+                .env("GITHUB_REPOSITORY", "Bunty9/kiln")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let pr = |head: serde_json::Value| serde_json::json!({ "pull_request": { "head": { "repo": head } } });
+        assert!(run(Some(pr(serde_json::json!({ "full_name": "bunty9/KILN" })))), "same-repo PR");
+        assert!(!run(Some(pr(serde_json::json!({ "full_name": "evil/kiln" })))), "fork PR");
+        assert!(!run(Some(pr(serde_json::Value::Null))), "deleted fork");
+        assert!(run(Some(serde_json::json!({ "ref": "refs/heads/main", "head_commit": {} }))), "push");
+        let wr = |head: serde_json::Value| serde_json::json!({ "workflow_run": { "head_repository": head } });
+        assert!(!run(Some(wr(serde_json::json!({ "full_name": "evil/kiln" })))), "workflow_run from a fork");
+        assert!(run(Some(wr(serde_json::json!({ "full_name": "Bunty9/kiln" })))), "workflow_run same repo");
+        assert!(!run(Some(serde_json::json!({ "workflow_run": {} }))), "workflow_run, head repo missing");
+        assert!(!run(None), "missing payload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn backoff_growth() {
         assert_eq!(backoff_secs(1), 60);

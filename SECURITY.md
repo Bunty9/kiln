@@ -45,7 +45,9 @@ The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every j
 
 ### Fork pull requests
 
-kiln refuses to run code from a fork. The scheduler does not count queued jobs of runs whose head repository differs from the repository (or is gone), so they never boot a VM, and the dashboard lists them as refused. Because a JIT runner can still be handed any queued job with matching labels, every VM also runs a runner job-started hook before the job's first step: if the event is a pull request from another repository it fails the job right there, and kiln kills the VM when it sees the assignment. This is enforced whatever the workflow says; the `if:` guard in the workflows is a second layer.
+kiln refuses to run code from a fork. The scheduler does not count queued jobs of runs whose head repository differs from the repository (or is gone), so they never boot a VM, and the dashboard lists them as refused. Because a JIT runner can still be handed any queued job with matching labels, every VM also runs a runner job-started hook before the job's first step: if the event is a pull request (`pull_request` or `pull_request_target`) from another repository, or a `workflow_run` whose triggering run's head repository is another one, it fails the job right there, and kiln kills the VM when it sees the assignment. It fails closed: a deleted fork, a `workflow_run` with no head repository, or an unreadable event payload are refused too. This is enforced whatever the workflow says; the `if:` guard in the workflows is a second layer.
+
+The hook can only see where the event came from, not what the workflow then checks out. Workflows triggered by `issue_comment`, `repository_dispatch` or `workflow_dispatch` (or anything else) that check out a pull request's head, such as a "/test" comment bot, run fork code that kiln cannot detect. On a public repository such workflows must not run on kiln: give them a GitHub-hosted runner.
 
 ### Console and lifecycle hardening
 
