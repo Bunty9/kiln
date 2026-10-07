@@ -6,6 +6,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- GitHub App authentication: create the App from the dashboard (manifest flow) or use an existing one. Installation tokens are minted per installation and refreshed before they expire; only the private key is stored. The repos kiln serves are the repos the App is installed on, refreshed every 5 minutes (every 30 s while it serves none), or at once with `POST /api/app/refresh`. Token auth still works.
+- `app_accounts`: in App mode, accounts whose installations are served besides the App owner's.
 - `cache_branches`: per repo, extra branches whose successful pushes also save the cache (for branch models that integrate on `dev` rather than the default branch). Settable on the repo page.
 - `bake_node_versions`: Node versions pre-seeded into the tool cache at bake time (default `["24"]`), resolved on nodejs.org and recorded in `base.json`. Changing the set marks the image stale; so does an image baked by an older kiln (recorded as `recipe` in `base.json`).
 - `repo_cache_gb`: per-repo cache disk size, overriding `cache_gb`. Settable on the repo page.
@@ -13,14 +15,23 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - `bake_apt_packages`: extra apt packages baked into the image. Changing the set marks the image stale.
 - `/var/cache/apt/archives` lives on the repo cache disk, so `apt-get install` reuses downloaded packages.
 - `kiln doctor` names the missing token permission per repo; the dashboard shows the token's expiry and save time and warns before it expires.
+- Dashboard polish: elevated surfaces instead of outlines, an icon set, hover and focus tooltips on states, stats and actions, no layout shift between pages, and Settings › Appearance (theme, density, accent, reduced motion; per browser). In App mode, Setup and Repos show the App install button and a Refresh, and a failed App creation can be retried.
 
 ### Security
 
-- Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. Needs a rebake for the hook.
+- GitHub App mode serves only installations on the App owner's account (matched by account id, read from GitHub at each refresh) or listed in `app_accounts`; others are ignored and reported. A call for a repo the App does not serve never borrows another installation's token.
+- `app.pem`, `app.json` and the setup states are written atomically with mode 0600, also when the files already existed.
+- Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. The hook also refuses `workflow_run` runs triggered from a fork (only the hook can see those).
+- **Upgrade note:** kiln launches nothing on an image baked by an older guest recipe (now `recipe` 3), because such an image lacks the fork-refusal hook. `auto_rebake` (on by default) rebuilds it within minutes; with it off, rebake by hand after upgrading.
+- Bake inputs are checked before they reach the bake VM's root shell: the config is re-validated, the runner release tag must be `N.N.N`, Node tarballs are verified against nodejs.org's SHASUMS256.txt, and apt names ending in `-` or `+` (apt's remove/install markers) are refused.
+- Cache-writer branch names outside `[A-Za-z0-9._/-]` never save the cache.
 - The "commit is really on the branch" check applies to every cache-writer branch, not only the default.
 
 ### Fixed
 
+- App setup: a failed code conversion (network error, 5xx) can be retried with the same link, setup links survive a kiln restart, and an expired or used code explains how to recover an App GitHub already created.
+- App mode: baking and the runner release check work before the App is installed anywhere (that lookup is public and now unauthenticated).
+- App mode: a 401 on an installation token always invalidates the cached tokens; Diagnostics reuses a discovery from the last minute.
 - The documented fine-grained token permissions now include *Contents: read*, without which caches never saved.
 
 ## [0.1.0] - 2026-10-06

@@ -1,3 +1,4 @@
+mod app_auth;
 mod github;
 mod mirror;
 mod vm;
@@ -32,6 +33,9 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// GitHub App mode: accounts (user or org logins) whose installations are served,
+    /// besides the App owner's. Empty = the owner's only.
+    pub app_accounts: Vec<String>,
     /// Docker Hub pull-through cache for job VMs (host loopback :5000).
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
@@ -79,6 +83,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
             bake_node_versions: vec!["24".into()],
@@ -133,6 +138,8 @@ impl Config {
         self.repo_cache_gb.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(self.cache_gb, |(_, &g)| g)
     }
 
+    /// Per-repo maps (`warm`, `cache_branches`, `repo_cache_gb`) may name repos that are
+    /// not served (removed, or a GitHub App no longer installed there): lookups ignore them.
     pub fn validate(&self) -> Result<()> {
         self.validate_for(host_threads())
     }
@@ -170,20 +177,20 @@ impl Config {
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
         }
-        if let Some((r, _)) =
-            self.repo_cache_gb.iter().find(|(r, g)| !(5..=500).contains(*g) || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
-        {
-            bail!("repo_cache_gb: {r:?} must be a configured repo with 5..=500 GB");
+        if let Some((r, _)) = self.repo_cache_gb.iter().find(|(_, g)| !(5..=500).contains(*g)) {
+            bail!("repo_cache_gb: {r:?} must be 5..=500 GB");
         }
         if let Some((n, _)) = self.size_mem_mb.iter().find(|(n, m)| !(1..=host).contains(*n) || !(1024..=1_048_576).contains(*m)) {
             bail!("size_mem_mb: size {n} must be 1..={host} vCPUs with 1024..=1048576 MB");
         }
+        // A trailing '-' makes apt-get install *remove* the package (and '+' is an action too).
         let apt_ok = |p: &String| {
             p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && !p.ends_with(['-', '+'])
                 && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".+-".contains(c))
         };
         if self.bake_apt_packages.len() > 32 || !self.bake_apt_packages.iter().all(apt_ok) {
-            bail!("bake_apt_packages: up to 32 apt package names (a-z 0-9 . + -)");
+            bail!("bake_apt_packages: up to 32 apt package names (a-z 0-9 . + -, not ending in - or +)");
         }
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
@@ -194,13 +201,10 @@ impl Config {
         if let Some(k) = self.debug_ssh_keys.iter().find(|k| !vm::valid_ssh_key(k)) {
             bail!("debug_ssh_keys: not a single-line ssh-/ecdsa-/sk- public key: {:?}", k.chars().take(24).collect::<String>());
         }
-        if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r))) {
-            bail!("warm: {r:?} must be a configured repo with a count of 0..=4");
+        if let Some((r, _)) = self.warm.iter().find(|(_, n)| **n > 4) {
+            bail!("warm: {r:?} must have a count of 0..=4");
         }
-        for (r, bs) in &self.cache_branches {
-            if !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)) {
-                bail!("cache_branches: {r:?} is not a configured repo");
-            }
+        for bs in self.cache_branches.values() {
             if let Some(b) = bs.iter().find(|b| !valid_branch(b)) {
                 bail!("cache_branches: {b:?} is not a branch name");
             }
@@ -218,8 +222,20 @@ impl Config {
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
         }
+        if let Some(a) = self.app_accounts.iter().find(|a| !valid_login(a)) {
+            bail!("app_accounts: {a:?} is not a GitHub user or org login (letters, digits, single hyphens, at most 39)");
+        }
         Ok(())
     }
+}
+
+/// GitHub login: 1-39 alphanumerics or single hyphens, not at either end.
+fn valid_login(l: &str) -> bool {
+    (1..=39).contains(&l.len())
+        && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+        && !l.contains("--")
 }
 
 /// Conservative git branch name check: no spaces, no ref syntax, no "..".
@@ -262,6 +278,8 @@ pub struct App {
     /// repo -> (consecutive launch failures, retry_at unix time).
     pub backoff: Mutex<HashMap<String, (u32, u64)>>,
     pub mirror: Mutex<mirror::Status>,
+    /// One-time states of GitHub App manifest flows in progress.
+    pub app_states: Mutex<app_auth::States>,
 }
 
 impl App {
@@ -271,12 +289,21 @@ impl App {
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
+        *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
         *w = c;
         Ok(())
+    }
+
+    /// Repos kiln serves: the App's installations in App mode, else the configured list.
+    pub fn repos(&self) -> Vec<String> {
+        match self.gh.app() {
+            Some(a) => a.names.read().unwrap().clone(),
+            None => self.cfg().repos,
+        }
     }
 
     pub fn save_token(&self, t: String) -> Result<()> {
@@ -345,11 +372,17 @@ async fn main() -> Result<()> {
         Err(_) => Config::default(),
     };
     let (token, source) = load_token(&data, false);
+    let gh = github::Gh::new(token, source);
+    *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
+    match app_auth::load(&data) {
+        Some(Ok(a)) => gh.set_app(Some(Arc::new(a))),
+        Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
+        None => {}
+    }
     let app = Arc::new(App {
-        gh: github::Gh::new(token, source),
+        gh,
         cfg: RwLock::new(cfg),
         vms: Mutex::default(),
-        data,
         kills: Mutex::default(),
         releases: Mutex::default(),
         committing: Mutex::default(),
@@ -358,6 +391,8 @@ async fn main() -> Result<()> {
         stopping: Default::default(),
         backoff: Default::default(),
         mirror: Default::default(),
+        app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+        data,
     });
 
     match std::env::args().nth(1).as_deref() {
@@ -433,10 +468,39 @@ async fn shutdown(app: &Arc<App>) {
     }
 }
 
+/// Seconds between App discoveries: 30 while it serves no repo or has never discovered
+/// successfully (so a fresh install shows up quickly), else 5 minutes.
+fn app_refresh_secs(repos: usize, ever_ok: bool) -> u64 {
+    if repos == 0 || !ever_ok { 30 } else { 300 }
+}
+
+/// App mode: refresh which repos the App is installed on (see `app_refresh_secs`).
+/// A failure keeps the previous list (a GitHub hiccup must not unschedule every repo).
+async fn refresh_app(app: &Arc<App>) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let Some(a) = app.gh.app() else { return };
+    let every = app_refresh_secs(a.names.read().unwrap().len(), a.discovered_at.load(Ordering::Relaxed) != 0);
+    if now() < LAST.load(Ordering::Relaxed) + every {
+        return;
+    }
+    LAST.store(now(), Ordering::Relaxed);
+    match app.gh.discover_now().await {
+        Ok(n) => {
+            tracing::info!("GitHub App: {n} repo(s) installed");
+            // Per-installation failures and ignored installations.
+            if let Some(e) = a.error.lock().unwrap().clone() {
+                tracing::warn!("GitHub App discovery: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("GitHub App discovery: {e:#}"),
+    }
+}
+
 async fn scheduler(app: Arc<App>) {
+    refresh_app(&app).await;
     // Runners a crashed kiln left registered (offline) would otherwise linger for a day.
     if app.gh.has_token() {
-        for repo in &app.cfg().repos {
+        for repo in &app.repos() {
             match app.gh.sweep_runners(repo).await {
                 Ok(n) if n > 0 => tracing::info!("{repo}: removed {n} stale runner(s)"),
                 Ok(_) => {}
@@ -477,6 +541,9 @@ fn poll_sleep(poll_secs: u64, rate: Option<(u64, u64, u64)>) -> u64 {
 /// Pick up a token that appeared (keyring unlocked, env fixed) or was rotated.
 async fn reload_token(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
+    if app.gh.app().is_some() {
+        return;
+    }
     let bad = !app.gh.has_token() || app.poll.lock().unwrap().error.as_deref().is_some_and(|e| e.contains("401"));
     if !bad || now() < LAST.load(Ordering::Relaxed) + 60 {
         return;
@@ -522,6 +589,7 @@ fn auto_rebake(app: &Arc<App>, cfg: &Config) {
 async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u32, usize>>> {
     static TICK: AtomicUsize = AtomicUsize::new(0);
     reload_token(app).await;
+    refresh_app(app).await;
     if !app.gh.has_token() {
         bail!("no GitHub token: set one in the dashboard, export KILN_GITHUB_TOKEN, or `gh auth login`");
     }
@@ -540,9 +608,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
     // Fail closed: filtered jobs never fall back to open networking.
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
-    let mut blocked = egress_err
-        .as_ref()
-        .map(|e| format!("egress filtering unavailable: {e}"))
+    // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
+    let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
+    let mut blocked = old_image
+        .then(|| "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())
+        .or_else(|| egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")))
         .or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
     let mut budget = {
         let vms = app.vms.lock().unwrap();
@@ -556,8 +626,9 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut repo_errors = HashMap::new();
     let mut refused_forks = HashMap::new();
     // Rotate the start so the first repo doesn't always win scarce slots.
-    let start = TICK.fetch_add(1, Ordering::Relaxed) % cfg.repos.len().max(1);
-    for repo in cfg.repos.iter().cycle().skip(start).take(cfg.repos.len()) {
+    let repos = app.repos();
+    let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
+    for repo in repos.iter().cycle().skip(start).take(repos.len()) {
         let (by_size, runners, forks) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
             Ok(r) => r,
             Err(e) => {
@@ -599,7 +670,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             if queued > waiting && blocked.is_none() {
                 blocked = gate.clone();
             }
-            let held = backed_off || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -709,7 +780,7 @@ mod tests {
         assert!(warm(&["a/b"], "A/B", 4));
         assert!(warm(&["a/b"], "a/b", 0));
         assert!(!warm(&["a/b"], "a/b", 5));
-        assert!(!warm(&["a/b"], "x/y", 1));
+        assert!(warm(&["a/b"], "x/y", 1), "unserved repos are ignored, not rejected");
         let branches = |r: &str, b: &str| {
             let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
             c.cache_branches.insert(r.into(), vec![b.into()]);
@@ -723,13 +794,13 @@ mod tests {
             c.validate_for(8).is_ok()
         };
         assert!(sized("A/B", 60) && sized("a/b", 5) && sized("a/b", 500));
-        assert!(!sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
+        assert!(sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
         let mut c = Config::default();
         c.cache_branches.insert("Owner/Repo".into(), vec!["dev".into()]);
         assert_eq!(c.cache_branches("owner/repo"), ["dev"]);
         assert!(c.cache_branches("other/repo").is_empty());
         assert!(branches("a/b", "release/1.x"));
-        assert!(!branches("x/y", "dev"));
+        assert!(branches("x/y", "dev"));
         assert!(!branches("a/b", ""));
         assert!(!branches("a/b", "a..b"));
         assert!(!branches("a/b", "dev branch"));
@@ -740,6 +811,11 @@ mod tests {
         assert!(!ok(|c| c.bake_apt_packages = vec!["-y".into()]));
         assert!(!ok(|c| c.bake_apt_packages = vec!["a; reboot".into()]));
         assert!(!ok(|c| c.bake_apt_packages = vec!["".into()]));
+        // apt-get install reads a trailing '-' as "remove" ('+' as install, '=' / '/' as version / release)
+        for p in ["openssh-server-", "docker.io-", "libc6+", "libc6=2.39", "libc6/noble"] {
+            let c = Config { bake_apt_packages: vec![p.into()], ..Config::default() };
+            assert!(c.validate_for(8).is_err(), "{p}");
+        }
         assert!(!ok(|c| c.bake_apt_packages = (0..33).map(|i| format!("p{i}")).collect()));
         assert!(ok(|c| c.size_mem_mb = [(8, 12288), (2, 1024)].into()));
         assert!(!ok(|c| c.size_mem_mb = [(9, 12288)].into()));
@@ -752,6 +828,46 @@ mod tests {
         assert!(ok(|c| c.warm_recycle_mins = 5));
         assert!(!ok(|c| c.warm_recycle_mins = 4));
         assert!(!ok(|c| c.warm_recycle_mins = 1441));
+    }
+
+    #[test]
+    fn unserved_per_repo_keys_never_block_saves() {
+        // After Remove App (or when app.pem stops loading) the keys set in App mode
+        // stay in config.json; they must not lock every later save or bake.
+        let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
+        c.warm.insert("other/repo".into(), 1);
+        c.cache_branches.insert("other/repo".into(), vec!["dev".into()]);
+        c.repo_cache_gb.insert("other/repo".into(), 60);
+        assert!(c.validate_for(8).is_ok());
+    }
+
+    #[test]
+    fn app_mode_per_repo_keys() {
+        // In App mode the served repos come from the installation, so per-repo keys
+        // for repos not (or no longer) installed are kept and ignored, not rejected.
+        let mut c = Config::default();
+        c.warm.insert("gone/repo".into(), 1);
+        c.cache_branches.insert("gone/repo".into(), vec!["dev".into()]);
+        c.repo_cache_gb.insert("gone/repo".into(), 60);
+        assert!(c.validate_for(8).is_ok());
+        // shape is still checked
+        c.cache_branches.insert("gone/repo".into(), vec!["bad branch".into()]);
+        assert!(c.validate_for(8).is_err());
+    }
+
+    #[test]
+    fn app_accounts_are_github_logins() {
+        let ok =
+            |a: &[&str]| Config { app_accounts: a.iter().map(|s| s.to_string()).collect(), ..Config::default() }.validate_for(8).is_ok();
+        assert!(ok(&[]));
+        assert!(ok(&["Bunty9", "my-org", &"a".repeat(39)]));
+        assert!(!ok(&[""]));
+        assert!(!ok(&["-org"]));
+        assert!(!ok(&["org-"]));
+        assert!(!ok(&["my--org"]));
+        assert!(!ok(&["my_org"]));
+        assert!(!ok(&["o/rg"]));
+        assert!(!ok(&[&"a".repeat(40)]));
     }
 
     #[test]
@@ -800,6 +916,14 @@ mod tests {
         // saved from the dashboard: a stale env token never wins again
         assert_eq!(pick(s("e"), s("f"), true), ("f".into(), "file"));
         assert_eq!(pick(s("e"), None, true), ("".into(), "none"));
+    }
+
+    #[test]
+    fn app_refresh_cadence() {
+        assert_eq!(app_refresh_secs(0, false), 30, "never discovered");
+        assert_eq!(app_refresh_secs(3, false), 30, "only an old map, never a successful discovery");
+        assert_eq!(app_refresh_secs(0, true), 30, "installed nowhere yet: pick up a new install quickly");
+        assert_eq!(app_refresh_secs(3, true), 300);
     }
 
     #[test]

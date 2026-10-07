@@ -41,13 +41,13 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 **VM supervisor** (`vm.rs`). One async task per VM. It creates the overlay, spawns QEMU, reads the console, tracks the runner's lifecycle, enforces timeouts, takes the debug-hold decision, commits or discards the cache overlay, and deletes everything when the VM ends. The same module holds the launch gates, the resource budget, the reaper, the egress ruleset and probe, `bake`, and the `doctor` checks.
 
-**Bake** (`vm.rs`, `guest/user-data.yaml`). Builds `images/base.qcow2`: downloads the Ubuntu 24.04 cloud image and its kernel (all together so they match), fetches the latest `actions/runner` release, renders the cloud-init recipe, boots a one-off VM that installs packages and the runner, then freezes the result. Image and kernel are swapped in by rename, so a job never sees a half-copied file.
+**Bake** (`vm.rs`, `guest/user-data.yaml`). Builds `images/base.qcow2`: downloads the Ubuntu 24.04 cloud image and its kernel (all together so they match), fetches the latest `actions/runner` release, renders the cloud-init recipe, boots a one-off VM that installs packages, the runner and Node (each tarball checked against nodejs.org's `SHASUMS256.txt`), then freezes the result. Image and kernel are swapped in by rename, so a job never sees a half-copied file. `base.json` records the recipe version; kiln launches nothing on an image from an older recipe until it is rebaked.
 
 **Mirror** (`mirror.rs`). Supervises a pinned `registry` binary as a Docker Hub pull-through cache on host loopback. Details under [Docker mirror](#docker-mirror).
 
 **Web and API** (`web.rs`). An axum server that serves the dashboard (one HTML file embedded in the binary with `include_str!`) and a JSON API, behind an access guard. See [API](#api).
 
-**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk. `kiln-bake` is the one-time setup.
+**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk. `kiln-prejob.sh` is the runner's job-started hook: it fails a job whose event is a pull request, or a `workflow_run` triggered by one, from another repository. `kiln-bake` is the one-time setup.
 
 ## Job lifecycle
 
@@ -191,9 +191,14 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | Method and path | Purpose |
 |---|---|
 | `GET /` | The dashboard page |
-| `GET /api/state` | Config, token status, poll status (queued, errors, backoff, rate limit, blocked reason), the last 100 VMs, image info, host stats, mirror status, cache sizes |
+| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit, blocked reason), the last 100 VMs, image info, host stats, mirror status, cache sizes |
 | `POST /api/config` | Save settings (validated); returns `{restart_required}` |
 | `POST /api/token` | Validate and save a GitHub token |
+| `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |
+| `POST /api/app/convert` | Finish it: trade GitHub's code (with the state) for the App's id and key, save them, switch to App mode |
+| `POST /api/app` | Use an existing App (id and private key), checked against GitHub before saving |
+| `DELETE /api/app` | Remove the App's key and record, back to token auth |
+| `POST /api/app/refresh` | Ask GitHub now which repos the App is installed on; returns the `app` object of `/api/state` |
 | `GET /api/doctor` | The `kiln doctor` checks |
 | `GET /api/log?src=<bake or vm id>&file=<console or steps>&from=<offset>` | Incremental log read (up to 512 KiB per call) |
 | `POST /api/vms/{id}/kill` | Kill a VM |

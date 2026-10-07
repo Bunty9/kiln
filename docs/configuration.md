@@ -55,17 +55,17 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `cache` | bool | `true` | | live (new VMs) | Attach a per-repo persistent cache disk to every job and commit it back when the trust rule allows. |
-| `cache_branches` | object | `{}` | `"owner/name"` (a configured repo) to a list of exact branch names (case-sensitive, no wildcards; letters, digits, `-_./`) | live | Extra branches whose successful pushes also save that repo's cache, besides the default branch. For a branch model like feature, then PR to `dev`, then `dev` promoted: `{"o/n": ["dev"]}`. The other trust conditions are unchanged: only `push` events whose job GitHub reports as `success`, and the commit must really be on that branch (a tag named `dev` does not count). Pull requests never save, whatever their branch is called. |
+| `cache_branches` | object | `{}` | `"owner/name"` (entries for repos kiln does not serve are ignored) to a list of exact branch names (case-sensitive, no wildcards; letters, digits, `-_./`) | live | Extra branches whose successful pushes also save that repo's cache, besides the default branch. For a branch model like feature, then PR to `dev`, then `dev` promoted: `{"o/n": ["dev"]}`. The other trust conditions are unchanged: only `push` events whose job GitHub reports as `success`, and the commit must really be on that branch (a tag named `dev` does not count). Pull requests never save, whatever their branch is called. |
 | `cache_gb` | integer | `30` | `5` to `500` | live | Virtual size of a cache disk when it is created. A cache that has actually grown past 1.2 x `cache_gb` at commit time is deleted and starts empty. The size of existing cache files does not change. |
-| `repo_cache_gb` | object | `{}` | `"owner/name"` (a configured repo) to `5` to `500` | live | Per-repo override of `cache_gb`, for both the size of a new cache disk and the 1.2x reset limit. An existing disk keeps its virtual size until it is reset or cleared. Set on the repo page. |
+| `repo_cache_gb` | object | `{}` | `"owner/name"` (entries for repos kiln does not serve are ignored) to `5` to `500` | live | Per-repo override of `cache_gb`, for both the size of a new cache disk and the 1.2x reset limit. An existing disk keeps its virtual size until it is reset or cleared. Set on the repo page. |
 
 ### Image
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `bake_node_versions` | list of strings | `["24"]` | 1 to 4 entries, each a major (`"20"`, newest release of it) or an exact version (`"20.19.5"`) | next bake | Node versions pre-installed into `/opt/hostedtoolcache`, so `actions/setup-node` with a matching `node-version` resolves offline. The newest is the plain `node` on `PATH`. Versions are looked up on nodejs.org at bake time and recorded in `base.json`; changing the set (not just its order) marks the image stale (rebake needed). An image baked by an older kiln, before the fork-refusal hook, is stale too. |
-| `bake_apt_packages` | list of strings | `[]` | up to 32 apt package names (`a-z 0-9 . + -`, starting with a letter or digit) | next bake | Extra packages installed into the base image (`apt-get install --no-install-recommends`), e.g. `chromium` and its fonts for a PDF render test. Recorded in `base.json`; changing the set marks the image stale. A name apt doesn't know fails the bake. |
-| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, or `bake_node_versions` changed since the bake. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically. |
+| `bake_apt_packages` | list of strings | `[]` | up to 32 apt package names (`a-z 0-9 . + -`, starting with a letter or digit and not ending in `-` or `+`, which apt reads as remove or install markers) | next bake | Extra packages installed into the base image (`apt-get install --no-install-recommends`), e.g. `chromium` and its fonts for a PDF render test. Recorded in `base.json`; changing the set marks the image stale. A name apt doesn't know fails the bake. |
+| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, `bake_node_versions` or `bake_apt_packages` changed since the bake, or an older kiln baked it. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically, except when the image was baked by a kiln older than the current guest recipe (`recipe` in `base.json`): then nothing launches until the rebake, because that image lacks the fork-refusal hook. With `auto_rebake` off, rebake by hand after upgrading kiln. |
 
 ### Network
 
@@ -84,7 +84,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `warm` | object | `{}` | `{"owner/name": 0..4}`; each repo must be in `repos` | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
+| `warm` | object | `{}` | `{"owner/name": 0..4}`; entries for repos kiln does not serve are ignored | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
 | `warm_recycle_mins` | integer | `30` | `5` to `1440` | live | Idle warm VMs older than this are deregistered and replaced so they never go stale. |
 
 ## Environment variables
@@ -97,6 +97,20 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | `HOME` | Used to find the default data directory. |
 
 kiln logs through `tracing` to stderr (the systemd journal for the user unit). To set a token for the unit, add `Environment=KILN_GITHUB_TOKEN=...` to the service, or save it from the dashboard instead.
+
+## GitHub App
+
+A GitHub App is the recommended way to authenticate. kiln holds only the App's private key; the tokens it uses are minted per installation, expire after an hour, and carry exactly *Administration: write*, *Actions: write*, *Contents: read* and *Metadata: read*. The App cannot push code (so the hello PR is off in App mode), but *Administration: write* lets it change branch protection and repository settings on every repo it is installed on. Treat `app.pem` like an admin credential.
+
+**Create it from the dashboard:** Settings › GitHub › Create GitHub App (enter an organization to create it there, or leave it empty for your account). GitHub shows the App with its permissions preset; confirm, and GitHub sends you back to the dashboard, which saves the App and shows an **Install the App on your repos** button. No webhook is configured: kiln keeps polling. The setup link is valid for an hour and survives a kiln restart; if finishing it fails on a network error, try again with the same link. If GitHub says the code expired or was already used but the App exists on github.com, open it there, generate a private key, and use **Use an existing App**.
+
+**Or use an existing App:** Settings › GitHub › Use an existing App, with its App ID and a private key (`.pem`, PKCS#1 as GitHub issues it, or PKCS#8). kiln checks the pair against GitHub before saving.
+
+**Which repos:** in App mode the repos kiln serves are exactly the repos the App is installed on. Install or uninstall it on github.com to change the list; the `repos` setting is only used with a token. kiln refreshes the list every 5 minutes, or every 30 seconds while the App serves no repo or has never been discovered successfully, so a new installation shows up quickly. **Refresh** in Settings › GitHub (`POST /api/app/refresh`) runs it at once. If a refresh fails, kiln keeps the last list and shows the error. Per-repo settings (`warm`, `cache_branches`, `repo_cache_gb`) stay keyed by `owner/name`; entries for repos the App is not installed on are kept and ignored.
+
+**Which accounts:** only installations on the App owner's account are served. The owner is read from GitHub at every refresh and matched by its numeric account id, so renaming the account is safe. Installations on other accounts (possible if the App is public) are ignored and listed as "Skipped" on the dashboard's GitHub App card. To serve one, add its user or org login to `app_accounts` (string array, default `[]`, GitHub logins: letters, digits and single hyphens, at most 39 characters; there is no dashboard field: edit `config.json` and restart kiln), then Refresh. `app_accounts` entries are matched by login, case-insensitively: if such an account is renamed, update the list.
+
+**Files:** `<data>/app.pem` and `<data>/app.json` (`{id, slug, html_url, owner}`, `owner` being the owner's login for display), both mode 0600 and written atomically. `<data>/app_states.json` (mode 0600) holds setup links in progress for up to an hour. kiln uses App mode when `app.json` and `app.pem` load at startup; if the key is unusable it logs the error and falls back to the token. **Remove App** in Settings deletes both files and returns to token auth (the App stays on GitHub until you delete it there).
 
 ## GitHub token
 
@@ -121,6 +135,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
 <data>/                          $KILN_DATA or ~/.local/share/kiln
   config.json                    settings
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
+  app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   onboard.json                   hello PRs opened from the dashboard
   images/

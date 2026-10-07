@@ -33,7 +33,7 @@ kiln is a single Rust binary with an embedded dashboard. It polls GitHub for que
 - Linux x86_64 with read/write access to `/dev/kvm` (the user must be in the `kvm` group).
 - `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale` on `PATH` (`kiln doctor` checks them).
 - About 15 GB of free disk at a minimum (kiln refuses to launch VMs below that), plus room for the base image, caches and the Docker mirror.
-- A GitHub token that can manage runners on your repos (see [Setup](#setup)).
+- A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
 - The release binary is built on Ubuntu 24.04, so it needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later). To build from source you need Rust 1.89 or newer.
 - For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
 
@@ -149,7 +149,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 
 - **Runner updates.** kiln pins the runner version when it bakes. GitHub stops sending jobs to runners much more than a month out of date, so kiln rebakes by itself (`auto_rebake`) once the image is stale.
 - **Network throughput.** User-mode networking (slirp) tops out well below line rate and is CPU-heavy on large `docker pull`s. A future option is `passt` (still rootless) or a one-time root setup of tap devices.
-- **PAT auth.** A GitHub App for org-wide runners and short-lived tokens is not implemented yet.
+- **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo; org-level runner groups are not implemented.
 - **Single host, x86_64, Ubuntu 24.04 guests only.** Scheduling is a per-repo count; there are no priorities or fair-share.
 - **Filtered egress is opt-in.** It is implemented but not yet the default; DNS is not filtered.
 

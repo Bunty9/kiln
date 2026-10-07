@@ -45,6 +45,10 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/state", get(state))
         .route("/api/config", post(set_config))
         .route("/api/token", post(set_token))
+        .route("/api/app", post(app_manual).delete(app_remove))
+        .route("/api/app/manifest", post(app_manifest))
+        .route("/api/app/convert", post(app_convert))
+        .route("/api/app/refresh", post(app_refresh))
         .route("/api/doctor", get(doctor))
         .route("/api/log", get(log))
         .route("/api/vms/{id}/kill", post(kill))
@@ -268,6 +272,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
     Ok(Json(json!({
         "config": app.cfg(),
         "token_set": app.gh.has_token(),
+        "app": app_json(&app),
         "token_source": app.gh.source(),
         "token_expires": *app.gh.expires.lock().unwrap(),
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
@@ -279,8 +284,24 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "host": host_stats(&app).await,
         "version": env!("CARGO_PKG_VERSION"),
         "mirror": mirror::status_json(&app).await,
-        "caches": vm::cache_stats(&app.data, &app.cfg().repos),
+        "caches": vm::cache_stats(&app.data, &app.repos()),
     })))
+}
+
+/// The `app` object of /api/state (null in token mode).
+fn app_json(app: &App) -> Value {
+    let Some(a) = app.gh.app() else { return Value::Null };
+    json!({
+        "id": a.id,
+        "slug": a.slug,
+        "html_url": a.html_url,
+        "owner": *a.owner.read().unwrap(),
+        "accounts": app.cfg().app_accounts,
+        "repos": a.names.read().unwrap().clone(),
+        "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
+        "error": a.error.lock().unwrap().clone(),
+        "notes": a.notes.lock().unwrap().clone(),
+    })
 }
 
 async fn doctor(State(app): S) -> R<Json<Value>> {
@@ -315,7 +336,7 @@ async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<Json<Value>> {
         bail_r(&format!("GitHub rejected the token: {status} {}", user["message"].as_str().unwrap_or("")))?;
     }
     let mut repos = serde_json::Map::new();
-    for r in app.cfg().repos {
+    for r in app.repos() {
         let (st, _, body) = app.gh.probe(&token, &format!("repos/{r}/actions/runners?per_page=1")).await?;
         let msg = if st == 200 { "ok".to_string() } else { format!("{st} {}", body["message"].as_str().unwrap_or("")) };
         repos.insert(r, msg.into());
@@ -400,6 +421,9 @@ async fn onboard(State(app): S) -> Json<Value> {
 async fn onboard_hello(State(app): S, Json(b): Json<RepoBody>) -> R<Json<Value>> {
     static SAVE: Mutex<()> = Mutex::new(());
     let cfg = app.cfg();
+    if app.gh.app().is_some() {
+        bail_r("the hello PR is off in GitHub App mode (the App cannot write code)")?;
+    }
     let repo = cfg.repos.iter().find(|r| r.eq_ignore_ascii_case(&b.repo)).ok_or_else(|| anyhow!("not a configured repo"))?;
     let t = now();
     let (pr_url, branch) = app.gh.hello_pr(repo, &cfg.label, t).await?;
@@ -473,6 +497,112 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
     Ok(Json(json!({ "output": text.trim() })))
 }
 
+#[derive(Deserialize)]
+struct ManifestBody {
+    #[serde(default)]
+    org: String,
+    /// The page was loaded over https (tailscale serve); the host comes from the Host header.
+    #[serde(default)]
+    https: bool,
+}
+
+/// Start the one-click App creation: the manifest, GitHub's form URL and a one-time state.
+/// The redirect goes back to the origin the browser used (its Host header, already vetted).
+async fn app_manifest(State(app): S, headers: HeaderMap, Json(b): Json<ManifestBody>) -> R<Json<Value>> {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).ok_or_else(|| anyhow!("no Host header"))?;
+    let org = b.org.trim();
+    if !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail_r("org must be a GitHub org login")?;
+    }
+    let name = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "box".into());
+    let state = app.app_states.lock().unwrap().issue(now()).context("saving the setup state (app_states.json)")?;
+    let base = if org.is_empty() {
+        "https://github.com/settings/apps/new".to_string()
+    } else {
+        format!("https://github.com/organizations/{org}/settings/apps/new")
+    };
+    Ok(Json(json!({
+        "url": format!("{base}?state={state}"),
+        "manifest": crate::app_auth::manifest(&crate::app_auth::origin(host, b.https), name.trim()),
+        "state": state,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ConvertBody {
+    code: String,
+    state: String,
+}
+
+/// Finish the one-click flow: trade GitHub's code for the App's id and key, and switch to it.
+async fn app_convert(State(app): S, Json(b): Json<ConvertBody>) -> R<Json<Value>> {
+    if !app.app_states.lock().unwrap().valid(&b.state, now()) {
+        bail_r("this setup link is unknown, already used or older than an hour: start again")?;
+    }
+    if b.code.is_empty() || !b.code.chars().all(|c| c.is_ascii_alphanumeric()) {
+        bail_r("bad code")?;
+    }
+    // The state is used up only once GitHub has handed over the App: a network error
+    // or a 5xx leaves it valid so the same code can be retried.
+    let v = app.gh.manifest_conversion(&b.code).await?;
+    // Best effort: the App exists now whatever happens to the state file.
+    let _ = app.app_states.lock().unwrap().consume(&b.state);
+    let id = v["id"].as_u64().ok_or_else(|| anyhow!("GitHub returned no app id"))?;
+    let (slug, url, pem) = (v["slug"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""), v["pem"].as_str().unwrap_or(""));
+    // Empty if GitHub ever leaves it out: discovery then asks GET /app once.
+    let owner = v["owner"]["login"].as_str().unwrap_or("");
+    // GitHub's code is single use: if saving fails, this response held the only copy of
+    // the key, so say how to recover instead of inviting a second App.
+    let a = crate::app_auth::save(&app.data, id, slug, url, owner, pem).map_err(|e| {
+        anyhow!(
+            "GitHub created the App ({url}) but kiln could not save its key: {e:#}. Fix that, then open the App on github.com, generate a private key, and use 'Use an existing App' with App ID {id}."
+        )
+    })?;
+    app.gh.set_app(Some(Arc::new(a)));
+    let _ = app.gh.discover().await;
+    Ok(Json(json!({ "slug": slug, "html_url": url })))
+}
+
+#[derive(Deserialize)]
+struct ManualBody {
+    id: u64,
+    pem: String,
+}
+
+/// Use an existing App: checked against GitHub (GET /app with its JWT) before saving.
+async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> {
+    let a = crate::app_auth::AppAuth::new(b.id, String::new(), String::new(), &b.pem)?;
+    let me = app.gh.app_info(&a).await?;
+    let (slug, url) = (me["slug"].as_str().unwrap_or(""), me["html_url"].as_str().unwrap_or(""));
+    let owner = me["owner"]["login"].as_str().unwrap_or("");
+    let a = crate::app_auth::save(&app.data, b.id, slug, url, owner, &b.pem)?;
+    app.gh.set_app(Some(Arc::new(a)));
+    let _ = app.gh.discover().await;
+    Ok(Json(json!({ "slug": slug, "html_url": url })))
+}
+
+/// Run discovery now (after installing the App, or changing `app_accounts`). Returns the
+/// `app` object of /api/state; a failure is in its `error`, and the last map is kept.
+async fn app_refresh(State(app): S) -> R<Json<Value>> {
+    if app.gh.app().is_none() {
+        bail_r("not in GitHub App mode: create or add the App in Settings › GitHub first")?;
+    }
+    let _ = app.gh.discover_now().await;
+    Ok(Json(app_json(&app)))
+}
+
+/// Back to token auth: delete the App's key and record.
+async fn app_remove(State(app): S) -> R<Json<Value>> {
+    for f in ["app.pem", "app.json"] {
+        match std::fs::remove_file(app.data.join(f)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    app.gh.set_app(None);
+    Ok(Json(json!({ "ok": true })))
+}
+
 fn bail_r(msg: &str) -> R<()> {
     Err(anyhow!(msg.to_string()).into())
 }
@@ -481,7 +611,7 @@ fn bail_r(msg: &str) -> R<()> {
 /// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
 /// or cancel without a dedicated endpoint per call.
 async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: axum::extract::RawQuery, body: Bytes) -> R<Response> {
-    if !proxy_path_ok(&path, &app.cfg().repos) {
+    if !proxy_path_ok(&path, &app.repos()) {
         bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
     }
     if method != Method::GET && method != Method::POST {

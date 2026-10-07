@@ -84,10 +84,16 @@ write_files:
       # Pre-seed Node into the tool cache so setup-node resolves offline.
       # kiln fills in the exact versions (bake_node_versions), newest last:
       # the bare `node` on PATH is the newest.
+      # Each tarball is checked against the release's SHASUMS256.txt before it is unpacked.
       for N in {{NODE_VERSIONS}}; do
+        T=node-v$N-linux-x64.tar.xz
+        curl -fsSL -o "/tmp/$T" "https://nodejs.org/dist/v$N/$T"
+        curl -fsSL -o /tmp/SHASUMS256.txt "https://nodejs.org/dist/v$N/SHASUMS256.txt"
+        # Exactly this file's line; none (or a mismatch) fails sha256sum, and so the bake.
+        awk -v f="$T" '$2 == f' /tmp/SHASUMS256.txt | (cd /tmp && sha256sum --strict -c -)
         mkdir -p /opt/hostedtoolcache/node/$N/x64
-        curl -fsSL "https://nodejs.org/dist/v$N/node-v$N-linux-x64.tar.xz" \
-          | tar -xJ -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
+        tar -xJf "/tmp/$T" -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
+        rm -f "/tmp/$T" /tmp/SHASUMS256.txt
         touch /opt/hostedtoolcache/node/$N/x64.complete
         ln -sf /opt/hostedtoolcache/node/$N/x64/bin/node /usr/local/bin/node
         ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npm /usr/local/bin/npm
@@ -199,12 +205,17 @@ write_files:
     content: |
       #!/bin/bash
       # Runner job-started hook: runs before any step, while the VM is still clean.
-      # Never run a pull request's code from another repository on this hardware
-      # (kiln's scheduler refuses these too; a JIT runner can still be handed one).
-      head=$(jq -r 'if .pull_request then (.pull_request.head.repo.full_name // "deleted fork") else empty end' "$GITHUB_EVENT_PATH") || {
+      # Never run code from another repository on this hardware: pull requests
+      # (pull_request_target too) and workflow_run runs triggered by one, from a
+      # fork; an unknown head counts as a fork. kiln's scheduler also refuses fork
+      # pull requests (a JIT runner can still be handed one); workflow_run from a
+      # fork is caught only here.
+      head=$(jq -r 'if .pull_request then (.pull_request.head.repo.full_name // "deleted fork")
+        elif .workflow_run then (.workflow_run.head_repository.full_name // "unknown head repository")
+        else empty end' "$GITHUB_EVENT_PATH") || {
         echo "::error::kiln could not read the event payload"; exit 1; }
       if [ -n "$head" ] && [ "${head,,}" != "${GITHUB_REPOSITORY,,}" ]; then
-        echo "::error::kiln refuses pull requests from forks ($head)"
+        echo "::error::kiln refuses code from forks ($head)"
         exit 1
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf
