@@ -4,6 +4,14 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Apple Silicon (experimental, untested on a real Mac): on macOS kiln runs native linux/arm64 VMs with QEMU and Hypervisor.framework, advertising `ARM64` runners labelled `<label>-arm64` and `<label>-arm64-<N>cpu` (never the plain label). launchd LaunchAgent (`deploy/kiln.plist`), `aarch64-macos` self-update flavor, a gated macOS release build (`KILN_MACOS_RELEASE`), a `macos` CI workflow and `scripts/macos-smoke.sh`. No filtered egress and no Docker mirror on macOS. aarch64 Linux hosts with KVM work the same way. See [docs/apple-silicon.md](docs/apple-silicon.md).
+
+### Changed
+
+- The JIT config and debug SSH keys also reach the guest as fw_cfg files; x86 VMs still get the SMBIOS strings too. The guest recipe is now 4: an image baked by an older kiln is rebaked before VMs launch (automatic with `auto_rebake`).
+
 ## [0.2.2] - 2026-10-07
 
 ### Changed

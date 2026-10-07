@@ -35,7 +35,7 @@ The dashboard holds a GitHub token and can kill VMs, so access is checked on eve
 
 ### VM isolation
 
-Each job runs in its own QEMU/KVM guest on a throwaway qcow2 overlay, so nothing survives the job. QEMU runs as your unprivileged user, with no tap devices, bridges or sudo. The job's disk, JIT secret and sockets are deleted when the VM ends, and runners that never ran are deregistered.
+Each job runs in its own QEMU/KVM guest (Hypervisor.framework on macOS) on a throwaway qcow2 overlay, so nothing survives the job. QEMU runs as your unprivileged user, with no tap devices, bridges or sudo. The job's disk, JIT secret and sockets are deleted when the VM ends, and runners that never ran are deregistered.
 
 ### Filtered egress
 
@@ -87,6 +87,7 @@ kiln is honest about these:
 - **Open egress is the default.** With `egress: "open"`, a job has full outbound access including your LAN and your tailnet (it appears to come from the box). That is fine for your own private repos and not for untrusted code. Filtered mode is opt-in until it has been verified on more hosts.
 - **DNS exfiltration in filtered mode.** DNS goes through the host's resolver, so a job can leak data in DNS queries. DNS is not filtered.
 - **IPv6 is disabled, not filtered.**
+- **macOS has no filtered egress.** On Apple Silicon (experimental) jobs always have open egress; kiln refuses `egress: "filtered"` there. Do not run untrusted code on a Mac kiln.
 - **The denylist covers private ranges only.** Public addresses that the host can reach are not blocked. Notably, if your router hairpins its WAN address, a job could reach services you forwarded from the Internet. Keep Tailscale subnet-route acceptance off on this host, since routed subnets would also be reachable.
 - **Without `rootlessctl`, the debug SSH port is open for the whole VM life in filtered mode.** The port is published statically at launch rather than at hold time. Nothing listens on it by default, but a job is root and could start a listener. Install `rootlesskit` with `rootlessctl` to publish it only at hold time.
 - **The Docker mirror's `/v2/_catalog` and other reads are visible to every job** and shared between repos. It only caches public images, so this is acceptable, but jobs can learn what other jobs pulled.
