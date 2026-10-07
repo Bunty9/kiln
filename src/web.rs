@@ -74,14 +74,28 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .with_state(app.clone());
     let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
     let sock = app.data.join("serve.sock");
-    let unix = bind_serve_socket(&sock).with_context(|| format!("bind {}", sock.display()))?;
-    tracing::info!("dashboard on http://{addr} and {} (for tailscale serve)", sock.display());
-    tokio::try_join!(
-        axum::serve(listener, router.clone().into_make_service_with_connect_info::<Via>()).into_future(),
-        axum::serve(unix, router.into_make_service_with_connect_info::<Via>()).into_future(),
-    )?;
+    // Without the socket (e.g. a KILN_DATA path past the ~108-byte unix socket limit) kiln still
+    // serves; HTTPS via tailscale serve then proxies to loopback, where the API needs the key.
+    match bind_serve_socket(&sock) {
+        Ok(unix) => {
+            let _ = SERVE_SOCKET.set(true);
+            tracing::info!("dashboard on http://{addr} and {} (for tailscale serve)", sock.display());
+            tokio::try_join!(
+                axum::serve(listener, router.clone().into_make_service_with_connect_info::<Via>()).into_future(),
+                axum::serve(unix, router.into_make_service_with_connect_info::<Via>()).into_future(),
+            )?;
+        }
+        Err(e) => {
+            tracing::warn!("no tailscale serve socket at {}: {e:#}; HTTPS will need the dashboard key", sock.display());
+            tracing::info!("dashboard on http://{addr}");
+            axum::serve(listener, router.into_make_service_with_connect_info::<Via>()).await?;
+        }
+    }
     Ok(())
 }
+
+/// Whether `<data>/serve.sock` is listening (set once at startup).
+static SERVE_SOCKET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The socket `tailscale serve` proxies to. Mode 0600: tailscaled (root) can connect,
 /// other local users can't, and job VMs (QEMU NAT) can't reach a unix socket at all.
@@ -702,7 +716,13 @@ struct ServeBody {
 /// cert. 8443 so we never disturb whatever already lives on :443. It proxies to
 /// the unix socket, where `admit` trusts tailscaled's identity headers.
 async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
-    let target = format!("unix:{}", app.data.join("serve.sock").display());
+    let target = if SERVE_SOCKET.get() == Some(&true) {
+        format!("unix:{}", app.data.join("serve.sock").display())
+    } else {
+        // Fallback: loopback proxy (the API then needs the dashboard key, as before 0.2.2).
+        let port = RUNNING_LISTEN.get().and_then(|l| l.rsplit_once(':')).map_or("7878", |(_, p)| p).to_string();
+        format!("http://127.0.0.1:{port}")
+    };
     let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
     let out = tailscale(&args).await?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
