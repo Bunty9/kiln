@@ -1417,13 +1417,20 @@ async fn bake_inner(app: &App) -> Result<()> {
 /// Bump it when an image baked from an older recipe lacks something kiln
 /// depends on; such images are stale (and rebaked by auto_rebake).
 /// 2: fork-refusal job hook, apt archives on the cache disk, bake_node_versions.
-const RECIPE: u64 = 2;
+/// 3: the hook also refuses workflow_run from forks; Node tarballs checked against SHASUMS256.txt.
+const RECIPE: u64 = 3;
+
+/// Was the image at `base` (base.json) baked from the current recipe? kiln launches
+/// nothing on an older one: it may lack the fork-refusal hook. No marker = recipe 1.
+pub fn image_recipe_ok(base: &serde_json::Value) -> bool {
+    base["recipe"].as_u64().unwrap_or(1) >= RECIPE
+}
 
 /// Why the image at `base` (base.json) must be rebaked for the current config, if so.
 /// Images from before `node_wanted` was recorded carried Node 24 only, and no extra apt packages.
 fn rebake_reason(base: &serde_json::Value, node: &[String], apt: &[String]) -> Option<String> {
-    if base["recipe"].as_u64().unwrap_or(1) < RECIPE {
-        return Some("baked by an older kiln: rebake for the fork-refusal hook and apt cache".into());
+    if !image_recipe_ok(base) {
+        return Some("baked by an older kiln: rebake for the fork-refusal hook".into());
     }
     let set = |v: &[String]| v.iter().cloned().collect::<std::collections::BTreeSet<_>>();
     let baked = |k: &str, old: &[&str]| -> Vec<String> {
@@ -2153,6 +2160,11 @@ mod tests {
         // an image from before the recipe marker lacks the fork hook, whatever its Node list
         assert!(rebake_reason(&serde_json::json!({ "runner_version": "2.338.0" }), &n(&["24"]), &[]).unwrap().contains("older kiln"));
         assert!(rebake_reason(&serde_json::json!({ "recipe": 1, "node_wanted": ["24"] }), &n(&["24"]), &[]).is_some());
+        // recipe 2 had the PR hook but not the workflow_run check or Node checksums
+        assert!(rebake_reason(&serde_json::json!({ "recipe": 2, "node_wanted": ["24"] }), &n(&["24"]), &[]).unwrap().contains("older kiln"));
+        // and kiln launches nothing on it (nor on an image without a marker) until rebaked
+        assert!(!image_recipe_ok(&serde_json::json!({ "recipe": 2 })) && !image_recipe_ok(&serde_json::json!({})));
+        assert!(image_recipe_ok(&serde_json::json!({ "recipe": RECIPE })) && image_recipe_ok(&serde_json::json!({ "recipe": RECIPE + 1 })));
         // current recipe, no node_wanted recorded: Node 24
         assert_eq!(rebake_reason(&serde_json::json!({ "recipe": RECIPE }), &n(&["24"]), &[]), None);
         // apt packages: compared as sets; an image without apt_wanted had none
