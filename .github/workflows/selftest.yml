@@ -30,7 +30,7 @@ jobs:
       - name: Baked tools
         run: |
           ls /opt/hostedtoolcache/node; echo "bare node: $(node -v)"
-          grep -q kiln-prejob /home/runner/actions-runner/.env && echo "fork hook: installed" || echo "fork hook: missing"
+          grep -q kiln-prejob.sh /home/runner/actions-runner/.env && echo "fork hook: installed" || echo "fork hook: missing"
           findmnt /var/cache/apt/archives >/dev/null && echo "apt archives: on cache disk" || echo "apt archives: not cached"
       # With 20 in bake_node_versions this logs "Found in cache" and downloads nothing.
       - uses: actions/setup-node@v4

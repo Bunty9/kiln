@@ -67,7 +67,7 @@ write_files:
       printf 'RUNNER_TOOL_CACHE=/opt/hostedtoolcache\nAGENT_TOOLSDIRECTORY=/opt/hostedtoolcache\nLANG=C.UTF-8\nImageOS=ubuntu24\nImageVersion=kiln-%s\nACCEPT_EULA=Y\n' "$BAKE_DATE" \
         | tee /home/runner/actions-runner/.env >> /etc/environment
       # Runs before a job's first step (runner job hook): refuses fork pull requests.
-      echo ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/kiln-prejob >> /home/runner/actions-runner/.env
+      echo ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/kiln-prejob.sh >> /home/runner/actions-runner/.env
       # Sysctls for Elasticsearch, kind, file watchers (same as GitHub hosted image)
       mkdir -p /etc/sysctl.d
       printf 'vm.max_map_count=262144\nfs.inotify.max_user_watches=655360\nfs.inotify.max_user_instances=1280\n' \
@@ -189,7 +189,7 @@ write_files:
       done
       # apt wants its download dir's partial/ owned by _apt.
       install -d -o _apt -g root -m 700 /var/cache/apt/archives/partial
-  - path: /usr/local/sbin/kiln-prejob
+  - path: /usr/local/sbin/kiln-prejob.sh
     permissions: "0755"
     content: |
       #!/bin/bash
