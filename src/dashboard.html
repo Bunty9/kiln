@@ -1130,7 +1130,9 @@ async function loadLast(r) {
 }
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', appearance: 'Appearance' };
+// Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
+const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5']];
 const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', appearance: 'palette' };
 let ncHTML = '', tsOpen = false;
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
@@ -1248,6 +1250,19 @@ const G = {
       setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
     },
   },
+  // Stored in this browser only (localStorage), applied by the script in <head> before first paint.
+  appearance: {
+    html() {
+      const cur = (k, d) => lsGet('kiln-' + k) || d, light = document.documentElement.dataset.scheme === 'light';
+      const R = (k, d, opts) => `<div class="seg" role="radiogroup" aria-labelledby="ap-${k}">${opts.map(([v, l, i, t]) => `<button role="radio" aria-checked="${v === cur(k, d)}" data-act="look" data-id="${k}" data-v="${v}"${tip(t)}>${ic(i)}${l}</button>`).join('')}</div>`;
+      return `<div class="card"><h2>Appearance</h2>
+        <div class="fld"><span class="lb" id="ap-theme">Theme</span><div>${R('theme', 'system', [['system', 'System', 'monitor', "Follow this device's light or dark setting"], ['light', 'Light', 'sun'], ['dark', 'Dark', 'moon']])}</div></div>
+        <div class="fld"><span class="lb" id="ap-density">Density</span><div>${R('density', 'comfortable', [['comfortable', 'Comfortable', 'overview'], ['compact', 'Compact', 'jobs', 'Tighter rows and cards, more on screen']])}</div></div>
+        <div class="fld"><span class="lb" id="ap-accent">Accent</span><div><div class="seg sws" role="radiogroup" aria-labelledby="ap-accent">${ACCENTS.map(([v, l, d, lt]) => `<button role="radio" aria-checked="${v === cur('accent', 'ember')}" aria-label="${l}" data-act="look" data-id="accent" data-v="${v}" style="--sw:${light ? lt : d}"${tip(l)}>${ic('check')}</button>`).join('')}</div></div><div class="h">Buttons, focus rings and the current page. Running jobs stay ember.</div></div>
+        <div class="fld"><span class="lb">Reduce motion</span><div class="sw"><input type="checkbox" role="switch" id="f-motion" data-act="motion" aria-label="Reduce motion" ${cur('motion', '') === 'reduce' ? 'checked' : ''}><span class="fg2 sm">Stops pulsing badges and transitions. Off follows your system setting.</span></div></div>
+        <p class="fg2 sm" style="margin-top:16px">Saved in this browser only.</p></div>`;
+    },
+  },
 };
 const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
@@ -1259,7 +1274,7 @@ pages.settings = {
       <div id="set-body"></div><div id="dbar" hidden><span class="sp fg2">Unsaved changes</span><button class="btn" data-act="discard"${tip('Undo the changes on this page')}>Discard</button><button class="btn pri" data-act="save"${tip('Applies within seconds, no restart (except the listen address)')}>${ic('check')}Save changes</button></div></div></div>`;
     this.render();
   },
-  render() { G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html(); G[this.g].open?.(); this.live(); },
+  render() { G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html(); G[this.g].open?.(); this.live(); rove($('#set-body')); },
   unmount() { G[this.g]?.close?.(); },
   update() {
     if (!isDirty()) { const j = JSON.stringify(S.config); if (j !== cfgJ) { cfgJ = j; draft = JSON.parse(j); if (!$('#set-body').contains(document.activeElement)) { G[this.g].close?.(); this.render(); } } }
@@ -1505,6 +1520,8 @@ const ACT = {
     lsSet('kiln-notify', '1'); toast('Notifications on'); poll();
   },
   doctor() { doctor = null; return runDoctor(); },
+  look(b) { lsSet('kiln-' + b.dataset.id, b.dataset.v === { theme: 'system', density: 'comfortable', accent: 'ember' }[b.dataset.id] ? null : b.dataset.v); kilnAppearance(); pages.settings.render(); $(`[data-act=look][data-id=${b.dataset.id}][aria-checked=true]`)?.focus(); },
+  motion(b) { lsSet('kiln-motion', b.checked ? 'reduce' : null); kilnAppearance(); },
   egress(b) { draft.egress = b.dataset.id; pages.settings.render(); },
   tsr() { return loadTs(); },
   async ping(b) {
