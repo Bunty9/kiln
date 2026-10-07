@@ -103,6 +103,18 @@ pub struct Vm {
     pub warm: bool,
 }
 
+impl Vm {
+    /// Holds off `auto_update`: a job (or a demand VM about to take one) or a debug hold.
+    /// Idle warm VMs do not: the drain reaps them.
+    pub fn blocks_auto_update(&self) -> bool {
+        match self.state {
+            State::Busy | State::Held => true,
+            State::Booting | State::Idle => !self.warm || self.job_url.is_some(),
+            _ => false,
+        }
+    }
+}
+
 const KEEP_HISTORY: usize = 200;
 /// console.log and steps.log stop growing here (parsing continues).
 const LOG_CAP: usize = 64 << 20;
@@ -1991,6 +2003,22 @@ mod tests {
         assert_eq!(launch_split(2, 2, 1), (0, 1));
         assert_eq!(launch_split(5, 0, 0), (5, 0));
         assert_eq!((surplus(3, 1, 1), surplus(2, 1, 1), surplus(1, 2, 1), surplus(2, 0, 0)), (1, 0, 0, 2));
+    }
+
+    #[test]
+    fn auto_update_blockers() {
+        let w = |s| Vm { warm: true, ..vm("w", s, None) };
+        // real work blocks: a job, a demand VM about to take one, a debug hold
+        for v in [vm("a", State::Busy, None), vm("b", State::Booting, None), vm("c", State::Idle, Some(1)), vm("d", State::Held, None)] {
+            assert!(v.blocks_auto_update(), "{:?}", v.state);
+        }
+        // the warm pool does not (the drain reaps it), unless GitHub already gave it a job
+        assert!(!w(State::Booting).blocks_auto_update());
+        assert!(!w(State::Idle).blocks_auto_update());
+        assert!(Vm { job_url: Some("u".into()), ..w(State::Idle) }.blocks_auto_update());
+        for s in [State::Done, State::Failed, State::Killed, State::Lost] {
+            assert!(!vm("x", s, None).blocks_auto_update());
+        }
     }
 
     #[test]

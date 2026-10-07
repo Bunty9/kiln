@@ -539,7 +539,7 @@ async fn update_check(State(app): S) -> Response {
 
 /// Download, verify, drain and restart into the latest release (progress in GET /api/update).
 async fn update_apply(State(app): S) -> Response {
-    if !update::start(&app) {
+    if !update::start(&app, true) {
         return conflict("an update check or update is already running");
     }
     (StatusCode::ACCEPTED, Json(update::json(&app))).into_response()

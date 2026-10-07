@@ -38,12 +38,15 @@ pub struct Status {
     checked_at: u64,
     /// Why the last update was rolled back (<data>/update/error); cleared by the next apply.
     rollback: Option<String>,
+    /// The version that was rolled back (<data>/update/skip): `auto_update` never retries
+    /// it, only a newer one. Cleared by a manual apply.
+    skip: Option<String>,
 }
 
 impl Status {
     pub fn load(data: &Path) -> Self {
-        let rollback = std::fs::read_to_string(data.join("update/error")).ok();
-        Self { state: "idle", latest: None, error: None, progress: None, checked_at: 0, rollback }
+        let read = |f: &str| std::fs::read_to_string(data.join("update").join(f)).ok();
+        Self { state: "idle", latest: None, error: None, progress: None, checked_at: 0, rollback: read("error"), skip: read("skip") }
     }
 }
 
@@ -85,6 +88,7 @@ pub fn json(app: &App) -> Value {
         "error": s.error,
         "progress": s.progress,
         "rollback": s.rollback,
+        "skipped": s.skip,
         "checked_at": s.checked_at,
         "auto": cfg.auto_update,
         "repo": cfg.update_repo,
@@ -141,18 +145,23 @@ pub async fn check(app: &App) -> bool {
 }
 
 /// Start an update in the background; false if one (or a check) is already running.
-pub fn start(app: &Arc<App>) -> bool {
+/// `manual` (dashboard or API) also clears the rolled-back version's skip.
+pub fn start(app: &Arc<App>, manual: bool) -> bool {
     if !begin(app, "downloading") {
         return false;
     }
     {
         let mut s = app.update.lock().unwrap();
         (s.error, s.rollback) = (None, None);
+        if manual {
+            s.skip = None;
+            let _ = std::fs::remove_file(app.data.join("update/skip"));
+        }
     }
     let _ = std::fs::remove_file(app.data.join("update/error"));
     let app = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = apply(&app).await {
+        if let Err(e) = apply(&app, manual).await {
             app.draining.store(false, Ordering::SeqCst);
             fail(&app, &e);
         }
@@ -191,12 +200,19 @@ fn current_exe() -> Result<PathBuf> {
 }
 
 /// Download, verify, stage next to the executable, drain, swap and re-exec.
-async fn apply(app: &Arc<App>) -> Result<()> {
+async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     let repo = app.cfg().update_repo;
     let rel = fetch(app).await?;
-    app.update.lock().unwrap().latest = Some(rel.clone());
+    let skip = {
+        let mut s = app.update.lock().unwrap();
+        s.latest = Some(rel.clone());
+        s.skip.clone()
+    };
     if !newer(&rel.version, VERSION) {
         bail!("kiln {VERSION} is up to date (latest release: {})", rel.version);
+    }
+    if !manual && !auto_apply(Some(&rel.version), VERSION, skip.as_deref()) {
+        bail!("kiln {} was rolled back: auto_update skips it (apply it by hand to retry)", rel.version);
     }
     let name = asset_name(&rel.version, MUSL);
     let [tgz, sha, sig] =
@@ -336,6 +352,7 @@ pub fn on_start(data: &Path) {
             let msg = format!("kiln {} failed to start {MAX_BOOTS} times after the update: rolled back to kiln {}", p.to, p.from);
             tracing::error!("{msg}");
             let _ = std::fs::write(data.join("update/error"), &msg);
+            let _ = std::fs::write(data.join("update/skip"), &p.to);
             let exe = match current_exe() {
                 Ok(e) => e,
                 Err(e) => return tracing::error!("rollback: {e:#}"),
@@ -362,11 +379,12 @@ pub async fn supervise(app: Arc<App>) {
         }
         let ready = {
             let s = app.update.lock().unwrap();
-            s.state == "idle" && s.latest.as_ref().is_some_and(|r| newer(&r.version, VERSION))
+            s.state == "idle" && auto_apply(s.latest.as_ref().map(|r| r.version.as_str()), VERSION, s.skip.as_deref())
         };
-        let idle = !app.baking.load(Ordering::SeqCst) && !app.vms.lock().unwrap().iter().any(|v| v.state.is_active());
+        // Warm VMs do not count (the drain reaps them); held ones do (see blocks_auto_update).
+        let idle = !app.baking.load(Ordering::SeqCst) && !app.vms.lock().unwrap().iter().any(|v| v.blocks_auto_update());
         // ponytail: a failed auto-update retries only after the next check (6 h) resets the state.
-        if ready && idle && app.cfg().auto_update && start(&app) {
+        if ready && idle && app.cfg().auto_update && start(&app, false) {
             tracing::info!("auto_update: applying the new release");
         }
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -386,6 +404,12 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 /// Is `latest` a release newer than `current`? Unparseable never is.
 fn newer(latest: &str, current: &str) -> bool {
     matches!((parse_version(latest), parse_version(current)), (Some(l), Some(c)) if l > c)
+}
+
+/// Should `auto_update` install `latest`? Only if it is newer than `current` and than the
+/// version that was rolled back (`skip`), so a broken release never loops.
+fn auto_apply(latest: Option<&str>, current: &str, skip: Option<&str>) -> bool {
+    latest.is_some_and(|l| newer(l, current) && skip.is_none_or(|s| newer(l, s)))
 }
 
 /// Tarball of `version` for this build's libc flavor.
@@ -516,6 +540,17 @@ mod tests {
         assert!(!archive_ok(&format!("{ok}other/kiln\n"), s));
         assert!(!archive_ok(&format!("{ok}kiln-0.2.0-x86_64-linux-evil/kiln\n"), s));
         assert!(!archive_ok("", s));
+    }
+
+    #[test]
+    fn auto_apply_skips_rolled_back() {
+        assert!(auto_apply(Some("0.2.0"), "0.1.0", None));
+        assert!(!auto_apply(None, "0.1.0", None));
+        assert!(!auto_apply(Some("0.1.0"), "0.1.0", None), "up to date");
+        // 0.2.0 was rolled back: never retried by itself, but a newer release is
+        assert!(!auto_apply(Some("0.2.0"), "0.1.0", Some("0.2.0")));
+        assert!(auto_apply(Some("0.2.1"), "0.1.0", Some("0.2.0")));
+        assert!(!auto_apply(Some("0.1.5"), "0.1.0", Some("0.2.0")), "older than the rolled-back one");
     }
 
     #[test]
