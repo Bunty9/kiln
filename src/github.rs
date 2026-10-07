@@ -447,7 +447,7 @@ impl Gh {
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
-                        && let Some(n) = job_size(&j["labels"], label, default_cpus, crate::host::ARM64).filter(|&n| n <= host)
+                        && let Some(n) = job_size(&j["labels"], label, default_cpus, crate::platform::ARM64).filter(|&n| n <= host)
                     {
                         let jid = j["id"].as_u64().unwrap_or_default();
                         if fork {
@@ -631,7 +631,7 @@ impl Gh {
         for r in v["runners"].as_array().into_iter().flatten() {
             if let Some(id) = r["id"].as_u64()
                 && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-"))
-                && same_arch(&r["labels"], crate::host::ARM64)
+                && same_arch(&r["labels"], crate::platform::ARM64)
                 && r["status"] == "offline"
                 && r["busy"] == false
             {

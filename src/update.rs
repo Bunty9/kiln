@@ -86,7 +86,7 @@ pub fn json(app: &App) -> Value {
         "available": l.is_some_and(|r| newer(&r.version, VERSION)),
         "notes": l.map(|r| &r.notes),
         "published_at": l.map(|r| &r.published_at),
-        "flavor": if crate::host::MACOS { "macos" } else if MUSL { "musl" } else { "gnu" },
+        "flavor": if crate::platform::MACOS { "macos" } else if MUSL { "musl" } else { "gnu" },
         "state": s.state,
         "error": s.error,
         "progress": s.progress,
@@ -225,7 +225,7 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
 
 /// This process's executable, refused once it was replaced on disk (Linux reports
 /// that as a " (deleted)" suffix of /proc/self/exe).
-fn current_exe() -> Result<PathBuf> {
+pub fn current_exe() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving kiln's own executable")?;
     if cfg!(target_os = "linux") && exe.to_string_lossy().ends_with(" (deleted)") {
         bail!("kiln's binary was replaced on disk since it started: restart kiln first");

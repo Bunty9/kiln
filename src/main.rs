@@ -1,12 +1,15 @@
 mod app_auth;
+mod audit;
+mod confine;
 mod github;
 mod host;
 mod mirror;
+mod platform;
 mod update;
 mod vm;
 mod web;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -114,7 +117,7 @@ impl Config {
     /// A VM of `cpus` serves `<label>-<cpus>cpu`, and the plain label only if it is the default size.
     /// On an arm64 host the label is `<label>-arm64`, so x64 jobs never land on it.
     pub fn runner_labels(&self, cpus: u32) -> Vec<String> {
-        self.labels_for(cpus, host::ARM64)
+        self.labels_for(cpus, platform::ARM64)
     }
 
     fn labels_for(&self, cpus: u32, arm64: bool) -> Vec<String> {
@@ -129,7 +132,7 @@ impl Config {
 
     /// What jobs put in `runs-on` for this host's default size: `<label>`, or `<label>-arm64`.
     pub fn job_label(&self) -> String {
-        github::arch_label(&self.label, host::ARM64)
+        github::arch_label(&self.label, platform::ARM64)
     }
 
     /// Warm VMs wanted for `repo` at size `cpus`: default size only, none while paused.
@@ -243,7 +246,7 @@ impl Config {
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
         }
-        if self.egress == "filtered" && host::MACOS {
+        if self.egress == "filtered" && platform::MACOS {
             bail!("{}", vm::FILTERED_LINUX_ONLY);
         }
         if let Some(a) = self.app_accounts.iter().find(|a| !valid_login(a)) {
@@ -410,9 +413,7 @@ impl App {
     }
 
     pub fn save_token(&self, t: String) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(self.data.join("token"))?;
-        std::io::Write::write_all(&mut f, t.trim().as_bytes())?;
+        app_auth::write_private(&self.data.join("token"), t.trim().as_bytes())?;
         self.gh.set_token(t.trim().to_string(), "file");
         Ok(())
     }
@@ -426,11 +427,16 @@ pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
+/// GitHub tokens the environment may hold. kiln reads the first two itself; `GH_TOKEN` reaches
+/// it only through `gh auth token`, last. Children kiln starts for VMs inherit none of them
+/// (see `vm::no_secrets`).
+pub const TOKEN_ENV: [&str; 3] = ["KILN_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+
 /// Env var, then the token file the dashboard writes, then the gh CLI login.
 /// `only_file`: a token was saved from the dashboard, so only that file counts
 /// (a stale env token must not take over again on reload).
 fn load_token(data: &std::path::Path, only_file: bool) -> (String, &'static str) {
-    let env = ["KILN_GITHUB_TOKEN", "GITHUB_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
+    let env = TOKEN_ENV[..2].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
     let file = std::fs::read_to_string(data.join("token")).ok();
     pick_token(env, file, only_file, || {
         std::process::Command::new("gh")
@@ -458,8 +464,16 @@ fn pick_token(env: Option<String>, file: Option<String>, only_file: bool, gh: im
     if gh.is_empty() { (gh, "none") } else { (gh, "gh") }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    // Before any runtime thread exists: confines itself, then execs a job VM's QEMU.
+    if args.next().is_some_and(|a| a == confine::ARG) {
+        confine::main(args);
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V" | "version")) {
         println!("kiln {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -468,7 +482,9 @@ async fn main() -> Result<()> {
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
-    // First, before anything that can fail (a bad config.json included), so a new version
+    // Absolute: paths built from it go into Landlock rules and QEMU arguments.
+    let data = std::path::absolute(&data)?;
+    // First, before anything likely to fail (a bad config.json included), so a new version
     // that dies early still counts its boots and gets rolled back. CLI runs never count.
     if is_serve(std::env::args().nth(1).as_deref()) {
         update::on_start(&data);
@@ -476,10 +492,14 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(data.join("vms"))?;
     std::fs::create_dir_all(data.join("images"))?;
     std::fs::create_dir_all(data.join("update"))?;
-    let cfg: Config = match std::fs::read(data.join("config.json")) {
-        Ok(b) => serde_json::from_slice(&b)?,
-        Err(_) => Config::default(),
-    };
+    // Job logs, repo caches and the key files all live here: other local users stay out,
+    // whatever the umask was when it was created.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 0700 {}", data.display()))?;
+    }
+    let cfg = load_config(&data)?;
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
     *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
@@ -520,8 +540,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         a if is_serve(a) => {
+            if let Some(p) = confine::exposed(&app.data) {
+                bail!("data directory {} is under {p}, which job VMs' QEMU may read: move it (KILN_DATA) elsewhere", app.data.display());
+            }
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
+            tokio::spawn(host::run(app.clone()));
+            let (ok, d) = confine::probe();
+            confine::ENFORCED.store(ok && !platform::MACOS, std::sync::atomic::Ordering::Relaxed);
+            match ok {
+                true if !d.starts_with("warning") => tracing::info!("{d}"),
+                _ => tracing::warn!("job VM confinement: {d}"),
+            }
             if app.cfg().egress == "filtered" {
                 let a = app.clone();
                 tokio::spawn(async move {
@@ -547,6 +577,23 @@ async fn main() -> Result<()> {
             );
             std::process::exit(2)
         }
+    }
+}
+
+/// `<data>/config.json`, validated: a hand-edited typo must not fail open (an `egress` of
+/// "Filtered" quietly meaning open). Only a missing file means the defaults, which the
+/// dashboard's first save adjusts to the host; an unreadable one is an error, not "open".
+fn load_config(data: &std::path::Path) -> Result<Config> {
+    match std::fs::read(data.join("config.json")) {
+        Ok(b) => {
+            let c: Config = serde_json::from_slice(&b).context("config.json")?;
+            // Host-size bounds are checked when saving: a box that later shows fewer CPUs
+            // (affinity, cpuset, a move) must still start, and only launches what fits.
+            c.validate_for(u32::MAX).context("config.json is invalid; fix it or remove it to start from the defaults")?;
+            Ok(c)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e).context("reading config.json"),
     }
 }
 
@@ -733,13 +780,13 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     app.gh.refresh_latest().await;
     // Launching during a bake is fine: new VMs use the old base until the atomic swap.
     auto_rebake(app, cfg);
-    let (mem_avail, disk) = (host::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
+    let (mem_avail, disk) = (platform::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
     // Shown on the dashboard; each size is gated on its own memory below.
     let mirror_mb = cfg.docker_mirror.then(|| mirror::cache_mb(app)).flatten();
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
     // Fail closed: filtered jobs never fall back to open networking.
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
-    // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
+    // An image from an older recipe may lack the job hooks (fork refusal, cold release builds): launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
     let api = app.api_backoff.lock().unwrap().clone();
@@ -749,7 +796,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
         .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
-        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())))
+        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
         .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
         .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
@@ -757,7 +804,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
         let (mb, cpus) = act.fold((0, 0), |(m, c), v| (m + v.mem_mb as u64, c + v.cpus as u64));
-        vm::Budget::new(host::mem_total_mb(), mb, cpus, host_threads())
+        vm::Budget::new(platform::mem_total_mb(), mb, cpus, host_threads())
     };
 
     let mut queued_by_repo = HashMap::new();
@@ -906,6 +953,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_load_fails_closed() {
+        let d = std::env::temp_dir().join(format!("kiln-test-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(load_config(&d).unwrap().egress, "open", "no file: defaults");
+        std::fs::write(d.join("config.json"), r#"{"egress":"filtered"}"#).unwrap();
+        assert_eq!(load_config(&d).unwrap().egress, "filtered");
+        std::fs::write(d.join("config.json"), r#"{"egress":"Filtered"}"#).unwrap();
+        assert!(load_config(&d).is_err(), "a typo never means open");
+        std::fs::write(d.join("config.json"), "{").unwrap();
+        assert!(load_config(&d).is_err());
+        std::fs::remove_file(d.join("config.json")).unwrap();
+        std::fs::create_dir(d.join("config.json")).unwrap();
+        assert!(load_config(&d).is_err(), "unreadable is not missing");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn gate_kinds() {
         assert_eq!(gate_kind(&vm::launch_gate(0, 2048, Some(500), None, None).unwrap()), "memory");
         assert_eq!(gate_kind(&vm::launch_gate(1 << 20, 2048, Some(1), None, None).unwrap()), "disk");
@@ -961,7 +1026,7 @@ mod tests {
         assert!(!ok(|c| c.debug_hold_mins = 121));
         assert!(ok(|c| c.debug_ssh_keys = vec!["ssh-ed25519 AAAA me@x".into()]));
         assert!(!ok(|c| c.debug_ssh_keys = vec!["rm -rf /".into()]));
-        assert_eq!(ok(|c| c.egress = "filtered".into()), !host::MACOS, "filtered egress is Linux-only");
+        assert_eq!(ok(|c| c.egress = "filtered".into()), !platform::MACOS, "filtered egress is Linux-only");
         assert!(!ok(|c| c.egress = "closed".into()));
         let warm = |repos: &[&str], r: &str, n: u32| {
             let mut c = Config { repos: repos.iter().map(|s| s.to_string()).collect(), ..Config::default() };
@@ -1072,11 +1137,11 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.labels_for(4, false), ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"]);
         assert_eq!(c.labels_for(8, false), ["self-hosted", "linux", "x64", "kiln-8cpu"]);
-        assert_eq!(c.runner_labels(8), c.labels_for(8, host::ARM64));
+        assert_eq!(c.runner_labels(8), c.labels_for(8, platform::ARM64));
         // arm64 hosts never advertise the plain label: x64 jobs must not land there.
         assert_eq!(c.labels_for(4, true), ["self-hosted", "linux", "ARM64", "kiln-arm64-4cpu", "kiln-arm64"]);
         assert_eq!(c.labels_for(8, true), ["self-hosted", "linux", "ARM64", "kiln-arm64-8cpu"]);
-        assert_eq!(c.job_label(), if host::ARM64 { "kiln-arm64" } else { "kiln" });
+        assert_eq!(c.job_label(), if platform::ARM64 { "kiln-arm64" } else { "kiln" });
         assert_eq!((c.mem_mb(4), c.mem_mb(2), c.mem_mb(16)), (8192, 4096, 24576));
         let c = Config { size_mem_mb: [(8, 12288), (4, 1024)].into(), ..Config::default() };
         // overrides apply to non-default sizes only; the default size is vm_mem_mb

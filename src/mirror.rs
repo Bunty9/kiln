@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 /// Pinned: a different tarball is refused, never installed. (url, sha256) for this host.
-const RELEASE: (&str, &str) = if crate::host::ARM64 {
+const RELEASE: (&str, &str) = if crate::platform::ARM64 {
     (
         "https://github.com/distribution/distribution/releases/download/v3.1.2/registry_3.1.2_linux_arm64.tar.gz",
         "09d26f88d2c0f161bd1b8bfc6c123571cc3d291dcca8af5477b3cacc4ec95e73",
@@ -27,7 +27,7 @@ const RELEASE: (&str, &str) = if crate::host::ARM64 {
 const URL: &str = RELEASE.0;
 const SHA256: &str = RELEASE.1;
 /// The registry has no darwin build: on macOS there is no mirror and VMs pull from Docker Hub.
-const SUPPORTED: bool = !crate::host::MACOS;
+const SUPPORTED: bool = !crate::platform::MACOS;
 const UNSUPPORTED_MSG: &str = "not available on macOS; VMs pull from Docker Hub directly";
 pub const ADDR: &str = "127.0.0.1:5000";
 

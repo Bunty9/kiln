@@ -159,6 +159,7 @@ write_files:
         cd /home/runner/actions-runner
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
+        /usr/local/sbin/kiln-cache scrub || echo "kiln: cache scrub failed"
         sleep 1 # let kiln-steps flush the last page
         # Host->guest control channel is the console's input. Open it once and keep it open:
         # input that arrives while no fd is open would be flushed.
@@ -198,16 +199,35 @@ write_files:
       # kiln attaches the repo's cache as a second virtio disk (no disk = no cache).
       # First use of a repo: it is blank, so format it. Then bind the usual cache
       # dirs onto it. /opt/hostedtoolcache stays off: the pre-seeded Node lives there.
+      # `kiln-cache detach` (the job-started hook, for release builds) unmounts it all again.
+      # `kiln-cache scrub` (after the job) deletes known login-token files (cargo, huggingface-cli).
       [ -b /dev/vdb ] || exit 0
       set -eu
+      DIRS="/var/lib/docker /var/cache/apt/archives /home/runner/.cache /home/runner/.npm /home/runner/.cargo
+            /home/runner/.rustup /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository"
+      case ${1:-} in
+        detach)
+          findmnt /mnt/cache >/dev/null || exit 0
+          systemctl stop docker.service docker.socket
+          for t in $DIRS; do umount "$t"; done
+          umount /mnt/cache
+          systemctl start docker.service
+          echo "kiln: cache detached: this job runs cold"
+          exit 0 ;;
+        scrub)
+          # Login tokens written under cached paths would reach every later job, pull requests
+          # included: cargo login, huggingface-cli login.
+          findmnt /mnt/cache >/dev/null || exit 0
+          rm -f /home/runner/.cargo/credentials /home/runner/.cargo/credentials.toml /home/runner/.cache/huggingface/token /home/runner/.cache/huggingface/stored_tokens
+          exit 0 ;;
+      esac
       blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb
       mkdir -p /mnt/cache
       mount -o noatime /dev/vdb /mnt/cache
       # Whole ~/.cargo and ~/.rustup: the Rust toolchain itself is cached, not just crates.
       # Older caches kept ~/.cargo/{registry,git} separately: drop those obsolete dirs.
       rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
-      for t in /var/lib/docker /var/cache/apt/archives /home/runner/.cache /home/runner/.npm /home/runner/.cargo \
-               /home/runner/.rustup /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
+      for t in $DIRS; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
         mkdir -p "$src"
         case $t in
@@ -235,6 +255,12 @@ write_files:
       if [ -n "$head" ] && [ "${head,,}" != "${GITHUB_REPOSITORY,,}" ]; then
         echo "::error::kiln refuses code from forks ($head)"
         exit 1
+      fi
+      # Tag pushes and releases build what gets shipped: run them on a clean slate, not on
+      # the repo cache that every default-branch job writes (a dependency compromised in one
+      # of those could otherwise plant a toolchain in ~/.cargo or ~/.rustup for the release).
+      if [ "${GITHUB_REF_TYPE:-}" = tag ] || [ "${GITHUB_EVENT_NAME:-}" = release ]; then
+        sudo /usr/local/sbin/kiln-cache detach || { echo "::error::kiln could not detach the cache for a release build"; exit 1; }
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf
     content: |

@@ -15,7 +15,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, kiln]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install Rust
         run: curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt
       - name: Format
@@ -23,7 +25,16 @@ jobs:
       - name: Lint
         run: . "$HOME/.cargo/env" && cargo clippy --locked --tests -- -D warnings
       - name: Test
+        # The Landlock test must not skip on a kernel without it.
+        env:
+          KILN_REQUIRE_LANDLOCK: "1"
         run: . "$HOME/.cargo/env" && cargo test --locked
+      - name: Dependency audit
+        # ~/.cargo persists on the cache disk, so the pinned cargo-deny is usually already there.
+        run: |
+          . "$HOME/.cargo/env"
+          [ "$(cargo deny --version 2>/dev/null)" = "cargo-deny 0.20.2" ] || cargo install cargo-deny --locked --version 0.20.2
+          cargo deny --locked check
       - name: Dashboard script
         # Every inline <script> block (the pre-paint theme script and the app), checked together.
         run: |
