@@ -45,6 +45,7 @@
  --ember:#F59E4C;--ok:#5DBE8A;--fail:#F07068;--queued:#97A9C4;--warn:#E2C35A;--info:#97A9C4;
  --acc-d:#F59E4C;--acc-l:#A34B07;--accent:var(--acc-d);--on-accent:#16130F;--on-ember:var(--on-accent);
  --tint:15%;
+ --soot:#000;--char-max:55%;
  --hi:inset 0 1px 0 rgb(255 240 220/.045);
  --e1:var(--hi),0 1px 2px rgb(0 0 0/.45),0 0 0 1px rgb(255 232 205/.05);
  --e2:var(--hi),0 1px 2px rgb(0 0 0/.4),0 6px 16px -4px rgb(0 0 0/.5),0 0 0 1px rgb(255 232 205/.07);
@@ -63,6 +64,7 @@
  --fg:#1C1813;--fg-2:#5A5248;--fg-3:#6B6258;
  --ember:#A34B07;--ok:#136A40;--fail:#BE2D25;--queued:#466186;--warn:#805A00;--info:#466186;
  --accent:var(--acc-l);--on-accent:#FFF;--tint:10%;
+ --soot:#3A1F0C;--char-max:14%;
  --hi:inset 0 0 0 0 transparent;
  --e1:0 0 0 1px rgb(70 50 30/.07),0 1px 2px rgb(70 50 30/.07);
  --e2:0 0 0 1px rgb(70 50 30/.08),0 1px 2px rgb(70 50 30/.06),0 6px 16px -6px rgb(70 50 30/.18);
@@ -122,6 +124,12 @@ main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity va
 .card{background:var(--s1);border-radius:var(--r2);padding:var(--pad);box-shadow:var(--e1)}
 .card+.card{margin-top:var(--gap)}
 .card .card{background:var(--s3);box-shadow:none;outline:1px solid var(--line)}
+/* roast: top-level cards glow from below (--heat flickers) and char inward from the edges (--char, once) */
+@property --heat{syntax:'<percentage>';inherits:false;initial-value:0%}
+@property --char{syntax:'<percentage>';inherits:false;initial-value:0%}
+.card:not(.card .card){background:linear-gradient(to top,color-mix(in srgb,var(--ember) calc(var(--heat)*2.5),transparent),transparent 3px),radial-gradient(140% 90% at 50% 120%,color-mix(in srgb,var(--ember) var(--heat),transparent),color-mix(in srgb,#E0402A calc(var(--heat)/3),transparent) 45%,transparent 75%),radial-gradient(150% 120% at 50% 35%,transparent 55%,color-mix(in srgb,var(--soot) var(--char),transparent)),var(--s1);animation:char 8s cubic-bezier(.2,0,0,1) forwards,heat 3.4s ease-in-out infinite alternate}
+@keyframes heat{0%{--heat:18%}30%{--heat:32%}55%{--heat:22%}80%{--heat:36%}100%{--heat:26%}}
+@keyframes char{to{--char:var(--char-max)}}
 .hair>*+*{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
 #ov-st:not(:empty){margin-bottom:var(--gap)}
 .stline{color:var(--fg-2);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
