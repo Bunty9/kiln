@@ -271,14 +271,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
     Ok(Json(json!({
         "config": app.cfg(),
         "token_set": app.gh.has_token(),
-        "app": app.gh.app().map(|a| json!({
-            "id": a.id,
-            "slug": a.slug,
-            "html_url": a.html_url,
-            "repos": a.names.read().unwrap().clone(),
-            "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
-            "error": a.error.lock().unwrap().clone(),
-        })),
+        "app": app_json(&app),
         "token_source": app.gh.source(),
         "token_expires": *app.gh.expires.lock().unwrap(),
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
@@ -292,6 +285,21 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.repos()),
     })))
+}
+
+/// The `app` object of /api/state (null in token mode).
+fn app_json(app: &App) -> Value {
+    let Some(a) = app.gh.app() else { return Value::Null };
+    json!({
+        "id": a.id,
+        "slug": a.slug,
+        "html_url": a.html_url,
+        "owner": *a.owner.read().unwrap(),
+        "accounts": app.cfg().app_accounts,
+        "repos": a.names.read().unwrap().clone(),
+        "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
+        "error": a.error.lock().unwrap().clone(),
+    })
 }
 
 async fn doctor(State(app): S) -> R<Json<Value>> {
@@ -535,7 +543,9 @@ async fn app_convert(State(app): S, Json(b): Json<ConvertBody>) -> R<Json<Value>
     let v = app.gh.manifest_conversion(&b.code).await?;
     let id = v["id"].as_u64().ok_or_else(|| anyhow!("GitHub returned no app id"))?;
     let (slug, url, pem) = (v["slug"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""), v["pem"].as_str().unwrap_or(""));
-    let a = crate::app_auth::save(&app.data, id, slug, url, pem)?;
+    // Empty if GitHub ever leaves it out: discovery then asks GET /app once.
+    let owner = v["owner"]["login"].as_str().unwrap_or("");
+    let a = crate::app_auth::save(&app.data, id, slug, url, owner, pem)?;
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))
@@ -552,7 +562,8 @@ async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> 
     let a = crate::app_auth::AppAuth::new(b.id, String::new(), String::new(), &b.pem)?;
     let me = app.gh.app_info(&a).await?;
     let (slug, url) = (me["slug"].as_str().unwrap_or(""), me["html_url"].as_str().unwrap_or(""));
-    let a = crate::app_auth::save(&app.data, b.id, slug, url, &b.pem)?;
+    let owner = me["owner"]["login"].as_str().unwrap_or("");
+    let a = crate::app_auth::save(&app.data, b.id, slug, url, owner, &b.pem)?;
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))

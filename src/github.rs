@@ -26,6 +26,8 @@ pub struct Gh {
     spelled: std::sync::Mutex<HashMap<String, String>>,
     /// GitHub App mode: tokens come from the App's installations, not `token`.
     app: std::sync::RwLock<Option<std::sync::Arc<crate::app_auth::AppAuth>>>,
+    /// Config `app_accounts`: installations on these accounts are served besides the owner's.
+    pub app_accounts: std::sync::RwLock<Vec<String>>,
     /// Unix time the token expires, from GitHub's response header (None = no expiry seen).
     pub expires: std::sync::Mutex<Option<u64>>,
     /// repo -> (default branch, fetched at unix time); renames are rare, so 1h.
@@ -53,6 +55,7 @@ impl Gh {
             defaults: Default::default(),
             expires: Default::default(),
             app: Default::default(),
+            app_accounts: Default::default(),
             spelled: Default::default(),
         }
     }
@@ -390,9 +393,18 @@ impl Gh {
         r.map(|(n, _)| n)
     }
 
-    /// (repos found, per-installation errors). One failing installation keeps its previous
-    /// repos and does not stop the others; suspended installations are skipped.
+    /// (repos found, per-installation errors and ignored installations). One failing
+    /// installation keeps its previous repos and does not stop the others; suspended
+    /// installations and those on accounts other than the owner's and `app_accounts` are skipped.
     async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<(usize, Vec<String>)> {
+        if a.owner.read().unwrap().is_empty() {
+            // app.json from before the owner was kept: learn it once.
+            let me = self.app_info(a).await?;
+            let owner = me["owner"]["login"].as_str().context("GitHub's GET /app response names no owner")?;
+            a.set_owner(owner).context("saving the App owner to app.json")?;
+        }
+        let owner = a.owner.read().unwrap().clone();
+        let accounts = self.app_accounts.read().unwrap().clone();
         let jwt = a.jwt(crate::now())?;
         let mut map = BTreeMap::new();
         let mut errs = vec![];
@@ -403,7 +415,9 @@ impl Gh {
                 bail!("listing App installations: {}", r.status());
             }
             let insts: Vec<Value> = r.json().await?;
-            for id in crate::app_auth::live_installations(&insts) {
+            let (ids, ignored) = crate::app_auth::served_installations(&insts, &owner, &accounts);
+            errs.extend(ignored);
+            for id in ids {
                 match self.installation_repos(a, id).await {
                     Ok(repos) => map.extend(repos.into_iter().map(|n| (n, id))),
                     Err(e) => {

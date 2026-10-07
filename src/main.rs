@@ -33,6 +33,9 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// GitHub App mode: accounts (user or org logins) whose installations are served,
+    /// besides the App owner's. Empty = the owner's only.
+    pub app_accounts: Vec<String>,
     /// Docker Hub pull-through cache for job VMs (host loopback :5000).
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
@@ -80,6 +83,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
             bake_node_versions: vec!["24".into()],
@@ -216,8 +220,20 @@ impl Config {
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
         }
+        if let Some(a) = self.app_accounts.iter().find(|a| !valid_login(a)) {
+            bail!("app_accounts: {a:?} is not a GitHub user or org login (letters, digits, single hyphens, at most 39)");
+        }
         Ok(())
     }
+}
+
+/// GitHub login: 1-39 alphanumerics or single hyphens, not at either end.
+fn valid_login(l: &str) -> bool {
+    (1..=39).contains(&l.len())
+        && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+        && !l.contains("--")
 }
 
 /// Conservative git branch name check: no spaces, no ref syntax, no "..".
@@ -271,6 +287,7 @@ impl App {
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
+        *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
@@ -354,6 +371,7 @@ async fn main() -> Result<()> {
     };
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
+    *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
     match app_auth::load(&data) {
         Some(Ok(a)) => gh.set_app(Some(Arc::new(a))),
         Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
@@ -812,6 +830,21 @@ mod tests {
         // shape is still checked
         c.cache_branches.insert("gone/repo".into(), vec!["bad branch".into()]);
         assert!(c.validate_for(8).is_err());
+    }
+
+    #[test]
+    fn app_accounts_are_github_logins() {
+        let ok =
+            |a: &[&str]| Config { app_accounts: a.iter().map(|s| s.to_string()).collect(), ..Config::default() }.validate_for(8).is_ok();
+        assert!(ok(&[]));
+        assert!(ok(&["Bunty9", "my-org", &"a".repeat(39)]));
+        assert!(!ok(&[""]));
+        assert!(!ok(&["-org"]));
+        assert!(!ok(&["org-"]));
+        assert!(!ok(&["my--org"]));
+        assert!(!ok(&["my_org"]));
+        assert!(!ok(&["o/rg"]));
+        assert!(!ok(&[&"a".repeat(40)]));
     }
 
     #[test]

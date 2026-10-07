@@ -62,9 +62,25 @@ pub fn origin(host: &str, https: bool) -> String {
     format!("{}://{host}", if https { "https" } else { "http" })
 }
 
-/// Installations kiln can use: a suspended one can't mint tokens.
-pub fn live_installations(insts: &[serde_json::Value]) -> Vec<u64> {
-    insts.iter().filter(|i| i["suspended_at"].is_null()).filter_map(|i| i["id"].as_u64()).collect()
+/// Installations kiln serves, and a note per one it ignores. Anyone can install a
+/// (private) App only if they own it, but a public one, or one made public later, can be
+/// installed by strangers: only the App owner's account and `app_accounts` are served.
+/// Suspended installations can't mint tokens and are skipped silently.
+pub fn served_installations(insts: &[serde_json::Value], owner: &str, accounts: &[String]) -> (Vec<u64>, Vec<String>) {
+    let (mut ids, mut notes) = (vec![], vec![]);
+    for i in insts.iter().filter(|i| i["suspended_at"].is_null()) {
+        let Some(id) = i["id"].as_u64() else { continue };
+        let login = i["account"]["login"].as_str().unwrap_or("");
+        let ok = !login.is_empty()
+            && ((!owner.is_empty() && login.eq_ignore_ascii_case(owner)) || accounts.iter().any(|a| a.eq_ignore_ascii_case(login)));
+        if ok {
+            ids.push(id);
+        } else {
+            let on = if login.is_empty() { format!("{id}") } else { login.to_string() };
+            notes.push(format!("ignored installation on {on}: not the App owner; add it to app_accounts to serve it"));
+        }
+    }
+    (ids, notes)
 }
 
 /// App manifest for GitHub's one-click creation flow. GitHub sends the browser back
@@ -104,6 +120,10 @@ pub struct AppAuth {
     pub id: u64,
     pub slug: String,
     pub html_url: String,
+    /// Login of the account that owns the App; "" until known (app.json from before it was kept).
+    pub owner: std::sync::RwLock<String>,
+    /// Data directory the App's files live in (None: a key being checked, not saved yet).
+    dir: Option<std::path::PathBuf>,
     key: RsaKeyPair,
     /// installation id -> (token, expires_at unix)
     pub tokens: tokio::sync::Mutex<std::collections::HashMap<u64, (String, u64)>>,
@@ -122,6 +142,8 @@ impl AppAuth {
             id,
             slug,
             html_url,
+            owner: Default::default(),
+            dir: None,
             key: parse_key(pem)?,
             tokens: Default::default(),
             repos: Default::default(),
@@ -134,6 +156,20 @@ impl AppAuth {
     pub fn jwt(&self, now: u64) -> Result<String> {
         jwt(&self.key, self.id, now)
     }
+
+    /// Record the owner's login, in app.json too when the App is saved.
+    pub fn set_owner(&self, owner: &str) -> Result<()> {
+        *self.owner.write().unwrap() = owner.into();
+        match &self.dir {
+            Some(d) => self.write_meta(d),
+            None => Ok(()),
+        }
+    }
+
+    fn write_meta(&self, data: &std::path::Path) -> Result<()> {
+        let m = serde_json::json!({ "id": self.id, "slug": self.slug, "html_url": self.html_url, "owner": *self.owner.read().unwrap() });
+        write_private(&data.join("app.json"), m.to_string().as_bytes())
+    }
 }
 
 /// `<data>/app.json` + `<data>/app.pem`; None when no App is configured.
@@ -142,12 +178,15 @@ pub fn load(data: &std::path::Path) -> Option<Result<AppAuth>> {
     Some((|| {
         let m: serde_json::Value = serde_json::from_slice(&meta).context("app.json")?;
         let pem = std::fs::read_to_string(data.join("app.pem")).context("app.pem")?;
-        AppAuth::new(
+        let mut a = AppAuth::new(
             m["id"].as_u64().context("app.json has no id")?,
             m["slug"].as_str().unwrap_or("").into(),
             m["html_url"].as_str().unwrap_or("").into(),
             &pem,
-        )
+        )?;
+        a.owner = m["owner"].as_str().unwrap_or("").to_string().into();
+        a.dir = Some(data.into());
+        Ok(a)
     })())
 }
 
@@ -165,10 +204,12 @@ pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 /// Write the App's files (key mode 0600) and load them. app.json goes last: it is
 /// what marks the App as configured, so a crash never leaves it without its key.
-pub fn save(data: &std::path::Path, id: u64, slug: &str, html_url: &str, pem: &str) -> Result<AppAuth> {
-    let a = AppAuth::new(id, slug.into(), html_url.into(), pem)?;
+pub fn save(data: &std::path::Path, id: u64, slug: &str, html_url: &str, owner: &str, pem: &str) -> Result<AppAuth> {
+    let mut a = AppAuth::new(id, slug.into(), html_url.into(), pem)?;
+    a.owner = owner.to_string().into();
+    a.dir = Some(data.into());
     write_private(&data.join("app.pem"), pem.as_bytes())?;
-    write_private(&data.join("app.json"), serde_json::json!({ "id": id, "slug": slug, "html_url": html_url }).to_string().as_bytes())?;
+    a.write_meta(data)?;
     Ok(a)
 }
 
@@ -235,9 +276,44 @@ mod tests {
 
     #[test]
     fn suspended_installations_are_skipped() {
-        let insts =
-            serde_json::json!([{ "id": 1, "suspended_at": null }, { "id": 2, "suspended_at": "2026-10-01T00:00:00Z" }, { "id": 3 }]);
-        assert_eq!(live_installations(insts.as_array().unwrap()), [1, 3]);
+        let me = serde_json::json!({ "login": "Bunty9" });
+        let insts = serde_json::json!([{ "id": 1, "account": me, "suspended_at": null }, { "id": 2, "account": me, "suspended_at": "2026-10-01T00:00:00Z" }, { "id": 3, "account": me }]);
+        assert_eq!(served_installations(insts.as_array().unwrap(), "Bunty9", &[]).0, [1, 3]);
+    }
+
+    #[test]
+    fn only_the_owners_and_allowed_accounts_are_served() {
+        let insts = serde_json::json!([
+            { "id": 1, "account": { "login": "bunty9" } },
+            { "id": 2, "account": { "login": "stranger" } },
+            { "id": 3, "account": { "login": "MyOrg" } },
+            { "id": 4, "account": null },
+        ]);
+        let insts = insts.as_array().unwrap();
+        let (ids, notes) = served_installations(insts, "Bunty9", &[]);
+        assert_eq!(ids, [1], "owner only by default, case-insensitive");
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[0], "ignored installation on stranger: not the App owner; add it to app_accounts to serve it");
+        let (ids, _) = served_installations(insts, "Bunty9", &["myorg".into()]);
+        assert_eq!(ids, [1, 3]);
+        // no known owner: only the allowlist, never an account-less installation
+        let (ids, _) = served_installations(insts, "", &[]);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn owner_is_saved_and_loaded() {
+        let d = scratch("owner");
+        save(&d, 42, "kiln-x", "https://github.com/apps/kiln-x", "Bunty9", PEM).unwrap();
+        let a = load(&d).unwrap().unwrap();
+        assert_eq!(*a.owner.read().unwrap(), "Bunty9");
+        // an app.json from before `owner` existed loads with none, and learns it once
+        std::fs::write(d.join("app.json"), r#"{"id":42,"slug":"kiln-x","html_url":"u"}"#).unwrap();
+        let a = load(&d).unwrap().unwrap();
+        assert_eq!(*a.owner.read().unwrap(), "");
+        a.set_owner("Bunty9").unwrap();
+        let m: serde_json::Value = serde_json::from_slice(&std::fs::read(d.join("app.json")).unwrap()).unwrap();
+        assert_eq!(m, serde_json::json!({ "id": 42, "slug": "kiln-x", "html_url": "u", "owner": "Bunty9" }));
     }
 
     /// A per-test scratch dir under the system temp dir.
@@ -262,7 +338,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(!d.join("app.pem.tmp").exists());
-        let a = save(&d, 42, "kiln-x", "https://github.com/apps/kiln-x", PEM).unwrap();
+        let a = save(&d, 42, "kiln-x", "https://github.com/apps/kiln-x", "Bunty9", PEM).unwrap();
         assert_eq!(a.id, 42);
         assert_eq!(std::fs::metadata(d.join("app.json")).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(load(&d).unwrap().unwrap().slug, "kiln-x");
