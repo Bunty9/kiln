@@ -300,6 +300,7 @@ fn app_json(app: &App) -> Value {
         "repos": a.names.read().unwrap().clone(),
         "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
         "error": a.error.lock().unwrap().clone(),
+        "notes": a.notes.lock().unwrap().clone(),
     })
 }
 
@@ -550,7 +551,13 @@ async fn app_convert(State(app): S, Json(b): Json<ConvertBody>) -> R<Json<Value>
     let (slug, url, pem) = (v["slug"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""), v["pem"].as_str().unwrap_or(""));
     // Empty if GitHub ever leaves it out: discovery then asks GET /app once.
     let owner = v["owner"]["login"].as_str().unwrap_or("");
-    let a = crate::app_auth::save(&app.data, id, slug, url, owner, pem)?;
+    // GitHub's code is single use: if saving fails, this response held the only copy of
+    // the key, so say how to recover instead of inviting a second App.
+    let a = crate::app_auth::save(&app.data, id, slug, url, owner, pem).map_err(|e| {
+        anyhow!(
+            "GitHub created the App ({url}) but kiln could not save its key: {e:#}. Fix that, then open the App on github.com, generate a private key, and use 'Use an existing App' with App ID {id}."
+        )
+    })?;
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))

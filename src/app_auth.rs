@@ -174,6 +174,8 @@ pub struct AppAuth {
     pub discovered_at: std::sync::atomic::AtomicU64,
     /// Why the last discovery failed (cleared by a successful one).
     pub error: std::sync::Mutex<Option<String>>,
+    /// Installations the last discovery skipped (other accounts): information, not errors.
+    pub notes: std::sync::Mutex<Vec<String>>,
     /// One discovery at a time: (when the last one finished, its error if it failed outright).
     pub discovery: tokio::sync::Mutex<(u64, Option<String>)>,
     /// GitHub answered 401 to a cached token: drop the cache at the next mint.
@@ -194,6 +196,7 @@ impl AppAuth {
             names: Default::default(),
             discovered_at: Default::default(),
             error: Default::default(),
+            notes: Default::default(),
             discovery: Default::default(),
             stale: Default::default(),
         })

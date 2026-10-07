@@ -191,9 +191,14 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | Method and path | Purpose |
 |---|---|
 | `GET /` | The dashboard page |
-| `GET /api/state` | Config, token status, poll status (queued, errors, backoff, rate limit, blocked reason), the last 100 VMs, image info, host stats, mirror status, cache sizes |
+| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit, blocked reason), the last 100 VMs, image info, host stats, mirror status, cache sizes |
 | `POST /api/config` | Save settings (validated); returns `{restart_required}` |
 | `POST /api/token` | Validate and save a GitHub token |
+| `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |
+| `POST /api/app/convert` | Finish it: trade GitHub's code (with the state) for the App's id and key, save them, switch to App mode |
+| `POST /api/app` | Use an existing App (id and private key), checked against GitHub before saving |
+| `DELETE /api/app` | Remove the App's key and record, back to token auth |
+| `POST /api/app/refresh` | Ask GitHub now which repos the App is installed on; returns the `app` object of `/api/state` |
 | `GET /api/doctor` | The `kiln doctor` checks |
 | `GET /api/log?src=<bake or vm id>&file=<console or steps>&from=<offset>` | Incremental log read (up to 512 KiB per call) |
 | `POST /api/vms/{id}/kill` | Kill a VM |

@@ -21,7 +21,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 - GitHub App mode serves only installations on the App owner's account (matched by account id, read from GitHub at each refresh) or listed in `app_accounts`; others are ignored and reported. A call for a repo the App does not serve never borrows another installation's token.
 - `app.pem`, `app.json` and the setup states are written atomically with mode 0600, also when the files already existed.
-- Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. Needs a rebake for the hook.
+- Fork pull requests are refused by kiln itself: never counted as demand, failed by a pre-job hook in the VM before any step, and the VM killed. The hook also refuses `workflow_run` runs triggered from a fork (only the hook can see those).
+- **Upgrade note:** kiln launches nothing on an image baked by an older guest recipe (now `recipe` 3), because such an image lacks the fork-refusal hook. `auto_rebake` (on by default) rebuilds it within minutes; with it off, rebake by hand after upgrading.
+- Bake inputs are checked before they reach the bake VM's root shell: the config is re-validated, the runner release tag must be `N.N.N`, Node tarballs are verified against nodejs.org's SHASUMS256.txt, and apt names ending in `-` or `+` (apt's remove/install markers) are refused.
+- Cache-writer branch names outside `[A-Za-z0-9._/-]` never save the cache.
 - The "commit is really on the branch" check applies to every cache-writer branch, not only the default.
 
 ### Fixed

@@ -571,7 +571,7 @@ const REPOS = () => S.app ? S.app.repos : S.config.repos;
 // case-insensitive, so read and replace entries ignoring case.
 const ciGet = (m, r) => Object.entries(m || {}).find(([k]) => k.toLowerCase() === r.toLowerCase())?.[1];
 const ciPut = (m, r, v) => { const o = Object.fromEntries(Object.entries(m || {}).filter(([k]) => k.toLowerCase() !== r.toLowerCase())); if (v != null) o[r] = v; return o; };
-const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip('Ask GitHub now which repos the App is installed on. kiln also checks every 5 minutes.')}>${ic('refresh')}Refresh</button>` : '';
+const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip('Ask GitHub now which repos the App is installed on. kiln also checks on its own: every 30 seconds until the App serves a repo, then every 5 minutes.')}>${ic('refresh')}Refresh</button>` : '';
 // Accounts whose installations kiln serves: the App's owner plus app_accounts.
 const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_accounts || [])].filter(Boolean))];
 // A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
@@ -1125,7 +1125,7 @@ pages.repos = {
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
           <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
-      }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 5 minutes.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
+      }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 30 seconds until it serves one.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
         : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
       if ($('#rl-app')) setHTML($('#rl-app'), rs.length ? `<p class="fg2 sm" style="margin:16px 0 8px">These are the repos the GitHub App is installed on. Install or uninstall it on GitHub to change the list.</p><div class="bar">${appInstall()}${appRefresh()}</div>` : '');
       return;
@@ -1211,7 +1211,7 @@ const G = {
       const acc = a ? appAccounts(a) : [];
       setHTML($('#app-st'), appConvHTML() + (a ? `${a.repos.length ? '' : `<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> It is on none yet, so kiln has nothing to serve.</span>${appInstall(1)}</div>`}
         <dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)}</a></dd>${a.owner ? `<dt>Owner</dt><dd>${esc(a.owner)}</dd>` : ''}
-        <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? relH(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}</dl>
+        <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? relH(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}${(a.notes || []).length ? `<dt>Skipped</dt><dd class="fg2">${a.notes.map(esc).join('<br>')}</dd>` : ''}</dl>
         ${acc.length ? `<p class="fg2 sm" style="margin-bottom:12px">Only installations on ${acc.map(x => `<b>${esc(x)}</b>`).join(', ')} are served. Installing the App on another account does nothing until that account is added to <span class="mono">app_accounts</span>.</p>` : ''}
         <div class="bar" style="margin:0">${a.repos.length ? appInstall() : ''}${appRefresh()}<span class="sp"></span><button class="btn dng" data-act="rmapp"${tip('Go back to token auth. The App stays on GitHub.')}>${ic('trash')}Remove App</button></div>
         <p class="fg2 sm" style="margin-top:8px">kiln uses the App's installation tokens (they expire after an hour); the token below is not used.</p>`
@@ -1399,7 +1399,7 @@ pages.setup = {
     };
     const B = S.app ? [
       `<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/github">Settings › GitHub</a>.</p>`,
-      `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 5 minutes, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
+      `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 30 seconds, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
       test(),
     ] : [
       `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>

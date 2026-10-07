@@ -152,7 +152,10 @@ impl Gh {
         let r = rb.send().await?;
         let num = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         let (remaining, reset) = (num("x-ratelimit-remaining"), num("x-ratelimit-reset"));
-        if let (Some(rem), Some(lim), Some(reset)) = (remaining, num("x-ratelimit-limit"), reset) {
+        // An unauthenticated call (the App's runner-release lookup) spends the per-IP
+        // anonymous budget, not ours: it must neither show as our rate nor pause polling.
+        let ours = !anonymous_budget(num("x-ratelimit-limit"));
+        if ours && let (Some(rem), Some(lim), Some(reset)) = (remaining, num("x-ratelimit-limit"), reset) {
             *self.rate.lock().unwrap() = Some((rem, lim, reset));
         }
         // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
@@ -168,7 +171,7 @@ impl Gh {
             // Not a try_lock clear: that is lost whenever a mint holds the lock.
             a.mark_stale();
         }
-        if let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
+        if ours && let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
             self.paused_until.fetch_max(t, Ordering::Relaxed);
         }
         Ok(r)
@@ -429,7 +432,7 @@ impl Gh {
         r.map(|(n, _)| n)
     }
 
-    /// (repos found, per-installation errors and ignored installations). One failing
+    /// (repos found, per-installation errors; ignored installations go to `notes`). One failing
     /// installation keeps its previous repos and does not stop the others; suspended
     /// installations and those on accounts other than the owner's and `app_accounts` are skipped.
     async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<(usize, Vec<String>)> {
@@ -447,6 +450,7 @@ impl Gh {
         let jwt = a.jwt(crate::now())?;
         let mut map = BTreeMap::new();
         let mut errs = vec![];
+        let mut notes = vec![];
         let mut page = 1;
         loop {
             let r = self.request_with(&jwt, Method::GET, &format!("app/installations?per_page=100&page={page}")).send().await?;
@@ -455,7 +459,7 @@ impl Gh {
             }
             let insts: Vec<Value> = r.json().await?;
             let (ids, ignored) = crate::app_auth::served_installations(&insts, owner, &accounts);
-            errs.extend(ignored);
+            notes.extend(ignored);
             for id in ids {
                 match self.installation_repos(a, id).await {
                     Ok(repos) => map.extend(repos.into_iter().map(|n| (n, id))),
@@ -471,6 +475,7 @@ impl Gh {
             }
             page += 1;
         }
+        *a.notes.lock().unwrap() = notes;
         // Display names: GitHub's spelling from the last successful listing, else the key.
         let prev: Vec<String> = a.names.read().unwrap().clone();
         let mut names: Vec<String> = map
@@ -715,6 +720,11 @@ fn job_size(job_labels: &Value, label: &str, default_cpus: u32) -> Option<u32> {
 
 /// When to stop calling GitHub after a 403/429: until the rate-limit reset if
 /// the budget is spent, or for `retry-after` seconds (secondary limits).
+/// GitHub's unauthenticated budget (60/h per IP); every token's is 5000 or more.
+fn anonymous_budget(limit: Option<u64>) -> bool {
+    limit.is_some_and(|l| l <= 60)
+}
+
 fn pause_until(status: u16, remaining: Option<u64>, reset: Option<u64>, retry_after: Option<u64>, now: u64) -> Option<u64> {
     if status != 403 && status != 429 {
         return None;
@@ -748,6 +758,15 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anonymous_budget_is_not_ours() {
+        // GitHub's unauthenticated budget is 60/h per IP; any token's is 5000+.
+        assert!(super::anonymous_budget(Some(60)));
+        assert!(!super::anonymous_budget(Some(5000)));
+        assert!(!super::anonymous_budget(Some(15000)));
+        assert!(!super::anonymous_budget(None));
+    }
+
     #[test]
     fn fork_runs() {
         let run = |head: Value| json!({ "head_repository": head, "repository": { "full_name": "o/n" } });
