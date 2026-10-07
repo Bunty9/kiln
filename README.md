@@ -18,13 +18,15 @@ kiln is a single Rust binary with an embedded dashboard. It polls GitHub for que
 - JIT runners (single-use, auto-deregistering) so no long-lived registration token sits on disk.
 - VM sizes chosen by label: `kiln`, `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu`, `kiln-16cpu`.
 - Demand-based scheduling by queued-job count, with memory, vCPU and disk gates and per-repo failure backoff.
-- Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch writes it.
+- Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch (or a configured cache branch such as `dev`) writes it.
 - Built-in Docker Hub pull-through mirror, so fresh VMs do not hit Docker Hub rate limits.
 - Optional filtered egress: job VMs reach the internet and the mirror only, not your LAN or tailnet.
 - Debug hold: a failed job's VM stays up for SSH for a while.
 - Optional warm pool of pre-booted idle VMs per repo.
 - Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
-- Auto-rebake of the base image when the runner version or image age goes stale.
+- Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
+- Fork pull requests refused by kiln itself, before any of their code runs.
+- Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.
 
 ## Requirements
 

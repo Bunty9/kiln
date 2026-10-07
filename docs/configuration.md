@@ -54,13 +54,15 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `cache` | bool | `true` | | live (new VMs) | Attach a per-repo persistent cache disk to every job and commit it back when the trust rule allows. |
+| `cache_branches` | object | `{}` | `"owner/name"` (a configured repo) to a list of exact branch names (case-sensitive, no wildcards; letters, digits, `-_./`) | live | Extra branches whose successful pushes also save that repo's cache, besides the default branch. For a branch model like feature, then PR to `dev`, then `dev` promoted: `{"o/n": ["dev"]}`. The other trust conditions are unchanged: only `push` events whose job GitHub reports as `success`, and the commit must really be on that branch (a tag named `dev` does not count). Pull requests never save, whatever their branch is called. |
 | `cache_gb` | integer | `30` | `5` to `500` | live | Virtual size of a cache disk when it is created. A cache that has actually grown past 1.2 x `cache_gb` at commit time is deleted and starts empty. The size of existing cache files does not change. |
 
 ### Image
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, or it is more than 25 days old. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically. |
+| `bake_node_versions` | list of strings | `["24"]` | 1 to 4 entries, each a major (`"20"`, newest release of it) or an exact version (`"20.19.5"`) | next bake | Node versions pre-installed into `/opt/hostedtoolcache`, so `actions/setup-node` with a matching `node-version` resolves offline. The newest is the plain `node` on `PATH`. Versions are looked up on nodejs.org at bake time and recorded in `base.json`; changing the set (not just its order) marks the image stale (rebake needed). An image baked by an older kiln, before the fork-refusal hook, is stale too. |
+| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, or `bake_node_versions` changed since the bake. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically. |
 
 ### Network
 
@@ -97,14 +99,16 @@ kiln logs through `tracing` to stderr (the systemd journal for the user unit). T
 
 **Precedence at startup:** `KILN_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `<data>/token`, then the output of `gh auth token`. The dashboard shows which source is in use.
 
-**Saving from the dashboard** validates the token first: it must authenticate, and the runners API of every configured repo is probed, so a missing permission shows immediately. The token is then written to `<data>/token` with mode `0600` and used from then on. After a dashboard save, only the file counts for in-process reloads, so a stale environment variable cannot take over again. On the next restart the environment variable wins again if it is set, so unset it if you want the saved token to stay in charge.
+**Saving from the dashboard** validates the token first: it must authenticate, and the runners API of every configured repo is probed, so a missing *Administration* permission shows immediately (Diagnostics checks the others). The token is then written to `<data>/token` with mode `0600` and used from then on. After a dashboard save, only the file counts for in-process reloads, so a stale environment variable cannot take over again. On the next restart the environment variable wins again if it is set, so unset it if you want the saved token to stay in charge.
 
 **Reloading:** if there is no token, or a poll fails with a 401, kiln re-reads the sources at most once a minute. This picks up a token that appeared (an unlocked keyring, a fixed environment) or was rotated. On hosts where `gh` keeps its token in a keyring that stays locked after a headless reboot, save the token from the dashboard instead.
 
 **Required permissions:**
 
 - Classic PAT: the `repo` scope (plus `workflow` for the hello PR).
-- Fine-grained token, on each repo: *Administration: write* (register and delete runners), *Actions: read and write* (list and rerun or cancel runs, dispatch workflows, read jobs). *Contents: write* and *Workflows: write* are needed only for the optional hello PR. *Metadata: read* is implicit.
+- Fine-grained token, on each repo: *Administration: write* (register and delete runners), *Actions: read and write* (list and rerun or cancel runs, dispatch workflows, read jobs), *Contents: read* (check that a cache-saving push is really on its branch; without it caches never save). *Contents: write* and *Workflows: write* are needed only for the optional hello PR. *Metadata: read* is implicit.
+
+`kiln doctor` (and Settings › Diagnostics) probes each repo once per permission and names the one that is missing, for example "token lacks Contents: read". When GitHub reports an expiry for the token (fine-grained tokens, and classic ones created with one), the dashboard shows it under Settings › GitHub and warns from 14 days before.
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
 
@@ -119,7 +123,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   images/
     base.qcow2                   frozen base image
     base.vmlinuz                 kernel the VMs boot (direct kernel boot)
-    base.json                    {baked_at, runner_version}
+    base.json                    {baked_at, runner_version, node_versions, node_wanted}
     bake.log, bake.lock          last bake log; lock so only one bake runs
   bin/registry                   pinned Docker registry binary
   registry/                      config.yml, registry.log, data/ (the pull cache)
@@ -143,5 +147,5 @@ kiln --version    print the version (also -V and version)
 
 - `kiln serve` is what the systemd unit runs. Only `serve` touches leftovers from a previous run, so `bake` and `doctor` are safe to run next to a live `serve`.
 - `kiln bake` downloads the Ubuntu 24.04 cloud image and matching kernel (re-downloading only changed files), fetches the latest actions/runner version, boots a bake VM that runs the recipe in `guest/user-data.yaml`, and swaps the result into `images/` atomically. It takes about 5 minutes and times out after 30. Bake VMs always use open networking. Running job VMs keep using the old base until they exit.
-- `kiln doctor` checks: KVM, `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the token, each repo's runners API, the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
+- `kiln doctor` checks: KVM, `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing), the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
 - Any other argument prints usage and exits with status 2.

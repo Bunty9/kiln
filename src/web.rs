@@ -269,9 +269,11 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "config": app.cfg(),
         "token_set": app.gh.has_token(),
         "token_source": app.gh.source(),
+        "token_expires": *app.gh.expires.lock().unwrap(),
+        "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
-        "image": vm::image_info(&app.data, app.gh.latest_cached()),
+        "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg().bake_node_versions),
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
         "host": host_stats(&app).await,
@@ -304,7 +306,8 @@ struct TokenBody {
     token: String,
 }
 /// Check the token against GitHub before saving it: it must authenticate, and
-/// each configured repo's runners API is probed so a missing permission shows now.
+/// each configured repo's runners API is probed so a missing Administration
+/// permission shows now (doctor checks the others).
 async fn set_token(State(app): S, Json(b): Json<TokenBody>) -> R<Json<Value>> {
     let token = b.token.trim().to_string();
     let (status, scopes, user) = app.gh.probe(&token, "user").await?;

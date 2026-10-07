@@ -41,7 +41,11 @@ With `egress: "filtered"` each job's QEMU runs in its own rootless network names
 
 ### Cache trust
 
-The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch, and the commit is really on it. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch or one of the repo's `cache_branches`, and the commit is really on that branch. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+
+### Fork pull requests
+
+kiln refuses to run code from a fork. The scheduler does not count queued jobs of runs whose head repository differs from the repository (or is gone), so they never boot a VM, and the dashboard lists them as refused. Because a JIT runner can still be handed any queued job with matching labels, every VM also runs a runner job-started hook before the job's first step: if the event is a pull request from another repository it fails the job right there, and kiln kills the VM when it sees the assignment. This is enforced whatever the workflow says; the `if:` guard in the workflows is a second layer.
 
 ### Console and lifecycle hardening
 
@@ -70,14 +74,14 @@ kiln is honest about these:
 - **The denylist covers private ranges only.** Public addresses that the host can reach are not blocked. Notably, if your router hairpins its WAN address, a job could reach services you forwarded from the Internet. Keep Tailscale subnet-route acceptance off on this host, since routed subnets would also be reachable.
 - **Without `rootlessctl`, the debug SSH port is open for the whole VM life in filtered mode.** The port is published statically at launch rather than at hold time. Nothing listens on it by default, but a job is root and could start a listener. Install `rootlesskit` with `rootlessctl` to publish it only at hold time.
 - **The Docker mirror's `/v2/_catalog` and other reads are visible to every job** and shared between repos. It only caches public images, so this is acceptable, but jobs can learn what other jobs pulled.
-- **The cache can be poisoned by a compromised default branch.** The trust rule stops PRs and other branches, not code already merged.
+- **The cache can be poisoned by a compromised default branch or cache branch.** The trust rule stops PRs and other branches, not code already merged into a writer branch. Only list branches in `cache_branches` that are as protected as the default.
 - **The base image gives `runner` passwordless sudo,** and bake VMs always use open networking.
 - **Local file secrets.** The GitHub token and dashboard key are plain files readable by the kiln user.
 - **One host.** There is no tenant separation between repos beyond VM and cache-disk isolation.
 
 ## Recommendations
 
-- **Never let fork pull requests reach kiln.** For a public repo, guard every `pull_request` job (kiln's own workflows and the `kiln-hello.yml` it generates already do):
+- **Never let fork pull requests reach kiln.** kiln refuses them itself (see [Fork pull requests](#fork-pull-requests)); as a second layer, for a public repo guard every `pull_request` job (kiln's own workflows and the `kiln-hello.yml` it generates already do):
 
 ```yaml
 jobs:
@@ -90,7 +94,7 @@ jobs:
   Also keep GitHub's "Require approval for all outside collaborators" setting on (Settings › Actions › General).
 
 - Set `egress` to `filtered` before running untrusted pull requests, such as ones from forks, and check Diagnostics shows "filtered egress" passing. Also consider requiring approval for workflows from outside contributors in the repository's GitHub settings.
-- Use a fine-grained token with only the repos you serve and the permissions listed in [docs/configuration.md](docs/configuration.md#github-token): *Administration: write* and *Actions: read and write*. Add *Contents* and *Workflows* write only while you use the hello PR.
+- Use a fine-grained token with only the repos you serve and the permissions listed in [docs/configuration.md](docs/configuration.md#github-token): *Administration: write*, *Actions: read and write* and *Contents: read*. Add *Contents* and *Workflows* write only while you use the hello PR.
 - Keep `allowed_users` empty (owner only) or minimal, and do not share the box's node to other tailnets.
 - Keep the host, QEMU and Tailscale updated, and let `auto_rebake` keep the guest and runner current.
 - Do not put secrets on the CI box that a job in an open-egress VM could reach over the LAN.

@@ -27,6 +27,16 @@ jobs:
           probe "kiln dashboard (10.0.2.2:7878)" http://10.0.2.2:7878/
           probe "LAN router (192.168.1.1)"       http://192.168.1.1/
           probe "tailnet (100.100.100.100)"      http://100.100.100.100/
+      - name: Baked tools
+        run: |
+          ls /opt/hostedtoolcache/node; echo "bare node: $(node -v)"
+          grep -q kiln-prejob.sh /home/runner/actions-runner/.env && echo "fork hook: installed" || echo "fork hook: missing"
+          findmnt /var/cache/apt/archives >/dev/null && echo "apt archives: on cache disk" || echo "apt archives: not cached"
+      # With 20 in bake_node_versions this logs "Found in cache" and downloads nothing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node -v
       - name: Fail on request
         if: ${{ inputs.fail }}
         run: |

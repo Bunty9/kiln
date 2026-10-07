@@ -22,6 +22,8 @@ pub struct Gh {
     // URL -> (etag, body). Conditional GETs that return 304 are free against
     // the rate limit, which is what makes 5s polling of several repos viable.
     etags: Mutex<HashMap<String, (String, Value)>>,
+    /// Unix time the token expires, from GitHub's response header (None = no expiry seen).
+    pub expires: std::sync::Mutex<Option<u64>>,
     /// repo -> (default branch, fetched at unix time); renames are rare, so 1h.
     defaults: std::sync::Mutex<HashMap<String, (String, u64)>>,
 }
@@ -45,12 +47,14 @@ impl Gh {
             latest: Default::default(),
             etags: Mutex::default(),
             defaults: Default::default(),
+            expires: Default::default(),
         }
     }
 
     pub fn set_token(&self, t: String, source: &'static str) {
         *self.token.write().unwrap() = t;
         *self.source.write().unwrap() = source;
+        *self.expires.lock().unwrap() = None;
     }
 
     pub fn source(&self) -> &'static str {
@@ -85,6 +89,13 @@ impl Gh {
         let (remaining, reset) = (num("x-ratelimit-remaining"), num("x-ratelimit-reset"));
         if let (Some(rem), Some(lim), Some(reset)) = (remaining, num("x-ratelimit-limit"), reset) {
             *self.rate.lock().unwrap() = Some((rem, lim, reset));
+        }
+        // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
+        // Every successful API response says it, so a rotated token without one clears it.
+        // Not a redirected log download: blob storage never sends it.
+        if r.status().is_success() && r.url().host_str() == Some("api.github.com") {
+            *self.expires.lock().unwrap() =
+                r.headers().get("github-authentication-token-expiration").and_then(|v| v.to_str().ok()).and_then(parse_rfc3339);
         }
         if let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
             self.paused_until.fetch_max(t, Ordering::Relaxed);
@@ -189,9 +200,10 @@ impl Gh {
 
     /// (event, head branch, default branch, job conclusion) of the run behind a job, to
     /// decide whether its cache may be committed. The conclusion is GitHub's, not the console's.
-    pub async fn cache_trust(&self, repo: &str, job: u64) -> Result<(String, String, String, String)> {
+    /// `writers` are the extra cache-writer branches besides the default.
+    pub async fn cache_trust(&self, repo: &str, job: u64, writers: &[String]) -> Result<(String, String, String, String)> {
         // The VM powers off a moment before GitHub records the job's conclusion;
-        // without waiting, trusted saves on the default branch would be lost to the race.
+        // without waiting, trusted saves on a writer branch would be lost to the race.
         let mut j = self.get(&format!("repos/{repo}/actions/jobs/{job}")).await?;
         for _ in 0..6 {
             if j["status"] == "completed" {
@@ -215,14 +227,19 @@ impl Gh {
                 b
             }
         };
-        // A pushed *tag* named like the default branch also arrives as
-        // event=push, head_branch=main. Only trust it if the commit is really
-        // on the default branch (identical to it or an ancestor of it).
-        if event == "push" && branch == default {
+        // A pushed *tag* arrives as event=push with head_branch = the tag's name, so a
+        // tag named like a writer branch looks like a push to it. Only trust the run
+        // if the commit is really on that branch (identical to it or an ancestor of it).
+        if event == "push" && (branch == default || writers.contains(&branch)) {
             let sha = run["head_sha"].as_str().context("run has no head_sha")?;
-            let cmp = self.get(&format!("repos/{repo}/compare/{default}...{sha}")).await?;
+            // Resolve the branch tip through refs/heads explicitly: a bare name in
+            // compare/ may resolve to a same-named tag, which anyone who can push a
+            // tag controls.
+            let tip = self.get(&format!("repos/{repo}/git/ref/heads/{branch}")).await?;
+            let tip = tip["object"]["sha"].as_str().context("branch ref has no sha")?;
+            let cmp = self.get(&format!("repos/{repo}/compare/{tip}...{sha}")).await?;
             if !matches!(cmp["status"].as_str(), Some("identical" | "behind")) {
-                return Ok((event, format!("{branch} (commit {:.7} not on {default})", sha), default, conclusion));
+                return Ok((event, format!("{branch} (commit {:.7} not on {branch})", sha), default, conclusion));
             }
         }
         Ok((event, branch, default, conclusion))
@@ -231,15 +248,17 @@ impl Gh {
     /// Queued jobs per VM size (see `job_size`), counted once per job id.
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
-    /// runner name -> (job page, queued-at unix time).
+    /// runner name -> (job page, queued-at unix time, from a fork), and the
+    /// number of queued fork jobs refused (never counted as demand).
     pub async fn queued_jobs(
         &self,
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64)>)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool)>, usize)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
+        let mut forks = std::collections::HashSet::new();
         let mut ours = HashMap::new();
         // A run is "in_progress" while later jobs of it still wait in the queue,
         // so both statuses have to be scanned.
@@ -247,18 +266,24 @@ impl Gh {
             let runs = self.get(&format!("repos/{repo}/actions/runs?status={status}&per_page=30")).await?;
             for run in runs["workflow_runs"].as_array().into_iter().flatten() {
                 let id = run["id"].as_u64().context("run id")?;
+                let fork = is_fork_run(run);
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
                         && let Some(n) = job_size(&j["labels"], label, default_cpus).filter(|&n| n <= host)
                     {
-                        queued.insert(j["id"].as_u64().unwrap_or_default(), n);
+                        let jid = j["id"].as_u64().unwrap_or_default();
+                        if fork {
+                            forks.insert(jid);
+                        } else {
+                            queued.insert(jid, n);
+                        }
                     }
                     if let Some(name) = j["runner_name"].as_str().filter(|n| n.starts_with("kiln-"))
                         && let Some(url) = j["html_url"].as_str()
                         && let Some(at) = j["created_at"].as_str().and_then(parse_rfc3339)
                     {
-                        ours.insert(name.to_string(), (url.to_string(), at));
+                        ours.insert(name.to_string(), (url.to_string(), at, fork));
                     }
                 }
             }
@@ -267,7 +292,7 @@ impl Gh {
         for n in queued.into_values() {
             *by_size.entry(n).or_default() += 1;
         }
-        Ok((by_size, ours))
+        Ok((by_size, ours, forks.len()))
     }
 
     /// Delete offline, idle `kiln-*` runners left behind by a crash.
@@ -414,6 +439,15 @@ pub fn size_mem_mb(cpus: u32) -> u32 {
     (cpus * 2048).min(24576)
 }
 
+/// Did this run's code come from another repository (a fork PR)? Fails closed:
+/// a run whose head repository is gone (deleted fork) counts as a fork.
+fn is_fork_run(run: &Value) -> bool {
+    match (run["head_repository"]["full_name"].as_str(), run["repository"]["full_name"].as_str()) {
+        (Some(head), Some(base)) => !head.eq_ignore_ascii_case(base),
+        _ => true,
+    }
+}
+
 /// The VM size a job asks for, if it is ours: every label must be implicit
 /// (GitHub adds `self-hosted`, `linux`, `x64` to self-hosted runners) or one
 /// of ours, and exactly one of ours must be present. `<label>` is the default
@@ -474,11 +508,21 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_runs() {
+        let run = |head: Value| json!({ "head_repository": head, "repository": { "full_name": "o/n" } });
+        assert!(!super::is_fork_run(&run(json!({ "full_name": "O/N" }))));
+        assert!(super::is_fork_run(&run(json!({ "full_name": "evil/n" }))));
+        assert!(super::is_fork_run(&run(Value::Null)));
+    }
+
     use super::*;
 
     #[test]
     fn rfc3339() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        // GitHub's token expiry header format
+        assert_eq!(parse_rfc3339("2026-10-06 10:51:50 UTC"), Some(1791283910));
         assert_eq!(parse_rfc3339("2026-10-06T10:51:50Z"), Some(1791283910));
         assert_eq!(parse_rfc3339("2024-02-29T23:59:59Z"), Some(1709251199));
         assert_eq!(parse_rfc3339("garbage"), None);

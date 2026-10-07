@@ -1,7 +1,7 @@
 #cloud-config
 # Bake recipe for the kiln base image. Runs once (`kiln bake`), then the image
 # is frozen; every job boots a throwaway qcow2 overlay of it.
-# {{RUNNER_VERSION}} is filled in by kiln.
+# {{RUNNER_VERSION}} and {{NODE_VERSIONS}} are filled in by kiln.
 hostname: kiln
 users:
   - name: runner
@@ -66,6 +66,8 @@ write_files:
       BAKE_DATE=$(date +%Y%m%d)
       printf 'RUNNER_TOOL_CACHE=/opt/hostedtoolcache\nAGENT_TOOLSDIRECTORY=/opt/hostedtoolcache\nLANG=C.UTF-8\nImageOS=ubuntu24\nImageVersion=kiln-%s\nACCEPT_EULA=Y\n' "$BAKE_DATE" \
         | tee /home/runner/actions-runner/.env >> /etc/environment
+      # Runs before a job's first step (runner job hook): refuses fork pull requests.
+      echo ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/kiln-prejob.sh >> /home/runner/actions-runner/.env
       # Sysctls for Elasticsearch, kind, file watchers (same as GitHub hosted image)
       mkdir -p /etc/sysctl.d
       printf 'vm.max_map_count=262144\nfs.inotify.max_user_watches=655360\nfs.inotify.max_user_instances=1280\n' \
@@ -79,15 +81,18 @@ write_files:
       # setup-dotnet's default install dir must be writable
       mkdir -p /usr/share/dotnet
       chown runner:runner /usr/share/dotnet
-      # Pre-seed Node LTS into tool cache for setup-node
-      N=24.21.0
-      mkdir -p /opt/hostedtoolcache/node/$N/x64
-      curl -fsSL "https://nodejs.org/dist/v$N/node-v$N-linux-x64.tar.xz" \
-        | tar -xJ -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
-      touch /opt/hostedtoolcache/node/$N/x64.complete
-      ln -sf /opt/hostedtoolcache/node/$N/x64/bin/node /usr/local/bin/node
-      ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npm /usr/local/bin/npm
-      ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npx /usr/local/bin/npx
+      # Pre-seed Node into the tool cache so setup-node resolves offline.
+      # kiln fills in the exact versions (bake_node_versions), newest last:
+      # the bare `node` on PATH is the newest.
+      for N in {{NODE_VERSIONS}}; do
+        mkdir -p /opt/hostedtoolcache/node/$N/x64
+        curl -fsSL "https://nodejs.org/dist/v$N/node-v$N-linux-x64.tar.xz" \
+          | tar -xJ -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
+        touch /opt/hostedtoolcache/node/$N/x64.complete
+        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/node /usr/local/bin/node
+        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npm /usr/local/bin/npm
+        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npx /usr/local/bin/npx
+      done
       # Docker Hub mirror: kiln runs a registry proxy at 127.0.0.1:5000 (host); guests reach via 10.0.2.2:5000 (QEMU user networking)
       # Pulls are mirrored locally; falls back to Docker Hub if proxy is down
       # Docker Hub limits 100 pulls/6h per IP and all VMs share the home IP
@@ -172,8 +177,8 @@ write_files:
       # Whole ~/.cargo and ~/.rustup: the Rust toolchain itself is cached, not just crates.
       # Older caches kept ~/.cargo/{registry,git} separately: drop those obsolete dirs.
       rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
-      for t in /var/lib/docker /home/runner/.cache /home/runner/.npm /home/runner/.cargo /home/runner/.rustup \
-               /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
+      for t in /var/lib/docker /var/cache/apt/archives /home/runner/.cache /home/runner/.npm /home/runner/.cargo \
+               /home/runner/.rustup /home/runner/go/pkg/mod /home/runner/.gradle/caches /home/runner/.m2/repository; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
         mkdir -p "$src"
         case $t in
@@ -182,6 +187,21 @@ write_files:
         esac
         mount --bind "$src" "$t"
       done
+      # apt wants its download dir's partial/ owned by _apt.
+      install -d -o _apt -g root -m 700 /var/cache/apt/archives/partial
+  - path: /usr/local/sbin/kiln-prejob.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Runner job-started hook: runs before any step, while the VM is still clean.
+      # Never run a pull request's code from another repository on this hardware
+      # (kiln's scheduler refuses these too; a JIT runner can still be handed one).
+      head=$(jq -r 'if .pull_request then (.pull_request.head.repo.full_name // "deleted fork") else empty end' "$GITHUB_EVENT_PATH") || {
+        echo "::error::kiln could not read the event payload"; exit 1; }
+      if [ -n "$head" ] && [ "${head,,}" != "${GITHUB_REPOSITORY,,}" ]; then
+        echo "::error::kiln refuses pull requests from forks ($head)"
+        exit 1
+      fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf
     content: |
       PasswordAuthentication no
