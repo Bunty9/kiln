@@ -93,6 +93,9 @@ impl Gh {
     }
 
     fn pause(&self, who: u64, t: u64) {
+        if !billed(self.app().is_some(), who) {
+            return;
+        }
         let mut p = self.paused.lock().unwrap();
         let e = p.entry(who).or_default();
         *e = (*e).max(t);
@@ -107,11 +110,11 @@ impl Gh {
 
     /// The most constrained identity's (remaining, limit, reset).
     pub fn rate(&self) -> Option<(u64, u64, u64)> {
-        tightest(&self.rates.lock().unwrap())
+        tightest(&self.rates.lock().unwrap(), crate::now())
     }
 
     pub fn rates(&self) -> BTreeMap<u64, (u64, u64, u64)> {
-        self.rates.lock().unwrap().clone()
+        live(&self.rates.lock().unwrap(), crate::now())
     }
 
     pub fn has_token(&self) -> bool {
@@ -142,7 +145,8 @@ impl Gh {
                     "repo {r} is not served by the GitHub App: install the App on it (an account other than the App owner's must be in app_accounts)"
                 )
             }
-            (Some(i), None) => Ok((self.mint(&a, i).await.unwrap_or_default(), i)),
+            // A failed mint goes out unauthenticated: the anonymous budget, not the installation's.
+            (Some(i), None) => Ok(self.mint(&a, i).await.map_or((String::new(), 0), |t| (t, i))),
             (None, None) => Ok((String::new(), 0)),
         }
     }
@@ -201,9 +205,10 @@ impl Gh {
         let r = rb.send().await?;
         let num = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         let (remaining, reset) = (num("x-ratelimit-remaining"), num("x-ratelimit-reset"));
-        // An unauthenticated call (the App's runner-release lookup) spends the per-IP
-        // anonymous budget, not ours: it must neither show as our rate nor pause polling.
-        let ours = !anonymous_budget(num("x-ratelimit-limit"));
+        // An unauthenticated call (the App's runner-release lookup, or any call whose mint
+        // failed) spends the per-IP anonymous budget, not ours: it must neither show as our
+        // rate nor pause polling.
+        let ours = !anonymous_budget(num("x-ratelimit-limit")) && billed(self.app().is_some(), who);
         if ours && let (Some(rem), Some(lim), Some(reset)) = (remaining, num("x-ratelimit-limit"), reset) {
             self.rates.lock().unwrap().insert(who, (rem, lim, reset));
         }
@@ -789,9 +794,20 @@ fn pause_until(status: u16, remaining: Option<u64>, reset: Option<u64>, retry_af
     }
 }
 
-/// The identity with the lowest remaining/limit ratio.
-fn tightest(rates: &BTreeMap<u64, (u64, u64, u64)>) -> Option<(u64, u64, u64)> {
-    rates.values().copied().min_by_key(|&(rem, lim, _)| (rem as u128 * 1_000_000) / lim.max(1) as u128)
+/// Whether `who`'s rate limit is ours to track and pause on. In App mode identity 0 only
+/// makes unauthenticated calls, which spend GitHub's per-IP budget, not an installation's.
+fn billed(app_mode: bool, who: u64) -> bool {
+    !app_mode || who != 0
+}
+
+/// The entries whose rate-limit window has not reset yet.
+fn live(rates: &BTreeMap<u64, (u64, u64, u64)>, now: u64) -> BTreeMap<u64, (u64, u64, u64)> {
+    rates.iter().filter(|(_, r)| r.2 > now).map(|(&k, &v)| (k, v)).collect()
+}
+
+/// The identity with the lowest remaining/limit ratio, among windows not yet reset.
+fn tightest(rates: &BTreeMap<u64, (u64, u64, u64)>, now: u64) -> Option<(u64, u64, u64)> {
+    live(rates, now).into_values().min_by_key(|&(rem, lim, _)| (rem as u128 * 1_000_000) / lim.max(1) as u128)
 }
 
 /// Repo error for a repo whose installation (on the repo's owner) is paused until `t`.
@@ -863,11 +879,30 @@ mod tests {
     #[test]
     fn tightest_rate() {
         let m = |v: &[(u64, (u64, u64, u64))]| v.iter().copied().collect::<BTreeMap<_, _>>();
-        assert_eq!(tightest(&m(&[])), None);
+        assert_eq!(tightest(&m(&[]), 0), None);
         // PAT mode: the single identity, as before
-        assert_eq!(tightest(&m(&[(0, (4000, 5000, 9))])), Some((4000, 5000, 9)));
+        assert_eq!(tightest(&m(&[(0, (4000, 5000, 9))]), 0), Some((4000, 5000, 9)));
         // lowest remaining/limit ratio wins, not the lowest remaining count
-        assert_eq!(tightest(&m(&[(1, (900, 1000, 1)), (2, (1000, 15000, 2)), (3, (4000, 5000, 3))])), Some((1000, 15000, 2)));
+        assert_eq!(tightest(&m(&[(1, (900, 1000, 1)), (2, (1000, 15000, 2)), (3, (4000, 5000, 3))]), 0), Some((1000, 15000, 2)));
+    }
+
+    #[test]
+    fn expired_rates_ignored() {
+        let m: BTreeMap<_, _> = [(1, (0, 5000, 100)), (2, (4000, 5000, 900))].into_iter().collect();
+        // Identity 1's window reset at 100: its empty budget is history.
+        assert_eq!(tightest(&m, 99), Some((0, 5000, 100)));
+        assert_eq!(tightest(&m, 100), Some((4000, 5000, 900)));
+        assert_eq!(live(&m, 100).keys().copied().collect::<Vec<_>>(), [2]);
+        assert_eq!(tightest(&m, 900), None);
+    }
+
+    #[test]
+    fn app_mode_identity_zero_is_anonymous() {
+        // Token mode: 0 is the token, tracked and paused.
+        assert!(billed(false, 0));
+        // App mode: 0 is an unauthenticated call (public lookup, or a failed mint), never ours.
+        assert!(!billed(true, 0));
+        assert!(billed(true, 42));
     }
 
     #[test]

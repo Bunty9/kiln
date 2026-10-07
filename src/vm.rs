@@ -1822,6 +1822,9 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         }
         Err(e) => check("tailscale up", false, format!("{e:#}")),
     });
+    if let Some((ok, detail)) = crate::web::serve_doctor(&app.data).await {
+        out.push(check("tailscale serve", ok, detail));
+    }
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());

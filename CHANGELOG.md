@@ -6,12 +6,20 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
-- **Serve over HTTPS** no longer asks for the dashboard key. `tailscale serve` now proxies to a unix socket, `<data>/serve.sock` (mode 0600), and kiln identifies the tailnet user from the `Tailscale-User-Login` header tailscaled sets there, applying the usual `allowed_users` rule. Before, every HTTPS request arrived from `127.0.0.1` and looked local. A tagged node or a browser on the box itself still needs the key; Funnel requests are refused; identity headers on the TCP port are ignored. If Serve was already on, turn it off and on again in Settings › Network to switch to the socket.
+- **Serve over HTTPS** no longer asks for the dashboard key. `tailscale serve` now proxies to a unix socket, `<data>/serve.sock` (mode 0600), and kiln identifies the tailnet user from the `Tailscale-User-Login` header tailscaled sets there, applying the usual `allowed_users` rule. Before, every HTTPS request arrived from `127.0.0.1` and looked local. A browser on the box itself still needs the key; Funnel requests are refused; identity headers on the TCP port are ignored. If Serve was already on, turn it off and on again in Settings › Network to switch to the socket.
 
 ### Fixed
 
 - GitHub App mode tracks rate limits per installation: one installation hitting its limit pauses only its own repos (with a repo error saying until when) instead of all polling. `/api/state` reports the most constrained installation's limit in `poll.rate` and each installation's in `poll.rates`.
 - The dashboard recognizes the "base image too old" launch block by a new `poll.blocked_kind` field instead of matching the message text.
+- GitHub App mode never records or pauses on an unauthenticated call's rate limit, and a call that went out without a token because minting failed is billed to the anonymous budget, not the installation. A secondary-limit 403 on an anonymous call no longer stops all polling.
+- The rate shown in `poll.rate` and `poll.rates` ignores identities whose rate-limit window has already reset.
+
+### Security
+
+- The serve socket trusts tailscaled's identity headers only while `tailscale serve status` shows nothing but HTTPS reverse proxies to it on ports without Funnel. A raw TCP forward (`--tcp`, `--tls-terminated-tcp`) or Funnel would let a client write `Tailscale-User-Login` itself; kiln then requires the dashboard key on the socket, logs a warning and fails the new "tailscale serve" doctor check. See SECURITY.md: never TCP-forward or funnel `serve.sock`.
+- A serve login is cross-checked with `tailscale whois` of the forwarded address: the users must match and the node must not be the box itself. An address kiln does not recognize makes it re-read its own addresses (at most every 10 s) before deciding.
+- A tagged node through serve (no login) is identified like a TCP peer and refused unless `tagged-devices` is in `allowed_users`, instead of being treated as local.
 
 ## [0.2.1] - 2026-10-07
 

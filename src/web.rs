@@ -138,11 +138,12 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, toki
 /// Who a request says it is, before the Tailscale lookups in `admit`.
 #[derive(Debug, PartialEq)]
 enum Claim {
-    /// From the box itself, or a serve request without a tailnet user: the API needs the key.
+    /// From the box itself, or a serve request from no tailnet address: the API needs the key.
     Local,
-    /// TCP from a tailnet address: identified with `tailscale whois`.
+    /// A tailnet address (TCP, or a serve request without a login: a tagged node): `tailscale whois`.
     Peer(IpAddr),
     /// Through `tailscale serve`: the login tailscaled vouches for, and the address it saw.
+    /// Cross-checked with `tailscale whois` of that address.
     Login(String, IpAddr),
     /// Refused outright.
     Outside(&'static str),
@@ -166,9 +167,10 @@ fn claim(via: Via, login: Option<&str>, fwd_for: Option<&str>, funnel: bool) -> 
             }
         }
         Via::Serve if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
-        // No login: a tagged node. No tailnet source: this machine itself.
+        // No login: a tagged node (or this machine), identified like a TCP peer. No tailnet source: local.
         Via::Serve => match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
             (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
+            (None, Some(ip)) if is_tailnet(ip) => Claim::Peer(ip),
             _ => Claim::Local,
         },
     }
@@ -201,28 +203,41 @@ async fn whois(ip: IpAddr) -> Option<Who> {
 }
 
 /// This machine's own tailnet IPs and the login that owns it, from
-/// `tailscale status`. Refreshed every 5 minutes.
+/// `tailscale status`. Refreshed every 5 minutes, or sooner for an unknown address.
 #[derive(Clone, Default)]
 struct SelfInfo {
     ips: Vec<IpAddr>,
     node: Option<String>,
     owner: Option<String>,
+    /// Last successful read.
     at: u64,
+    /// Last attempt: `tailscale status` runs at most every 10 s.
+    tried: u64,
 }
 static SELF: LazyLock<Mutex<SelfInfo>> = LazyLock::new(Mutex::default);
 
-async fn self_info() -> SelfInfo {
-    let cached = SELF.lock().unwrap().clone();
-    if cached.at != 0 && now() - cached.at < 300 {
-        return cached;
-    }
+fn refresh_due(info: &SelfInfo, now: u64, max_age: u64) -> bool {
+    now.saturating_sub(info.tried) >= 10 && now.saturating_sub(info.at) >= max_age
+}
+
+/// `max_age`: 300 normally; 10 when a request comes from an address not in the cached
+/// list, which may be this box's own after its addresses changed.
+async fn self_info(max_age: u64) -> SelfInfo {
+    let cached = {
+        let mut s = SELF.lock().unwrap();
+        if !refresh_due(&s, now(), max_age) {
+            return s.clone();
+        }
+        s.tried = now();
+        s.clone()
+    };
     let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output().await else { return cached };
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     let ips = v["Self"]["TailscaleIPs"].as_array().into_iter().flatten().filter_map(|ip| ip.as_str()?.parse().ok()).collect();
     let uid = v["Self"]["UserID"].to_string();
     let owner = v["User"][uid.as_str()]["LoginName"].as_str().map(String::from);
     let node = v["Self"]["ID"].as_str().map(String::from);
-    let info = SelfInfo { ips, node, owner, at: now() };
+    let info = SelfInfo { ips, node, owner, at: now(), tried: now() };
     *SELF.lock().unwrap() = info.clone();
     info
 }
@@ -375,6 +390,128 @@ fn peer_allowed(allowed: &[String], owner: Option<String>, login: &str) -> bool 
     allowed.iter().any(|a| a.eq_ignore_ascii_case(login))
 }
 
+/// None: local, needs the key. Some(login): a tailnet user (None if unknown: refused).
+/// `who` is `tailscale whois` of the claim's address.
+fn identify(claim: Claim, me: &SelfInfo, who: Option<Who>) -> Option<Option<String>> {
+    // Fail closed: if we can't tell our own addresses or node apart from a
+    // peer (tailscale down, CLI error), treat the request as local. tailscaled
+    // names this box's owner for traffic from the box itself (a job VM
+    // through QEMU's NAT, too), so a login from our own IP or node is local.
+    let ours = |ip: &IpAddr| {
+        me.ips.is_empty()
+            || me.node.is_none()
+            || me.ips.contains(ip)
+            || who.as_ref().is_some_and(|(_, node)| Some(node) == me.node.as_ref())
+    };
+    match claim {
+        Claim::Outside(_) | Claim::Local => None,
+        Claim::Peer(ip) | Claim::Login(_, ip) if ours(&ip) => None,
+        Claim::Peer(_) => Some(who.map(|(l, _)| l)),
+        // tailscaled's header and whois must name the same user.
+        Claim::Login(login, _) => Some(who.filter(|(l, _)| *l == login).map(|(l, _)| l)),
+    }
+}
+
+/// What `tailscale serve` does with kiln's socket.
+#[derive(Clone, Debug, PartialEq)]
+enum ServeUse {
+    /// No handler targets it.
+    Unused,
+    /// Only tailscaled's HTTPS reverse proxy, tailnet-only: its identity headers can be trusted.
+    Proxied,
+    /// Something lets a client write its own headers (raw TCP forward, Funnel), or the
+    /// config could not be read: never trusted.
+    Unsafe(String),
+}
+
+/// Judge `tailscale serve status --json` for `sock`. Shape (ipn.ServeConfig):
+/// `{"TCP": {"<port>": {"HTTPS": true} | {"TCPForward": "<target>", "TerminateTLS": "<host>"}},
+///   "Web": {"<host>:<port>": {"Handlers": {"<path>": {"Proxy": "<target>"}}}},
+///   "AllowFunnel": {"<host>:<port>": true}, "Services": {"<svc>": {..}}, "Foreground": {"<id>": {..}}}`.
+fn serve_use(status: &Value, sock: &std::path::Path) -> ServeUse {
+    serve_use_in(status, status, sock)
+}
+
+fn serve_use_in(cfg: &Value, root: &Value, sock: &std::path::Path) -> ServeUse {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // "unix:/p", "unix:///p" or a bare path; symlinks resolved when they exist.
+    let to_us = |v: &Value| {
+        v.as_str().is_some_and(|t| {
+            let p = t.strip_prefix("unix:").unwrap_or(t);
+            canon(std::path::Path::new(&format!("/{}", p.trim_start_matches('/')))) == canon(sock)
+        })
+    };
+    let entries = |v: &Value| v.as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
+    let mut found = ServeUse::Unused;
+    for (port, h) in entries(&cfg["TCP"]) {
+        if to_us(&h["TCPForward"]) {
+            return ServeUse::Unsafe(format!("TCP port {port} forwards raw connections to it"));
+        }
+    }
+    for (hp, web) in entries(&cfg["Web"]) {
+        for (_, h) in entries(&web["Handlers"]) {
+            if !to_us(&h["Proxy"]) {
+                continue;
+            }
+            if cfg["AllowFunnel"][&hp] == true || root["AllowFunnel"][&hp] == true {
+                return ServeUse::Unsafe(format!("{hp} is open to the internet with Funnel"));
+            }
+            found = ServeUse::Proxied;
+        }
+    }
+    for (_, c) in entries(&cfg["Services"]).into_iter().chain(entries(&cfg["Foreground"])) {
+        match serve_use_in(&c, root, sock) {
+            ServeUse::Unused => {}
+            ServeUse::Proxied => found = ServeUse::Proxied,
+            bad => return bad,
+        }
+    }
+    found
+}
+
+/// `tailscale serve status`, judged; Err when it can't be read.
+async fn serve_status(sock: &std::path::Path) -> Result<ServeUse, String> {
+    let o = tailscale(&["serve", "status", "--json"]).await.map_err(|e| format!("{e:#}"))?;
+    if !o.status.success() {
+        return Err(format!("`tailscale serve status` failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
+    }
+    let v = serde_json::from_slice::<Value>(&o.stdout).map_err(|e| format!("unreadable `tailscale serve status --json`: {e}"))?;
+    Ok(serve_use(&v, sock))
+}
+
+/// The verdict on the serve config and when it was read; cleared when kiln changes it.
+static SERVE_CHECK: Mutex<Option<(ServeUse, u64)>> = Mutex::new(None);
+
+/// Cached `serve_status`: 60 s, or 10 s while unused (a socket request then means serve was
+/// just set up). Unreadable counts as unsafe.
+async fn serve_check(sock: &std::path::Path) -> ServeUse {
+    let prev = SERVE_CHECK.lock().unwrap().clone();
+    if let Some((v, at)) = &prev
+        && now().saturating_sub(*at) < if *v == ServeUse::Unused { 10 } else { 60 }
+    {
+        return v.clone();
+    }
+    let v = serve_status(sock).await.unwrap_or_else(ServeUse::Unsafe);
+    if let ServeUse::Unsafe(why) = &v
+        && prev.as_ref().map(|p| &p.0) != Some(&v)
+    {
+        tracing::warn!("tailscale serve config exposes kiln's socket unsafely ({why}): requests through it need the dashboard key");
+    }
+    *SERVE_CHECK.lock().unwrap() = Some((v.clone(), now()));
+    v
+}
+
+/// Doctor's (ok, detail); None when tailscale serve can't be read (the tailscale check covers that).
+pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
+    Some(match serve_status(&data.join("serve.sock")).await.ok()? {
+        ServeUse::Unsafe(why) => {
+            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
+        }
+        ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
+        ServeUse::Unused => (true, "kiln's socket is not served".into()),
+    })
+}
+
 async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Response {
     let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
     // tailscaled sends `Host: localhost` to a unix socket and the name the browser
@@ -403,22 +540,27 @@ async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Respons
     if let Claim::Outside(msg) = claim {
         return deny(StatusCode::FORBIDDEN, msg);
     }
-    let me = self_info().await;
-    // Fail closed: if we can't tell our own addresses or node apart from a
-    // peer (tailscale down, CLI error), treat the request as local. tailscaled
-    // names this box's owner for traffic from the box itself (a job VM
-    // through QEMU's NAT, too), so a serve login from our own IP is local.
-    let ours = |ip: &IpAddr| me.ips.is_empty() || me.node.is_none() || me.ips.contains(ip);
-    // None: local, needs the key. Some(login): a tailnet user (None if unknown).
-    let user = match claim {
-        Claim::Outside(_) | Claim::Local => None,
-        Claim::Login(_, ip) if ours(&ip) => None,
-        Claim::Login(login, _) => Some(Some(login)),
-        Claim::Peer(ip) => {
-            let who = whois(ip).await;
-            if ours(&ip) || who.as_ref().is_some_and(|(_, node)| Some(node) == me.node.as_ref()) { None } else { Some(who.map(|(l, _)| l)) }
-        }
+    // The identity headers mean something only if tailscaled's web proxy is all that reaches the socket.
+    let claim = if matches!(via, Via::Serve) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
+        Claim::Local
+    } else {
+        claim
     };
+    let ip = match claim {
+        Claim::Peer(ip) | Claim::Login(_, ip) => Some(ip),
+        _ => None,
+    };
+    let mut me = self_info(300).await;
+    if let Some(ip) = ip
+        && !me.ips.contains(&ip)
+    {
+        me = self_info(10).await;
+    }
+    let who = match ip {
+        Some(ip) => whois(ip).await,
+        None => None,
+    };
+    let user = identify(claim, &me, who);
     match user {
         None if api && !key_ok(key.as_deref()) => {
             return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
@@ -725,6 +867,7 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
     };
     let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
     let out = tailscale(&args).await?;
+    *SERVE_CHECK.lock().unwrap() = None;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
         bail_r(text.trim())?;
@@ -1011,15 +1154,104 @@ mod tests {
         assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.73.48.98"), false), Claim::Outside(_)));
         // The serve socket: tailscaled's login header, from the tailnet address it saw.
         assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), false), Claim::Login("me@x.com".into(), peer));
-        // No user (tagged node, Funnel or the box itself) or no tailnet source: key needed.
-        assert_eq!(claim(Via::Serve, None, Some("100.73.48.98"), false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some(""), Some("100.73.48.98"), false), Claim::Local);
+        // No user from a tailnet address: a tagged node (or the box itself), judged as over TCP.
+        assert_eq!(claim(Via::Serve, None, Some("100.73.48.98"), false), Claim::Peer(peer));
+        assert_eq!(claim(Via::Serve, Some(""), Some("100.73.48.98"), false), Claim::Peer(peer));
+        // No tailnet source: key needed.
+        assert_eq!(claim(Via::Serve, None, None, false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), None, false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
         // Funnel (the public internet) is refused outright.
         assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), true), Claim::Outside(_)));
         assert!(matches!(claim(Via::Serve, None, None, true), Claim::Outside(_)));
+    }
+
+    #[test]
+    fn identity_decisions() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let me = SelfInfo { ips: vec![ip("100.64.0.1")], node: Some("nSELF".into()), owner: Some("me@x.com".into()), at: 1, tried: 1 };
+        let who = |l: &str, n: &str| Some((l.to_string(), n.to_string()));
+        let login = |l: &str, a: &str| Claim::Login(l.into(), ip(a));
+        // Serve login: whois must name the same user, on another node.
+        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("me@x.com", "nPEER")), Some(Some("me@x.com".into())));
+        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("evil@x.com", "nPEER")), Some(None));
+        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, None), Some(None));
+        // whois says it is this box (an address not in the cached list): local, key needed.
+        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("me@x.com", "nSELF")), None);
+        assert_eq!(identify(login("me@x.com", "100.64.0.1"), &me, who("me@x.com", "nPEER")), None);
+        // Tagged node through serve (no login): whois names the pseudo-user, which allowed_users refuses.
+        let tagged = identify(Claim::Peer(ip("100.73.48.98")), &me, who(TAGGED, "nTAG"));
+        assert_eq!(tagged, Some(Some(TAGGED.into())));
+        assert!(!peer_allowed(&[], me.owner.clone(), TAGGED));
+        assert_eq!(identify(Claim::Peer(ip("100.64.0.1")), &me, who(TAGGED, "nSELF")), None);
+        // Fail closed when we don't know ourselves.
+        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &SelfInfo::default(), who("me@x.com", "nPEER")), None);
+        assert_eq!(identify(Claim::Local, &me, None), None);
+    }
+
+    #[test]
+    fn self_info_refresh_due() {
+        let info = |at, tried| SelfInfo { at, tried, ..Default::default() };
+        // Normal 5-minute cache.
+        assert!(!refresh_due(&info(1000, 1000), 1299, 300));
+        assert!(refresh_due(&info(1000, 1000), 1300, 300));
+        // An unknown address asks for 10 s freshness, but never more than one attempt per 10 s.
+        assert!(refresh_due(&info(1000, 1000), 1010, 10));
+        assert!(!refresh_due(&info(1000, 1005), 1010, 10));
+        assert!(!refresh_due(&info(0, 1005), 1010, 300));
+        assert!(refresh_due(&info(0, 0), 1010, 300));
+    }
+
+    #[test]
+    fn serve_config_checks() {
+        let sock = std::path::Path::new("/home/k/.local/share/kiln/serve.sock");
+        let check = |v: Value| serve_use(&v, sock);
+        let host = "ryzen7.tailedf5ce.ts.net";
+        // Shape seen on ryzen7 (tailscale 1.102): unrelated loopback proxies only.
+        let unrelated = json!({
+            "TCP": { "443": { "HTTPS": true }, "8443": { "HTTPS": true } },
+            "Web": {
+                format!("{host}:443"): { "Handlers": { "/": { "Proxy": "http://127.0.0.1:8789" } } },
+                format!("{host}:8443"): { "Handlers": { "/": { "Proxy": "http://127.0.0.1:7878" } } },
+            },
+        });
+        assert_eq!(check(unrelated.clone()), ServeUse::Unused);
+        assert_eq!(check(json!({})), ServeUse::Unused);
+        let mut web = unrelated.clone();
+        web["Web"][format!("{host}:8443")]["Handlers"]["/"]["Proxy"] = json!(format!("unix:{}", sock.display()));
+        assert_eq!(check(web.clone()), ServeUse::Proxied);
+        // Funnel on the port that proxies to kiln: anyone on the internet.
+        let mut funnel = web.clone();
+        funnel["AllowFunnel"] = json!({ format!("{host}:8443"): true });
+        assert!(matches!(check(funnel), ServeUse::Unsafe(_)));
+        // Funnel on an unrelated port is fine.
+        let mut other_funnel = web.clone();
+        other_funnel["AllowFunnel"] = json!({ format!("{host}:443"): true });
+        assert_eq!(check(other_funnel), ServeUse::Proxied);
+        // Raw TCP (plain or TLS-terminated) to the socket: the client writes the headers.
+        for tcp in [
+            json!({ "TCPForward": format!("unix:{}", sock.display()) }),
+            json!({ "TCPForward": format!("unix:{}", sock.display()), "TerminateTLS": host }),
+        ] {
+            let mut fwd = web.clone();
+            fwd["TCP"]["2222"] = tcp;
+            assert!(matches!(check(fwd), ServeUse::Unsafe(_)));
+        }
+        let mut fwd_other = web.clone();
+        fwd_other["TCP"]["2222"] = json!({ "TCPForward": "127.0.0.1:22" });
+        assert_eq!(check(fwd_other), ServeUse::Proxied);
+        // Foreground sessions and Services carry their own config.
+        let fg = json!({ "Foreground": { "abc": { "TCP": { "9000": { "TCPForward": format!("unix://{}", sock.display()) } } } } });
+        assert!(matches!(check(fg), ServeUse::Unsafe(_)));
+        let svc = json!({ "Services": { "svc:kiln": { "Web": { "kiln.ts.net:443": { "Handlers": { "/": { "Proxy": format!("unix:{}", sock.display()) } } } } } } });
+        assert_eq!(check(svc), ServeUse::Proxied);
+        // Funnel set at the top level still applies to a foreground session's port.
+        let fg_funnel = json!({
+            "AllowFunnel": { format!("{host}:8443"): true },
+            "Foreground": { "abc": { "Web": { format!("{host}:8443"): { "Handlers": { "/": { "Proxy": format!("unix:{}", sock.display()) } } } } } },
+        });
+        assert!(matches!(check(fg_funnel), ServeUse::Unsafe(_)));
     }
 
     #[tokio::test]
