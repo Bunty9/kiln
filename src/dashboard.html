@@ -977,7 +977,7 @@ const statusLine = n => `<span class="d${n ? ' w' : ''}"></span><span>${n ? `${n
   <span${kt('Last successful check with GitHub for queued jobs')}>· polled ${relH(S.poll.last_ok)}</span><span${kt('Actions runner version in the base image')}>· image ${esc(S.image?.runner_version || '—')}</span>${S.version ? `<span>· kiln ${esc(S.version)}</span>` : ''}${S.poll.rate ? `<span${kt('GitHub API requests left this hour')}>· API ${S.poll.rate.remaining}/${S.poll.rate.limit}</span>` : ''}`;
 // GitHub-hosted Linux x64 $/min by size (docs.github.com/en/billing/reference/actions-runner-pricing, checked 2026-10).
 const ghRate = c => c <= 2 ? 0.006 : c <= 4 ? 0.012 : c <= 8 ? 0.022 : 0.042;
-const myRate = () => parseFloat(lsGet('kiln-rate')) || 0;
+const myRate = () => { const r = parseFloat(lsGet('kiln-rate')); return r > 0 ? r : 0; };
 const rate = c => myRate() || ghRate(c || S.config.vm_cpus);
 const median = a => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 function stats() {
@@ -1018,7 +1018,12 @@ function hvMerge(a) {
   if (HV.buf.length > 1800) HV.buf.splice(0, HV.buf.length - 1800);
   return gap;
 }
-async function hvLoad() { try { const a = await api('/api/host'); HV.buf = []; hvMerge(a); } catch { /* next poll fills in */ } hvKick(); }
+async function hvLoad() {
+  const e = $('#hxe');
+  try { const a = await api('/api/host'); HV.buf = []; hvMerge(a); if (e) e.hidden = true; }
+  catch (err) { console.warn('host history', err); if (e) { e.textContent = `Host history unavailable (${err.message || err}); showing samples from now on.`; e.hidden = false; } }
+  hvKick();
+}
 function hvKick() { if (HV.open && !HV.raf) HV.raf = requestAnimationFrame(hvDraw); }
 // Stack layers of one sample, bottom to top: VMs by colour slot, then the rest of the host.
 function layers(s, key) {
@@ -1052,8 +1057,10 @@ function chart(id, key, max, tR, cs) {
     g.strokeStyle = c; g.globalAlpha = k === 'h' ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
   });
   const h = HV.hover; if (!h || h.id !== id) return;
-  const t = t0 + h.x / r.width * win; let n = 0;
-  vis.forEach((s, i) => { if (Math.abs(s.t - t) < Math.abs(vis[n].t - t)) n = i; });
+  // Only samples on screen: vis also holds one past each edge, for the interpolation.
+  const t = t0 + h.x / r.width * win; let n = -1;
+  vis.forEach((s, i) => { if (s.t >= t0 && s.t <= tR && (n < 0 || Math.abs(s.t - t) < Math.abs(vis[n].t - t))) n = i; });
+  if (n < 0) return hvTip(null);
   const x = Math.round(xs[n]) + .5;
   g.strokeStyle = cs.getPropertyValue('--fg-2'); g.lineWidth = dpr; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
   hvTip(vis[n], key, r.left + x / dpr, r.top);
@@ -1061,7 +1068,7 @@ function chart(id, key, max, tR, cs) {
 function hvTip(s, key, x, y) {
   let el = document.getElementById('htip');
   if (!s) { if (el) el.className = ''; HV.tipKey = ''; return; }
-  if (!el) { el = document.createElement('div'); el.id = 'htip'; el.setAttribute('role', 'status'); document.body.append(el); }
+  if (!el) { el = document.createElement('div'); el.id = 'htip'; el.setAttribute('aria-hidden', 'true'); document.body.append(el); }
   const k = key + s.t;
   if (HV.tipKey !== k) {
     HV.tipKey = k; const f = key === 'cpu' ? fmtC : fmtM, ago = Math.max(0, Math.round((Date.now() - s.t) / 1000));
@@ -1121,13 +1128,16 @@ const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="$
   <div class="meter" id="hm-mem" tabindex="0" style="margin-top:12px"><div class="l"><span>Memory</span><span data-v></span></div><div class="b st" role="meter" aria-label="Memory" aria-valuemin="0"></div></div>
   <div class="meter" id="hm-disk" tabindex="0" style="margin-top:12px" data-tip="Free disk where kiln keeps the image, repo caches and VM disks"><div class="l"><span>Disk free</span><span data-v></span></div></div></div>
   <div class="hx" id="hx"${HV.open ? '' : ' hidden'}><div class="seg" role="radiogroup" aria-label="Time window">${[300, 900, 3600].map(w => `<button role="radio" aria-checked="${HV.win === w}" data-act="hostwin" data-w="${w}">${winTxt(w)}</button>`).join('')}</div>
-  ${[['cpu', 'CPU', 'cores'], ['mem', 'Memory', 'GB']].map(([k, t, u]) => `<figure><figcaption><span>${t}</span><span class="fg2 sm">by VM, ${u}</span></figcaption><div class="cv"><canvas id="hc-${k}" tabindex="0" role="img" aria-label="${t} use by job VM over the last ${winTxt(HV.win)}; values are listed below"></canvas></div><div class="ax"><span data-w>−${winTxt(HV.win)}</span><span>now</span></div></figure>`).join('')}
-  <ul class="lg" id="hlg" aria-label="Now, by VM: cores · memory"></ul></div>`;
+  ${[['cpu', 'CPU', 'cores'], ['mem', 'Memory', 'GB']].map(([k, t, u]) => `<figure><figcaption><span>${t}</span><span class="fg2 sm">by VM, ${u}</span></figcaption><div class="cv"><canvas id="hc-${k}" tabindex="0" role="img" data-t="${t}" aria-label="${t} use by job VM over the last ${winTxt(HV.win)}; values are listed below"></canvas></div><div class="ax"><span data-wl>−${winTxt(HV.win)}</span><span>now</span></div></figure>`).join('')}
+  <p class="fg2 sm" id="hxe" hidden></p><ul class="lg" id="hlg" aria-label="Now, by VM: cores · memory"></ul></div>`;
 function hostWire() {
   const hx = $('#hx'), at = (c, x) => { HV.hover = { id: c.id, x }; hvKick(); };
   if (HV.open) hvLoad();
   hx.addEventListener('pointermove', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.clientX - e.target.getBoundingClientRect().left); });
-  hx.addEventListener('pointerleave', () => { HV.hover = null; hvTip(null); });
+  hx.addEventListener('pointerleave', () => {
+    const f = document.activeElement;
+    if (f?.tagName === 'CANVAS' && hx.contains(f)) at(f, f.getBoundingClientRect().width - 1); else { HV.hover = null; hvTip(null); }
+  });
   hx.addEventListener('focusin', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.target.getBoundingClientRect().width - 1); });
   hx.addEventListener('focusout', () => { HV.hover = null; hvTip(null); });
   hx.addEventListener('keydown', e => {
@@ -1139,7 +1149,7 @@ const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r
 pages.overview = {
   mount() {
     $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host">${hostSkel()}</div></aside></div>`;
-    hostWire();
+    hostWire(); rove($('#hx'));
   },
   unmount() { cancelAnimationFrame(HV.raf); HV.raf = 0; HV.hover = null; hvTip(null); },
   update() {
@@ -1790,7 +1800,8 @@ pages.guides = {
 /* ---------- actions ---------- */
 const ACT = {
   hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
-  hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-w]').forEach(x => { x.textContent = '−' + winTxt(HV.win); }); hvKick(); },
+  hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
+    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.t} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
   async mkapp() {
     const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;

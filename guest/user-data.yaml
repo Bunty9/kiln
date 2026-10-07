@@ -200,7 +200,7 @@ write_files:
           # Login tokens written under cached paths would reach every later job, pull requests
           # included: cargo login, huggingface-cli login.
           findmnt /mnt/cache >/dev/null || exit 0
-          rm -f /home/runner/.cargo/credentials /home/runner/.cargo/credentials.toml /home/runner/.cache/huggingface/token
+          rm -f /home/runner/.cargo/credentials /home/runner/.cargo/credentials.toml /home/runner/.cache/huggingface/token /home/runner/.cache/huggingface/stored_tokens
           exit 0 ;;
       esac
       blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb

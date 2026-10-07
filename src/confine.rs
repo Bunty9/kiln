@@ -8,7 +8,7 @@
 //!   devices (not the rest of `/dev`), and read-write only the VM's `q/` directory (its
 //!   disks, JIT secret, sockets). The images directory and the repo's cache disk are
 //!   readable; everything else under kiln's data directory (token, keys, the VM's own
-//!   record and logs, other jobs) is not;
+//!   record and logs, other jobs) is not. kiln also strips GitHub tokens from its environment;
 //! - no ptrace of processes outside the sandbox (kiln, other VMs); on Linux 6.12+ (ABI 6)
 //!   no signals to them or abstract unix sockets either, and with ABI 9 no connecting to
 //!   unix sockets elsewhere (tailscaled, docker).
@@ -21,6 +21,9 @@ use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetA
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+/// What the startup probe found: false means job VMs' QEMU runs unconfined.
+pub static ENFORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// The argv[1] that makes `main` run [`main`] instead of the service.
 pub const ARG: &str = "__confine";
 
@@ -30,6 +33,13 @@ const SYSTEM: [&str; 6] = ["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"];
 const KERNEL: [&str; 2] = ["/proc", "/sys"];
 /// The device nodes QEMU opens, read-write with ioctls: KVM, and the usual character devices.
 const DEVICES: [&str; 6] = ["/dev/kvm", "/dev/null", "/dev/zero", "/dev/full", "/dev/urandom", "/dev/random"];
+
+/// The read rule a data directory falls under, if any: then confined QEMU could read the token
+/// and keys, so `serve` refuses to start there.
+pub fn exposed(data: &std::path::Path) -> Option<&'static str> {
+    let data = std::fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
+    SYSTEM.into_iter().chain(KERNEL).find(|p| data.starts_with(p))
+}
 
 /// What a confined process may touch.
 #[derive(Debug, Default, PartialEq)]
@@ -156,6 +166,14 @@ pub fn probe() -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_dir_must_not_be_readable_by_qemu() {
+        assert_eq!(exposed(std::path::Path::new("/opt/kiln-does-not-exist")), Some("/opt"));
+        assert_eq!(exposed(std::path::Path::new("/etc/kiln")), Some("/etc"));
+        assert_eq!(exposed(&std::env::temp_dir().join("kiln-data")), None);
+        assert_eq!(exposed(std::path::Path::new("/optional/kiln")), None, "a prefix is not a parent");
+    }
 
     #[test]
     fn args_round_trip() {

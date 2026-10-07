@@ -32,11 +32,13 @@ pub fn recent(n: usize) -> Vec<Sample> {
     h.iter().skip(h.len().saturating_sub(n)).cloned().collect()
 }
 
-/// (busy, total) jiffies from /proc/stat's first line. guest time is already inside user.
-fn cpu_ticks(stat: &str) -> Option<(u64, u64)> {
+/// (busy, total) jiffies from /proc/stat's first line, and the CPUs that line sums (the
+/// `cpuN` lines: all online CPUs, whatever kiln's own affinity). Guest time is inside user.
+fn cpu_ticks(stat: &str) -> Option<(u64, u64, usize)> {
     let f: Vec<u64> = stat.lines().next()?.split_whitespace().skip(1).take(8).filter_map(|x| x.parse().ok()).collect();
     let total: u64 = f.iter().sum();
-    Some((total - f.get(3)? - f.get(4)?, total))
+    let n = stat.lines().filter(|l| l.strip_prefix("cpu").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))).count();
+    Some((total - f.get(3)? - f.get(4)?, total, n.max(1)))
 }
 
 /// utime + stime from /proc/<pid>/stat (guest time is inside utime).
@@ -75,8 +77,9 @@ fn assign(slots: &mut HashMap<String, usize>, ids: &[&str]) {
 }
 
 pub async fn run(app: Arc<App>) {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
-    let (mut last, mut last_vm): (Option<(u64, u64)>, HashMap<String, u64>) = (None, HashMap::new());
+    let mut last: Option<(u64, u64, usize)> = None;
+    let mut last_vm: HashMap<String, u64> = HashMap::new();
+    let mut warned = false;
     let (mut pids, mut slots) = (HashMap::<String, u32>::new(), HashMap::<String, usize>::new());
     let mut tick = tokio::time::interval(EVERY);
     loop {
@@ -89,7 +92,12 @@ pub async fn run(app: Arc<App>) {
             pids.extend(find_qemu(&missing));
         }
         assign(&mut slots, &ids);
-        let Some(now) = cpu_ticks(&std::fs::read_to_string("/proc/stat").unwrap_or_default()) else { continue };
+        let Some(now) = cpu_ticks(&std::fs::read_to_string("/proc/stat").unwrap_or_default()) else {
+            if !std::mem::replace(&mut warned, true) {
+                tracing::warn!("host graphs: /proc/stat unreadable, no samples");
+            }
+            continue;
+        };
         let vm_now: HashMap<String, (u64, u64)> = pids
             .iter()
             .filter_map(|(id, pid)| {
@@ -100,7 +108,7 @@ pub async fn run(app: Arc<App>) {
             .collect();
         if let Some(prev) = last.filter(|p| now.1 > p.1) {
             // Ticks over all CPUs in this interval, so ticks / per_cpu = cores busy.
-            let per_cpu = (now.1 - prev.1) as f32 / cpus;
+            let per_cpu = (now.1 - prev.1) as f32 / now.2 as f32;
             let mut vms: Vec<_> = vm_now
                 .iter()
                 .filter_map(|(id, &(t, mb))| {
@@ -133,7 +141,7 @@ mod tests {
     #[test]
     fn parses_proc_and_keeps_slots() {
         // user nice system idle iowait irq softirq steal guest guest_nice
-        assert_eq!(cpu_ticks("cpu  100 0 50 800 50 0 0 0 40 0\ncpu0 1 2"), Some((150, 1000)));
+        assert_eq!(cpu_ticks("cpu  100 0 50 800 50 0 0 0 40 0\ncpu0 1 2\ncpu1 3 4\nintr 5"), Some((150, 1000, 2)));
         assert_eq!(proc_ticks("123 (qemu-system-x86) S 1 2 3 4 5 6 7 8 9 10 700 30 0"), Some(730));
         assert_eq!(proc_ticks("9 (a) b) R 1 2 3 4 5 6 7 8 9 10 5 6"), Some(11), "comm may hold ')'");
         let mut s = HashMap::new();

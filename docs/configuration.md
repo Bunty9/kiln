@@ -176,7 +176,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
-  usage.json                     job minutes per UTC day and VM size, for "Saved this month" (kept 400 days)
+  usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
   audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

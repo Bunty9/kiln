@@ -343,11 +343,15 @@ pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
+/// Where a GitHub token may come from in the environment. Children kiln starts for VMs never
+/// inherit these (see `vm::no_secrets`).
+pub const TOKEN_ENV: [&str; 3] = ["KILN_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+
 /// Env var, then the token file the dashboard writes, then the gh CLI login.
 /// `only_file`: a token was saved from the dashboard, so only that file counts
 /// (a stale env token must not take over again on reload).
 fn load_token(data: &std::path::Path, only_file: bool) -> (String, &'static str) {
-    let env = ["KILN_GITHUB_TOKEN", "GITHUB_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
+    let env = TOKEN_ENV.iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
     let file = std::fs::read_to_string(data.join("token")).ok();
     pick_token(env, file, only_file, || {
         std::process::Command::new("gh")
@@ -395,7 +399,7 @@ async fn run() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
     // Absolute: paths built from it go into Landlock rules and QEMU arguments.
     let data = std::path::absolute(&data)?;
-    // First, before anything that can fail (a bad config.json included), so a new version
+    // First, before anything likely to fail (a bad config.json included), so a new version
     // that dies early still counts its boots and gets rolled back. CLI runs never count.
     if is_serve(std::env::args().nth(1).as_deref()) {
         update::on_start(&data);
@@ -450,12 +454,17 @@ async fn run() -> Result<()> {
             Ok(())
         }
         a if is_serve(a) => {
+            if let Some(p) = confine::exposed(&app.data) {
+                bail!("data directory {} is under {p}, which job VMs' QEMU may read: move it (KILN_DATA) elsewhere", app.data.display());
+            }
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
-            match confine::probe() {
-                (true, d) if !d.starts_with("warning") => tracing::info!("{d}"),
-                (_, d) => tracing::warn!("job VM confinement: {d}"),
+            let (ok, d) = confine::probe();
+            confine::ENFORCED.store(ok, std::sync::atomic::Ordering::Relaxed);
+            match ok {
+                true if !d.starts_with("warning") => tracing::info!("{d}"),
+                _ => tracing::warn!("job VM confinement: {d}"),
             }
             if app.cfg().egress == "filtered" {
                 let a = app.clone();
@@ -492,7 +501,9 @@ fn load_config(data: &std::path::Path) -> Result<Config> {
     match std::fs::read(data.join("config.json")) {
         Ok(b) => {
             let c: Config = serde_json::from_slice(&b).context("config.json")?;
-            c.validate().context("config.json is invalid; fix it or remove it to start from the defaults")?;
+            // Host-size bounds are checked when saving: a box that later shows fewer CPUs
+            // (affinity, cpuset, a move) must still start, and only launches what fits.
+            c.validate_for(u32::MAX).context("config.json is invalid; fix it or remove it to start from the defaults")?;
             Ok(c)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
