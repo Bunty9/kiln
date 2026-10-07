@@ -381,7 +381,6 @@ async fn main() -> Result<()> {
         gh,
         cfg: RwLock::new(cfg),
         vms: Mutex::default(),
-        data,
         kills: Mutex::default(),
         releases: Mutex::default(),
         committing: Mutex::default(),
@@ -390,7 +389,8 @@ async fn main() -> Result<()> {
         stopping: Default::default(),
         backoff: Default::default(),
         mirror: Default::default(),
-        app_states: Default::default(),
+        app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+        data,
     });
 
     match std::env::args().nth(1).as_deref() {

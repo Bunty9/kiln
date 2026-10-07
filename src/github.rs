@@ -353,18 +353,19 @@ impl Gh {
         Ok((by_size, ours, forks.len()))
     }
 
-    /// Exchange a manifest-flow code for the new App's id, slug, html_url and pem (no auth).
+    /// Exchange a manifest-flow code for the new App's id, slug, html_url, owner and pem (no auth).
     pub async fn manifest_conversion(&self, code: &str) -> Result<Value> {
         let r = self
             .http
             .post(format!("https://api.github.com/app-manifests/{code}/conversions"))
             .header(header::ACCEPT, "application/vnd.github+json")
             .send()
-            .await?;
+            .await
+            .context("could not reach GitHub to finish the setup: try again (the setup code stays usable for an hour)")?;
         let status = r.status();
         let v: Value = r.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            bail!("GitHub refused the setup code ({status}): it is single use and expires after an hour, start again");
+            bail!("{}", conversion_error(status.as_u16()));
         }
         Ok(v)
     }
@@ -614,6 +615,18 @@ jobs:
     )
 }
 
+/// Why a manifest code could not be converted. 404/422: the code expired or was used,
+/// possibly by a conversion whose response never arrived, so the App may exist already.
+fn conversion_error(status: u16) -> String {
+    match status {
+        404 | 422 => format!(
+            "GitHub refused the setup code ({status}): it is single use and expires after an hour. \
+             If GitHub already created the App, open it on github.com, generate a private key, and use 'Use an existing App'."
+        ),
+        _ => format!("GitHub could not finish the setup ({status}): try again (the setup code stays usable for an hour)"),
+    }
+}
+
 /// Allowed `<label>-<N>cpu` sizes.
 pub const SIZES: [u32; 4] = [2, 4, 8, 16];
 
@@ -760,6 +773,18 @@ mod tests {
         assert!(hello_err(403, &m, "adding the workflow").starts_with("GitHub refused"));
         assert_eq!(hello_err(404, &m, "reading the repo"), "repo not found, or the token cannot see it");
         assert_eq!(hello_err(422, &m, "creating the branch"), "GitHub: 422 while creating the branch: Nope");
+    }
+
+    #[test]
+    fn conversion_errors() {
+        let hint = "If GitHub already created the App, open it on github.com, generate a private key, and use 'Use an existing App'.";
+        for st in [404, 422] {
+            let e = conversion_error(st);
+            assert!(e.ends_with(hint), "{e}");
+            assert!(e.contains(&st.to_string()));
+        }
+        let e = conversion_error(502);
+        assert!(e.contains("try again") && !e.contains("existing App"), "{e}");
     }
 
     #[test]

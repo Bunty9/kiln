@@ -97,22 +97,41 @@ pub fn manifest(origin: &str, host: &str) -> serde_json::Value {
     })
 }
 
-/// One-time `state` values for the manifest flow (1 h, single use).
-#[derive(Default)]
-pub struct States(std::collections::HashMap<String, u64>);
+/// One-time `state` values for the manifest flow (1 h, single use), kept in
+/// `<data>/app_states.json` so a kiln restart mid-setup does not strand the callback.
+pub struct States {
+    path: std::path::PathBuf,
+    map: std::collections::HashMap<String, u64>,
+}
 
 impl States {
-    pub fn issue(&mut self, now: u64) -> String {
+    pub fn open(path: std::path::PathBuf) -> Self {
+        let map = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        Self { path, map }
+    }
+
+    fn save(&self) -> Result<()> {
+        write_private(&self.path, &serde_json::to_vec(&self.map)?)
+    }
+
+    pub fn issue(&mut self, now: u64) -> Result<String> {
         let mut b = [0u8; 16];
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).expect("system rng");
         let s: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        self.0.retain(|_, at| now < *at + 3600);
-        self.0.insert(s.clone(), now);
-        s
+        self.map.retain(|_, at| now < *at + 3600);
+        self.map.insert(s.clone(), now);
+        self.save()?;
+        Ok(s)
     }
 
-    pub fn take(&mut self, s: &str, now: u64) -> bool {
-        self.0.remove(s).is_some_and(|at| now < at + 3600)
+    /// Known and under an hour old. Not used up: that waits for a successful conversion.
+    pub fn valid(&self, s: &str, now: u64) -> bool {
+        self.map.get(s).is_some_and(|at| now < at + 3600)
+    }
+
+    pub fn consume(&mut self, s: &str) -> Result<()> {
+        self.map.remove(s);
+        self.save()
     }
 }
 
@@ -263,15 +282,27 @@ mod tests {
     }
 
     #[test]
-    fn states_are_single_use_and_expire() {
-        let mut s = States::default();
-        let a = s.issue(1000);
+    fn states_persist_expire_and_are_consumed_only_on_success() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = scratch("states").join("app_states.json");
+        let mut s = States::open(p.clone());
+        let a = s.issue(1000).unwrap();
         assert_eq!(a.len(), 32);
-        assert!(!s.take("nope", 1000));
-        assert!(s.take(&a, 1000));
-        assert!(!s.take(&a, 1000), "single use");
-        let b = s.issue(1000);
-        assert!(!s.take(&b, 1000 + 3601), "expired");
+        assert!(!s.valid("nope", 1000));
+        assert!(s.valid(&a, 1000));
+        assert!(s.valid(&a, 1000), "checking does not use it up: a failed conversion can be retried");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        // a kiln restart mid-setup keeps it
+        let mut s = States::open(p.clone());
+        assert!(s.valid(&a, 1500));
+        s.consume(&a).unwrap();
+        assert!(!s.valid(&a, 1500), "single use");
+        assert!(!States::open(p.clone()).valid(&a, 1500), "consumed on disk too");
+        let b = s.issue(1000).unwrap();
+        assert!(!s.valid(&b, 1000 + 3600), "expired after an hour");
+        s.issue(1000 + 3600).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains(&b), "expired states are pruned");
+        assert!(!States::open(p.with_file_name("missing.json")).valid(&a, 1000));
     }
 
     #[test]

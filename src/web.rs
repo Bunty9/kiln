@@ -513,7 +513,7 @@ async fn app_manifest(State(app): S, headers: HeaderMap, Json(b): Json<ManifestB
         bail_r("org must be a GitHub org login")?;
     }
     let name = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "box".into());
-    let state = app.app_states.lock().unwrap().issue(now());
+    let state = app.app_states.lock().unwrap().issue(now()).context("saving the setup state (app_states.json)")?;
     let base = if org.is_empty() {
         "https://github.com/settings/apps/new".to_string()
     } else {
@@ -534,13 +534,17 @@ struct ConvertBody {
 
 /// Finish the one-click flow: trade GitHub's code for the App's id and key, and switch to it.
 async fn app_convert(State(app): S, Json(b): Json<ConvertBody>) -> R<Json<Value>> {
-    if !app.app_states.lock().unwrap().take(&b.state, now()) {
+    if !app.app_states.lock().unwrap().valid(&b.state, now()) {
         bail_r("this setup link is unknown, already used or older than an hour: start again")?;
     }
     if b.code.is_empty() || !b.code.chars().all(|c| c.is_ascii_alphanumeric()) {
         bail_r("bad code")?;
     }
+    // The state is used up only once GitHub has handed over the App: a network error
+    // or a 5xx leaves it valid so the same code can be retried.
     let v = app.gh.manifest_conversion(&b.code).await?;
+    // Best effort: the App exists now whatever happens to the state file.
+    let _ = app.app_states.lock().unwrap().consume(&b.state);
     let id = v["id"].as_u64().ok_or_else(|| anyhow!("GitHub returned no app id"))?;
     let (slug, url, pem) = (v["slug"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""), v["pem"].as_str().unwrap_or(""));
     // Empty if GitHub ever leaves it out: discovery then asks GET /app once.
