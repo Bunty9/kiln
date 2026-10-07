@@ -1,6 +1,6 @@
 # kiln on Apple Silicon (macOS)
 
-> **Status: untested on a real Mac.** The code compiles and its unit tests pass for `aarch64-apple-darwin`, and the arm64 guest side was exercised under QEMU TCG emulation on Linux, but kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it. Release builds for macOS stay off until then (see [Releases](#releases)).
+> **Status: untested on a real Mac.** Lint and unit tests pass on a GitHub-hosted `macos-14` (Apple Silicon) runner, including real `sysctl`, `vm_stat` and `ps` readings. The arm64 guest path was run end to end on x86 Linux under emulation: the arm64 recipe baked under QEMU TCG, and an aarch64 kiln (under `qemu-user`, with a shim swapping `accel=kvm` for TCG) booted a warm VM from it that registered an `ARM64`/`kiln-arm64` runner, reached "Listening for Jobs" and was released over `ttyAMA0`; a hold with fw_cfg SSH keys worked too. But kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it. Release builds for macOS stay off until then (see [Releases](#releases)).
 
 On a Mac with Apple Silicon, kiln runs **native linux/arm64 job VMs**: one fresh Ubuntu 24.04 arm64 VM per job, booted by QEMU with Apple's Hypervisor.framework (HVF). It is the same kiln as on Linux, with the differences listed below.
 
