@@ -1,6 +1,6 @@
 //! Dashboard + JSON API. Reachable only from loopback and the tailnet.
 
-use crate::{App, Config, mirror, now, vm};
+use crate::{App, Config, mirror, now, update, vm};
 use anyhow::{Context, anyhow};
 use axum::{
     Json, Router,
@@ -57,6 +57,10 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/onboard", get(onboard))
         .route("/api/onboard/hello", post(onboard_hello))
         .route("/api/bake", post(bake))
+        .route("/api/update", get(update_get))
+        .route("/api/update/check", post(update_check))
+        .route("/api/update/apply", post(update_apply))
+        .route("/api/update/cancel", post(update_cancel))
         .route("/api/tailscale", get(ts_status))
         .route("/api/tailscale/netcheck", get(ts_netcheck))
         .route("/api/tailscale/ping", post(ts_ping))
@@ -285,6 +289,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "version": env!("CARGO_PKG_VERSION"),
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.repos()),
+        "update": update::compact(&app),
     })))
 }
 
@@ -445,6 +450,38 @@ async fn bake(State(app): S) -> R<StatusCode> {
         }
     });
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn update_get(State(app): S) -> Json<Value> {
+    Json(update::json(&app))
+}
+
+fn conflict(msg: &str) -> Response {
+    (StatusCode::CONFLICT, msg.to_string()).into_response()
+}
+
+/// Check now; a failed check is reported in the returned status, not as an HTTP error.
+async fn update_check(State(app): S) -> Response {
+    if !update::check(&app).await {
+        return conflict("an update check or update is already running");
+    }
+    Json(update::json(&app)).into_response()
+}
+
+/// Download, verify, drain and restart into the latest release (progress in GET /api/update).
+async fn update_apply(State(app): S) -> Response {
+    if !update::start(&app) {
+        return conflict("an update check or update is already running");
+    }
+    (StatusCode::ACCEPTED, Json(update::json(&app))).into_response()
+}
+
+/// Stop a draining update and resume launching.
+async fn update_cancel(State(app): S) -> Response {
+    if !update::cancel(&app) {
+        return conflict("only an update that is still draining can be cancelled");
+    }
+    Json(update::json(&app)).into_response()
 }
 
 async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
