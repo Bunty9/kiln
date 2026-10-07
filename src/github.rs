@@ -91,8 +91,9 @@ impl Gh {
             *self.rate.lock().unwrap() = Some((rem, lim, reset));
         }
         // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
-        // Every successful response says it, so a rotated token without one clears it.
-        if r.status().is_success() {
+        // Every successful API response says it, so a rotated token without one clears it.
+        // Not a redirected log download: blob storage never sends it.
+        if r.status().is_success() && r.url().host_str() == Some("api.github.com") {
             *self.expires.lock().unwrap() =
                 r.headers().get("github-authentication-token-expiration").and_then(|v| v.to_str().ok()).and_then(parse_rfc3339);
         }
