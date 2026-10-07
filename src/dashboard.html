@@ -553,7 +553,7 @@ const STATE = {
   booting: ['boot', 'The VM is starting. Its runner usually comes online in about 4 s.'],
   waiting: ['wait', 'The runner is online and waiting for GitHub to hand it a job.'],
   running: ['flame', 'The job is running in this VM.'],
-  held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it or the hold ends.'],
+  held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it, the hold ends, or a queued job needs the slot.'],
   passed: ['check', 'The job succeeded. Its VM is already deleted.'],
   failed: ['x', 'The job failed, or its VM broke (for example the runner never came online). The note on the job page says which.'],
   killed: ['stop', 'kiln stopped this VM: Kill VM, the job or idle timeout, or an expired debug hold.'],
@@ -570,6 +570,9 @@ const badge = (s, c = s, tip, f) => {
   return `<span class="bdg s-${c.replace(/ /g, '-')}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
+// The hold kiln ends first when jobs wait: the one expiring first. A released hold
+// (hold_until passed) is already powering off and is not released again.
+const oldestHeld = () => S.vms.filter(v => v.state === 'held' && (v.hold_until || 0) > now()).sort((a, b) => (a.hold_until || 0) - (b.hold_until || 0))[0];
 function status(v) {
   const r = String(v.result || '').toLowerCase();
   switch (v.state) {
@@ -608,7 +611,7 @@ const HELP = {
   timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
-  held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out.", "debug"],
+  held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -930,6 +933,7 @@ function banners() {
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
+  else if (p.blocked_kind === 'held') { const h = oldestHeld(); B('warn', esc(p.blocked) + `. kiln is releasing the oldest hold.${hq('held')}`, h ? X('Release oldest', 'relheld') + A('View held job', '#/jobs/' + encodeURIComponent(h.id)) : ''); }
   else if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
@@ -1668,6 +1672,7 @@ const ACT = {
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() { await post(`/api/vms/${encodeURIComponent(pages.job.id)}/release`); toast('Releasing'); await poll(); },
+  async relheld() { const h = oldestHeld(); if (h) { await post(`/api/vms/${encodeURIComponent(h.id)}/release`); toast('Releasing'); await poll(); } },
   copyssh: b => copy(b.dataset.id, 'ssh command copied').then(() => copied(b)),
   async clearcache(b) {
     const r = b.dataset.id;

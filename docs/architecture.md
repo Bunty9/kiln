@@ -165,7 +165,7 @@ After the runner exits, `kiln-job` prints `kiln: decide` and waits up to 20 seco
 - `release`: power off.
 - `hold <secs>`: write the authorized keys (passed as a second SMBIOS string), generate fresh SSH host keys and print their fingerprints (`kiln: hostkey ...`), start `sshd`, and wait until the time is up or a `release` line arrives.
 
-kiln answers only the first `kiln: decide`; an early one gets `release`, which also forfeits the hold. The hold is granted only when `debug_hold_mins > 0`, a key is configured, a job actually started, and its result was anything other than "Succeeded". While held, the VM's state is `held`, it keeps its memory and its `max_vms` slot, and the dashboard shows the command (`ssh -p 2201 runner@100.73.48.98`) with Release and Kill buttons. Kill sends `release` first for a clean shutdown and kills QEMU five seconds later.
+kiln answers only the first `kiln: decide`; an early one gets `release`, which also forfeits the hold. The hold is granted only when `debug_hold_mins > 0`, a key is configured, a job actually started, its result was "Failed" or "Abandoned" (never "Canceled"), and fewer than `max_vms - 1` VMs are already held. When a job is queued and every slot is taken with at least one held, kiln releases the hold that expires first (see [configuration.md](configuration.md#debug-holds-and-the-queue)). While held, the VM's state is `held`, it keeps its memory and its `max_vms` slot, and the dashboard shows the command (`ssh -p 2201 runner@100.73.48.98`) with Release and Kill buttons. Kill sends `release` first for a clean shutdown and kills QEMU five seconds later.
 
 ### SSH publish
 
@@ -202,7 +202,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | Method and path | Purpose |
 |---|---|
 | `GET /` | The dashboard page |
-| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `github_api`, `egress`, `memory`, `disk` or `budget`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
+| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `github_api`, `egress`, `memory`, `disk`, `budget` or `held`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
 | `POST /api/config` | Save settings (validated); returns `{restart_required}` |
 | `POST /api/token` | Validate and save a GitHub token |
 | `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |

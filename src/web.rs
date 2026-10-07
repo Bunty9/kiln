@@ -727,11 +727,9 @@ async fn kill(State(app): S, Path(id): Path<String>) -> R<StatusCode> {
 /// Ends a hold early: the guest powers off and the VM finishes normally.
 async fn release(State(app): S, Path(id): Path<String>) -> R<StatusCode> {
     vm::check_id(&id)?;
-    if !app.vms.lock().unwrap().iter().any(|v| v.id == id && v.state == vm::State::Held) {
+    if !vm::release_hold(&app, &id, None) {
         bail_r("that VM is not held")?;
     }
-    let n = app.releases.lock().unwrap().get(&id).cloned().ok_or_else(|| anyhow!("no running VM {id}"))?;
-    n.notify_one();
     Ok(StatusCode::NO_CONTENT)
 }
 
