@@ -576,11 +576,13 @@ const STATE = {
   booting: ['boot', 'The VM is starting. Its runner usually comes online in about 4 s.'],
   waiting: ['wait', 'The runner is online and waiting for GitHub to hand it a job.'],
   running: ['flame', 'The job is running in this VM.'],
-  held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it or the hold ends.'],
+  held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it, the hold ends, or a queued job needs the slot.'],
   passed: ['check', 'The job succeeded. Its VM is already deleted.'],
   failed: ['x', 'The job failed, or its VM broke (for example the runner never came online). The note on the job page says which.'],
   killed: ['stop', 'kiln stopped this VM: Kill VM, the job or idle timeout, or an expired debug hold.'],
   lost: ['lost', 'This VM was running when kiln stopped, and it stopped with kiln.'],
+  'not needed': ['skip', 'No job reached this VM: the queued job went to another runner or was cancelled. Nothing went wrong.'],
+  ended: ['skip', 'Ended in a state this kiln version does not know (recorded by a newer kiln, read after a rollback).'],
   cancelled: ['cancel', 'Cancelled on GitHub.'],
   queued: ['clock', 'GitHub is waiting for a runner.'],
   skipped: ['skip', 'GitHub skipped this job.'],
@@ -588,9 +590,12 @@ const STATE = {
 };
 const badge = (s, c = s, tip, f) => {
   const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? STATE[s]?.[1];
-  return `<span class="bdg s-${c}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
+  return `<span class="bdg s-${c.replace(/ /g, '-')}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
+// The hold kiln ends first when jobs wait: the one expiring first. A released hold
+// (hold_until passed) is already powering off and is not released again.
+const oldestHeld = () => S.vms.filter(v => v.state === 'held' && (v.hold_until || 0) > now()).sort((a, b) => (a.hold_until || 0) - (b.hold_until || 0))[0];
 function status(v) {
   const r = String(v.result || '').toLowerCase();
   switch (v.state) {
@@ -601,12 +606,14 @@ function status(v) {
     case 'done': return r === 'succeeded' || !r ? 'passed' : /cancel/.test(r) ? 'cancelled' : 'failed';
     case 'failed': return 'failed';
     case 'killed': return 'killed';
+    case 'unneeded': return 'not needed';
+    case 'unknown': return 'ended';
     default: return 'lost';
   }
 }
 const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
   : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
-const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
+const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
@@ -618,7 +625,7 @@ const HELP = {
   autorebake: ["Auto rebake", "When the image is stale (runner behind GitHub's latest, baked over 25 days ago, Node versions changed, or baked by an older kiln), kiln rebakes on its own, at most every 6 hours.", "image"],
   mirror: ["Docker mirror", "A local cache of Docker Hub images. Fresh VMs would otherwise hit Docker Hub's pull limit. Jobs use it automatically; if it is down, they pull from Docker Hub.", "cache"],
   key: ["Dashboard key", "Tailnet devices are recognised by their Tailscale login. A browser on the CI box itself can't be, because job VMs look like local traffic too. So it has to show this key once.", "network"],
-  serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it.", "network"],
+  serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it. The tailnet must have HTTPS certificates on (Tailscale admin console › DNS › HTTPS Certificates).", "network"],
   doctor: ["Diagnostics", "Runs `kiln doctor`: KVM, tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
   queued: ["Queued", "Jobs GitHub is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
   stale: ["Stale image", "The image needs a rebake: its runner is older than GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
@@ -627,7 +634,7 @@ const HELP = {
   timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
-  held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out.", "debug"],
+  held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -952,7 +959,9 @@ function banners() {
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
-  if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
+  else if (p.blocked_kind === 'held') { const h = oldestHeld(); B('warn', esc(p.blocked) + `. kiln is releasing the oldest hold.${hq('held')}`, h ? X('Release oldest', 'relheld') + A('View held job', '#/jobs/' + encodeURIComponent(h.id)) : ''); }
+  else if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
@@ -1227,7 +1236,7 @@ pages.job = {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
-    const sg = segs(v), calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
+    const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
@@ -1453,7 +1462,7 @@ const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', g
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
 const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', updates: 'update', appearance: 'palette' };
-let ncHTML = '', tsOpen = false;
+let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
@@ -1645,14 +1654,18 @@ pages.settings = {
   },
   live() { G[this.g].live?.(); $('#dbar').hidden = !isDirty() && !$('#f-adduser')?.value; },
 };
+const serveOn = t => !!t?.serve?.TCP?.['8443'];
 async function loadTs() {
+  const was = TS && !TS.err ? serveOn(TS) : null;
   try { TS = await api('/api/tailscale'); } catch (e) { TS = { err: e.message }; }
+  // Serve changed some other way (CLI, another tab): the last toggle error no longer applies.
+  if (serveSt?.err && !TS.err && was !== null && serveOn(TS) !== was) serveSt = null;
   if (cur === pages.settings && pages.settings.g === 'network') renderTs();
 }
 addEventListener('toggle', e => { if (e.target.matches?.('#ts details')) tsOpen = e.target.open; }, true);
 function renderTs() {
   if (TS.err) return setHTML($('#ts'), `<div class="card"><div class="cal" style="margin-top:0">${esc(TS.err)}</div><button class="btn" data-act="tsr">${ic('refresh')}Retry</button></div>`);
-  const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = !!TS.serve?.TCP?.['8443'], url = `https://${dns}:8443`;
+  const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = serveOn(TS), url = `https://${dns}:8443`;
   const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
   const row = p => {
     const ip = (p.TailscaleIPs || [])[0] || '', pg = pings.get(ip), ls = iso(p.LastSeen);
@@ -1663,7 +1676,8 @@ function renderTs() {
   };
   setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn', undefined, 1)}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
       <dt>This machine</dt><dd>${esc(self.HostName || '—')}</dd><dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd><dt>IPs</dt><dd class="mono">${(self.TailscaleIPs || []).map(esc).join(', ') || '—'}</dd></dl></div>
-    <div class="card"><h2>Serve over HTTPS${hq('serve')}</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${on ? 'checked' : ''}><span>${on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate.'}</span></div>
+    <div class="card"><h2>Serve over HTTPS${hq('serve')}</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${(serveSt?.busy ? serveSt.want : on) ? 'checked' : ''}${serveSt?.busy ? ' disabled' : ''}><span>${serveSt?.busy ? (serveSt.want ? 'Turning on…' : 'Turning off…') : on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate. The tailnet must have HTTPS certificates on.'}</span></div>
+      ${serveSt?.err ? `<div class="cal" role="alert">${esc(serveSt.err)}</div>` : !on && st.BackendState === 'Running' && !(st.CertDomains || []).length ? `<div class="cal w">This tailnet can't issue HTTPS certificates yet. Turn on DNS › HTTPS Certificates in the <a href="https://login.tailscale.com/admin/dns" target="_blank" rel="noopener">Tailscale admin console</a> first.</div>` : ''}
       <details${(document.querySelector('#ts details')?.open ?? tsOpen) ? ' open' : ''}><summary>Raw serve config</summary><pre class="raw">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></details></div>
     <div class="card"><h2>Peers <span class="fg2 sm" style="font-weight:400">${peers.filter(p => p.Online).length} of ${peers.length} online</span></h2>${peers.length ? `<ul class="list">${peers.map(row).join('')}</ul>` : '<p class="fg2">No peers.</p>'}</div>
 `);
@@ -1762,7 +1776,7 @@ const GUIDES = [
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
     <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
     <p>The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
-    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.73.48.98')}</li>
+    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
     <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
   ['cache', 'Caching', () => `<h2>Caching</h2>
@@ -1784,7 +1798,7 @@ const GUIDES = [
     <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
     <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
     <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
 ];
@@ -1840,6 +1854,7 @@ const ACT = {
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() { await post(`/api/vms/${encodeURIComponent(pages.job.id)}/release`); toast('Releasing'); await poll(); },
+  async relheld() { const h = oldestHeld(); if (h) { await post(`/api/vms/${encodeURIComponent(h.id)}/release`); toast('Releasing'); await poll(); } },
   copyssh: b => copy(b.dataset.id, 'ssh command copied').then(() => copied(b)),
   async clearcache(b) {
     const r = b.dataset.id;
@@ -1924,7 +1939,9 @@ const ACT = {
     renderTs();
   },
   async serve(b) {
-    try { await post('/api/tailscale/serve', { on: b.checked }); toast(b.checked ? 'Serve on' : 'Serve off'); } finally { $('#ts')._h = null; loadTs(); }
+    // Errors (no certs, a timeout, kiln unreachable) stay next to the toggle; the reload reverts it.
+    const want = b.checked; serveSt = { busy: 1, want }; renderTs();
+    try { await post('/api/tailscale/serve', { on: want }); serveSt = null; toast(want ? 'Serve on' : 'Serve off'); } catch (e) { serveSt = { err: e.message }; } finally { $('#ts')._h = null; await loadTs(); }
   },
   async netcheck(b) {
     b.disabled = true; $('#nc').textContent = 'Running…';

@@ -71,7 +71,7 @@ The hook can only see where the event came from, not what the workflow then chec
 Console lines may shape the timeline but cannot rewind state or extend a VM's life:
 
 - each lifecycle line ("Listening for Jobs", "Running job", the result) is accepted once and only forward;
-- the hold is granted only after a non-success verdict line; a job can forge that or cancel its own hold, but cannot hold a VM that never ran a job;
+- the hold is granted only after a "Failed" (or "Abandoned") verdict line; a job can forge that or cancel its own hold, but cannot hold a VM that never ran a job, nor take the last free VM slot (at most `max_vms - 1` holds, and the oldest is released when a job is queued);
 - lines are capped at 64 KiB (a longer line and its remainder are never parsed) and logs at 64 MiB;
 - every VM has a **hard lifetime cap** of idle timeout + job timeout + hold time + 5 minutes, enforced by kiln outside the guest.
 
@@ -81,7 +81,7 @@ kiln launches no VM, warm ones included, on a base image baked from an older rec
 
 ### Self-update
 
-kiln installs only releases signed with its release key. Release CI signs each tarball's bytes with an Ed25519 key; the public key is compiled into kiln. The key is a secret of the `release` GitHub Environment, which only `v*` tags can deploy to, and only the `sign` job uses it: that job runs in its own fresh VM after a separate `build` job (where build scripts, proc macros and rustup run) has produced the tarballs, executes no project code, writes the key only to a mode 0600 temporary file removed in the same step, and verifies every signature against the embedded public key before publishing. A tag push runs the workflow file of the tagged commit, so whoever can push a `v*` tag can get a release signed: on this repository that is only the owner (there are no other collaborators; on GitHub Pro or a public repository, add a tag ruleset restricting `v*` to admins). The "tag is on main" check in the workflow guards against mistakes, not against a malicious tagger. Before unpacking anything, kiln verifies the signature, then the tarball's SHA-256, then lists the archive and extracts only the `kiln` binary, which must report the release's version (so an old signed build relabelled as a new release is refused). A compromised release page or `update_repo` setting cannot make kiln run an unsigned binary; what it can do is withhold updates, or (by pointing `update_repo` at a copy of the releases) offer a genuine signed release that is newer than the running one but not the newest. A compromised owner account can publish signed releases. Updates are applied only from the dashboard (or `auto_update`), behind the access guard.
+kiln installs only releases signed with its release key. Release CI signs each tarball's bytes with an Ed25519 key; the public key is compiled into kiln. The key is a secret of the `release` GitHub Environment, which only `v*` tags can deploy to, and only the `sign` job uses it: that job runs in its own fresh VM after a separate `build` job (where build scripts, proc macros and rustup run) has produced the tarballs, executes no project code, writes the key only to a mode 0600 temporary file removed in the same step, and verifies every signature against the embedded public key before publishing. A tag push runs the workflow file of the tagged commit, so whoever can push a `v*` tag can get a release signed: on this repository a tag ruleset restricts creating, moving and deleting `v*` tags to repository admins. Workflows on pull requests from forks, by any external contributor, need approval before they run (a repository setting), in addition to kiln's own fork refusal. The "tag is on main" check in the workflow guards against mistakes, not against a malicious tagger. Before unpacking anything, kiln verifies the signature, then the tarball's SHA-256, then lists the archive and extracts only the `kiln` binary, which must report the release's version (so an old signed build relabelled as a new release is refused). A compromised release page or `update_repo` setting cannot make kiln run an unsigned binary; what it can do is withhold updates, or (by pointing `update_repo` at a copy of the releases) offer a genuine signed release that is newer than the running one but not the newest. A compromised owner account can publish signed releases. Updates are applied only from the dashboard (or `auto_update`), behind the access guard.
 
 **Who can sign:** the release workflow signs whatever a `v*` tag points at, so anyone who can push such a tag to the repository can produce a signed release, but only of a commit already on `main` (the workflow refuses otherwise) and only when the tag matches `Cargo.toml`'s version. Protect `main` and restrict who can push `v*` tags (a tag ruleset) accordingly. The key reaches only the signing step, which runs after the build and packaging, runs no project code and fetches nothing; the next step checks every signature against the public key in `src/update.rs`, so a wrong key never publishes.
 
@@ -138,13 +138,6 @@ jobs:
 
 ## Reporting a vulnerability
 
-Please report security problems privately, never in a public issue:
-
-- preferred: GitHub's private vulnerability reporting on this repository (Security › Advisories › Report a vulnerability);
-- otherwise: contact **@Bunty9** on GitHub and ask for a private channel.
-
-Include what you found, how to reproduce it and the kiln version (`kiln --version`).
-
-What to expect: an acknowledgement within 3 working days, an assessment within 10, and a fix or mitigation plan for confirmed issues as soon as it is ready; you are credited in the advisory unless you prefer not to be. Fixes ship as a new release (kiln updates itself, see [Self-update](#self-update)) with a GitHub security advisory. Only the latest release is supported: there are no backports.
+Please do not open a public issue for a vulnerability. Report it privately through GitHub's private vulnerability reporting: on the repository, go to **Security › Report a vulnerability**. Include what you found, how to reproduce it and the kiln version (`kiln --version`). There is no formal response-time guarantee, but reports will be looked at promptly.
 
 Releases are signed (see [Self-update](#self-update)), and on the public repository each release tarball also has a GitHub build provenance attestation: `gh attestation verify kiln-X.Y.Z-x86_64-linux.tar.gz --repo Bunty9/kiln`. CI checks dependencies against the RustSec advisory database, licenses and sources with `cargo deny` on every change.

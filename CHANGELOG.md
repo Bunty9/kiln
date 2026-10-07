@@ -22,11 +22,29 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - **Host graphs on the Overview.** The Host card's CPU and memory bars are split by job VM, one colour per VM (the same colour marks its tile under Now running), with grey for the rest of the host. Opening the card shows stacked area charts of both over the last 5 minutes, 15 minutes or an hour, scrolling continuously, with a crosshair readout per VM. kiln samples `/proc` every 2 s and keeps an hour in memory (`GET /api/host`).
 - **On crates.io as `kiln-ci`:** `cargo install kiln-ci --locked --root ~/.local` installs the `kiln` binary. Every `v*` tag publishes there after the GitHub release.
 
+### Changed
+
+- Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
+
 ### Fixed
 
 - **"Saved this month" counts every job.** It summed only the last 100 jobs the dashboard loads, so a busy month read low (one box ran 239 jobs in two days). kiln now keeps job minutes per UTC day and VM size in `<data>/usage.json`, seeded from the VM history on first start. Each job counts from start to its result as GitHub bills it, so a debug hold is no longer billed (jobs recorded before this version, and jobs killed before a result, count until the VM ended), and is priced at the current GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute; the old figures predated GitHub's 2026 price cut). The month is the UTC calendar month GitHub bills by. A custom flat rate still overrides.
 
 - VM records (`meta.json`) are written atomically, so a crash mid-write no longer hides a VM from the startup cleanup.
+
+## [0.2.3] - 2026-10-07
+
+### Fixed
+
+- **Serve over HTTPS** no longer hangs and leaks a `tailscale serve` process on a tailnet without HTTPS certificates (#15). kiln reads `CertDomains` from `tailscale status` first and refuses with "This tailnet can't issue HTTPS certificates. Enable DNS › HTTPS Certificates in the Tailscale admin console…". Every tailscale CLI call now runs with stdin closed in its own process group, bounded (15 s for `serve`, 20 s otherwise; turning serve on takes at most 35 s end to end: the ≤20 s `tailscale status` preflight plus the ≤15 s `serve`), and the whole group is killed on timeout or when the client goes away, so the request always returns and nothing is left behind.
+- The Serve toggle shows the server's error (including a timeout) next to it instead of silently reverting, and warns up front when the tailnet has HTTPS certificates off. `kiln doctor` and Diagnostics show "tailscale HTTPS: unavailable on this tailnet (DNS › HTTPS Certificates is off)" in that case.
+- A GitHub outage of runner registration no longer burns a VM a minute with no signal ([#16](https://github.com/Bunty9/kiln/issues/16)). kiln mints the JIT runner config before it creates the VM's directory, disk or QEMU, so a refused registration costs one API call and leaves nothing on disk. The VM record, job page and journal say "runner registration failed: GitHub returned HTTP 500 (generate-jitconfig)" instead of a generic failure.
+- A 5xx (or no answer) from runner registration pauses all launches for 1, 2, 5, then 10 minutes, capped, instead of a per-repo backoff that kept retrying every minute; a 4xx stays a per-repo failure. After each pause kiln launches a single probe VM rather than the whole queue, and in GitHub App mode a failure minting the installation token is classified the same way. The first successful registration resumes launches. Registration failures are marked `mint_failed` on the VM record: they stay out of Failed in 24h, Recent failures and browser notifications, and only the latest 5 are kept, so an outage does not push job history out. The Overview shows "GitHub is rejecting runner registration (HTTP 500) — launches paused, retrying in N min" (`poll.blocked_kind` `github_api`), and the journal logs a warning once per backoff step.
+- A VM whose runner came online but got no job (it went to another runner or was cancelled) ends in the new `unneeded` state, shown as "not needed", instead of `failed`. It no longer counts in Failed in 24h, Recent failures or the per-repo backoff. A runner that exits before coming online, or after starting a job without a result, is still `failed`, with a note saying which.
+- `debug_hold_mins` no longer holds cancelled jobs ([#17](https://github.com/Bunty9/kiln/issues/17)). Only a `Failed` (or `Abandoned`) result earns a hold; a `cancel-in-progress` cancellation, which has nothing to inspect, releases its VM at once.
+- Debug holds can no longer deadlock the queue: at most `max_vms - 1` VMs are held at once (none with `max_vms: 1`), and when a job is queued with no free slot, kiln releases the hold that expires first, noting "hold released early: a queued job needed the slot" on the VM and in the journal.
+- The Overview says when holds keep jobs waiting: "N of M slots held for debugging — jobs are waiting" (`poll.blocked_kind` `held`), with Release oldest and a link to the held job. docs/configuration.md explains what a hold costs.
+- `kiln doctor`'s repo check exercises the write path: it mints a runner registration token (cached 10 minutes per repo) and reports "runner registration works" or "runner registration failing: HTTP 500", instead of a green "runners, actions and contents reachable" while registration was impossible.
 
 ## [0.2.2] - 2026-10-07
 
@@ -125,7 +143,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0

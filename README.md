@@ -46,23 +46,32 @@ On the CI box.
 
 ### Install from a GitHub Release
 
-The repository is private, so use an authenticated `gh`. Two builds are published: `x86_64-linux` (glibc 2.39+, Ubuntu 24.04 / Debian 13 or newer) and `x86_64-linux-musl` (fully static, any x86_64 Linux).
+Two builds are published: `x86_64-linux` (glibc 2.39+, Ubuntu 24.04 / Debian 13 or newer) and `x86_64-linux-musl` (fully static, any x86_64 Linux).
 
 ```sh
-v=0.2.0 flavor=x86_64-linux          # or x86_64-linux-musl
+flavor=x86_64-linux          # or x86_64-linux-musl
+v=$(curl -s https://api.github.com/repos/Bunty9/kiln/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
+f=kiln-$v-$flavor.tar.gz url=https://github.com/Bunty9/kiln/releases/latest/download
 cd "$(mktemp -d)"
-gh release download "v$v" -R Bunty9/kiln -p "kiln-$v-$flavor.tar.gz*"
-sha256sum -c "kiln-$v-$flavor.tar.gz.sha256"
-# Optional: check the Ed25519 release signature (the same key kiln uses for its own updates)
-printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > pub.der
-printf '%s' zOK6AdHJZXwFqAOUApNnaU7r5PZSCjkpAjLRu2w16ZM= | base64 -d >> pub.der
-openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin \
-  -in "kiln-$v-$flavor.tar.gz" -sigfile "kiln-$v-$flavor.tar.gz.sig"
-tar -xzf "kiln-$v-$flavor.tar.gz"
+curl -fLO "$url/$f" -fLO "$url/$f.sha256"
+sha256sum -c "$f.sha256"
+tar -xzf "$f"
 install -Dm755 "kiln-$v-$flavor/kiln" ~/.local/bin/kiln
 install -Dm644 "kiln-$v-$flavor/deploy/kiln.service" ~/.config/systemd/user/kiln.service
 kiln --version
 ```
+
+<details>
+<summary>Optional: check the Ed25519 release signature (the same key kiln uses for its own updates)</summary>
+
+```sh
+curl -fLO "$url/$f.sig"
+printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > pub.der
+printf '%s' zOK6AdHJZXwFqAOUApNnaU7r5PZSCjkpAjLRu2w16ZM= | base64 -d >> pub.der
+openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in "$f" -sigfile "$f.sig"
+```
+
+</details>
 
 After that, kiln updates itself from the dashboard (Settings › Updates), installing only releases signed with that key.
 
@@ -80,7 +89,7 @@ curl -fsSL "https://raw.githubusercontent.com/Bunty9/kiln/v$v/deploy/kiln.servic
 ### Or build from source
 
 ```sh
-gh repo clone Bunty9/kiln && cd kiln
+git clone https://github.com/Bunty9/kiln && cd kiln
 cargo build --release
 install -Dm755 target/release/kiln ~/.local/bin/kiln
 install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service
@@ -99,7 +108,7 @@ The unit ([`deploy/kiln.service`](deploy/kiln.service)) runs `~/.local/bin/kiln 
 
 ### Open the dashboard
 
-Open `http://<box>:7878` from your own devices on the tailnet (or users in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve from Settings > Network, which publishes it at `https://<box>.<tailnet>.ts.net:8443`.
+Open `http://<box>:7878` from your own devices on the tailnet (or users in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve from Settings > Network, which publishes it at `https://<box>.<tailnet>.ts.net:8443`. The tailnet must have HTTPS certificates enabled (Tailscale admin console › DNS › HTTPS Certificates); without them kiln refuses and says so.
 
 ### Setup
 
