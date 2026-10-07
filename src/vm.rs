@@ -1322,7 +1322,7 @@ async fn bake_inner(app: &App) -> Result<()> {
 
     let rel = app.gh.raw(reqwest::Method::GET, "repos/actions/runner/releases/latest", None).await?;
     let tag: serde_json::Value = serde_json::from_slice(&rel.body)?;
-    let version = tag["tag_name"].as_str().context("runner release tag")?.trim_start_matches('v').to_string();
+    let version = runner_version(tag["tag_name"].as_str().context("runner release tag")?)?;
     say(format!("actions runner {version}")).await?;
 
     let work = img.join("bake");
@@ -1411,6 +1411,17 @@ async fn bake_inner(app: &App) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&work).await;
     say("base image ready".into()).await?;
     Ok(())
+}
+
+/// The actions/runner version in a release tag ("v2.338.0"). It is templated into the
+/// bake's root shell, so anything but N.N.N is refused.
+fn runner_version(tag: &str) -> Result<String> {
+    let v = tag.strip_prefix('v').unwrap_or(tag);
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() != 3 || !parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+        bail!("unexpected actions/runner release tag {tag:?}");
+    }
+    Ok(v.to_string())
 }
 
 /// Version of the guest recipe (guest/user-data.yaml) that the host relies on.
@@ -2172,6 +2183,15 @@ mod tests {
         assert_eq!(rebake_reason(&apt(&["a", "b"]), &n(&["24"]), &n(&["b", "a"])), None);
         assert!(rebake_reason(&apt(&["a"]), &n(&["24"]), &n(&["a", "b"])).unwrap().contains("bake_apt_packages"));
         assert!(rebake_reason(&cur(&["24"]), &n(&["24"]), &n(&["chromium"])).unwrap().contains("bake_apt_packages"));
+    }
+
+    #[test]
+    fn runner_versions() {
+        assert_eq!(runner_version("v2.338.0").unwrap(), "2.338.0");
+        assert_eq!(runner_version("2.10.11").unwrap(), "2.10.11");
+        for bad in ["v2.338", "v2.338.0-rc1", "v2.338.0; reboot", "v2.338.0\n", "v2..0", "", "v", "v2.3a8.0", "vv2.338.0"] {
+            assert!(runner_version(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
