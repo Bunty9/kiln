@@ -15,6 +15,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - `bake_apt_packages`: extra apt packages baked into the image. Changing the set marks the image stale.
 - `/var/cache/apt/archives` lives on the repo cache disk, so `apt-get install` reuses downloaded packages.
 - `kiln doctor` names the missing token permission per repo; the dashboard shows the token's expiry and save time and warns before it expires.
+- Dashboard polish: elevated surfaces instead of outlines, an icon set, hover and focus tooltips on states, stats and actions, no layout shift between pages, and Settings › Appearance (theme, density, accent, reduced motion; per browser). In App mode, Setup and Repos show the App install button and a Refresh, and a failed App creation can be retried.
 
 ### Security
 
