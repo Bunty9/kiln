@@ -85,6 +85,10 @@ impl Gh {
     /// never handed out here: only `mint`, `discover` and `app_info` use it, directly.
     async fn token_for(&self, path: &str) -> Result<String> {
         let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
+        // CLI commands (bake, doctor) never ran the scheduler's discovery.
+        if a.discovered_at.load(Ordering::Relaxed) == 0 {
+            self.discover().await?;
+        }
         let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap()).context("the GitHub App has no installations")?;
         self.mint(&a, inst).await
     }

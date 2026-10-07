@@ -1693,15 +1693,31 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     });
 
     let src = app.gh.source();
-    out.push(match (app.gh.has_token(), src) {
-        (false, _) => check("token", false, "no token: set one in the dashboard, KILN_GITHUB_TOKEN, or `gh auth login`"),
-        (true, "gh") => check(
-            "token",
-            true,
-            "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead",
-        ),
-        (true, s) => check("token", true, format!("source: {s}")),
-    });
+    if let Some(a) = app.gh.app() {
+        if let Err(e) = app.gh.discover().await {
+            out.push(check("app discovery", false, format!("{e:#}")));
+        }
+        out.push(match app.gh.app_info(&a).await {
+            Ok(v) => check("github app", true, format!("{} (id {})", v["slug"].as_str().unwrap_or("?"), a.id)),
+            Err(e) => check("github app", false, format!("{e:#}")),
+        });
+        let n = a.names.read().unwrap().len();
+        out.push(if n > 0 {
+            check("app installations", true, format!("{n} repo(s)"))
+        } else {
+            check("app installations", false, format!("installed on no repo: {}/installations/new", a.html_url))
+        });
+    } else {
+        out.push(match (app.gh.has_token(), src) {
+            (false, _) => check("token", false, "no token: set one in the dashboard, KILN_GITHUB_TOKEN, or `gh auth login`"),
+            (true, "gh") => check(
+                "token",
+                true,
+                "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead",
+            ),
+            (true, s) => check("token", true, format!("source: {s}")),
+        });
+    }
     // A read per permission kiln needs; 403/404 on one names the missing permission
     // (fine-grained tokens) instead of a generic API failure.
     const NEEDS: [(&str, &str); 3] = [
