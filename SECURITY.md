@@ -56,7 +56,7 @@ The hook can only see where the event came from, not what the workflow then chec
 Console lines may shape the timeline but cannot rewind state or extend a VM's life:
 
 - each lifecycle line ("Listening for Jobs", "Running job", the result) is accepted once and only forward;
-- the hold is granted only after a non-success verdict line; a job can forge that or cancel its own hold, but cannot hold a VM that never ran a job;
+- the hold is granted only after a "Failed" (or "Abandoned") verdict line; a job can forge that or cancel its own hold, but cannot hold a VM that never ran a job, nor take the last free VM slot (at most `max_vms - 1` holds, and the oldest is released when a job is queued);
 - lines are capped at 64 KiB (a longer line and its remainder are never parsed) and logs at 64 MiB;
 - every VM has a **hard lifetime cap** of idle timeout + job timeout + hold time + 5 minutes, enforced by kiln outside the guest.
 

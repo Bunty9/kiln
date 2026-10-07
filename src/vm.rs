@@ -37,6 +37,7 @@ pub enum State {
     Unknown,
 }
 
+const NO_ROOM: &str = "not held: holds never take the last free VM slot";
 const NOT_NEEDED: &str = "not needed: the queued job went to another runner or was cancelled";
 
 /// End state and note of a VM whose guest powered off cleanly without a job result.
@@ -582,7 +583,14 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 observe(app, id, &text);
                 if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
+                    let max_vms = app.cfg().max_vms;
+                    let held = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Held).count();
                     let mut hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
+                    // Checked again when granting; this skips publishing a port for nothing.
+                    if hold.is_some() && !hold_room(held, max_vms) {
+                        note(app, id, NO_ROOM);
+                        hold = None;
+                    }
                     if let (Some(_), Some((ip, port))) = (hold, &ssh_host)
                         && let Err(e) = publish_ssh(dir, publish, ip, *port).await
                     {
@@ -591,14 +599,28 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         hold = None;
                     }
                     if let (Some(secs), Some((ip, port))) = (hold, &ssh_host) {
-                        let v = update(app, id, |v| {
-                            v.state = State::Held;
-                            v.hold_until = Some(now() + secs);
-                            v.ssh = Some(format!("ssh -p {port} runner@{ip}"));
-                            v.ssh_port = Some(*port);
-                        });
+                        // Count and grant under one lock: two verdicts at once cannot both take the last free slot.
+                        let v = {
+                            let mut vms = app.vms.lock().unwrap();
+                            let n = vms.iter().filter(|v| v.state == State::Held).count();
+                            let room = hold_room(n, max_vms);
+                            vms.iter_mut().find(|v| v.id == id).map(|v| {
+                                if room {
+                                    v.state = State::Held;
+                                    v.hold_until = Some(now() + secs);
+                                    v.ssh = Some(format!("ssh -p {port} runner@{ip}"));
+                                    v.ssh_port = Some(*port);
+                                } else {
+                                    v.note = Some(NO_ROOM.into());
+                                }
+                                v.clone()
+                            })
+                        };
                         if let Some(v) = v {
                             persist(app, &v);
+                            if v.state != State::Held {
+                                hold = None;
+                            }
                         }
                     }
                     send(&mut stdin, &decide_msg(hold)).await;
@@ -652,13 +674,48 @@ async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
     }
 }
 
-/// Seconds to hold the VM, if at all. Only a job that started and ended with a
-/// verdict other than success is worth keeping, and only when there is a way in.
-/// The guest asking early (no verdict yet) is answered "release", so a job
-/// cannot force a hold by printing `kiln: decide` itself.
+/// Seconds to hold the VM, if at all. Only a job that started and failed is worth
+/// keeping, and only when there is a way in. A cancelled job (often `cancel-in-progress`
+/// on a branch being pushed to) has nothing to inspect. "Abandoned" is the runner's
+/// verdict when it lost the job. The guest asking early (no verdict yet) is answered
+/// "release", so a job cannot force a hold by printing `kiln: decide` itself.
 fn decide(hold_mins: u64, can_ssh: bool, job_started: bool, result: Option<&str>) -> Option<u64> {
-    (hold_mins > 0 && can_ssh && job_started && result.is_some_and(|r| r != "Succeeded")).then_some(hold_mins * 60)
+    let failed = matches!(result, Some("Failed" | "Abandoned"));
+    (hold_mins > 0 && can_ssh && job_started && failed).then_some(hold_mins * 60)
 }
+
+/// One more hold leaves a slot free: at most `max_vms - 1` VMs are held, so holds can
+/// slow the queue but never stop it. With `max_vms` 1, nothing is held.
+fn hold_room(held: usize, max_vms: usize) -> bool {
+    held + 1 < max_vms
+}
+
+/// The hold to end early for a queued job: the one expiring first. A hold already
+/// released (its `hold_until` passed) is powering off and is not picked again.
+fn oldest_hold(vms: &[Vm], t: u64) -> Option<String> {
+    vms.iter().filter(|v| v.state == State::Held && v.hold_until.is_some_and(|u| u > t)).min_by_key(|v| v.hold_until).map(|v| v.id.clone())
+}
+
+/// Ends the oldest debug hold because a queued job needs its slot. Returns true if one was.
+pub fn release_oldest_hold(app: &App) -> bool {
+    let v = {
+        let mut vms = app.vms.lock().unwrap();
+        let Some(id) = oldest_hold(&vms, now()) else { return false };
+        let Some(v) = vms.iter_mut().find(|v| v.id == id) else { return false };
+        // Also the run loop's safety net: the guest gets 60 s to power off.
+        v.hold_until = Some(now());
+        v.note = Some(EARLY_RELEASE.into());
+        v.clone()
+    };
+    persist(app, &v);
+    tracing::info!("{}: {EARLY_RELEASE}", v.id);
+    if let Some(n) = app.releases.lock().unwrap().get(&v.id) {
+        n.notify_one();
+    }
+    true
+}
+
+const EARLY_RELEASE: &str = "hold released early: a queued job needed the slot";
 
 /// How a held VM's SSH port reaches the host.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -2260,7 +2317,28 @@ mod tests {
         assert_eq!(decide_msg(decide(0, true, true, f)), "release\n");
         assert_eq!(decide_msg(decide(30, false, true, f)), "release\n"); // no way in
         assert_eq!(decide_msg(decide(30, true, false, None)), "release\n"); // never ran a job
-        assert_eq!(decide_msg(decide(30, true, true, Some("Cancelled"))), "hold 1800\n");
+        // A cancel has no failure to inspect (often cancel-in-progress): never held.
+        for r in ["Canceled", "Cancelled", "Skipped", "SucceededWithIssues", "whatever"] {
+            assert_eq!(decide_msg(decide(30, true, true, Some(r))), "release\n", "{r}");
+        }
+        assert_eq!(decide_msg(decide(30, true, true, Some("Abandoned"))), "hold 1800\n");
+    }
+
+    #[test]
+    fn holds_never_take_the_last_slot() {
+        assert!(!hold_room(0, 0) && !hold_room(0, 1)); // max_vms 1: a hold would stop the queue
+        assert!(hold_room(0, 2) && !hold_room(1, 2));
+        assert!(hold_room(2, 4) && !hold_room(3, 4));
+    }
+
+    #[test]
+    fn oldest_hold_released_first() {
+        let held = |id: &str, until: Option<u64>| Vm { hold_until: until, ..vm(id, State::Held, None) };
+        let vms = [vm("a", State::Busy, None), held("b", Some(900)), held("c", Some(500)), held("d", Some(100))];
+        // "d" was already released (hold_until passed) and is powering off: not picked again
+        assert_eq!(oldest_hold(&vms, 200).as_deref(), Some("c"));
+        assert_eq!(oldest_hold(&vms, 1000), None);
+        assert_eq!(oldest_hold(&[vm("a", State::Busy, None)], 0), None);
     }
 
     #[test]

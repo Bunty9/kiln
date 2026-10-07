@@ -271,7 +271,7 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
-    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "disk" or "budget".
+    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "disk", "budget" or "held".
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
@@ -645,6 +645,13 @@ fn gate_kind(m: &str) -> &'static str {
     if m.starts_with("low disk") { "disk" } else { "memory" }
 }
 
+/// The `held` banner when queued jobs (`demand`) find no free slot and debug holds take some:
+/// the queue is waiting on holds, which looks like an outage unless said.
+fn held_block(demand: usize, max_vms: usize, active: usize, held: usize) -> Option<String> {
+    (demand > 0 && max_vms > 0 && held > 0 && active >= max_vms)
+        .then(|| format!("{held} of {max_vms} slots held for debugging — jobs are waiting"))
+}
+
 /// Pick up a token that appeared (keyring unlocked, env fixed) or was rotated.
 async fn reload_token(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
@@ -741,6 +748,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut errors = vec![];
     let mut repo_errors = HashMap::new();
     let mut refused_forks = HashMap::new();
+    let mut released = false;
     // Rotate the start so the first repo doesn't always win scarce slots.
     let repos = app.repos();
     let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
@@ -778,10 +786,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         sizes.dedup();
         for n in sizes {
             let queued = by_size.get(&n).copied().unwrap_or(0);
-            let (waiting, active) = {
+            let (waiting, active, holds) = {
                 let vms = app.vms.lock().unwrap();
                 let waiting = vms.iter().filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.cpus == n && v.state.is_waiting()).count();
-                (waiting, vms.iter().filter(|v| v.state.is_active()).count())
+                let holds = vms.iter().filter(|v| v.state == vm::State::Held).count();
+                (waiting, vms.iter().filter(|v| v.state.is_active()).count(), holds)
             };
             // Draining: every waiting VM is surplus, and none are kept warm.
             let target = if draining { 0 } else { cfg.warm_target(repo, n) };
@@ -803,6 +812,13 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
             let want = api.allow(now(), want, probing);
             probing |= want > 0;
+            // A debug hold must not keep a queued job waiting: end the oldest (one per tick).
+            if let (false, Some(m)) = (held, held_block(demand, cfg.max_vms, active, holds)) {
+                released = released || vm::release_oldest_hold(app);
+                if blocked.is_none() {
+                    blocked = Some(("held", m));
+                }
+            }
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
             if blocked.is_none() {
@@ -874,6 +890,16 @@ mod tests {
     fn gate_kinds() {
         assert_eq!(gate_kind(&vm::launch_gate(0, 2048, Some(500), None, None).unwrap()), "memory");
         assert_eq!(gate_kind(&vm::launch_gate(1 << 20, 2048, Some(1), None, None).unwrap()), "disk");
+    }
+
+    #[test]
+    fn held_slots_block_queued_jobs() {
+        // max_vms 2: one busy, one held, a job queued -> the hold is in the way
+        assert_eq!(held_block(1, 2, 2, 1).unwrap(), "1 of 2 slots held for debugging — jobs are waiting");
+        assert!(held_block(1, 2, 1, 1).is_none()); // a slot is free: it launches
+        assert!(held_block(0, 2, 2, 1).is_none()); // nothing queued
+        assert!(held_block(1, 2, 2, 0).is_none()); // full, but not because of holds
+        assert!(held_block(1, 0, 1, 1).is_none()); // paused: holds are not why
     }
 
     #[test]

@@ -77,8 +77,18 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `debug_hold_mins` | integer | `0` | `0` to `120` | live (new VMs) | Keep a job VM whose job ended with a verdict other than success alive for SSH this long. `0` is off. Needs at least one key in `debug_ssh_keys`. |
+| `debug_hold_mins` | integer | `0` | `0` to `120` | live (new VMs) | Keep a job VM whose job failed alive for SSH this long. `0` is off. Needs at least one key in `debug_ssh_keys`. A held VM keeps its VM slot; see [Debug holds and the queue](#debug-holds-and-the-queue). |
 | `debug_ssh_keys` | string array | `[]` | single-line public keys starting `ssh-`, `ecdsa-` or `sk-` | live (new VMs) | Keys allowed into a held VM (login as `runner`, key-only). Changing keys, or turning the hold on or off, recycles idle VMs that booted with the old values. |
+
+#### Debug holds and the queue
+
+A held VM keeps its memory and one of the `max_vms` slots, so holds compete with queued jobs. kiln keeps that cost bounded:
+
+- **Only failures are held.** A job whose result is `Failed` (or `Abandoned`, the runner losing the job) is held. A cancelled job never is: usually it is `concurrency: cancel-in-progress` on a branch someone is pushing to, and there is nothing to inspect. Succeeded, skipped, and jobs kiln itself stopped (job timeout, kill) are not held either, nor a VM that never ran a job. A job that hits its workflow `timeout-minutes` is cancelled by GitHub and is therefore not held.
+- **Never the last slot.** At most `max_vms - 1` VMs are held at once, so one slot always stays free for the queue. With `max_vms: 1` nothing is held. A failure that finds no room is released at once, with the note "not held: holds never take the last free VM slot".
+- **Early release when jobs wait.** When a job is queued and every slot is taken, with at least one held, kiln releases the hold that would expire first (one per poll). Its VM's note says "hold released early: a queued job needed the slot", and the journal logs it. Until the slot frees, the Overview shows "N of M slots held for debugging — jobs are waiting" (`poll.blocked_kind` `held`) with **Release oldest**.
+
+In practice a hold lasts `debug_hold_mins` only while the box has spare slots; under load, SSH in quickly.
 
 ### Updates
 
