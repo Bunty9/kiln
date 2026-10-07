@@ -66,6 +66,17 @@ kiln --version
 
 After that, kiln updates itself from the dashboard (Settings › Updates), installing only releases signed with that key.
 
+### Or install from crates.io
+
+The crate is `kiln-ci` (`kiln` is taken there); the binary is still `kiln`. `--root ~/.local` puts it where the service unit expects it.
+
+```sh
+cargo install kiln-ci --locked --root ~/.local
+v=$(kiln --version | awk '{print $2}')
+curl -fsSL "https://raw.githubusercontent.com/Bunty9/kiln/v$v/deploy/kiln.service" \
+  | install -Dm644 /dev/stdin ~/.config/systemd/user/kiln.service
+```
+
 ### Or build from source
 
 ```sh
@@ -126,7 +137,7 @@ kiln updates itself from signed GitHub releases: Settings › Updates shows when
 
 A first-run stepper takes over until kiln is set up. After that there are four pages:
 
-- **Overview:** health banners only when something needs you (token, image, backoff, rate limit, memory, mirror), one "chamber" per VM slot with live timers, jobs today, failures, median job time and an estimate of minutes saved against GitHub-hosted prices.
+- **Overview:** health banners only when something needs you (token, image, backoff, rate limit, memory, mirror), one "chamber" per VM slot with live timers, jobs today, failures, median job time and an estimate of minutes saved against GitHub-hosted prices. The Host card splits CPU and memory by job VM and opens into live charts of the last hour.
 - **Jobs:** every job VM, filterable. The detail page shows a queue, boot, wait and job timeline, the exit reason, and three log sources: live **console**, live **steps** (the runner's `_diag/pages`, mirrored over a second serial port) and the **GitHub** log once the job finishes. ANSI colour, follow, wrap, copy, download, and a Kill button.
 - **Repos:** connected repos, whether jobs actually route to kiln, workflows (with dispatch), recent runs (rerun or cancel), jobs and steps.
 - **Settings:** capacity (and pause), timeouts, access, GitHub token, image (rebake, Docker mirror, auto-rebake), cache, debugging, network (egress mode, Tailscale peers, ping, netcheck, HTTPS serve), notifications, diagnostics (the same checks as `kiln doctor`) and updates.

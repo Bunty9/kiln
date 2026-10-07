@@ -1,0 +1,28 @@
+# cargo-deny policy, checked in CI (`cargo deny --locked check`).
+# Schema: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[advisories]
+# RustSec: vulnerabilities and unsound crates always fail.
+unmaintained = "all" # fail on unmaintained crates anywhere in the tree
+yanked = "deny"
+ignore = [] # each entry needs a reason and must not affect kiln
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# crates.io only: no git dependencies, no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+# Exactly what the dependency tree uses (`cargo deny list`); all permissive.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",        # subtle
+  "ISC",                 # ring, rustls-webpki, untrusted
+  "Unicode-3.0",         # icu_* / zerovec family (via url/idna)
+  "CDLA-Permissive-2.0", # webpki-roots (Mozilla CA list data)
+]

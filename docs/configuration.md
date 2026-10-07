@@ -7,7 +7,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 - Location: `<data>/config.json`, where `<data>` is `$KILN_DATA` or `~/.local/share/kiln`.
 - A missing file means all defaults. A partial file is fine: every field has a default, and unknown fields are ignored.
 - The dashboard saves the whole object atomically (write to `config.json.tmp`, then rename) after validating it. A rejected save returns the reason and changes nothing.
-- On startup kiln only parses the file; it does not check the ranges below until the next save from the dashboard. Keep a hand-edited file within them.
+- On startup kiln validates the file with the same rules as a dashboard save and refuses to start if it is invalid (so a typo like `"egress": "Filtered"` can never quietly mean open networking). The error names the field.
 - Changes made from the dashboard apply to the running process. Hand edits need a restart.
 
 "Live" below means a change from the dashboard takes effect without restarting kiln. VMs that are already running keep the values they booted with (for example the timeouts and the memory size), unless noted.
@@ -63,9 +63,9 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `bake_node_versions` | list of strings | `["24"]` | 1 to 4 entries, each a major (`"20"`, newest release of it) or an exact version (`"20.19.5"`) | next bake | Node versions pre-installed into `/opt/hostedtoolcache`, so `actions/setup-node` with a matching `node-version` resolves offline. The newest is the plain `node` on `PATH`. Versions are looked up on nodejs.org at bake time and recorded in `base.json`; changing the set (not just its order) marks the image stale (rebake needed). An image baked by an older kiln, before the fork-refusal hook, is stale too. |
+| `bake_node_versions` | list of strings | `["24"]` | 1 to 4 entries, each a major (`"20"`, newest release of it) or an exact version (`"20.19.5"`) | next bake | Node versions pre-installed into `/opt/hostedtoolcache`, so `actions/setup-node` with a matching `node-version` resolves offline. The newest is the plain `node` on `PATH`. Versions are looked up on nodejs.org at bake time and recorded in `base.json`; changing the set (not just its order) marks the image stale (rebake needed). An image baked by an older kiln, before the current job hooks (fork refusal, cold release builds), is stale too. |
 | `bake_apt_packages` | list of strings | `[]` | up to 32 apt package names (`a-z 0-9 . + -`, starting with a letter or digit and not ending in `-` or `+`, which apt reads as remove or install markers) | next bake | Extra packages installed into the base image (`apt-get install --no-install-recommends`), e.g. `chromium` and its fonts for a PDF render test. Recorded in `base.json`; changing the set marks the image stale. A name apt doesn't know fails the bake. |
-| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, `bake_node_versions` or `bake_apt_packages` changed since the bake, or an older kiln baked it. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically, except when the image was baked by a kiln older than the current guest recipe (`recipe` in `base.json`): then nothing launches until the rebake, because that image lacks the fork-refusal hook. With `auto_rebake` off, rebake by hand after upgrading kiln. |
+| `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, `bake_node_versions` or `bake_apt_packages` changed since the bake, or an older kiln baked it. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically, except when the image was baked by a kiln older than the current guest recipe (`recipe` in `base.json`): then nothing launches until the rebake, because that image lacks the current job hooks (fork refusal, cold release builds). With `auto_rebake` off, rebake by hand after upgrading kiln. |
 
 ### Network
 
@@ -169,13 +169,15 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
 ## Data directory
 
 ```
-<data>/                          $KILN_DATA or ~/.local/share/kiln
+<data>/                          $KILN_DATA or ~/.local/share/kiln; set to mode 0700 at every start
   config.json                    settings
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
+  usage.json                     job minutes per UTC day and VM size, for "Saved this month" (kept 400 days)
+  audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked
   images/
@@ -186,10 +188,13 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   bin/registry                   pinned Docker registry binary
   registry/                      config.yml, registry.log, data/ (the pull cache)
   cache/<owner>__<name>.qcow2    per-repo cache disk (lowercase names)
+  rk/<id>/                       rootlesskit state of a filtered VM (deleted when it exits)
   vms/<id>/                      one directory per VM
     meta.json                    VM record
     console.log, steps.log       console and step output, each capped at 64 MiB
-                                 (disk.qcow2, cache.qcow2, the JIT secret and sockets are deleted when the VM exits)
+    egress.nft                   filtered mode's rules (deleted when the VM exits)
+    q/                           the only directory the VM's confined QEMU may write: disk.qcow2,
+                                 cache.qcow2, the JIT secret and sockets (deleted when the VM exits)
 ```
 
 kiln keeps the 200 most recent VM records and prunes older finished ones, directory included. The cache directory counts toward the "low disk" message.

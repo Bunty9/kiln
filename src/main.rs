@@ -1,11 +1,14 @@
 mod app_auth;
+mod audit;
+mod confine;
 mod github;
+mod host;
 mod mirror;
 mod update;
 mod vm;
 mod web;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -326,9 +329,7 @@ impl App {
     }
 
     pub fn save_token(&self, t: String) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(self.data.join("token"))?;
-        std::io::Write::write_all(&mut f, t.trim().as_bytes())?;
+        app_auth::write_private(&self.data.join("token"), t.trim().as_bytes())?;
         self.gh.set_token(t.trim().to_string(), "file");
         Ok(())
     }
@@ -374,8 +375,16 @@ fn pick_token(env: Option<String>, file: Option<String>, only_file: bool, gh: im
     if gh.is_empty() { (gh, "none") } else { (gh, "gh") }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    // Before any runtime thread exists: confines itself, then execs a job VM's QEMU.
+    if args.next().is_some_and(|a| a == confine::ARG) {
+        confine::main(args);
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
+}
+
+async fn run() -> Result<()> {
     if matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V" | "version")) {
         println!("kiln {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -384,6 +393,8 @@ async fn main() -> Result<()> {
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
+    // Absolute: paths built from it go into Landlock rules and QEMU arguments.
+    let data = std::path::absolute(&data)?;
     // First, before anything that can fail (a bad config.json included), so a new version
     // that dies early still counts its boots and gets rolled back. CLI runs never count.
     if is_serve(std::env::args().nth(1).as_deref()) {
@@ -392,10 +403,14 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(data.join("vms"))?;
     std::fs::create_dir_all(data.join("images"))?;
     std::fs::create_dir_all(data.join("update"))?;
-    let cfg: Config = match std::fs::read(data.join("config.json")) {
-        Ok(b) => serde_json::from_slice(&b)?,
-        Err(_) => Config::default(),
-    };
+    // Job logs, repo caches and the key files all live here: other local users stay out,
+    // whatever the umask was when it was created.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 0700 {}", data.display()))?;
+    }
+    let cfg = load_config(&data)?;
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
     *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
@@ -437,6 +452,11 @@ async fn main() -> Result<()> {
         a if is_serve(a) => {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
+            tokio::spawn(host::run(app.clone()));
+            match confine::probe() {
+                (true, d) if !d.starts_with("warning") => tracing::info!("{d}"),
+                (_, d) => tracing::warn!("job VM confinement: {d}"),
+            }
             if app.cfg().egress == "filtered" {
                 let a = app.clone();
                 tokio::spawn(async move {
@@ -462,6 +482,21 @@ async fn main() -> Result<()> {
             );
             std::process::exit(2)
         }
+    }
+}
+
+/// `<data>/config.json`, validated: a hand-edited typo must not fail open (an `egress` of
+/// "Filtered" quietly meaning open). Only a missing file means the defaults, which the
+/// dashboard's first save adjusts to the host; an unreadable one is an error, not "open".
+fn load_config(data: &std::path::Path) -> Result<Config> {
+    match std::fs::read(data.join("config.json")) {
+        Ok(b) => {
+            let c: Config = serde_json::from_slice(&b).context("config.json")?;
+            c.validate().context("config.json is invalid; fix it or remove it to start from the defaults")?;
+            Ok(c)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e).context("reading config.json"),
     }
 }
 
@@ -647,13 +682,13 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
     // Fail closed: filtered jobs never fall back to open networking.
     let egress_err = if cfg.egress == "filtered" { vm::egress_ready(app, false).await.err() } else { None };
-    // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
+    // An image from an older recipe may lack the job hooks (fork refusal, cold release builds): launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
         .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
-        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())))
+        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
         .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
     let mut budget = {
@@ -788,6 +823,24 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_load_fails_closed() {
+        let d = std::env::temp_dir().join(format!("kiln-test-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(load_config(&d).unwrap().egress, "open", "no file: defaults");
+        std::fs::write(d.join("config.json"), r#"{"egress":"filtered"}"#).unwrap();
+        assert_eq!(load_config(&d).unwrap().egress, "filtered");
+        std::fs::write(d.join("config.json"), r#"{"egress":"Filtered"}"#).unwrap();
+        assert!(load_config(&d).is_err(), "a typo never means open");
+        std::fs::write(d.join("config.json"), "{").unwrap();
+        assert!(load_config(&d).is_err());
+        std::fs::remove_file(d.join("config.json")).unwrap();
+        std::fs::create_dir(d.join("config.json")).unwrap();
+        assert!(load_config(&d).is_err(), "unreadable is not missing");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn gate_kinds() {

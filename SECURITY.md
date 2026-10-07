@@ -29,13 +29,26 @@ The dashboard holds a GitHub token and can kill VMs, so access is checked on eve
 - **Everything else is refused:** the LAN, the public internet, and anything not on the tailnet.
 - **Host header check.** The `Host` (through `tailscale serve`, the `X-Forwarded-Host` tailscaled sets) must be an IP, `localhost`, a `*.ts.net` name or a single-label MagicDNS name. This blocks DNS rebinding.
 - **CSRF header.** Every non-GET request to `/api/` needs the custom `x-kiln` header, which a browser cannot add cross-origin without a CORS preflight that kiln never grants.
-- **GitHub proxy allow-list.** `/api/gh/...` passes only GET and POST to `repos/<configured repo>/actions/` for workflows, runs and jobs, with plain path characters only and no dot segments. Runners, secrets and variables are unreachable.
-- **Response headers.** `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store` on API responses.
+- **GitHub proxy allow-list.** `/api/gh/...` reads only `repos/<configured repo>/actions/` workflows, runs and jobs, with plain path characters only and no dot segments, and writes only what the dashboard does: rerun or cancel a run, dispatch a workflow. Runners, secrets, variables, run approvals and deployment reviews are unreachable.
+- **Response headers.** A strict `Content-Security-Policy`: `default-src 'none'`, scripts only by the SHA-256 of the page's own inline blocks (computed from the embedded page at startup), connections to the same origin only, forms only to `https://github.com`, no framing, no `<base>`. An injected script or handler does not run even if some string slipped past the page's HTML escaping, which matters because the page holds the dashboard key. Also `X-Content-Type-Options: nosniff` (the GitHub proxy passes content types through), `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy: same-origin`, a `Permissions-Policy` denying camera, microphone, location, USB and payment, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store` on API responses. The page only links to `https://github.com/` URLs it gets from the API.
+- **Audit log.** Every admitted API write is appended to `<data>/audit.log` (mode 0600, rolled over at 8 MiB, also written to kiln's log); refused writes are logged to kiln's log only, so a job cannot flood the file: when, the tailnet login or `local`, the source address, method, path, status, and what changed (the keys of a config save, the repo of a cache clear). Ship it to your log pipeline if you need it kept.
+- **Bounded identity lookups.** The `tailscale` CLI calls the guard depends on are killed after 20 seconds; a timeout counts as an unknown identity, which is refused, or, when kiln cannot learn its own addresses at all, as local, which needs the dashboard key.
 - The GitHub token is stored with mode 0600 and never included in error messages. A job VM only ever receives a single-use JIT runner configuration, which is deleted from the host as soon as the guest has read it.
 
 ### VM isolation
 
 Each job runs in its own QEMU/KVM guest on a throwaway qcow2 overlay, so nothing survives the job. QEMU runs as your unprivileged user, with no tap devices, bridges or sudo. The job's disk, JIT secret and sockets are deleted when the VM ends, and runners that never ran are deregistered.
+
+### VMM confinement
+
+A QEMU escape is out of scope, but kiln limits what one would gain, as libvirt does for its guests:
+
+- **seccomp:** every QEMU runs with `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`, so an escaped QEMU cannot start a shell or any other program, gain privileges or use obsolete syscalls. A QEMU without seccomp support refuses the option and no VM starts.
+- **Landlock:** a job VM's QEMU is started through `kiln __confine`, which restricts it to the system directories (read-only), `/dev/kvm` and the standard character devices, the images directory and its own repo's cache disk (read-only), and its VM's `q/` directory (disks, JIT secret, sockets). It cannot read the GitHub token, the App key, the dashboard key, other jobs' files or other repos' caches, cannot write its own VM record or logs, and cannot ptrace kiln or other VMs; on Linux 6.12+ it also cannot signal them or use abstract unix sockets; with the newest Landlock ABI it cannot connect to unix sockets such as tailscaled's or Docker's. Landlock is best effort: `kiln doctor` and kiln's startup log report what the kernel enforces. A trusted cache overlay is committed only after `qemu-img info` shows a plain qcow2 file backed by exactly that repo's cache disk, with no external data file, so a compromised QEMU cannot steer the commit into another file.
+
+### Files on the host
+
+The data directory is set to mode 0700 at every start, and the systemd unit sets `UMask=0077`: job logs (which may contain what a job printed), repo caches, VM disks and the key files are private to the kiln user. Secret files (token, App key, dashboard key) are written atomically with mode 0600 even when a looser file existed. `config.json` is validated at startup and kiln refuses to start on an invalid one, so a hand-edited typo cannot weaken a setting (for example an `egress` value that is neither `open` nor `filtered`).
 
 ### Filtered egress
 
@@ -44,6 +57,8 @@ With `egress: "filtered"` each job's QEMU runs in its own rootless network names
 ### Cache trust
 
 The per-repo cache disk follows a trusted-writer, throwaway-reader rule. Every job gets a private overlay, and an overlay is merged back only when the job succeeded according to GitHub's API (not just the console), the event was a `push`, the branch is the default branch or one of the repo's `cache_branches`, and the commit is really on that branch. A branch name outside `A-Z a-z 0-9 . _ / -` (or containing `..`) never writes. A pull request can read the cache but never poison it. The decision uses GitHub's data because the job controls its own console output.
+
+Release builds do not read the cache at all: a job for a pushed tag or a `release` event detaches it before its first step and runs on the clean base image, so a dependency compromised in some default-branch job cannot plant a toolchain that ends up in what you ship. After every job, login tokens that tools write under cached paths (`cargo login`, `huggingface-cli login`) are deleted before the cache can be saved. See [docs/architecture.md](docs/architecture.md#release-builds-run-cold).
 
 ### Fork pull requests
 
@@ -62,7 +77,7 @@ Console lines may shape the timeline but cannot rewind state or extend a VM's li
 
 ### Base image
 
-kiln launches no VM, warm ones included, on a base image baked from an older recipe than the binary expects (`recipe` in `images/base.json`), since such an image may lack the fork-refusal hook. The dashboard shows why, and `auto_rebake` (or Settings › Image) replaces the image. The bake refuses an `actions/runner` release tag that is not `N.N.N`, checks each Node tarball against the release's `SHASUMS256.txt` from nodejs.org before unpacking it, and accepts only plain apt package names in `bake_apt_packages` (no trailing `-` or `+`, which apt reads as remove or install, and no `=` or `/` version pins). The Node checksum guards against a corrupted or swapped tarball, not against nodejs.org itself, since the sums come from the same origin over HTTPS.
+kiln launches no VM, warm ones included, on a base image baked from an older recipe than the binary expects (`recipe` in `images/base.json`), since such an image may lack the current job hooks (fork refusal, cold release builds). The dashboard shows why, and `auto_rebake` (or Settings › Image) replaces the image. The bake refuses an `actions/runner` release tag that is not `N.N.N`, checks each Node tarball against the release's `SHASUMS256.txt` from nodejs.org before unpacking it, and accepts only plain apt package names in `bake_apt_packages` (no trailing `-` or `+`, which apt reads as remove or install, and no `=` or `/` version pins). The Node checksum guards against a corrupted or swapped tarball, not against nodejs.org itself, since the sums come from the same origin over HTTPS.
 
 ### Self-update
 
@@ -84,7 +99,7 @@ sshd does not run during jobs. Held VMs accept keys from `debug_ssh_keys` only (
 
 kiln is honest about these:
 
-- **Open egress is the default.** With `egress: "open"`, a job has full outbound access including your LAN and your tailnet (it appears to come from the box). That is fine for your own private repos and not for untrusted code. Filtered mode is opt-in until it has been verified on more hosts.
+- **Open egress is the default.** With `egress: "open"`, a job has full outbound access including your LAN and your tailnet (it appears to come from the box), and, through QEMU's `10.0.2.2`, **every service listening on the host's loopback** (databases, dev servers, local admin UIs): QEMU's user networking has no switch to turn that off. That is fine for your own private repos and not for untrusted code or a box that runs other services. Filtered mode blocks all of it except the Docker mirror; it is opt-in until it has been verified on more hosts.
 - **DNS exfiltration in filtered mode.** DNS goes through the host's resolver, so a job can leak data in DNS queries. DNS is not filtered.
 - **IPv6 is disabled, not filtered.**
 - **The denylist covers private ranges only.** Public addresses that the host can reach are not blocked. Notably, if your router hairpins its WAN address, a job could reach services you forwarded from the Internet. Keep Tailscale subnet-route acceptance off on this host, since routed subnets would also be reachable.
@@ -94,6 +109,10 @@ kiln is honest about these:
 - **The base image gives `runner` passwordless sudo,** and bake VMs always use open networking.
 - **Local file secrets.** The GitHub token and dashboard key are plain files readable by the kiln user.
 - **One host.** There is no tenant separation between repos beyond VM and cache-disk isolation.
+- **Nested virtualization is on.** Guests get `-cpu host` and may use KVM themselves (Android emulators, VM tests), which exposes the host's nested-virtualization code to jobs.
+- **Secrets in cached paths persist.** Apart from the login tokens kiln scrubs, anything a trusted job writes under a cached directory (including Docker images built with secrets in their layers) is visible to later jobs of the repo, pull requests included, exactly as with `actions/cache`.
+- **One release key.** Self-update trusts a single Ed25519 key; losing it means installing one release by hand on every box, and a leaked key must be rotated the same way. Releases carry no signed expiry, so a mirror can withhold updates (see [Self-update](#self-update)).
+- **Landlock depends on the kernel.** Without it (Linux older than 5.13, or `landlock` missing from `lsm=`), QEMU is limited by seccomp only.
 
 ## Recommendations
 
@@ -119,4 +138,13 @@ jobs:
 
 ## Reporting a vulnerability
 
-kiln is a private personal project. If you find a security problem, please report it privately and do not open a public issue: contact **@Bunty9** on GitHub (for example through a private message or a private security advisory on the repository, if you have access). Include what you found, how to reproduce it and the kiln version (`kiln --version`). There is no formal response-time guarantee, but reports will be looked at promptly.
+Please report security problems privately, never in a public issue:
+
+- preferred: GitHub's private vulnerability reporting on this repository (Security › Advisories › Report a vulnerability);
+- otherwise: contact **@Bunty9** on GitHub and ask for a private channel.
+
+Include what you found, how to reproduce it and the kiln version (`kiln --version`).
+
+What to expect: an acknowledgement within 3 working days, an assessment within 10, and a fix or mitigation plan for confirmed issues as soon as it is ready; you are credited in the advisory unless you prefer not to be. Fixes ship as a new release (kiln updates itself, see [Self-update](#self-update)) with a GitHub security advisory. Only the latest release is supported: there are no backports.
+
+Releases are signed (see [Self-update](#self-update)), and on the public repository each release tarball also has a GitHub build provenance attestation: `gh attestation verify kiln-X.Y.Z-x86_64-linux.tar.gz --repo Bunty9/kiln`. CI checks dependencies against the RustSec advisory database, licenses and sources with `cargo deny` on every change.
