@@ -1284,6 +1284,9 @@ async fn sh(log: &Path, cmd: &mut Command) -> Result<()> {
 
 async fn bake_inner(app: &App) -> Result<()> {
     let cfg = app.cfg();
+    // config.json may be hand-edited and is only validated on dashboard saves; apt
+    // names and Node versions reach the bake's root shell, so check them here too.
+    cfg.validate().context("config.json is invalid, not baking")?;
     let img = images(&app.data);
     let log = img.join("bake.log");
     tokio::fs::write(&log, "").await?;
