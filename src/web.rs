@@ -273,7 +273,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
-        "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg().bake_node_versions),
+        "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
         "host": host_stats(&app).await,

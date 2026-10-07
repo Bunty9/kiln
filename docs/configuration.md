@@ -29,7 +29,8 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 |---|---|---|---|---|---|
 | `max_vms` | integer | `2` | `0` to `64` | live | Maximum VMs at once (booting, idle, busy or held). `0` pauses launching; polling and everything else continues, and warm VMs are not kept. |
 | `vm_cpus` | integer | `4` | `1` to the host's thread count | live (new VMs) | vCPUs of the default size, the one plain `[self-hosted, kiln]` gets. Also used by `kiln bake` for the bake VM. |
-| `vm_mem_mb` | integer | `8192` | at least `1024` | live (new VMs) | RAM in MB of the default size. Other sizes use min(N x 2048, 24576) MB. The bake VM uses at least 4096. |
+| `vm_mem_mb` | integer | `8192` | at least `1024` | live (new VMs) | RAM in MB of the default size. Other sizes use min(N x 2048, 24576) MB unless `size_mem_mb` says otherwise. The bake VM uses at least 4096. |
+| `size_mem_mb` | object | `{}` | vCPU count (`1` to the host's threads) to MB (`1024` to `1048576`) | live (new VMs) | Memory of a non-default size, e.g. `{"8": 12288}` for an 8 vCPU / 12 GB VM on a box shared with a desktop. The default size always uses `vm_mem_mb`. Set in Settings › Capacity as `8=12` (GB). |
 | `vm_disk_gb` | integer | `40` | at least `10` | next bake | Virtual size of the guest disk. It is applied when the base image is baked (the image is resized then); job overlays inherit it. Rebake after changing it. |
 
 ### Polling and timeouts
@@ -56,12 +57,14 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | `cache` | bool | `true` | | live (new VMs) | Attach a per-repo persistent cache disk to every job and commit it back when the trust rule allows. |
 | `cache_branches` | object | `{}` | `"owner/name"` (a configured repo) to a list of exact branch names (case-sensitive, no wildcards; letters, digits, `-_./`) | live | Extra branches whose successful pushes also save that repo's cache, besides the default branch. For a branch model like feature, then PR to `dev`, then `dev` promoted: `{"o/n": ["dev"]}`. The other trust conditions are unchanged: only `push` events whose job GitHub reports as `success`, and the commit must really be on that branch (a tag named `dev` does not count). Pull requests never save, whatever their branch is called. |
 | `cache_gb` | integer | `30` | `5` to `500` | live | Virtual size of a cache disk when it is created. A cache that has actually grown past 1.2 x `cache_gb` at commit time is deleted and starts empty. The size of existing cache files does not change. |
+| `repo_cache_gb` | object | `{}` | `"owner/name"` (a configured repo) to `5` to `500` | live | Per-repo override of `cache_gb`, for both the size of a new cache disk and the 1.2x reset limit. An existing disk keeps its virtual size until it is reset or cleared. Set on the repo page. |
 
 ### Image
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `bake_node_versions` | list of strings | `["24"]` | 1 to 4 entries, each a major (`"20"`, newest release of it) or an exact version (`"20.19.5"`) | next bake | Node versions pre-installed into `/opt/hostedtoolcache`, so `actions/setup-node` with a matching `node-version` resolves offline. The newest is the plain `node` on `PATH`. Versions are looked up on nodejs.org at bake time and recorded in `base.json`; changing the set (not just its order) marks the image stale (rebake needed). An image baked by an older kiln, before the fork-refusal hook, is stale too. |
+| `bake_apt_packages` | list of strings | `[]` | up to 32 apt package names (`a-z 0-9 . + -`, starting with a letter or digit) | next bake | Extra packages installed into the base image (`apt-get install --no-install-recommends`), e.g. `chromium` and its fonts for a PDF render test. Recorded in `base.json`; changing the set marks the image stale. A name apt doesn't know fails the bake. |
 | `auto_rebake` | bool | `true` | | live | Rebake automatically when the image is stale: its runner version differs from the latest actions/runner release, it is more than 25 days old, or `bake_node_versions` changed since the bake. At most once every 6 hours (the timer resets when kiln restarts). Jobs that queue meanwhile launch on the old base, which is swapped atomically. |
 
 ### Network
@@ -123,7 +126,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   images/
     base.qcow2                   frozen base image
     base.vmlinuz                 kernel the VMs boot (direct kernel boot)
-    base.json                    {baked_at, runner_version, node_versions, node_wanted}
+    base.json                    {recipe, baked_at, runner_version, node_versions, node_wanted, apt_wanted}
     bake.log, bake.lock          last bake log; lock so only one bake runs
   bin/registry                   pinned Docker registry binary
   registry/                      config.yml, registry.log, data/ (the pull cache)

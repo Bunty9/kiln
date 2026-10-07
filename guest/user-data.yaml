@@ -1,7 +1,7 @@
 #cloud-config
 # Bake recipe for the kiln base image. Runs once (`kiln bake`), then the image
 # is frozen; every job boots a throwaway qcow2 overlay of it.
-# {{RUNNER_VERSION}} and {{NODE_VERSIONS}} are filled in by kiln.
+# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln.
 hostname: kiln
 users:
   - name: runner
@@ -104,6 +104,11 @@ write_files:
       apt-get purge -y snapd unattended-upgrades || true
       systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer motd-news.timer \
         e2scrub_reap.service fwupd-refresh.timer
+      # Extra packages from bake_apt_packages (names validated by kiln); none = skip.
+      APT_EXTRA="{{APT_PACKAGES}}"
+      if [ -n "$APT_EXTRA" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $APT_EXTRA
+      fi
       apt-get clean
       systemctl enable kiln-job.service kiln-cache.service
       # sshd only exists for held (failed) jobs: kiln-job starts it. Noble socket-activates it, so disable both.

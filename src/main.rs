@@ -23,6 +23,9 @@ pub struct Config {
     pub vm_cpus: u32,
     pub vm_mem_mb: u32,
     pub vm_disk_gb: u32,
+    /// vCPUs -> memory MB of that size, overriding the built-in min(N x 2048, 24576).
+    /// The default size uses `vm_mem_mb`.
+    pub size_mem_mb: BTreeMap<u32, u32>,
     pub poll_secs: u64,
     pub job_timeout_mins: u64,
     /// A VM that booted but never got a job (cancelled, picked by another runner) is reaped after this.
@@ -36,6 +39,8 @@ pub struct Config {
     /// Node versions baked into the tool cache ("20" = newest 20.x, or exact "20.19.5").
     /// The newest is the bare `node`. Takes effect at the next bake.
     pub bake_node_versions: Vec<String>,
+    /// Extra apt packages installed into the base image. Takes effect at the next bake.
+    pub bake_apt_packages: Vec<String>,
     /// Per-repo persistent cache disk (see vm.rs: trusted writer, throwaway readers).
     pub cache: bool,
     /// "owner/name" -> branches whose successful pushes may also save the cache,
@@ -43,6 +48,8 @@ pub struct Config {
     pub cache_branches: BTreeMap<String, Vec<String>>,
     /// Virtual size of a new repo cache; it is reset when it grows past 1.2x this.
     pub cache_gb: u32,
+    /// "owner/name" -> cache size in GB for that repo, overriding `cache_gb`.
+    pub repo_cache_gb: BTreeMap<String, u32>,
     /// Docker mirror storage cap; over it (checked every 10 min) the cache is wiped.
     pub mirror_gb: u32,
     /// Keep a failed job's VM this long for SSH debugging. 0 = off.
@@ -67,6 +74,7 @@ impl Default for Config {
             vm_cpus: 4,
             vm_mem_mb: 8192,
             vm_disk_gb: 40,
+            size_mem_mb: BTreeMap::new(),
             poll_secs: 5,
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
@@ -74,9 +82,11 @@ impl Default for Config {
             docker_mirror: true,
             auto_rebake: true,
             bake_node_versions: vec!["24".into()],
+            bake_apt_packages: vec![],
             cache: true,
             cache_branches: BTreeMap::new(),
             cache_gb: 30,
+            repo_cache_gb: BTreeMap::new(),
             mirror_gb: 20,
             debug_hold_mins: 0,
             debug_ssh_keys: vec![],
@@ -111,7 +121,16 @@ impl Config {
     }
 
     pub fn mem_mb(&self, cpus: u32) -> u32 {
-        if cpus == self.vm_cpus { self.vm_mem_mb } else { github::size_mem_mb(cpus) }
+        if cpus == self.vm_cpus {
+            self.vm_mem_mb
+        } else {
+            self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| github::size_mem_mb(cpus))
+        }
+    }
+
+    /// Cache disk size of `repo`: its `repo_cache_gb` entry, else `cache_gb`.
+    pub fn cache_gb_for(&self, repo: &str) -> u32 {
+        self.repo_cache_gb.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(self.cache_gb, |(_, &g)| g)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -150,6 +169,21 @@ impl Config {
         }
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
+        }
+        if let Some((r, _)) =
+            self.repo_cache_gb.iter().find(|(r, g)| !(5..=500).contains(*g) || !self.repos.iter().any(|x| x.eq_ignore_ascii_case(r)))
+        {
+            bail!("repo_cache_gb: {r:?} must be a configured repo with 5..=500 GB");
+        }
+        if let Some((n, _)) = self.size_mem_mb.iter().find(|(n, m)| !(1..=host).contains(*n) || !(1024..=1_048_576).contains(*m)) {
+            bail!("size_mem_mb: size {n} must be 1..={host} vCPUs with 1024..=1048576 MB");
+        }
+        let apt_ok = |p: &String| {
+            p.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".+-".contains(c))
+        };
+        if self.bake_apt_packages.len() > 32 || !self.bake_apt_packages.iter().all(apt_ok) {
+            bail!("bake_apt_packages: up to 32 apt package names (a-z 0-9 . + -)");
         }
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
@@ -465,7 +499,7 @@ fn should_rebake(cfg: &Config, stale: bool, baking: bool, t: u64, last: u64) -> 
 
 fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let stale = vm::image_info(&app.data, app.gh.latest_cached(), &cfg.bake_node_versions)["stale"] == true;
+    let stale = vm::image_info(&app.data, app.gh.latest_cached(), cfg)["stale"] == true;
     let baking = app.baking.load(Ordering::SeqCst);
     if !should_rebake(cfg, stale, baking, now(), LAST.load(Ordering::Relaxed)) {
         return;
@@ -683,6 +717,13 @@ mod tests {
         };
         assert!(branches("A/B", "dev"));
         assert!(!branches("a/b", "dev/") && !branches("a/b", ".dev") && !branches("a/b", "dev?x") && !branches("a/b", "release/*"));
+        let sized = |r: &str, g: u32| {
+            let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
+            c.repo_cache_gb.insert(r.into(), g);
+            c.validate_for(8).is_ok()
+        };
+        assert!(sized("A/B", 60) && sized("a/b", 5) && sized("a/b", 500));
+        assert!(!sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
         let mut c = Config::default();
         c.cache_branches.insert("Owner/Repo".into(), vec!["dev".into()]);
         assert_eq!(c.cache_branches("owner/repo"), ["dev"]);
@@ -694,6 +735,16 @@ mod tests {
         assert!(!branches("a/b", "dev branch"));
         assert!(!branches("a/b", "-dev"));
         assert!(ok(|c| c.bake_node_versions = vec!["20".into(), "24.21.0".into()]));
+        assert!(ok(|c| c.bake_apt_packages = vec!["chromium".into(), "libnss3".into(), "g++-12".into(), "fonts-liberation2".into()]));
+        assert!(!ok(|c| c.bake_apt_packages = vec!["Chromium".into()]));
+        assert!(!ok(|c| c.bake_apt_packages = vec!["-y".into()]));
+        assert!(!ok(|c| c.bake_apt_packages = vec!["a; reboot".into()]));
+        assert!(!ok(|c| c.bake_apt_packages = vec!["".into()]));
+        assert!(!ok(|c| c.bake_apt_packages = (0..33).map(|i| format!("p{i}")).collect()));
+        assert!(ok(|c| c.size_mem_mb = [(8, 12288), (2, 1024)].into()));
+        assert!(!ok(|c| c.size_mem_mb = [(9, 12288)].into()));
+        assert!(!ok(|c| c.size_mem_mb = [(0, 12288)].into()));
+        assert!(!ok(|c| c.size_mem_mb = [(8, 1000)].into()));
         assert!(!ok(|c| c.bake_node_versions = vec![]));
         assert!(!ok(|c| c.bake_node_versions = vec!["v20".into()]));
         assert!(!ok(|c| c.bake_node_versions = vec!["20.1".into()]));
@@ -709,6 +760,12 @@ mod tests {
         assert_eq!(c.runner_labels(4), ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"]);
         assert_eq!(c.runner_labels(8), ["self-hosted", "linux", "x64", "kiln-8cpu"]);
         assert_eq!((c.mem_mb(4), c.mem_mb(2), c.mem_mb(16)), (8192, 4096, 24576));
+        let c = Config { size_mem_mb: [(8, 12288), (4, 1024)].into(), ..Config::default() };
+        // overrides apply to non-default sizes only; the default size is vm_mem_mb
+        assert_eq!((c.mem_mb(8), c.mem_mb(4), c.mem_mb(2)), (12288, 8192, 4096));
+        let mut c = Config { cache_gb: 30, ..Config::default() };
+        c.repo_cache_gb.insert("Owner/Repo".into(), 80);
+        assert_eq!((c.cache_gb_for("owner/repo"), c.cache_gb_for("other/repo")), (80, 30));
         assert_eq!(c.poll_secs, 5);
     }
 
