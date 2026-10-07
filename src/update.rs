@@ -7,6 +7,7 @@ use crate::{App, now};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -184,6 +185,36 @@ async fn download(app: &App, repo: &str, id: u64) -> Result<Vec<u8>> {
     Ok(r.bytes().await?.to_vec())
 }
 
+/// Run `tar args` with `input` (the verified tarball, in memory) on its stdin.
+async fn tar<S: AsRef<OsStr>>(args: impl IntoIterator<Item = S>, input: &[u8]) -> Result<std::process::Output> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    let mut child = Command::new("tar")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("tar")?;
+    let mut stdin = child.stdin.take().context("tar stdin")?;
+    let input = input.to_vec();
+    // Written concurrently with reading its output, so neither pipe can stall the other.
+    // A write error (tar quit early) shows in tar's status.
+    let writer = tokio::spawn(async move { stdin.write_all(&input).await });
+    let out = child.wait_with_output().await.context("tar")?;
+    let _ = writer.await;
+    Ok(out)
+}
+
+/// Write `path` and flush it to disk: a counted boot or a pending update must survive a crash.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     let mut s = exe.as_os_str().to_owned();
     s.push(suffix);
@@ -231,23 +262,22 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     let x = dir.join("x");
     let _ = tokio::fs::remove_dir_all(&x).await;
     tokio::fs::create_dir_all(&x).await?;
-    let path = dir.join(&name);
-    tokio::fs::write(&path, &tgz).await?;
+    // tar reads the verified bytes from memory: no file that could change after the check.
     let stem = name.trim_end_matches(".tar.gz");
-    let list = Command::new("tar").arg("-tzf").arg(&path).output().await.context("tar")?;
+    let list = tar(["-tzf", "-"], &tgz).await?;
     if !list.status.success() || !archive_ok(&String::from_utf8_lossy(&list.stdout), stem) {
         bail!("{name}: unexpected archive layout");
     }
     // Only the binary is extracted: nothing else in the archive is ever written.
     let member = format!("{stem}/kiln");
-    let st =
-        Command::new("tar").args(["--no-same-owner", "-xzf"]).arg(&path).arg("-C").arg(&x).arg(&member).status().await.context("tar")?;
-    let _ = tokio::fs::remove_file(&path).await;
+    let args = [OsStr::new("--no-same-owner"), OsStr::new("-xzf"), OsStr::new("-"), OsStr::new("-C"), x.as_os_str(), OsStr::new(&member)];
+    let st = tar(args, &tgz).await?.status;
     let new = x.join(&member);
     if !st.success() || !tokio::fs::symlink_metadata(&new).await.is_ok_and(|m| m.is_file()) {
         bail!("{name}: extracting {member} failed");
     }
-    let out = tokio::time::timeout(Duration::from_secs(10), Command::new(&new).arg("--version").output()).await;
+    // kill_on_drop: a binary that hangs is killed when the timeout drops the future.
+    let out = tokio::time::timeout(Duration::from_secs(10), Command::new(&new).arg("--version").kill_on_drop(true).output()).await;
     let got = out.ok().and_then(|o| o.ok()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     if got != format!("kiln {}", rel.version) {
         bail!("{name}: the new binary reports {got:?}, expected \"kiln {}\" (does it run on this host?)", rel.version);
@@ -260,6 +290,8 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&x).await;
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).await?;
+    // On disk before the rename that makes it the binary systemd starts.
+    tokio::fs::File::open(&staged).await?.sync_all().await?;
 
     // Drain: no new VMs (warm included), idle ones reaped, running jobs finish.
     app.draining.store(true, Ordering::SeqCst);
@@ -300,7 +332,7 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
 
     tracing::info!("updating kiln {VERSION} -> {}", rel.version);
     let pending = Pending { from: VERSION.into(), to: rel.version.clone(), attempts: 0 };
-    std::fs::write(dir.join("pending.json"), serde_json::to_vec(&pending)?)?;
+    write_synced(&dir.join("pending.json"), &serde_json::to_vec(&pending)?)?;
     let prev = sibling(&exe, ".prev");
     let _ = std::fs::remove_file(&prev);
     let swapped =
@@ -354,7 +386,7 @@ pub fn on_start(data: &Path) {
         }
         Boot::Retry(p) => {
             tracing::info!("kiln {} started after an update (boot {} of {MAX_BOOTS})", p.to, p.attempts);
-            let _ = std::fs::write(&path, serde_json::to_vec(&p).unwrap_or_default());
+            let _ = write_synced(&path, &serde_json::to_vec(&p).unwrap_or_default());
         }
         Boot::Rollback(p) => {
             let _ = std::fs::remove_file(&path);
@@ -549,6 +581,27 @@ mod tests {
         assert!(!archive_ok(&format!("{ok}other/kiln\n"), s));
         assert!(!archive_ok(&format!("{ok}kiln-0.2.0-x86_64-linux-evil/kiln\n"), s));
         assert!(!archive_ok("", s));
+    }
+
+    #[tokio::test]
+    async fn tar_reads_the_verified_bytes_from_memory() {
+        let d = std::env::temp_dir().join(format!("kiln-test-tar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src/k-1")).unwrap();
+        std::fs::write(d.join("src/k-1/kiln"), b"binary").unwrap();
+        std::fs::write(d.join("src/k-1/README"), b"doc").unwrap();
+        let tgz = std::process::Command::new("tar").args(["-czf", "-", "-C"]).arg(d.join("src")).arg("k-1").output().unwrap().stdout;
+        std::fs::remove_dir_all(d.join("src")).unwrap();
+        let list = tar(["-tzf", "-"], &tgz).await.unwrap();
+        assert!(list.status.success() && archive_ok(&String::from_utf8_lossy(&list.stdout), "k-1"));
+        let x = d.join("x");
+        std::fs::create_dir_all(&x).unwrap();
+        let out = tar([OsStr::new("-xzf"), OsStr::new("-"), OsStr::new("-C"), x.as_os_str(), OsStr::new("k-1/kiln")], &tgz).await.unwrap();
+        assert!(out.status.success());
+        assert_eq!(std::fs::read(x.join("k-1/kiln")).unwrap(), b"binary");
+        assert!(!x.join("k-1/README").exists(), "only the binary is extracted");
+        assert!(!tar(["-tzf", "-"], b"not a tarball").await.unwrap().status.success());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
