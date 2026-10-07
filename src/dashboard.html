@@ -650,7 +650,7 @@ const TIPS = {
   jobs: "Every row is one throwaway VM that ran one job. Open a row for its timeline and logs.",
   job: "Console is boot and runner output, Steps is your steps live, and the GitHub log appears when the job ends.",
   repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
-  settings: "Changes apply within seconds, with no restart. The listen address is the only exception.",
+  settings: "Changes apply within seconds, with no restart. The listen address is the only exception: Overview then offers Restart when idle.",
 };
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
@@ -940,6 +940,13 @@ function jobRow(v) {
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
 const BI = { fail: 'alert', warn: 'alert', ember: 'flame', queued: 'info', ok: 'check' };
+// After a restart that applies a changed listen address: where kiln will be.
+function newListen() {
+  if (!S.restart?.needed?.includes('listen')) return '';
+  const h = S.config.listen.replace(/^(0\.0\.0\.0|\[::\]):/, location.hostname + ':');
+  return ` kiln will be at <b class="mono">http://${esc(h)}</b>.` + (S.serve_socket ? '' : ' If HTTPS via tailscale serve is on, it still proxies the old port: switch it off and on in Settings › Network afterwards.');
+}
+const RESTART_WAITS = v => ACTIVE(v) && v.state !== 'held';
 function banners() {
   const p = S.poll, c = S.config, b = [], err = String(p.error || '');
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
@@ -957,11 +964,17 @@ function banners() {
   if (up.rollback) B('fail', 'Update rolled back: ' + esc(up.rollback), A('Updates', '#/settings/updates'));
   if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
+  const rs = S.restart || {};
+  if (S.listen_fallback) B('fail', esc(S.listen_fallback) + '.', A('Fix listen address', '#/settings/access'));
+  if (rs.state === 'stopping') B('ember', `<b>kiln is stopping</b> · ${esc(rs.progress || 'stopping VMs')}`);
+  else if (rs.state === 'restarting') B('ember', '<b>Restarting kiln</b> · back in a few seconds.' + newListen());
+  else if (rs.state === 'draining') B('ember', `<b>Restart pending</b> · ${esc(rs.progress || 'draining')}. No new VMs start meanwhile.`, X('Cancel restart', 'rscancel') + X('Restart now', 'rsnow'));
+  else if (rs.needed?.length) B('warn', `Restart needed to apply: ${rs.needed.map(esc).join(', ')}.`, X('Restart when idle', 'rsidle', 1) + X('Restart now', 'rsnow'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
   else if (p.blocked_kind === 'held') { const h = oldestHeld(); B('warn', esc(p.blocked) + `. kiln is releasing the oldest hold.${hq('held')}`, h ? X('Release oldest', 'relheld') + A('View held job', '#/jobs/' + encodeURIComponent(h.id)) : ''); }
-  else if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  else if (p.blocked && !oldImg && up.state !== 'draining' && !rs.state) B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
@@ -1386,7 +1399,7 @@ function addRepo(raw) {
 }
 async function saveCfg(c) {
   const r = await post('/api/config', c); await poll();
-  if (r?.restart_required) { restartPending = true; toast('Restart kiln to apply the listen address'); }
+  if (r?.restart_required) toast(`Saved. Restart needed to apply: ${r.restart_needed.join(', ')} (Overview › Restart when idle)`);
   return r;
 }
 const repoForm = `<form class="bar" data-form="addrepo" style="margin:16px 0 0"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false" style="width:260px"><button class="btn pri">Add repo</button></form>`;
@@ -1463,7 +1476,7 @@ const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', g
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
 const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', updates: 'update', appearance: 'palette' };
 let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
-let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
+let draft = null, cfgJ = '', TS = null, tokRes = null;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
 const fld = (id, label, ctl, hint, help, t) => `<div class="fld"><div><label for="${id}"${tip(t)}>${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
@@ -1489,13 +1502,14 @@ const G = {
     },
   },
   timeouts: { html: () => `<div class="card"><h2>Timeouts</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
-    ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}</div>` },
+    ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}
+    ${fld('f-stop_grace_secs', 'Stop grace (s)', num('stop_grace_secs', draft.stop_grace_secs ?? 25), 'On systemctl stop/restart, running jobs get this long to finish before their VMs are killed (0 to 570). A host shutdown or logout waits up to this long too.')}</div>` },
   access: {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
       ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
       <div class="fld"><div><span class="lb">Dashboard key</span>${hq('key')}</div><div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">${ic('key')}Forget key in this browser</button></div></div></div>`,
-    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
+    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !S.restart?.needed?.includes('listen'); },
   },
   github: {
     html: () => {
@@ -1907,7 +1921,7 @@ const ACT = {
     if (draft.warm_recycle_mins != null && !(draft.warm_recycle_mins >= 5 && draft.warm_recycle_mins <= 1440)) return toast('Warm VM recycle must be 5 to 1440 minutes', true);
     const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
     if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
-    await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); toast('Saved'); pages.settings.render();
+    const r = await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); if (!r?.restart_required) toast('Saved'); pages.settings.render();
   },
   rmuser(b) { draft.allowed_users = draft.allowed_users.filter(u => u !== b.dataset.id); pages.settings.live(); },
   forgetkey() { lsSet('kiln-key', null); toast('Key forgotten in this browser'); },
@@ -1929,6 +1943,17 @@ const ACT = {
     await post('/api/update/apply'); toast('Update started'); await poll(); loadUpd();
   },
   async updcancel() { await post('/api/update/cancel'); toast('Update cancelled. Launching resumes.'); await poll(); loadUpd(); },
+  async rsidle() {
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln when idle?', action: 'Restart when idle', body: `kiln drains first: it starts no new VMs (warm ones included) and waits for ${n ? `the <b>${n} running VM${n > 1 ? 's' : ''}</b>` : 'running jobs'} to finish, at most the job timeout (${+S.config.job_timeout_mins} min). Held debug VMs are not waited for: the restart ends them. Queued jobs wait meanwhile. Then kiln restarts in place, which takes a few seconds. You can cancel while it drains.${newListen()}` })) return;
+    await post('/api/restart'); toast('Restart pending: draining'); await poll();
+  },
+  async rsnow() {
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: (n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on GitHub with "The runner has received a shutdown signal". Use <b>Restart when idle</b> to let them finish first.` : 'No job is running: kiln restarts in place right away, which takes a few seconds.') + newListen() })) return;
+    await post('/api/restart?now=true'); toast('Restarting kiln'); await poll();
+  },
+  async rscancel() { await post('/api/restart/cancel'); toast('Restart cancelled. Launching resumes.'); await poll(); },
   look(b) { lsSet('kiln-' + b.dataset.id, b.dataset.v === { theme: 'system', density: 'comfortable', accent: 'ember' }[b.dataset.id] ? null : b.dataset.v); kilnAppearance(); pages.settings.render(); $(`[data-act=look][data-id=${b.dataset.id}][aria-checked=true]`)?.focus(); },
   motion(b) { lsSet('kiln-motion', b.checked ? 'reduce' : null); kilnAppearance(); },
   egress(b) { draft.egress = b.dataset.id; pages.settings.render(); },

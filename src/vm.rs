@@ -612,6 +612,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd.args(&confined[1..]).kill_on_drop(true);
     }
     no_secrets(&mut cmd);
+    // Out of kiln's process group: a Ctrl-C at a foreground `kiln serve` reaches kiln only,
+    // which then gives the job its stop grace. Kills target the child's pid, never a group.
+    cmd.process_group(0);
     if !crate::confine::ENFORCED.load(std::sync::atomic::Ordering::Relaxed) {
         note(app, id, "QEMU runs unconfined: this kernel has no Landlock (see Diagnostics)");
     }
@@ -2188,6 +2191,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         _ if no_certs => out.push(check("tailscale HTTPS", true, "unavailable on this tailnet (DNS › HTTPS Certificates is off)")),
         Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
         None => {}
+    }
+
+    // An old unit (TimeoutStopSec=30) would SIGKILL kiln mid-cleanup: the grace is clamped.
+    if let Some(t) = crate::unit_stop_timeout().await {
+        out.push(match crate::unit_timeout_problem(cfg.stop_grace_secs, Some(t)) {
+            Some(p) => check("kiln.service", false, p),
+            None if t == u64::MAX => check("kiln.service", true, "TimeoutStopSec=infinity"),
+            None => {
+                check("kiln.service", true, format!("TimeoutStopSec={t}s fits stop_grace_secs ({} s) and cleanup", cfg.stop_grace_secs))
+            }
+        });
     }
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).

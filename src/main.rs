@@ -74,6 +74,9 @@ pub struct Config {
     pub auto_update: bool,
     /// "owner/name" whose GitHub releases kiln updates from.
     pub update_repo: String,
+    /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
+    /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
+    pub stop_grace_secs: u64,
 }
 
 impl Default for Config {
@@ -108,6 +111,7 @@ impl Default for Config {
             warm_recycle_mins: 30,
             auto_update: false,
             update_repo: "Bunty9/kiln".into(),
+            stop_grace_secs: 25,
         }
     }
 }
@@ -229,6 +233,9 @@ impl Config {
         }
         if !(5..=1440).contains(&self.warm_recycle_mins) {
             bail!("warm_recycle_mins must be 5..=1440");
+        }
+        if self.stop_grace_secs > 570 {
+            bail!("stop_grace_secs must be 0..=570 (kiln.service's TimeoutStopSec=600 minus ~30 s of cleanup)");
         }
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
@@ -367,12 +374,33 @@ pub struct App {
     pub mirror: Mutex<mirror::Status>,
     /// One-time states of GitHub App manifest flows in progress.
     pub app_states: Mutex<app_auth::States>,
-    /// An update is draining: launch nothing (warm included), reap idle VMs.
+    /// An update, restart or stop is draining: launch nothing (warm included), reap idle VMs.
     pub draining: AtomicBool,
     pub update: Mutex<update::Status>,
 }
 
 impl App {
+    fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
+        App {
+            gh,
+            cfg: RwLock::new(cfg),
+            vms: Mutex::default(),
+            kills: Mutex::default(),
+            releases: Mutex::default(),
+            committing: Mutex::default(),
+            poll: Mutex::default(),
+            baking: Default::default(),
+            stopping: Default::default(),
+            backoff: Default::default(),
+            api_backoff: Default::default(),
+            mirror: Default::default(),
+            app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+            draining: Default::default(),
+            update: Mutex::new(update::Status::load(&data)),
+            data,
+        }
+    }
+
     pub fn cfg(&self) -> Config {
         self.cfg.read().unwrap().clone()
     }
@@ -492,24 +520,7 @@ async fn run() -> Result<()> {
         Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
         None => {}
     }
-    let app = Arc::new(App {
-        gh,
-        cfg: RwLock::new(cfg),
-        vms: Mutex::default(),
-        kills: Mutex::default(),
-        releases: Mutex::default(),
-        committing: Mutex::default(),
-        poll: Mutex::default(),
-        baking: Default::default(),
-        stopping: Default::default(),
-        backoff: Default::default(),
-        api_backoff: Default::default(),
-        mirror: Default::default(),
-        app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
-        draining: Default::default(),
-        update: Mutex::new(update::Status::load(&data)),
-        data,
-    });
+    let app = Arc::new(App::new(data, cfg, gh));
 
     match std::env::args().nth(1).as_deref() {
         Some("bake") => vm::bake(app).await,
@@ -544,12 +555,22 @@ async fn run() -> Result<()> {
                     }
                 });
             }
+            if std::env::var_os("INVOCATION_ID").is_some() {
+                let t = unit_stop_timeout().await;
+                let _ = UNIT_STOP_TIMEOUT.set(t);
+                if let Some(p) = unit_timeout_problem(app.cfg().stop_grace_secs, t) {
+                    tracing::warn!("{p}");
+                }
+            }
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
+            // In its own task: the dashboard keeps serving while a stop drains.
+            let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
-                r = web::serve(app.clone()) => r,
+                r = web => r?,
                 _ = stop_signal() => {
+                    stop_drain(&app).await;
                     shutdown(&app).await;
                     Ok(())
                 }
@@ -592,6 +613,105 @@ async fn stop_signal() {
     tokio::select! {
         _ = term.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+/// VMs the stop drain waits for. Held VMs are not (they keep a finished job for
+/// debugging); waiting ones are reaped by the draining scheduler meanwhile.
+pub fn stop_waits_for(s: vm::State) -> bool {
+    s.is_active() && s != vm::State::Held
+}
+
+/// kiln.service's TimeoutStopSec in seconds, read at startup when systemd runs kiln.
+static UNIT_STOP_TIMEOUT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+/// What kiln needs after the stop grace: kill VMs, deregister runners, exit.
+const STOP_CLEANUP_SECS: u64 = 25;
+
+/// The stop grace that still leaves cleanup time before systemd SIGKILLs kiln.
+fn clamp_grace(grace: u64, unit_timeout: Option<u64>) -> u64 {
+    unit_timeout.map_or(grace, |t| grace.min(t.saturating_sub(STOP_CLEANUP_SECS)))
+}
+
+/// A systemd timespan ("30s", "1min 30s", "infinity") in whole seconds.
+fn parse_timespan(s: &str) -> Option<u64> {
+    if s == "infinity" {
+        return Some(u64::MAX);
+    }
+    let mut us: u64 = 0;
+    for part in s.split_whitespace() {
+        let i = part.find(|c: char| !c.is_ascii_digit())?;
+        let n: u64 = part[..i].parse().ok()?;
+        let unit = match &part[i..] {
+            "us" => 1,
+            "ms" => 1_000,
+            "s" => 1_000_000,
+            "min" => 60_000_000,
+            "h" => 3_600_000_000,
+            "d" => 86_400_000_000,
+            "w" => 604_800_000_000,
+            _ => return None,
+        };
+        us = us.checked_add(n.checked_mul(unit)?)?;
+    }
+    (!s.trim().is_empty()).then_some(us / 1_000_000)
+}
+
+/// TimeoutStopUSec from `systemctl show -p LoadState -p TimeoutStopUSec`, if the unit exists.
+fn unit_timeout(show: &str) -> Option<u64> {
+    let prop = |k: &str| show.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('='));
+    prop("LoadState").filter(|s| *s == "loaded")?;
+    parse_timespan(prop("TimeoutStopUSec")?)
+}
+
+/// kiln.service's (user unit) stop timeout in seconds; None without systemd or the unit.
+pub async fn unit_stop_timeout() -> Option<u64> {
+    let args = ["--user", "show", "-p", "LoadState", "-p", "TimeoutStopUSec", "kiln"];
+    let o = web::bounded("systemctl", &args, Duration::from_secs(5)).await.ok().filter(|o| o.status.success())?;
+    unit_timeout(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// Doctor and startup: a unit timeout too short for `grace` (an old 30 s unit).
+pub fn unit_timeout_problem(grace: u64, unit_timeout: Option<u64>) -> Option<String> {
+    let t = unit_timeout?;
+    (clamp_grace(grace, Some(t)) < grace).then(|| {
+        format!(
+            "kiln.service TimeoutStopSec={t}s is shorter than stop_grace_secs ({grace} s) + {STOP_CLEANUP_SECS} s cleanup, so stops wait only {} s: reinstall the unit (see docs/configuration.md)",
+            clamp_grace(grace, Some(t))
+        )
+    })
+}
+
+/// After the first SIGTERM/SIGINT: launch nothing (idle VMs are reaped) and give running
+/// jobs up to `stop_grace_secs` to finish. A second signal ends the wait.
+async fn stop_drain(app: &Arc<App>) {
+    update::stopping(app);
+    app.draining.store(true, Ordering::SeqCst);
+    let grace = clamp_grace(app.cfg().stop_grace_secs, UNIT_STOP_TIMEOUT.get().copied().flatten());
+    let deadline = now() + grace;
+    let again = stop_signal();
+    tokio::pin!(again);
+    let mut logged = 0;
+    loop {
+        let running = app.vms.lock().unwrap().iter().filter(|v| stop_waits_for(v.state)).count();
+        if running == 0 || now() >= deadline {
+            if running > 0 {
+                tracing::warn!("stop grace ({grace} s) is over: killing {running} running VM(s)");
+            }
+            return;
+        }
+        let p = format!("waiting for {running} running VM{} (at most {} s more)", if running == 1 { "" } else { "s" }, deadline - now());
+        if now() >= logged + 5 {
+            logged = now();
+            tracing::info!("stopping: {p}; signal again to stop now");
+        }
+        update::stop_progress(app, p);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = &mut again => {
+                tracing::warn!("second stop signal: killing {running} running VM(s) now");
+                return;
+            }
+        }
     }
 }
 
@@ -779,7 +899,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
-        .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
+        .then(|| ("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()))
         .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
         .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
         .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
@@ -930,6 +1050,16 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
     for v in &changed {
         vm::persist(app, v);
     }
+}
+
+/// An App on a fresh temp data dir, listening (if ever) on an ephemeral loopback port.
+#[cfg(test)]
+pub fn test_app(name: &str) -> Arc<App> {
+    let data = std::env::temp_dir().join(format!("kiln-test-app-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(data.join("update")).unwrap();
+    let cfg = Config { listen: "127.0.0.1:0".into(), ..Config::default() };
+    Arc::new(App::new(data, cfg, github::Gh::new(String::new(), "none")))
 }
 
 #[cfg(test)]
@@ -1212,6 +1342,45 @@ mod tests {
         assert_eq!(b.allow(1060, 5, false), 1);
         assert_eq!(b.allow(1060, 0, false), 0);
         assert_eq!(b.allow(1060, 5, true), 0);
+    }
+
+    #[test]
+    fn stop_waits_for_running_jobs_only() {
+        use vm::State::*;
+        for s in [Booting, Idle, Busy] {
+            assert!(stop_waits_for(s), "{s:?}");
+        }
+        for s in [Held, Done, Failed, Killed, Lost, Unneeded] {
+            assert!(!stop_waits_for(s), "{s:?}");
+        }
+        assert_eq!(Config::default().stop_grace_secs, 25);
+        assert!(Config { stop_grace_secs: 0, ..Config::default() }.validate_for(8).is_ok());
+        // 600 s unit timeout minus ~30 s of cleanup
+        assert!(Config { stop_grace_secs: 570, ..Config::default() }.validate_for(8).is_ok());
+        assert!(Config { stop_grace_secs: 571, ..Config::default() }.validate_for(8).is_err());
+    }
+
+    #[test]
+    fn unit_stop_timeout_clamps_the_grace() {
+        assert_eq!(parse_timespan("30s"), Some(30));
+        assert_eq!(parse_timespan("10min"), Some(600));
+        assert_eq!(parse_timespan("1min 30s"), Some(90));
+        assert_eq!(parse_timespan("1h 2min"), Some(3720));
+        assert_eq!(parse_timespan("1min 500ms"), Some(60));
+        assert_eq!(parse_timespan("infinity"), Some(u64::MAX));
+        for bad in ["", "abc", "30", "5parsecs", "s"] {
+            assert_eq!(parse_timespan(bad), None, "{bad}");
+        }
+        assert_eq!(unit_timeout("LoadState=loaded\nTimeoutStopUSec=30s\n"), Some(30));
+        assert_eq!(unit_timeout("TimeoutStopUSec=10min\nLoadState=loaded\n"), Some(600));
+        assert_eq!(unit_timeout("LoadState=not-found\nTimeoutStopUSec=1min 30s\n"), None, "no kiln unit");
+        assert_eq!(unit_timeout(""), None);
+        assert_eq!(clamp_grace(25, None), 25, "not under systemd");
+        assert_eq!(clamp_grace(25, Some(600)), 25);
+        assert_eq!(clamp_grace(570, Some(600)), 570);
+        assert_eq!(clamp_grace(570, Some(30)), 5, "an old 30 s unit");
+        assert_eq!(clamp_grace(25, Some(10)), 0);
+        assert_eq!(clamp_grace(570, Some(u64::MAX)), 570);
     }
 
     #[test]

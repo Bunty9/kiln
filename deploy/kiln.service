@@ -10,10 +10,14 @@ After=network-online.target
 ExecStart=%h/.local/bin/kiln serve
 Restart=on-failure
 RestartSec=5
-# SIGTERM goes to kiln only; it kills its VMs and deregisters runners that never got a job
-# (leftovers are swept at the next start), then the rest of the cgroup is SIGKILLed.
+# SIGTERM goes to kiln only. It stops launching, waits up to stop_grace_secs (config,
+# default 25) for running jobs, then kills its VMs and deregisters their runners (leftovers
+# are swept at the next start); after that the rest of the cgroup is SIGKILLed.
+# A second SIGTERM to kiln alone (systemctl --user kill --kill-whom=main kiln) skips the wait.
+# stop_grace_secs is capped at 570 to fit this timeout; kiln shortens it under a shorter one.
+# A host shutdown or logout waits up to this long.
 KillMode=mixed
-TimeoutStopSec=30
+TimeoutStopSec=600
 # Files kiln and its VMs create (logs, overlays, sockets) are private to this user.
 UMask=0077
 # Optional: Environment=KILN_GITHUB_TOKEN=... (or set it from the dashboard)

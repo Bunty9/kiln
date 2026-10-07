@@ -29,7 +29,8 @@ struct Release {
     assets: Value,
 }
 
-/// "idle" | "checking" | "downloading" | "verifying" | "draining" | "applying" | "error".
+/// "idle" | "checking" | "downloading" | "verifying" | "draining" | "applying" | "error",
+/// "restarting" (a restart's drain is over), or "stopping" (SIGTERM: final, nothing new begins).
 pub struct Status {
     state: &'static str,
     latest: Option<Release>,
@@ -42,17 +43,34 @@ pub struct Status {
     /// The version that was rolled back (<data>/update/skip): `auto_update` never retries
     /// it, only a newer one. Cleared by a manual apply.
     skip: Option<String>,
+    /// The drain is a plain restart (same binary), not an update.
+    restart: bool,
+    /// "Restart now": end the drain without waiting for running VMs.
+    force: bool,
 }
 
 impl Status {
     pub fn load(data: &Path) -> Self {
         let read = |f: &str| std::fs::read_to_string(data.join("update").join(f)).ok();
-        Self { state: "idle", latest: None, error: None, progress: None, checked_at: 0, rollback: read("error"), skip: read("skip") }
+        Self {
+            state: "idle",
+            latest: None,
+            error: None,
+            progress: None,
+            checked_at: 0,
+            rollback: read("error"),
+            skip: read("skip"),
+            restart: false,
+            force: false,
+        }
     }
 }
 
 fn set(app: &App, state: &'static str, progress: Option<String>) {
     let mut s = app.update.lock().unwrap();
+    if s.state == "stopping" {
+        return;
+    }
     s.state = state;
     s.progress = progress;
 }
@@ -60,7 +78,10 @@ fn set(app: &App, state: &'static str, progress: Option<String>) {
 fn fail(app: &App, e: &anyhow::Error) {
     tracing::warn!("update: {e:#}");
     let mut s = app.update.lock().unwrap();
-    (s.state, s.progress, s.error) = ("error", None, Some(format!("{e:#}")));
+    if s.state != "stopping" {
+        s.state = "error";
+    }
+    (s.progress, s.error, s.restart, s.force) = (None, Some(format!("{e:#}")), false, false);
 }
 
 /// Move from idle/error to `to`; false while another check or update runs.
@@ -73,10 +94,47 @@ fn begin(app: &App, to: &'static str) -> bool {
     true
 }
 
+/// The update state and progress the dashboard shows: a restart's drain is reported in
+/// `restart_json`, not as an update.
+fn shown(s: &Status) -> (&'static str, Option<String>) {
+    if s.restart { ("idle", None) } else { (s.state, s.progress.clone()) }
+}
+
+/// Why an update, update check or restart cannot begin now (the 409's message).
+fn busy(state: &str, restart: bool, draining: bool) -> &'static str {
+    match state {
+        "stopping" => "kiln is stopping",
+        "draining" if restart && draining => "a restart is draining: cancel it first, or wait for it",
+        "draining" if restart => "a restart is being cancelled: try again in a moment",
+        "draining" => "an update is draining: cancel it first, or wait for it",
+        "restarting" => "kiln is restarting",
+        "applying" => "kiln is restarting into an update",
+        "checking" => "an update check is running: try again in a moment",
+        _ => "an update is being downloaded and verified: try again once it is done",
+    }
+}
+
+pub fn busy_msg(app: &App) -> &'static str {
+    let s = app.update.lock().unwrap();
+    busy(s.state, s.restart, app.draining.load(Ordering::SeqCst))
+}
+
+/// Does a drain wait for a VM in state `s`? A restart's does not wait for held VMs (a
+/// finished job kept for debugging), like a stop's; an update's does.
+fn drain_waits_for(s: crate::vm::State, restart: bool) -> bool {
+    if restart { crate::stop_waits_for(s) } else { s.is_active() }
+}
+
+/// VMs a restart's drain waits for now.
+pub fn restart_waits_for(app: &App) -> usize {
+    app.vms.lock().unwrap().iter().filter(|v| drain_waits_for(v.state, true)).count()
+}
+
 /// GET /api/update.
 pub fn json(app: &App) -> Value {
     let cfg = app.cfg();
     let s = app.update.lock().unwrap();
+    let (state, progress) = shown(&s);
     let l = s.latest.as_ref();
     json!({
         "current": VERSION,
@@ -85,9 +143,9 @@ pub fn json(app: &App) -> Value {
         "notes": l.map(|r| &r.notes),
         "published_at": l.map(|r| &r.published_at),
         "flavor": if MUSL { "musl" } else { "gnu" },
-        "state": s.state,
+        "state": state,
         "error": s.error,
-        "progress": s.progress,
+        "progress": progress,
         "rollback": s.rollback,
         "skipped": s.skip,
         "checked_at": s.checked_at,
@@ -101,7 +159,74 @@ pub fn compact(app: &App) -> Value {
     let s = app.update.lock().unwrap();
     let latest = s.latest.as_ref().map(|r| r.version.clone());
     let available = latest.as_deref().is_some_and(|l| newer(l, VERSION));
-    json!({ "latest": latest, "available": available, "state": s.state, "error": s.error, "progress": s.progress, "rollback": s.rollback })
+    let (state, progress) = shown(&s);
+    json!({ "latest": latest, "available": available, "state": state, "error": s.error, "progress": progress, "rollback": s.rollback })
+}
+
+/// The `restart` object of /api/state: saved settings that apply only after a restart
+/// (`needed`), and a restart or stop in progress (`state` "draining" | "restarting" |
+/// "stopping", else null) with its progress.
+pub fn restart_json(app: &App, running_listen: Option<&str>) -> Value {
+    let running = restart_waits_for(app);
+    let needed = restart_needed(running_listen, &app.cfg());
+    let s = app.update.lock().unwrap();
+    let state = (s.restart || s.state == "stopping").then_some(s.state);
+    json!({ "needed": needed, "state": state, "progress": state.and(s.progress.clone()), "running": running, "force": s.force })
+}
+
+/// Saved settings that differ from what this process started with and apply only at startup.
+/// `listen` is the only one: every other setting is read where it is used.
+pub fn restart_needed(running_listen: Option<&str>, cfg: &crate::Config) -> Vec<&'static str> {
+    running_listen.filter(|l| *l != cfg.listen).map(|_| "listen").into_iter().collect()
+}
+
+/// Drain, then re-exec this same binary in place (POST /api/restart). `now`: do not wait
+/// for running VMs (they are killed); during a restart's drain it ends the wait. Refused
+/// (with why) while something else runs, or if the listen address could not be bound.
+pub fn restart(app: &Arc<App>, now: bool) -> Result<(), String> {
+    // Before anything stops: a listen kiln cannot bind would leave it unreachable.
+    if let Some(why) = crate::web::listen_refusal(&app.cfg().listen) {
+        return Err(why);
+    }
+    {
+        let mut s = app.update.lock().unwrap();
+        let draining = app.draining.load(Ordering::SeqCst);
+        if s.restart && s.state == "draining" && draining {
+            s.force |= now;
+            return Ok(());
+        }
+        if !matches!(s.state, "idle" | "error") {
+            return Err(busy(s.state, s.restart, draining).into());
+        }
+        (s.state, s.restart, s.force, s.error, s.progress) = ("draining", true, now, None, None);
+    }
+    // This request reached the running version, which confirms a just-applied update: a
+    // plain restart must not count as one of its failed boots.
+    let _ = std::fs::remove_file(app.data.join("update/pending.json"));
+    tracing::info!("restart requested{}", if now { " now: running jobs are killed" } else { ": draining first" });
+    let app = app.clone();
+    tokio::spawn(async move {
+        if !drain(&app, "restarting").await {
+            return tracing::info!("restart cancelled");
+        }
+        // The address may have gone away during the drain.
+        if let Some(why) = crate::web::listen_refusal(&app.cfg().listen) {
+            tracing::error!("restart abandoned: {why}");
+            let mut s = app.update.lock().unwrap();
+            if s.state != "stopping" {
+                app.draining.store(false, Ordering::SeqCst);
+                (s.state, s.progress) = ("idle", None);
+            }
+            (s.restart, s.force) = (false, false);
+            return;
+        }
+        // A binary replaced on disk since start (a manual install) is what systemd would run too.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let exe = PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)"));
+        tracing::info!("restarting kiln ({})", exe.display());
+        restart_into(&app, &exe).await
+    });
+    Ok(())
 }
 
 /// The latest release of `update_repo` (GitHub's "latest" excludes drafts and pre-releases).
@@ -135,7 +260,10 @@ pub async fn check(app: &App) -> bool {
     match r {
         Ok(rel) => {
             let mut s = app.update.lock().unwrap();
-            (s.state, s.error, s.latest, s.checked_at) = ("idle", None, Some(rel), now());
+            if s.state == "checking" {
+                s.state = "idle";
+            }
+            (s.error, s.latest, s.checked_at) = (None, Some(rel), now());
         }
         Err(e) => {
             fail(app, &e);
@@ -163,17 +291,33 @@ pub fn start(app: &Arc<App>, manual: bool) -> bool {
     let app = app.clone();
     tokio::spawn(async move {
         if let Err(e) = apply(&app, manual).await {
-            app.draining.store(false, Ordering::SeqCst);
+            // A stop drains on: only resume launching if kiln is not stopping.
+            if app.update.lock().unwrap().state != "stopping" {
+                app.draining.store(false, Ordering::SeqCst);
+            }
             fail(&app, &e);
         }
     });
     true
 }
 
-/// Stop a drain and resume launching; false unless draining.
-pub fn cancel(app: &App) -> bool {
+/// Stop a drain and resume launching; false unless draining. `restart` says which drain
+/// (a restart's or an update's) may be cancelled.
+pub fn cancel(app: &App, restart: bool) -> bool {
     let s = app.update.lock().unwrap();
-    s.state == "draining" && app.draining.swap(false, Ordering::SeqCst)
+    s.state == "draining" && s.restart == restart && app.draining.swap(false, Ordering::SeqCst)
+}
+
+/// SIGTERM: no update or restart begins or finishes from now on (one draining ends as if
+/// cancelled, without resuming launches); the caller drains and shuts down.
+pub fn stopping(app: &App) {
+    let mut s = app.update.lock().unwrap();
+    (s.state, s.progress) = ("stopping", None);
+}
+
+/// The stop drain's progress, for the dashboard.
+pub fn stop_progress(app: &App, p: String) {
+    app.update.lock().unwrap().progress = Some(p);
 }
 
 async fn download(app: &App, repo: &str, id: u64) -> Result<Vec<u8>> {
@@ -293,41 +437,10 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     // On disk before the rename that makes it the binary systemd starts.
     tokio::fs::File::open(&staged).await?.sync_all().await?;
 
-    // Drain: no new VMs (warm included), idle ones reaped, running jobs finish.
-    app.draining.store(true, Ordering::SeqCst);
-    set(app, "draining", None);
-    let deadline = now() + app.cfg().job_timeout_mins * 60 + 120;
-    loop {
-        let active = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count();
-        let baking = app.baking.load(Ordering::SeqCst);
-        // Decided under the status lock, which `cancel` takes too.
-        let cancelled = {
-            let mut s = app.update.lock().unwrap();
-            if !app.draining.load(Ordering::SeqCst) {
-                (s.state, s.progress) = ("idle", None);
-                true
-            } else if drain_done(active, baking, now(), deadline) {
-                (s.state, s.progress) = ("applying", None);
-                break;
-            } else if now() >= deadline {
-                s.progress = Some("waiting for a bake to finish".into());
-                false
-            } else {
-                let bake = if baking { ", and a bake" } else { "" };
-                s.progress = Some(format!(
-                    "waiting for {active} VM{}{bake} to finish (at most {})",
-                    if active == 1 { "" } else { "s" },
-                    dur(deadline - now())
-                ));
-                false
-            }
-        };
-        if cancelled {
-            let _ = tokio::fs::remove_file(&staged).await;
-            tracing::info!("update to {} cancelled", rel.version);
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    if !drain(app, "applying").await {
+        let _ = tokio::fs::remove_file(&staged).await;
+        tracing::info!("update to {} cancelled", rel.version);
+        return Ok(());
     }
 
     tracing::info!("updating kiln {VERSION} -> {}", rel.version);
@@ -341,6 +454,57 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
         let _ = std::fs::remove_file(dir.join("pending.json"));
         return Err(e).with_context(|| format!("replacing {}", exe.display()));
     }
+    restart_into(app, &exe).await
+}
+
+/// Drain: no new VMs (warm included), idle ones reaped, running jobs finish, bounded by
+/// the job timeout + 2 min, or not waited for once `force` is set. Ends in state `then`.
+/// False if cancelled, or if kiln is stopping (SIGTERM).
+async fn drain(app: &App, then: &'static str) -> bool {
+    app.draining.store(true, Ordering::SeqCst);
+    set(app, "draining", None);
+    let restart = then == "restarting";
+    let what = if restart { "restart" } else { "update" };
+    let deadline = now() + app.cfg().job_timeout_mins * 60 + 120;
+    let mut logged = 0;
+    loop {
+        let active = app.vms.lock().unwrap().iter().filter(|v| drain_waits_for(v.state, restart)).count();
+        let baking = app.baking.load(Ordering::SeqCst);
+        // Decided under the status lock, which `cancel`, `restart` and `stopping` take too.
+        {
+            let mut s = app.update.lock().unwrap();
+            // Reset here, under the lock: a restart requested right after must not be undone.
+            if s.state == "stopping" {
+                (s.restart, s.force) = (false, false);
+                return false;
+            }
+            if !app.draining.load(Ordering::SeqCst) {
+                (s.state, s.progress, s.restart, s.force) = ("idle", None, false, false);
+                return false;
+            }
+            let deadline = if s.force { 0 } else { deadline };
+            if drain_done(active, baking, now(), deadline) {
+                (s.state, s.progress) = (then, None);
+                return true;
+            }
+            let p = if now() >= deadline {
+                "waiting for a bake to finish".into()
+            } else {
+                let bake = if baking { ", and a bake" } else { "" };
+                format!("waiting for {active} VM{}{bake} to finish (at most {})", if active == 1 { "" } else { "s" }, dur(deadline - now()))
+            };
+            if now() >= logged + 30 {
+                logged = now();
+                tracing::info!("{what} draining: {p}");
+            }
+            s.progress = Some(p);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Shut down (VMs killed, runners deregistered) and exec `exe` in place. Never returns.
+async fn restart_into(app: &Arc<App>, exe: &Path) -> ! {
     crate::shutdown(app).await;
     // The registry child is killed by its supervisor within a couple of seconds of `stopping`.
     for _ in 0..50 {
@@ -349,8 +513,13 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let e = reexec(&exe);
-    // Past shutdown there is no going back: let systemd start the new binary.
+    // A SIGTERM that came in meanwhile wins: stop instead of starting again.
+    if app.update.lock().unwrap().state == "stopping" {
+        tracing::info!("kiln stopped");
+        std::process::exit(0)
+    }
+    let e = reexec(exe);
+    // Past shutdown there is no going back: let systemd start the binary.
     tracing::error!("re-exec {}: {e:#}; exiting so the service manager restarts kiln", exe.display());
     std::process::exit(1)
 }
@@ -612,6 +781,96 @@ mod tests {
         assert!(!drain_done(0, true, 10, 100), "a bake runs");
         assert!(!drain_done(0, true, 500, 100), "past the deadline a bake is still waited for");
         assert!(!drain_done(3, true, 500, 100));
+        // "Restart now" drains with a deadline of 0: VMs are not waited for, a bake still is
+        assert!(drain_done(3, false, 10, 0));
+        assert!(!drain_done(3, true, 10, 0));
+    }
+
+    #[test]
+    fn restart_only_settings() {
+        let c = crate::Config::default();
+        assert!(restart_needed(Some("0.0.0.0:7878"), &c).is_empty());
+        assert_eq!(restart_needed(Some("127.0.0.1:7878"), &c), ["listen"]);
+        assert!(restart_needed(None, &c).is_empty(), "not serving (bake, doctor)");
+        // everything else applies live
+        let live = crate::Config { max_vms: 9, poll_secs: 30, egress: "filtered".into(), stop_grace_secs: 60, ..c.clone() };
+        assert!(restart_needed(Some(&c.listen), &live).is_empty());
+    }
+
+    #[test]
+    fn busy_messages_name_what_runs() {
+        assert_eq!(busy("stopping", false, true), "kiln is stopping");
+        assert!(busy("draining", true, true).contains("a restart is draining"));
+        assert!(busy("draining", true, false).contains("being cancelled"));
+        assert!(busy("draining", false, true).contains("an update is draining"));
+        assert!(busy("restarting", true, false).contains("kiln is restarting"));
+        assert!(busy("applying", false, false).contains("update"));
+        assert!(busy("checking", false, false).contains("update check"));
+        assert!(busy("downloading", false, false).contains("update"));
+    }
+
+    #[test]
+    fn restart_drain_skips_held_vms() {
+        use crate::vm::State::*;
+        assert!(!drain_waits_for(Held, true), "a debug hold does not block a restart");
+        assert!(drain_waits_for(Held, false), "an update still waits for it");
+        for s in [Booting, Idle, Busy] {
+            assert!(drain_waits_for(s, true) && drain_waits_for(s, false), "{s:?}");
+        }
+        assert!(!drain_waits_for(Done, true) && !drain_waits_for(Done, false));
+    }
+
+    #[test]
+    fn update_json_masks_a_restart() {
+        let app = crate::test_app("mask");
+        {
+            let mut s = app.update.lock().unwrap();
+            (s.state, s.restart, s.progress) = ("draining", true, Some("waiting".into()));
+        }
+        for v in [json(&app), compact(&app)] {
+            assert_eq!(v["state"], "idle");
+            assert!(v["progress"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_confirms_a_pending_update() {
+        let app = crate::test_app("pending");
+        app.baking.store(true, Ordering::SeqCst); // keeps the drain from ever re-execing the test
+        std::fs::write(app.data.join("update/pending.json"), "{}").unwrap();
+        restart(&app, false).unwrap();
+        assert!(!app.data.join("update/pending.json").exists());
+    }
+
+    #[tokio::test]
+    async fn restart_refuses_an_unbindable_listen() {
+        let app = crate::test_app("unbindable");
+        app.baking.store(true, Ordering::SeqCst);
+        // TEST-NET-1: never an address of this machine.
+        app.cfg.write().unwrap().listen = "192.0.2.1:17878".into();
+        let e = restart(&app, false).unwrap_err();
+        assert!(e.contains("192.0.2.1:17878"), "{e}");
+        assert_eq!(app.update.lock().unwrap().state, "idle");
+        assert!(!app.draining.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_restart_drain_resets_and_is_not_joined() {
+        let app = crate::test_app("cancel");
+        app.baking.store(true, Ordering::SeqCst);
+        restart(&app, true).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(cancel(&app, true));
+        // Until the drain notices, a new restart must not join the cancelled one.
+        assert!(restart(&app, false).unwrap_err().contains("being cancelled"));
+        for _ in 0..30 {
+            if app.update.lock().unwrap().state == "idle" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let s = app.update.lock().unwrap();
+        assert_eq!((s.state, s.restart, s.force), ("idle", false, false));
     }
 
     #[test]
