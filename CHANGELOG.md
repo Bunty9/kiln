@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in usage statistics and crash reports.** Both are off until you choose: the dashboard asks once (the Setup page, or an Overview banner on existing installs), and the new Settings › Privacy page changes the choice and shows the exact JSON this box would send. Usage is a daily report of counts and settings; a crash report is the version and the panic's code location, without the message. Neither ever includes repo, account or host names, IPs, paths, tokens or logs. kiln sends them itself (the dashboard stays offline); `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off. New config keys `usage_stats` and `crash_reports`, and `GET /api/telemetry`. The receiving Cloudflare Worker is in `deploy/telemetry/`. See SECURITY.md › Telemetry.
+
 ## [0.2.4] - 2026-10-08
 
 ### Security

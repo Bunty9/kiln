@@ -231,6 +231,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/onboard` | Hello PRs this kiln has opened |
 | `POST /api/onboard/hello` | Open a PR adding `.github/workflows/kiln-hello.yml` to a configured repo |
 | `POST /api/bake` | Start a bake (202; refused while one runs) |
+| `GET /api/telemetry` | Privacy settings preview: `{endpoint, disabled_by_env, usage, crash_example, pending_crashes}`, where `usage` is the exact report this box would send now (see SECURITY.md › Telemetry) |
 | `GET /api/update` | Update status: `{current, latest, available, notes, published_at, flavor, state, error, progress, rollback, checked_at, auto, repo}`; `state` is `idle`, `checking`, `downloading`, `verifying`, `draining`, `applying` or `error`. `/api/state` carries a compact copy as `update` |
 | `POST /api/update/check` | Check for a release now; returns the status (a failed check is in its `error`). 409 while a check or update runs |
 | `POST /api/update/apply` | Download, verify, drain and restart into the latest release (202). 409 while a check or update runs |

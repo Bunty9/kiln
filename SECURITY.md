@@ -87,6 +87,16 @@ kiln installs only releases signed with its release key. Release CI signs each t
 
 **Key rotation:** a kiln trusts only the key it was built with. Releases signed with a new key are refused by older kilns, so after a rotation install one release by hand; later updates are automatic again. If the private key leaks, rotate it and reinstall by hand everywhere, since every kiln built with the old key would accept a release signed with it.
 
+### Telemetry
+
+kiln reports nothing to its maintainers unless the owner opts in. There are two independent switches, `usage_stats` and `crash_reports`. Both start unset, and unset means off: the dashboard asks once (on the Setup page, or in an Overview banner), and Settings › Privacy changes the choice and shows the exact JSON this box would send. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever the config says.
+
+- **Usage** (at most once a day): kiln version, build (glibc or musl), CPU architecture, host thread count and memory in GB, auth mode (token or App), the number of repos, `max_vms`, the default VM size, the number of warm VMs, the egress mode, which features are on (cache, Docker mirror, auto rebake, auto update, debug hold, QEMU confinement), and for the last 24 hours the number of jobs, how many passed, job minutes and jobs per VM size.
+- **Crash** (when kiln panics): version, build, architecture, the panic's source location (`src/vm.rs:123:45`; a dependency's location starts at its crate, without the build machine's path), the thread kind, uptime and time. **The panic message is not sent**, since it can quote a repo name, a path or a login. Panics are written to `<data>/crash/` (at most 20 waiting) only while `crash_reports` is on, and sent hourly from 10 minutes after start, so a crash loop sends nothing.
+- **Never sent:** repo, owner, user or org names, the runner label, host names, IPs, tailnet names, paths, tokens or keys, job names, logs or workflow contents, and config values beyond those listed above.
+- Reports carry a random install id (`<data>/telemetry_id`) so one box's reports can be grouped. It is not derived from anything on the box, and is deleted when both switches are off, so opting in again starts a new id.
+- kiln sends the reports itself over HTTPS (no redirects followed, 20-second timeout) to a Cloudflare Worker run by the maintainers (`deploy/telemetry/`). The browser never contacts it: the dashboard's CSP stays `connect-src 'self'`. The Worker accepts only the fields above, with their types checked, and stores no IP address or other request metadata; Cloudflare, as its host, sees the connection. A failed send is retried later and never affects jobs.
+
 ### Docker mirror
 
 The mirror listens on host loopback only and is a pull-only proxy of public Docker Hub images. It holds no credentials and cannot be pushed to. The registry binary it runs is pinned by version and SHA-256, and a different download is refused.
