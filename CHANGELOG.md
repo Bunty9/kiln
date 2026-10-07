@@ -4,6 +4,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-07
+
 ### Changed
 
 - **Serve over HTTPS** no longer asks for the dashboard key. `tailscale serve` now proxies to a unix socket, `<data>/serve.sock` (mode 0600), and kiln identifies the tailnet user from the `Tailscale-User-Login` header tailscaled sets there, applying the usual `allowed_users` rule. Before, every HTTPS request arrived from `127.0.0.1` and looked local. A browser on the box itself still needs the key; Funnel requests are refused; identity headers on the TCP port are ignored. If Serve was already on, turn it off and on again in Settings › Network to switch to the socket.
@@ -99,7 +101,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Bunty9/kiln/releases/tag/v0.1.0
