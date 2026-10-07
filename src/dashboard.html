@@ -97,8 +97,8 @@ code{font:12.5px var(--mono);background:var(--sunk);padding:1px 5px;border-radiu
 body.down main{opacity:.6}
 main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity var(--ease)}
 /* page header: identical height on every page so titles never jump */
-.ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:36px;margin-bottom:20px}
-.ph h1{font-size:22px;font-weight:650;line-height:1.25;letter-spacing:-.015em;min-width:0;overflow-wrap:anywhere}
+.ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:40px;margin-bottom:20px}
+.ph h1{display:flex;align-items:center;min-height:40px;font-size:22px;font-weight:650;line-height:1.25;letter-spacing:-.015em;min-width:0;overflow-wrap:anywhere}
 .ph .sub-h{color:var(--fg-2);font-size:13px}
 .back{display:inline-grid;place-items:center;width:32px;height:32px;margin-right:-2px;border-radius:8px;color:var(--fg-2);text-decoration:none;flex:none;transition:background var(--ease),color var(--ease)}
 .back:hover{color:var(--fg);background:var(--s2);box-shadow:var(--e1)}
@@ -558,6 +558,12 @@ async function api(path, o = {}) {
   return o.text ? text : text ? JSON.parse(text) : null;
 }
 const post = (p, body) => api(p, { method: 'POST', body });
+// "GET repos/o/n/…: 401 Unauthorized {"message":"Bad credentials",…}" -> "401 Unauthorized: Bad credentials"
+function ghMsg(m) {
+  const i = String(m).indexOf('{');
+  if (i < 0) return m;
+  try { const j = JSON.parse(m.slice(i)); return m.slice(0, i).replace(/^(GET|POST|PUT|DELETE|PATCH) \S+: /, '').trim() + (j.message ? ': ' + j.message : ''); } catch { return m; }
+}
 const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
 // Served repos: the GitHub App's installations in App mode, else the configured list.
 const REPOS = () => S.app ? S.app.repos : S.config.repos;
@@ -809,7 +815,7 @@ function banners() {
   if (p.blocked) B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
-  for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(m)}`);
+  for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
   for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on GitHub-hosted runners.`);
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   const im = S.image;
@@ -1191,9 +1197,15 @@ const G = {
     live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
   },
   github: {
-    html: () => `<div class="card"><h2>GitHub App</h2><div id="app-st"></div></div><div class="card"><h2>GitHub</h2><div id="gh-st"></div>
+    html: () => {
+      const tok = `<div id="gh-st"></div>
       <form data-form="token" class="bar" style="margin:0"><label class="sr" for="tok-in">Personal access token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
-      <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p></div>`,
+      <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p>`;
+      // With the App configured the token is unused: keep it reachable, out of the way.
+      return `<div class="card"><h2>GitHub App</h2><div id="app-st"></div></div>` + (S.app
+        ? `<details class="card"><summary><b>Personal access token</b> <span class="fg2 sm">· not used while the GitHub App is configured</span></summary><div style="margin-top:12px">${tok}</div></details>`
+        : `<div class="card"><h2>GitHub</h2>${tok}</div>`);
+    },
     live() {
       const a = S.app;
       const acc = a ? appAccounts(a) : [];
