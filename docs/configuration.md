@@ -87,6 +87,15 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | `warm` | object | `{}` | `{"owner/name": 0..4}`; entries for repos kiln does not serve are ignored | live | Pre-booted idle VMs of the default size kept ready per repo. They hold RAM and a `max_vms` slot while idle. |
 | `warm_recycle_mins` | integer | `30` | `5` to `1440` | live | Idle warm VMs older than this are deregistered and replaced so they never go stale. |
 
+## Install as an app
+
+The dashboard is an installable web app: its own window, a dock or home-screen icon, and shortcuts to Jobs, Repos and Settings. Browsers allow this only over HTTPS (or on `localhost`), so:
+
+1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only.
+2. Open that URL. In Chrome or Edge click **Install app** at the top right (or the install icon in the address bar). On iOS use Share › Add to Home Screen; on Android, the menu's Install app.
+
+Over plain `http://<box>:7878` nothing is installed and Settings › Notifications says so. The app talks to the same server as the tab; the API is never cached. If kiln is unreachable, the app shows the last loaded dashboard (or a short "kiln is unreachable" page) and retries on its own. A new kiln release installs a new service worker on the next load.
+
 ## Environment variables
 
 | Variable | Meaning |

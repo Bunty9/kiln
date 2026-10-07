@@ -42,6 +42,10 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     load_key(&app.data)?;
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("dashboard.html")) }))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(sw))
+        .route("/icon.svg", get(|| async { icon_file("icon.svg") }))
+        .route("/icons/{name}", get(|Path(name): Path<String>| async move { icon_file(&name) }))
         .route("/api/state", get(state))
         .route("/api/config", post(set_config))
         .route("/api/token", post(set_token))
@@ -182,8 +186,73 @@ async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: R
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("frame-ancestors 'none'"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     // The page is embedded in the binary: no-cache so a redeploy shows up on reload.
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if api { "no-store" } else { "no-cache" }));
+    // Icons set their own (longer) Cache-Control; the API is always no-store.
+    if api || !h.contains_key(header::CACHE_CONTROL) {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static(if api { "no-store" } else { "no-cache" }));
+    }
     r
+}
+
+/* ---------- installable app (PWA): manifest, service worker, icons ---------- */
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Dashboard dark background; the installed window's title bar and splash.
+const THEME: &str = "#14110E";
+
+fn manifest_json(version: &str) -> Value {
+    let icon = |file: &str, size: &str, purpose: &str| json!({ "src": format!("/icons/{file}?v={version}"), "sizes": size, "type": "image/png", "purpose": purpose });
+    let shortcut = |name: &str, url: &str| json!({ "name": name, "url": url });
+    json!({
+        "id": "/",
+        "name": "kiln",
+        "short_name": "kiln",
+        "description": "One fresh VM per GitHub Actions job, on your own box.",
+        "start_url": "/#/overview",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": THEME,
+        "theme_color": THEME,
+        "categories": ["developer"],
+        "icons": [
+            { "src": format!("/icon.svg?v={version}"), "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+            icon("icon-192.png", "192x192", "any"),
+            icon("icon-512.png", "512x512", "any"),
+            icon("icon-maskable-512.png", "512x512", "maskable"),
+        ],
+        "shortcuts": [shortcut("Jobs", "/#/jobs"), shortcut("Repos", "/#/repos"), shortcut("Settings", "/#/settings/capacity")],
+    })
+}
+
+async fn manifest() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/manifest+json")], manifest_json(VERSION).to_string())
+}
+
+/// The worker's cache name carries the version, so a new release installs a new worker.
+fn sw_source(version: &str) -> String {
+    include_str!("../assets/sw.js").replace("__KILN_VERSION__", version)
+}
+
+async fn sw() -> impl IntoResponse {
+    let h = [
+        (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-cache"),
+        (header::HeaderName::from_static("service-worker-allowed"), "/"),
+    ];
+    (h, sw_source(VERSION))
+}
+
+fn icon_file(name: &str) -> Response {
+    let (ty, body): (&str, &'static [u8]) = match name {
+        "icon.svg" => ("image/svg+xml", include_bytes!("../assets/icon.svg")),
+        "icon-192.png" => ("image/png", include_bytes!("../assets/icon-192.png")),
+        "icon-512.png" => ("image/png", include_bytes!("../assets/icon-512.png")),
+        "icon-maskable-512.png" => ("image/png", include_bytes!("../assets/icon-maskable-512.png")),
+        "apple-touch-icon.png" => ("image/png", include_bytes!("../assets/apple-touch-icon.png")),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    // The manifest links them with ?v=<version>; a week is plenty for the unversioned favicon links.
+    ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=604800")], body).into_response()
 }
 
 /// Tailscale reports tagged nodes as this pseudo-login; it names no person.
@@ -691,6 +760,69 @@ mod tests {
         assert!(!key_ok(Some(&"b".repeat(48))));
         assert!(!key_ok(None));
     }
+    #[test]
+    fn pwa_manifest_shape() {
+        let m: Value = serde_json::from_str(&manifest_json("9.9.9").to_string()).unwrap();
+        assert_eq!(m["name"], "kiln");
+        assert_eq!(m["short_name"], "kiln");
+        assert_eq!(m["start_url"], "/#/overview");
+        assert_eq!(m["scope"], "/");
+        assert_eq!(m["display"], "standalone");
+        assert_eq!(m["theme_color"], THEME);
+        assert_eq!(m["background_color"], THEME);
+        assert_eq!(m["categories"], json!(["developer"]));
+        let icons = m["icons"].as_array().unwrap();
+        for i in icons {
+            let src = i["src"].as_str().unwrap();
+            assert!(src.ends_with("?v=9.9.9"), "{src} is not versioned");
+            let file = src.trim_start_matches("/icons/").trim_start_matches('/').split('?').next().unwrap();
+            assert_eq!(icon_file(file).status(), StatusCode::OK, "{src} is not served");
+        }
+        assert!(icons.iter().any(|i| i["purpose"] == "maskable"));
+        for size in ["192x192", "512x512"] {
+            assert!(icons.iter().any(|i| i["sizes"] == size && i["purpose"] == "any"));
+        }
+        let urls: Vec<_> = m["shortcuts"].as_array().unwrap().iter().map(|s| s["url"].as_str().unwrap()).collect();
+        assert_eq!(urls, ["/#/jobs", "/#/repos", "/#/settings/capacity"]);
+    }
+
+    #[test]
+    fn pwa_service_worker() {
+        let js = sw_source("9.9.9");
+        assert!(js.contains("'kiln-9.9.9'"));
+        assert!(!js.contains("__KILN_VERSION__"));
+        // The API is never answered from a cache.
+        assert!(js.contains("u.pathname.startsWith('/api/')) return;"));
+        let shell = js.lines().find(|l| l.starts_with("const SHELL")).unwrap();
+        assert!(shell.contains("'/'") && !shell.contains("/api"), "precache list: {shell}");
+        assert!(js.contains("skipWaiting") && js.contains("clients.claim"));
+    }
+
+    #[tokio::test]
+    async fn pwa_content_types() {
+        let ty = |r: &Response| r.headers()[header::CONTENT_TYPE].to_str().unwrap().to_string();
+        let m = manifest().await.into_response();
+        assert_eq!(ty(&m), "application/manifest+json");
+        let s = sw().await.into_response();
+        assert!(ty(&s).starts_with("application/javascript"));
+        assert_eq!(s.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(s.headers()["service-worker-allowed"], "/");
+        assert_eq!(ty(&icon_file("icon.svg")), "image/svg+xml");
+        let png = icon_file("icon-512.png");
+        assert_eq!(ty(&png), "image/png");
+        assert!(png.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("max-age"));
+        assert_eq!(icon_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
+        // The embedded PNGs are real PNGs of the advertised size.
+        for (bytes, px) in [
+            (&include_bytes!("../assets/icon-192.png")[..], 192),
+            (include_bytes!("../assets/icon-512.png"), 512),
+            (include_bytes!("../assets/apple-touch-icon.png"), 180),
+        ] {
+            assert_eq!(&bytes[1..4], b"PNG");
+            assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), px);
+        }
+    }
+
     #[test]
     fn tailnet_ranges() {
         assert!(is_tailnet("100.73.48.98".parse().unwrap()));

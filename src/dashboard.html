@@ -5,15 +5,26 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <title>kiln</title>
-<link rel="icon" id="fav" href="data:,">
+<link rel="icon" id="fav" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#14110E" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F4F3F1" media="(prefers-color-scheme: light)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="kiln">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <script>
 // Appearance (Settings › Appearance) lives in this browser only. Applied before first paint.
 (function () {
   var d = document.documentElement, m = matchMedia('(prefers-color-scheme: light)');
   var g = function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  var tc = document.querySelectorAll('meta[name=theme-color]');
   function apply() {
     var t = g('kiln-theme') || 'system', a = g('kiln-accent');
     d.dataset.scheme = t === 'system' ? (m.matches ? 'light' : 'dark') : t;
+    // A forced theme colours the browser / installed-app chrome whatever the OS says.
+    for (var i = 0; i < tc.length; i++) tc[i].content = t === 'system' ? (/light/.test(tc[i].media) ? '#F4F3F1' : '#14110E') : d.dataset.scheme === 'light' ? '#F4F3F1' : '#14110E';
     d.dataset.density = g('kiln-density') || 'comfortable';
     d.dataset.motion = g('kiln-motion') || 'system';
     if (a && a !== 'ember') d.dataset.accent = a; else delete d.dataset.accent;
@@ -356,6 +367,13 @@ dialog input{width:100%;margin-top:16px}
 .gnav{display:flex;justify-content:space-between;gap:16px;margin-top:40px;font-size:13px}
 .gnav a{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:8px;background:var(--s1);box-shadow:var(--e1);text-decoration:none}.gnav a:hover{box-shadow:var(--e2)}
 @media(max-width:719px){.hq::after{inset:-12px}.cb .btn{width:40px;height:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
+/* installed app: content clears the notch, status bar and rounded corners (viewport-fit=cover) */
+.hlp.inst{border:0;background:none;cursor:pointer;font:inherit;font-size:13px;font-weight:500}
+.inst+.hlp{margin-left:0}
+.top{padding-top:env(safe-area-inset-top)}
+.top>div,main{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+#conn{top:calc(64px + env(safe-area-inset-top))}
+@media(display-mode:standalone){html{overscroll-behavior-y:none}.inst{display:none!important}}
 </style>
 </head>
 <body>
@@ -414,6 +432,7 @@ dialog input{width:100%;margin-top:16px}
 <header class="top"><div>
   <a class="logo" href="#/" data-tip="kiln: one fresh VM per GitHub Actions job, on this box"><svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
   <nav class="nav" id="nav" aria-label="Sections"></nav>
+  <button class="hlp inst" id="inst" data-act="install" hidden aria-label="Install app" data-tip="Install kiln as an app: its own window, a dock or home-screen icon, and shortcuts to Jobs, Repos and Settings."><svg class="i l" aria-hidden="true"><use href="#i-dl"/></svg><span>Install app</span></button>
   <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides" data-tip="Guides and troubleshooting (g h). Press ? for keyboard shortcuts."><svg class="i l" aria-hidden="true"><use href="#i-help"/></svg><span>Help</span></a>
   <span class="cdot" id="cdot" role="img" aria-label="Connected" tabindex="0"></span>
 </div></header>
@@ -670,7 +689,8 @@ setInterval(() => {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 
 /* ---------- title, favicon, notifications ---------- */
-const FAV = dot => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="#A39A8E" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="#F59E4C"/>${dot ? `<circle cx="13" cy="3" r="2.5" fill="${dot}"/>` : ''}</svg>`)}`;
+// The app icon (/icon.svg) when idle; the same tile with a status dot while jobs run or a failure is unseen.
+const FAV = dot => !dot ? '/icon.svg' : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="3.5" fill="#1F1A15"/><g transform="translate(2 1.8) scale(.75)"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="#EEE7DE" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="#F59E4C"/></g><circle cx="12.5" cy="3.5" r="3" fill="${dot}" stroke="#14110E" stroke-width="1"/></svg>`)}`;
 const seen = () => new Set(lsJ('kiln-seen', null) || []);
 function markSeen() { if (S) lsSet('kiln-seen', JSON.stringify(S.vms.filter(isFail).map(v => v.id).slice(0, 300))); }
 function notifyState() {
@@ -1274,7 +1294,8 @@ const G = {
       const on = lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted', sec = window.isSecureContext && window.Notification;
       const dns = String(TS?.status?.Self?.DNSName || '').replace(/\.$/, '') || 'your-host.ts.net';
       return `<div class="card"><h2>Notifications</h2><div class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></div>
-        <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p></div>
+        <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
+        ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
         <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
     },
     open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
@@ -1571,6 +1592,7 @@ const ACT = {
     if (p !== 'granted') { b.checked = false; return toast('Notifications are blocked in this browser', true); }
     lsSet('kiln-notify', '1'); toast('Notifications on'); poll();
   },
+  async install() { const e = installEv; if (!e) return; e.prompt(); await e.userChoice; installEv = null; $('#inst').hidden = true; },
   doctor() { doctor = null; return runDoctor(); },
   look(b) { lsSet('kiln-' + b.dataset.id, b.dataset.v === { theme: 'system', density: 'comfortable', accent: 'ember' }[b.dataset.id] ? null : b.dataset.v); kilnAppearance(); pages.settings.render(); $(`[data-act=look][data-id=${b.dataset.id}][aria-checked=true]`)?.focus(); },
   motion(b) { lsSet('kiln-motion', b.checked ? 'reduce' : null); kilnAppearance(); },
@@ -1702,6 +1724,13 @@ document.addEventListener('pointerdown', e => {
 });
 addEventListener('scroll', hideTip, true);
 addEventListener('keydown', e => { if (e.key === 'Escape') hideTip(); });
+
+/* ---------- installable app: service worker + install button ---------- */
+// Service workers need a secure context (HTTPS via tailscale serve, or localhost); over plain http, skip.
+let installEv = null;
+if (window.isSecureContext && navigator.serviceWorker) navigator.serviceWorker.register('/sw.js').catch(() => { /* app install unavailable */ });
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEv = e; $('#inst').hidden = matchMedia('(display-mode: standalone)').matches; });
+addEventListener('appinstalled', () => { installEv = null; $('#inst').hidden = true; });
 
 $('#fav').href = FAV(null);
 route(); poll();
