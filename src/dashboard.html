@@ -6,102 +6,167 @@
 <meta name="color-scheme" content="dark light">
 <title>kiln</title>
 <link rel="icon" id="fav" href="data:,">
+<script>
+// Appearance (Settings › Appearance) lives in this browser only. Applied before first paint.
+(function () {
+  var d = document.documentElement, m = matchMedia('(prefers-color-scheme: light)');
+  var g = function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  function apply() {
+    var t = g('kiln-theme') || 'system', a = g('kiln-accent');
+    d.dataset.scheme = t === 'system' ? (m.matches ? 'light' : 'dark') : t;
+    d.dataset.density = g('kiln-density') || 'comfortable';
+    d.dataset.motion = g('kiln-motion') || 'system';
+    if (a && a !== 'ember') d.dataset.accent = a; else delete d.dataset.accent;
+  }
+  apply(); if (m.addEventListener) m.addEventListener('change', apply);
+  window.kilnAppearance = apply;
+})();
+</script>
 <style>
-:root{color-scheme:dark light;
- --bg:#16130F;--surface:#1E1A16;--raised:#26211C;--sunk:#110E0B;
- --line:#332C25;--line-strong:#463D34;
- --fg:#EDE6DD;--fg-2:#B3A99D;--fg-3:#968B7F;
- --ember:#F59E4C;--on-ember:#16130F;
- --ok:#5DBE8A;--fail:#F07068;--queued:#93A6C2;--warn:#E2C35A;
- --tint:14%;--focus:0 0 0 2px var(--bg),0 0 0 4px var(--ember);
- --pop:0 12px 32px -8px rgb(0 0 0/.55),0 0 0 1px var(--line-strong);
+/* ---------- tokens ---------- */
+:root{color-scheme:dark;
+ /* surfaces, low to high: page, card, raised (buttons, menus), overlay */
+ --bg:#14110E;--s1:#1C1814;--s2:#252019;--s3:#2E2820;--sunk:#0F0D0A;
+ --surface:var(--s1);--raised:var(--s2);
+ --line:rgb(255 232 205/.075);--line-strong:rgb(255 232 205/.15);
+ --fg:#EEE7DE;--fg-2:#B6AB9E;--fg-3:#978C80;
+ /* state palette; --ember is "running" and the logo, never the UI accent */
+ --ember:#F59E4C;--ok:#5DBE8A;--fail:#F07068;--queued:#97A9C4;--warn:#E2C35A;--info:#97A9C4;
+ --acc-d:#F59E4C;--acc-l:#A34B07;--accent:var(--acc-d);--on-accent:#16130F;--on-ember:var(--on-accent);
+ --tint:15%;
+ --hi:inset 0 1px 0 rgb(255 240 220/.045);
+ --e1:var(--hi),0 1px 2px rgb(0 0 0/.45),0 0 0 1px rgb(255 232 205/.05);
+ --e2:var(--hi),0 1px 2px rgb(0 0 0/.4),0 6px 16px -4px rgb(0 0 0/.5),0 0 0 1px rgb(255 232 205/.07);
+ --e3:0 4px 12px rgb(0 0 0/.4),0 18px 44px -8px rgb(0 0 0/.7),0 0 0 1px rgb(255 232 205/.1);
+ --pop:var(--e3);
+ --focus:0 0 0 2px var(--bg),0 0 0 4px var(--accent);
+ --r1:6px;--r2:10px;--r3:14px;
+ --pad:20px;--row:48px;--gap:16px;--sec:32px;
  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
- --ease:120ms cubic-bezier(.2,0,0,1);--tabh:calc(56px + env(safe-area-inset-bottom));
+ --ease:140ms cubic-bezier(.2,0,0,1);--tabh:calc(56px + env(safe-area-inset-bottom));
 }
-@media (prefers-color-scheme:light){:root{
- --bg:#F6F5F3;--surface:#FFF;--raised:#FFF;--sunk:#EFEDEA;
- --line:#E2DED8;--line-strong:#CBC5BC;
- --fg:#1C1813;--fg-2:#5E564C;--fg-3:#6E655B;
- --ember:#A34B07;--on-ember:#FFF;
- --ok:#136A40;--fail:#C02F27;--queued:#4D6890;--warn:#8A6100;
- --tint:10%;--pop:0 12px 32px -12px rgb(40 30 20/.25),0 0 0 1px var(--line-strong);
-}}
+:root[data-scheme=light]{color-scheme:light;
+ --bg:#F4F3F1;--s1:#FFF;--s2:#FFF;--s3:#FBFAF8;--sunk:#ECEAE6;
+ --line:rgb(70 50 30/.1);--line-strong:rgb(70 50 30/.2);
+ --fg:#1C1813;--fg-2:#5A5248;--fg-3:#6B6258;
+ --ember:#A34B07;--ok:#136A40;--fail:#BE2D25;--queued:#466186;--warn:#805A00;--info:#466186;
+ --accent:var(--acc-l);--on-accent:#FFF;--tint:10%;
+ --hi:inset 0 0 0 0 transparent;
+ --e1:0 0 0 1px rgb(70 50 30/.07),0 1px 2px rgb(70 50 30/.07);
+ --e2:0 0 0 1px rgb(70 50 30/.08),0 1px 2px rgb(70 50 30/.06),0 6px 16px -6px rgb(70 50 30/.18);
+ --e3:0 0 0 1px rgb(70 50 30/.08),0 4px 12px rgb(70 50 30/.08),0 20px 44px -10px rgb(70 50 30/.3);
+}
+/* accents: kiln glazes, each with a dark- and light-theme value that keeps AA on its fill */
+:root[data-accent=flame]{--acc-d:#F27B52;--acc-l:#B0391A}
+:root[data-accent=brass]{--acc-d:#E2B657;--acc-l:#7E5E0A}
+:root[data-accent=celadon]{--acc-d:#74C6B1;--acc-l:#1B6B5B}
+:root[data-accent=cobalt]{--acc-d:#8EAAF4;--acc-l:#3354B5}
+:root[data-density=compact]{--pad:14px;--row:38px;--gap:12px;--sec:24px}
+/* ---------- base ---------- */
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%}
+html{scrollbar-gutter:stable;overflow-y:scroll}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased}
 h1,h2,h3,p,ul,dl,dd{margin:0}
 a{color:inherit}
 button,input,select{font:inherit;color:inherit}
 :focus-visible{outline:0;box-shadow:var(--focus)}
 [hidden]{display:none!important}
+::selection{background:color-mix(in srgb,var(--accent) 35%,transparent)}
 .mono{font-family:var(--mono)}.fg2{color:var(--fg-2)}.fg3{color:var(--fg-3)}.sm{font-size:12px}.sp{flex:1}
 .ok{color:var(--ok)}.fail{color:var(--fail)}.warn{color:var(--warn)}.q{color:var(--queued)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-.top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line)}
-.top>div{max-width:1120px;margin:0 auto;padding:0 16px;height:52px;display:flex;align-items:center;gap:24px}
-.logo{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:650;text-decoration:none}
-.nav{display:flex;gap:4px;flex:1}
-.nav a{padding:6px 12px;border-radius:6px;color:var(--fg-2);text-decoration:none;font-size:13px;transition:background var(--ease),color var(--ease)}
-.nav a:hover{color:var(--fg);background:var(--raised)}
-.nav a[aria-current]{color:var(--fg);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line)}
-.cdot{width:8px;height:8px;border-radius:50%;background:var(--ok);margin-left:auto}
-.cdot.bad{background:var(--warn)}
-#conn{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:30;width:min(560px,calc(100vw - 32px))}
-#conn .bn{margin:0;box-shadow:var(--pop);background:color-mix(in srgb,var(--c) 18%,var(--surface))}
+.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vertical-align:-3px}
+.i.l{width:20px;height:20px}
+code{font:12.5px var(--mono);background:var(--sunk);padding:1px 5px;border-radius:4px}
+/* ---------- shell ---------- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 82%,transparent);-webkit-backdrop-filter:blur(12px) saturate(1.4);backdrop-filter:blur(12px) saturate(1.4);box-shadow:0 1px 0 var(--line)}
+.top>div{max-width:1120px;margin:0 auto;padding:0 16px;height:56px;display:flex;align-items:center;gap:24px}
+.logo{display:flex;align-items:center;gap:8px;font-size:16px;font-weight:650;letter-spacing:-.01em;text-decoration:none;border-radius:var(--r1)}
+.nav{display:flex;gap:2px;flex:1}
+.nav a{display:flex;align-items:center;gap:7px;height:34px;padding:0 12px;border-radius:8px;color:var(--fg-2);text-decoration:none;font-size:13px;font-weight:500;transition:background var(--ease),color var(--ease),box-shadow var(--ease)}
+.nav a .i{opacity:.8}
+.nav a:hover{color:var(--fg);background:var(--s1)}
+.nav a[aria-current]{color:var(--fg);background:var(--s2);box-shadow:var(--e1)}
+.nav a[aria-current] .i{color:var(--accent);opacity:1}
+.cdot{position:relative;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-left:auto;box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}
+.cdot::after{content:"";position:absolute;inset:-10px}
+.cdot.bad{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 22%,transparent)}
+#conn{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:30;width:min(560px,calc(100vw - 32px))}
+#conn .bn{margin:0;box-shadow:var(--e3),inset 3px 0 var(--c);background:color-mix(in srgb,var(--c) 14%,var(--s2))}
 body.down main{opacity:.6}
-main{max-width:1120px;margin:0 auto;padding:24px 16px 48px;transition:opacity var(--ease)}
-.ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin-bottom:16px}
-.ph h1{font-size:20px;font-weight:600;line-height:1.3}
-.back{display:inline-block;margin-bottom:12px;color:var(--fg-2);font-size:13px;text-decoration:none}
-.back:hover{color:var(--fg)}
+main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity var(--ease)}
+/* page header: identical height on every page so titles never jump */
+.ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:36px;margin-bottom:20px}
+.ph h1{font-size:22px;font-weight:650;line-height:1.25;letter-spacing:-.015em;min-width:0;overflow-wrap:anywhere}
+.ph .sub-h{color:var(--fg-2);font-size:13px}
+.back{display:inline-grid;place-items:center;width:32px;height:32px;margin-right:-2px;border-radius:8px;color:var(--fg-2);text-decoration:none;flex:none;transition:background var(--ease),color var(--ease)}
+.back:hover{color:var(--fg);background:var(--s2);box-shadow:var(--e1)}
+.lead{color:var(--fg-2);margin:-8px 0 20px;max-width:68ch}
 .ov{display:grid;gap:24px 32px;grid-template-columns:minmax(0,1fr)}
-@media(min-width:960px){.ov{grid-template-columns:minmax(0,1fr) 280px}.ov>aside{position:sticky;top:76px}}
-.sec{margin-top:32px}.sec:first-child{margin-top:0}
-.sec>h2,.card h2{font-size:16px;font-weight:600;margin-bottom:12px;display:flex;align-items:baseline;gap:12px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}
-@media(min-width:768px){.card{padding:20px}}
-.card+.card{margin-top:16px}
+@media(min-width:960px){.ov{grid-template-columns:minmax(0,1fr) 280px}.ov>aside{position:sticky;top:80px;align-self:start}}
+.sec{margin-top:var(--sec)}.sec:first-child{margin-top:0}
+.sec>h2,.card h2{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;letter-spacing:-.005em}
+/* ---------- surfaces ---------- */
+.card{background:var(--s1);border-radius:var(--r2);padding:var(--pad);box-shadow:var(--e1)}
+.card+.card{margin-top:var(--gap)}
+.card .card{background:var(--s3);box-shadow:none;outline:1px solid var(--line)}
 .hair>*+*{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
-#ov-st{margin-bottom:16px}
-.stline{color:var(--fg-2);font-size:13px;display:flex;gap:8px;align-items:center;margin-bottom:16px}
-.stline .d{width:8px;height:8px;border-radius:50%;background:var(--ok)}
-.bn{--c:var(--warn);display:flex;align-items:center;gap:16px;min-height:44px;padding:8px 16px;margin-bottom:8px;border-left:3px solid var(--c);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--c) var(--tint),var(--surface));font-size:13px}
-.bn>span:first-child{flex:1;min-width:0;overflow-wrap:anywhere}
+#ov-st:not(:empty){margin-bottom:var(--gap)}
+.stline{color:var(--fg-2);font-size:12px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.stline .d{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}
+.stline .d.w{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 22%,transparent)}
+.ph .stline{margin-left:auto}
+@media(max-width:719px){.ph .stline{margin-left:0;width:100%}}
+/* banners: elevated, a colour bar on the left says how urgent */
+.bn{--c:var(--warn);display:flex;align-items:center;gap:12px 16px;min-height:48px;padding:8px 12px 8px 16px;margin-bottom:8px;border-radius:var(--r2);background:color-mix(in srgb,var(--c) 9%,var(--s1));box-shadow:var(--e1),inset 3px 0 var(--c);font-size:13px}
+.bn>.i{color:var(--c)}
+.bn>span{flex:1;min-width:0;overflow-wrap:anywhere}
 .bn .btn{flex:none}
+.bn.cta{background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 16%,var(--s1)),var(--s1) 70%);--c:var(--accent);min-height:56px}
+@media(max-width:719px){.bn{flex-wrap:wrap}.bn>span{flex-basis:calc(100% - 32px)}.bn .btn{margin-left:28px}}
 .ph-steps{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:2px;color:var(--fg-2);font-size:12px}
 .ph-steps b{color:var(--fg)}
+/* VM slots */
 .chs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-.ch{height:64px;border:1px dashed var(--line-strong);border-radius:10px;display:flex;align-items:center;padding:0 16px;color:var(--fg-2);font-size:13px;text-decoration:none}
-a.ch{border:1px solid var(--line);border-top:2px solid var(--queued);background:var(--surface);color:var(--fg);gap:12px;transition:background var(--ease)}
-a.ch:hover{background:var(--raised)}
-a.ch.run{border-top-color:var(--ember)}
+.ch{height:64px;border-radius:var(--r2);display:flex;align-items:center;gap:10px;padding:0 16px;color:var(--fg-3);font-size:13px;text-decoration:none;background:repeating-linear-gradient(-45deg,transparent 0 6px,var(--line) 6px 7px);box-shadow:inset 0 0 0 1px var(--line)}
+a.ch{background:var(--s1);color:var(--fg);box-shadow:var(--e1),inset 0 2px var(--queued);transition:box-shadow var(--ease),background var(--ease)}
+a.ch:hover{box-shadow:var(--e2),inset 0 2px var(--queued);background:var(--s2)}
+/* the one warm moment: a running slot glows like a loaded kiln */
+a.ch.run{background:radial-gradient(130% 150% at 50% 135%,color-mix(in srgb,var(--ember) 30%,transparent),transparent 62%),var(--s1);box-shadow:var(--e1),inset 0 2px var(--ember)}
+a.ch.run:hover{box-shadow:var(--e2),inset 0 2px var(--ember)}
 .ch .tx{flex:1;min-width:0}.ch .tx>*{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ch .tm{font-size:16px;font-weight:600}
-.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.ch .tm{font-size:17px;font-weight:600;letter-spacing:-.01em}
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border-radius:var(--r2);overflow:hidden;box-shadow:var(--e1)}
 @media(min-width:720px){.stats{grid-template-columns:repeat(4,1fr)}}
-.stat{background:var(--surface);padding:16px;min-height:72px;text-decoration:none;display:block}
-.stat .l{font-size:12px;color:var(--fg-2)}.stat .v{font-size:32px;font-weight:600;line-height:1.2}
-a.stat:hover{background:var(--raised)}
+.stat{background:var(--s1);padding:14px var(--pad) 16px;min-height:76px;text-decoration:none;display:block;transition:background var(--ease)}
+.stat .l{font-size:12px;color:var(--fg-2)}.stat .v{font-size:28px;font-weight:600;line-height:1.2;letter-spacing:-.02em;margin-top:2px}
+a.stat:hover{background:var(--s2)}
+.stat:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
 .foot{margin-top:8px;font-size:12px;color:var(--fg-2)}
-.lnk{background:none;border:0;padding:0;cursor:pointer;color:inherit;text-decoration:underline;text-underline-offset:2px}
+.lnk{background:none;border:0;padding:0;cursor:pointer;color:inherit;text-decoration:underline;text-decoration-color:color-mix(in srgb,currentColor 40%,transparent);text-underline-offset:3px;border-radius:3px}
+.lnk:hover{text-decoration-color:currentColor}
 .meter{padding:0}.meter .l{display:flex;justify-content:space-between;font-size:13px}
-.meter .b{height:6px;background:var(--sunk);border-radius:3px;margin-top:6px;overflow:hidden}
-.meter .b i{display:block;height:100%;background:var(--fg-2);transition:width var(--ease)}
+.meter .b{height:6px;background:var(--sunk);border-radius:3px;margin-top:6px;overflow:hidden;box-shadow:inset 0 1px 1px rgb(0 0 0/.15)}
+.meter .b i{display:block;height:100%;border-radius:3px;background:var(--fg-3);transition:width var(--ease)}
 .meter.hot .b i{background:var(--warn)}
-.list{list-style:none;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+/* lists */
+.list{list-style:none;padding:0;background:var(--s1);border-radius:var(--r2);overflow:hidden;box-shadow:var(--e1)}
 .list>li{position:relative;border-top:1px solid var(--line)}.list>li:first-child{border-top:0}
-.row{display:grid;grid-template-columns:96px minmax(0,1fr) 110px 80px;align-items:center;gap:0 12px;min-height:48px;padding:8px 16px;font-size:13px;text-decoration:none;transition:background var(--ease)}
-a.row:hover,li:hover>.row{background:var(--raised)}
-.row[aria-current]{box-shadow:inset 2px 0 var(--ember)}
+.row{display:grid;grid-template-columns:104px minmax(0,1fr) 110px 80px;align-items:center;gap:0 12px;min-height:var(--row);padding:8px 16px;font-size:13px;text-decoration:none;transition:background var(--ease)}
+a.row:hover,li:hover>.row{background:var(--s2)}
+.row[aria-current]{box-shadow:inset 3px 0 var(--accent);background:color-mix(in srgb,var(--accent) 6%,var(--s1))}
 .row .tt{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
-.row .tt .r{color:var(--fg-2)}.row .id{display:block;font:12px var(--mono);color:var(--fg-3)}
+.row .tt .r{color:var(--fg-2);font-weight:400}.row .id{display:block;font:12px var(--mono);color:var(--fg-3)}
 .row .w{color:var(--fg-2)}.row .d{text-align:right}.row .m{display:none}
+:root[data-density=compact] .row{padding-top:4px;padding-bottom:4px}
 @media(max-width:719px){
- .row{grid-template-columns:84px minmax(0,1fr);grid-template-areas:"b t" "b m";gap:2px 12px;min-height:56px}
+ .row{grid-template-columns:96px minmax(0,1fr);grid-template-areas:"b t" "b m";gap:2px 12px;min-height:56px}
  .row .bd{grid-area:b;align-self:start;padding-top:2px}.row .t{grid-area:t}.row .m{grid-area:m;display:block;font-size:12px;color:var(--fg-2)}
  .row .w,.row .d,.row .id{display:none}
 }
-.rr{grid-template-columns:minmax(0,1fr) 160px 96px 80px}
+.rr{grid-template-columns:minmax(0,1fr) 160px 104px 80px}
 .rr .nm{font-weight:500;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rr .nm::after{content:"";position:absolute;inset:0}
 .rr .rt,.rr .lr,.rr .qn{position:relative;z-index:1}
@@ -113,144 +178,249 @@ a.row:hover,li:hover>.row{background:var(--raised)}
 .pr .pc{grid-area:c}.pr .ps{grid-area:s}
 @media(max-width:719px){.pr{grid-template-areas:"n p" "c c" "s s" "g g";grid-template-columns:minmax(0,1fr) auto}.pr .id{display:block}}
 .pg{margin-top:4px;font:12px var(--mono);color:var(--fg-2);grid-area:g;white-space:pre-wrap;overflow-wrap:anywhere}
-.bdg{--c:var(--fg-2);display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:4px;font:500 12px/20px var(--sans);color:var(--c);background:color-mix(in srgb,var(--c) var(--tint),var(--surface));white-space:nowrap}
-.bdg::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+/* badges: one component, colour + icon + word */
+.bdg{--c:var(--fg-2);display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px 0 6px;border-radius:999px;font:500 12px/22px var(--sans);color:var(--c);background:color-mix(in srgb,var(--c) var(--tint),transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--c) 22%,transparent);white-space:nowrap}
+.bdg .i{width:14px;height:14px;stroke-width:1.75}
+.bdg.nd{padding-left:8px}
 .s-running{--c:var(--ember)}.s-booting,.s-waiting,.s-queued{--c:var(--queued)}.s-passed,.s-ok{--c:var(--ok)}.s-failed{--c:var(--fail)}.s-lost,.s-warn,.s-held{--c:var(--warn)}
-.s-running::before,.dot.run{animation:br 1.6s ease-in-out infinite alternate}
-@keyframes br{from{opacity:.55}to{opacity:1}}
-.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;border:1px solid var(--line-strong);font-size:13px}
-.chip button{background:none;border:0;padding:0;cursor:pointer;color:var(--fg-2);line-height:1}
+.s-running .i{animation:br 1.6s ease-in-out infinite alternate}
+@keyframes br{from{opacity:.5}to{opacity:1}}
+@keyframes spin{to{transform:rotate(1turn)}}
+.chip{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 4px 0 10px;border-radius:999px;background:var(--s2);box-shadow:var(--e1);font-size:13px}
+.chip button{display:inline-grid;place-items:center;width:20px;height:20px;background:none;border:0;padding:0;border-radius:50%;cursor:pointer;color:var(--fg-2)}
+.chip button:hover{background:var(--s3);color:var(--fg)}
+.chip.jump{padding:0 12px;height:30px;gap:6px}
 .tag{font-size:12px;color:var(--warn);margin-left:8px}
-.btn{height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--line-strong);background:var(--raised);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap;transition:border-color var(--ease),background var(--ease)}
-.btn:hover{border-color:var(--fg-3)}
-.btn.pri{background:var(--ember);color:var(--on-ember);border-color:transparent;font-weight:600}
-.btn.dng{color:var(--fail)}.btn.dng.fill{background:var(--fail);color:var(--on-ember);border-color:transparent}
-.btn[disabled]{opacity:.5;cursor:default}
-@media(max-width:719px){.btn{height:40px}}
-input[type=text],input[type=number],input[type=password],select{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line-strong);background:var(--sunk);min-width:0;max-width:100%}
-textarea{font:inherit;color:inherit;padding:8px 10px;border-radius:4px;border:1px solid var(--line-strong);background:var(--sunk);max-width:100%;resize:vertical}
+/* buttons */
+.btn{height:32px;padding:0 12px;border-radius:8px;border:0;background:var(--s2);box-shadow:var(--e1);cursor:pointer;font-size:13px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap;transition:background var(--ease),box-shadow var(--ease),color var(--ease)}
+.btn:hover{background:var(--s3);box-shadow:var(--e2)}
+.btn:active{box-shadow:var(--e1);transform:translateY(.5px)}
+.btn:focus-visible{box-shadow:var(--focus)}
+.btn.pri{background:var(--accent);color:var(--on-accent);font-weight:600;box-shadow:0 1px 2px rgb(0 0 0/.25),inset 0 1px 0 rgb(255 255 255/.18)}
+.btn.pri:hover{background:color-mix(in srgb,var(--accent) 88%,var(--fg))}
+.btn.dng{color:var(--fail)}.btn.dng:hover{background:color-mix(in srgb,var(--fail) 12%,var(--s2))}
+.btn.dng.fill{background:var(--fail);color:#fff}
+:root:not([data-scheme=light]) .btn.dng.fill{color:#16130F}
+.btn.ic{width:32px;padding:0}
+.btn[disabled]{opacity:.55;cursor:default;transform:none}
+.btn[aria-busy=true] .i{animation:spin .9s linear infinite}
+@media(max-width:719px){.btn{height:40px}.btn.ic{width:40px}}
+/* inputs */
+input[type=text],input[type=number],input[type=password],input:not([type]),select,textarea{border-radius:8px;border:0;background:var(--sunk);box-shadow:inset 0 0 0 1px var(--line-strong);transition:box-shadow var(--ease)}
+input[type=text],input[type=number],input[type=password],input:not([type]),select{height:32px;padding:0 10px;min-width:0;max-width:100%}
+textarea{font:inherit;color:inherit;padding:8px 10px;max-width:100%;resize:vertical}
+input:hover,select:hover,textarea:hover{box-shadow:inset 0 0 0 1px var(--fg-3)}
+input:focus-visible,select:focus-visible,textarea:focus-visible{box-shadow:inset 0 0 0 1px var(--accent),0 0 0 3px color-mix(in srgb,var(--accent) 28%,transparent)}
 input::placeholder,textarea::placeholder{color:var(--fg-3)}
-@media(max-width:719px){input[type=text],input[type=number],input[type=password],select{height:40px;font-size:16px}}
-input[role=switch]{appearance:none;flex:none;width:32px;height:18px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer;margin:0;transition:background var(--ease)}
-input[role=switch]::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--fg);transition:transform var(--ease)}
-input[role=switch]:checked{background:var(--ember)}input[role=switch]:checked::after{transform:translateX(14px);background:var(--on-ember)}
+input[type=file]{font-size:13px;max-width:100%}
+@media(max-width:719px){input[type=text],input[type=number],input[type=password],input:not([type]),select{height:40px;font-size:16px}}
+input[role=switch]{appearance:none;flex:none;width:34px;height:20px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer;margin:0;box-shadow:inset 0 1px 2px rgb(0 0 0/.2);transition:background var(--ease)}
+input[role=switch]::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--fg);box-shadow:0 1px 2px rgb(0 0 0/.3);transition:transform var(--ease)}
+input[role=switch]:checked{background:var(--accent)}input[role=switch]:checked::after{transform:translateX(14px);background:var(--on-accent)}
+input[role=switch]:focus-visible{box-shadow:var(--focus)}
 input[role=switch]:disabled{opacity:.5;cursor:default}
-.seg{display:inline-flex;background:var(--sunk);border-radius:6px;padding:2px;gap:2px}
-.seg button{height:28px;padding:0 12px;border:0;border-radius:4px;background:none;color:var(--fg-2);cursor:pointer;font-size:13px;transition:background var(--ease)}
-.seg button[aria-checked=true]{background:var(--raised);color:var(--fg)}.seg button[disabled]{color:var(--fg-3);cursor:default}
-.bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:16px}
-.cal{--c:var(--fail);padding:12px 16px;border-left:3px solid var(--c);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--c) var(--tint),var(--surface));font-size:13px;overflow-wrap:anywhere;margin:16px 0}
-.cal.neu{--c:var(--fg-2)}.cal.w{--c:var(--warn)}.cal.o{--c:var(--ok)}
-.empty{padding:24px 0;display:flex;flex-direction:column;align-items:flex-start;gap:12px;color:var(--fg-2)}
-.empty p{max-width:52ch}
-.jh{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
-.jh h1{font-size:20px;font-weight:600;min-width:0;overflow-wrap:anywhere}
-.jm{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 16px;font-size:12px;color:var(--fg-2)}
-.tl{display:flex;gap:1px;height:8px;border-radius:4px;overflow:hidden;background:var(--sunk)}
-.tl i{display:block;min-width:4px;background:var(--queued)}
-.tl .q{opacity:.5}.tl .w{background:var(--line-strong)}.tl .j-ok{background:var(--ok)}.tl .j-fail{background:var(--fail)}.tl .j-run{background:var(--ember)}
-.tll{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px}
-.tll span{font-size:12px;color:var(--fg-2)}.tll b{display:block;font-size:13px;font-weight:500;color:var(--fg)}
-.lv{margin-top:16px;scroll-margin-top:64px}
-.row:focus-visible{box-shadow:inset 0 0 0 2px var(--ember)}
-.lt{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.lt .btn{height:32px;padding:0 10px}.lt .btn[aria-pressed=true]{background:var(--sunk);border-color:var(--fg-3)}
+.seg{display:inline-flex;background:var(--sunk);border-radius:9px;padding:3px;gap:2px;box-shadow:inset 0 1px 2px rgb(0 0 0/.12)}
+.seg button{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border:0;border-radius:6px;background:none;color:var(--fg-2);cursor:pointer;font-size:13px;font-weight:500;transition:background var(--ease),color var(--ease),box-shadow var(--ease)}
+.seg button:hover{color:var(--fg)}
+.seg button[aria-checked=true]{background:var(--s2);color:var(--fg);box-shadow:var(--e1)}.seg button[disabled]{color:var(--fg-3);cursor:default}
+.seg button:focus-visible{box-shadow:var(--focus)}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:var(--gap)}
+/* callouts and empty states */
+.cal{--c:var(--fail);padding:12px 16px;border-radius:var(--r1);background:color-mix(in srgb,var(--c) 9%,var(--s1));box-shadow:inset 3px 0 var(--c);font-size:13px;overflow-wrap:anywhere;margin:16px 0}
+.cal.neu{--c:var(--fg-3)}.cal.w{--c:var(--warn)}.cal.o{--c:var(--ok)}.cal.a{--c:var(--accent)}
+.empty{padding:28px 0;display:flex;flex-direction:column;align-items:flex-start;gap:12px;color:var(--fg-2)}
+.empty>.i{width:28px;height:28px;color:var(--fg-3);stroke-width:1.25}
+.empty p{max-width:60ch}
+.empty .acts{display:flex;flex-wrap:wrap;gap:8px}
+/* job page and the firing log (timeline) */
+.jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:12px;color:var(--fg-2)}
+.tl{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--sunk)}
+.tl i{display:block;min-width:4px;background:var(--queued);outline:0}
+.tl i:first-child{border-radius:5px 0 0 5px}.tl i:last-child{border-radius:0 5px 5px 0}
+.tl i:focus-visible{box-shadow:inset 0 0 0 2px var(--fg)}
+.tl .q{background:color-mix(in srgb,var(--queued) 45%,var(--sunk))}.tl .w{background:var(--line-strong)}.tl .j-ok{background:var(--ok)}.tl .j-fail{background:var(--fail)}
+.tl .j-run{background:linear-gradient(90deg,color-mix(in srgb,var(--ember) 55%,var(--sunk)),var(--ember))}
+.tll{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.tll span{font-size:12px;color:var(--fg-2);display:flex;flex-direction:column}.tll b{font-size:14px;font-weight:600;color:var(--fg);letter-spacing:-.01em}
+.tll span::before{content:"";width:12px;height:3px;border-radius:2px;background:var(--k,var(--queued));margin-bottom:6px}
+.tll .q{--k:color-mix(in srgb,var(--queued) 45%,var(--sunk))}.tll .w{--k:var(--line-strong)}.tll .j-ok{--k:var(--ok)}.tll .j-fail{--k:var(--fail)}.tll .j-run{--k:var(--ember)}
+.tlh{display:flex;align-items:center;margin-bottom:10px;font-size:13px;font-weight:600}
+/* log viewer */
+.lv{margin-top:var(--gap);scroll-margin-top:72px;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1);padding:8px}
+.row:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
+.lt{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.lt .btn{height:32px;padding:0 10px;box-shadow:none;background:none;color:var(--fg-2)}
+.lt .btn:hover{background:var(--s2);color:var(--fg)}
+.lt .btn[aria-pressed=true]{background:var(--s2);color:var(--fg);box-shadow:var(--e1)}
+.lt .btn[aria-pressed=true] .i{color:var(--accent)}
 .lw{position:relative}
-.lv pre{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:12px;font:12.5px/1.55 var(--mono);height:clamp(320px,calc(100dvh - 340px),720px);overflow:auto;white-space:pre;tab-size:4}
+.lv pre{margin:0;background:var(--sunk);border-radius:var(--r1);box-shadow:inset 0 1px 3px rgb(0 0 0/.25);padding:12px 14px;font:12.5px/1.6 var(--mono);height:clamp(320px,calc(100dvh - 340px),720px);overflow:auto;white-space:pre;tab-size:4;scrollbar-gutter:stable}
 .lv.wrap pre{white-space:pre-wrap;overflow-wrap:anywhere}
 .lv pre:empty::before{content:"No output yet.";color:var(--fg-3)}
-.lv .jump{position:absolute;right:16px;bottom:16px;box-shadow:var(--pop);background:var(--raised);cursor:pointer}
+.lv .jump{position:absolute;right:16px;bottom:16px;box-shadow:var(--e3);background:var(--s2);border:0;cursor:pointer;color:var(--fg)}
 .tsp{display:none;color:var(--fg-3)}.lv.ts pre .tsp{display:inline}
 .grp{font-weight:600}.er{color:var(--fail)}
 .a1{font-weight:600}.a2{opacity:.7}.a30,.a90{color:var(--fg-3)}.a31,.a91{color:var(--fail)}.a32,.a92{color:var(--ok)}.a33,.a93{color:var(--warn)}.a34,.a36,.a94,.a96{color:var(--queued)}.a35,.a95{color:var(--ember)}.a37,.a97{color:var(--fg)}
-@media(max-width:719px){.lt .seg{width:100%}.lt .seg button{flex:1}.lt .sp{display:none}.lv pre{height:calc(100dvh - 220px)}.lt .lbl{display:none}.lt .btn{width:40px;height:40px;padding:0}}
+@media(max-width:719px){.lt .seg{width:100%}.lt .seg button{flex:1;justify-content:center}.lt .sp{display:none}.lv pre{height:calc(100dvh - 220px)}.lt .lbl{display:none}.lt .btn{width:40px;height:40px;padding:0}}
+/* settings and guides: side nav + one fixed-width body */
 .set{display:grid;gap:32px;grid-template-columns:200px minmax(0,1fr)}
-.sub{display:flex;flex-direction:column;gap:2px;position:sticky;top:76px;align-self:start}
-.sub a{padding:6px 12px;border-radius:6px;color:var(--fg-2);text-decoration:none;font-size:13px}
-.sub a:hover{background:var(--raised);color:var(--fg)}.sub a[aria-current]{background:var(--raised);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line)}
+.sub{display:flex;flex-direction:column;gap:2px;position:sticky;top:80px;align-self:start}
+.sub a{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:8px;color:var(--fg-2);text-decoration:none;font-size:13px;font-weight:500;transition:background var(--ease),color var(--ease)}
+.sub a .i{opacity:.75}
+.sub a:hover{background:var(--s1);color:var(--fg)}.sub a[aria-current]{background:var(--s2);color:var(--fg);box-shadow:var(--e1)}
+.sub a[aria-current] .i{color:var(--accent);opacity:1}
+.sub hr{border:0;border-top:1px solid var(--line);margin:6px 10px}
 #gsel,#guide-sel{display:none;width:100%;margin-bottom:16px}
 @media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel,#guide-sel{display:block}}
-.fld{display:grid;grid-template-columns:200px minmax(0,1fr);gap:4px 16px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
-.fld:first-child{border-top:0;padding-top:0}
-.fld label,.fld .lb{font-size:13px}.fld .h{grid-column:2;font-size:12px;color:var(--fg-2)}
+.fld{display:grid;grid-template-columns:200px minmax(0,1fr);gap:4px 16px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}
+:root[data-density=compact] .fld{padding:10px 0}
+.fld:first-child,h2+.fld{border-top:0;padding-top:0}
+.fld label,.fld .lb{font-size:13px;font-weight:500}.fld .h{grid-column:2;font-size:12px;color:var(--fg-2)}
 .fld input[type=number]{width:120px}.fld input[type=text],.fld input[type=password]{width:100%;max-width:360px}
 @media(max-width:719px){.fld{grid-template-columns:minmax(0,1fr)}.fld .h{grid-column:1}}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
 .sw{display:flex;align-items:center;gap:12px}
-#dbar{position:sticky;bottom:12px;z-index:10;margin-top:16px;display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:10px;background:var(--raised);box-shadow:var(--pop)}
+.sws{gap:6px;padding:4px}
+.sws button{width:30px;height:30px;padding:0;border-radius:50%;justify-content:center;background:var(--sw);box-shadow:inset 0 0 0 1px rgb(0 0 0/.2)}
+.sws button[aria-checked=true]{background:var(--sw);box-shadow:0 0 0 2px var(--sunk),0 0 0 4px var(--sw)}
+.sws button .i{color:#16130F;opacity:0}.sws button[aria-checked=true] .i{opacity:1}
+:root[data-scheme=light] .sws button .i{color:#fff}
+#dbar{position:sticky;bottom:12px;z-index:10;margin-top:16px;display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:var(--r2);background:var(--s2);box-shadow:var(--e3)}
 @media(max-width:719px){#dbar{bottom:calc(var(--tabh) + 8px)}}
 .kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 24px;font-size:13px}.kv dt{color:var(--fg-2)}.kv dd{overflow-wrap:anywhere}
-details{margin-top:16px}summary{cursor:pointer;color:var(--fg-2);font-size:13px}
-details pre.raw{margin:8px 0 0;background:var(--sunk);padding:12px;border-radius:6px;font:12px/1.5 var(--mono);overflow:auto;max-height:320px}
-pre.snip{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:6px;padding:12px;font:12.5px/1.55 var(--mono);overflow:auto}
+details{margin-top:16px}summary{cursor:pointer;color:var(--fg-2);font-size:13px;border-radius:4px}summary:hover{color:var(--fg)}
+details pre.raw{margin:8px 0 0;background:var(--sunk);padding:12px;border-radius:var(--r1);font:12px/1.5 var(--mono);overflow:auto;max-height:320px}
+pre.snip{margin:0;background:var(--sunk);border-radius:var(--r1);box-shadow:inset 0 1px 3px rgb(0 0 0/.2);padding:12px 14px;font:12.5px/1.6 var(--mono);overflow:auto}
+/* setup steps */
 .stp{list-style:none;padding:0;margin:0}
-.stp>li{position:relative;padding:0 0 24px 40px;min-height:24px}
-.stp>li::before{content:"";position:absolute;left:11.5px;top:28px;bottom:4px;width:1px;background:var(--line)}.stp>li:last-child::before{display:none}
-.mk{position:absolute;left:0;top:0;width:24px;height:24px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;font-size:12px;font-weight:600;color:var(--fg-2)}
-.mk.cur{background:var(--ember);border-color:var(--ember);color:var(--on-ember)}.mk.done{background:var(--ok);border-color:var(--ok);color:var(--bg)}
-.stp h3{font-size:14px;font-weight:600;line-height:24px;display:flex;flex-wrap:wrap;gap:0 12px;align-items:center}
-.stp .bd2{margin-top:12px;display:flex;flex-direction:column;align-items:flex-start;gap:12px;max-width:560px}
+.stp>li{position:relative;padding:0 0 28px 44px;min-height:28px}
+.stp>li::before{content:"";position:absolute;left:13.5px;top:34px;bottom:6px;width:1px;background:var(--line-strong)}.stp>li:last-child::before{display:none}
+.mk{position:absolute;left:0;top:0;width:28px;height:28px;border-radius:50%;background:var(--s2);box-shadow:var(--e1);display:grid;place-items:center;font-size:12px;font-weight:600;color:var(--fg-2)}
+.mk.cur{background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 22%,transparent)}.mk.done{background:var(--ok);color:var(--bg);box-shadow:none}
+.stp h3{font-size:14px;font-weight:600;line-height:28px;display:flex;flex-wrap:wrap;gap:0 12px;align-items:center}
+.stp .bd2{margin-top:12px;display:flex;flex-direction:column;align-items:flex-start;gap:12px;max-width:600px}
 .stp form{display:flex;gap:8px;width:100%;flex-wrap:wrap}.stp form input{flex:1;min-width:200px}
+/* toasts, dialogs, popovers, tooltip */
 #toasts{position:fixed;right:16px;bottom:16px;z-index:60;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}
 @media(max-width:719px){#toasts{left:16px;bottom:calc(var(--tabh) + 12px);align-items:stretch}}
-.toast{--c:var(--ok);pointer-events:auto;background:var(--raised);box-shadow:var(--pop);border-radius:10px;border-left:3px solid var(--c);padding:10px 16px;max-width:400px;font-size:13px;overflow-wrap:anywhere;animation:in 180ms cubic-bezier(.2,0,0,1)}
+.toast{--c:var(--ok);pointer-events:auto;display:flex;align-items:flex-start;gap:10px;background:var(--s2);box-shadow:var(--e3);border-radius:var(--r2);padding:10px 16px 10px 12px;max-width:420px;font-size:13px;overflow-wrap:anywhere;animation:in 200ms cubic-bezier(.2,0,0,1)}
+.toast .i{color:var(--c);margin-top:1px}
 .toast.bad{--c:var(--fail)}
 @keyframes in{from{opacity:0;transform:translateY(8px)}}
-dialog{width:min(440px,100vw - 32px);border:0;border-radius:14px;padding:24px;background:var(--raised);color:var(--fg);box-shadow:var(--pop)}
-dialog::backdrop{background:rgb(0 0 0/.5)}dialog[open]{animation:in 180ms cubic-bezier(.2,0,0,1)}
-dialog h2{font-size:16px;font-weight:600;margin-bottom:8px}dialog p{color:var(--fg-2)}dialog p b{color:var(--fg);font-weight:500}
+dialog{width:min(440px,100vw - 32px);border:0;border-radius:var(--r3);padding:24px;background:var(--s2);color:var(--fg);box-shadow:var(--e3)}
+dialog::backdrop{background:rgb(10 8 6/.55);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}dialog[open]{animation:in 200ms cubic-bezier(.2,0,0,1)}
+dialog h2{font-size:17px;font-weight:600;margin-bottom:8px;letter-spacing:-.01em}dialog p{color:var(--fg-2)}dialog p b{color:var(--fg);font-weight:500}
 dialog .act{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}
 dialog input{width:100%;margin-top:16px}
-.kbd{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin-top:16px;font-size:13px}.kbd kbd{font:12px var(--mono);background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
-.pop{position:fixed;z-index:50;background:var(--raised);border-radius:10px;box-shadow:var(--pop);padding:12px;width:240px}
+.kbd{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin-top:16px;font-size:13px}kbd{font:12px var(--mono);background:var(--sunk);box-shadow:inset 0 -1px 0 var(--line-strong);border-radius:4px;padding:1px 6px}
+.pop{position:fixed;z-index:50;background:var(--s2);border-radius:var(--r2);box-shadow:var(--e3);padding:12px;width:240px}
 .pop form{display:flex;flex-direction:column;gap:8px}.pop label{font-size:12px;color:var(--fg-2)}
+#tip{position:fixed;z-index:70;left:0;top:0;max-width:min(280px,calc(100vw - 16px));padding:6px 10px;border-radius:7px;background:var(--fg);color:var(--bg);font-size:12px;line-height:1.45;white-space:pre-line;box-shadow:0 6px 18px -4px rgb(0 0 0/.45);pointer-events:none;opacity:0;transition:opacity 100ms}
+#tip.on{opacity:1}
+#tip code{background:color-mix(in srgb,var(--bg) 18%,transparent);color:inherit}
 .tabs{display:none}
 @media(max-width:719px){
  .nav{display:none}main{padding-bottom:calc(var(--tabh) + 24px)}
- .tabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;height:var(--tabh);padding-bottom:env(safe-area-inset-bottom);background:var(--surface);border-top:1px solid var(--line)}
- .tabs a{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--fg-2);font-size:11px;text-decoration:none}
- .tabs a[aria-current]{color:var(--fg)}.tabs a[aria-current]::before{content:"";position:absolute;top:-1px;left:25%;right:25%;height:2px;background:var(--ember)}
- .tabs .n{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--ember);color:var(--on-ember);font-size:11px;font-weight:600;line-height:16px;text-align:center}
+ .tabs{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;height:var(--tabh);padding-bottom:env(safe-area-inset-bottom);background:color-mix(in srgb,var(--s1) 88%,transparent);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:0 -1px 0 var(--line),0 -8px 24px -12px rgb(0 0 0/.3)}
+ .tabs a{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--fg-2);font-size:11px;font-weight:500;text-decoration:none}
+ .tabs a[aria-current]{color:var(--fg)}.tabs a[aria-current] .i{color:var(--accent)}.tabs a[aria-current]::before{content:"";position:absolute;top:0;left:30%;right:30%;height:2px;border-radius:0 0 2px 2px;background:var(--accent)}
+ .tabs .n{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--ember);color:#16130F;font-size:11px;font-weight:600;line-height:16px;text-align:center}
  .top>div{gap:12px}
 }
-.sk{border-radius:6px;background:linear-gradient(90deg,var(--sunk),var(--raised),var(--sunk));background-size:200% 100%;animation:sh 1.4s linear infinite}
+.sk{border-radius:var(--r1);background:linear-gradient(90deg,var(--s1),var(--s2),var(--s1));background-size:200% 100%;animation:sh 1.4s linear infinite}
 @keyframes sh{to{background-position:-200% 0}}
-.full{max-width:520px;margin:96px auto;padding:0 16px}.full h1{font-size:20px;font-weight:600;margin-bottom:8px}
-@media(prefers-reduced-motion:reduce){*,::before,::after{animation-duration:0s!important;animation-iteration-count:1!important;transition-duration:0s!important}.sk{animation:none}}
-
-.hq{position:relative;display:inline-grid;place-items:center;width:16px;height:16px;padding:0;margin-left:6px;border-radius:50%;border:1px solid var(--line-strong);background:none;color:var(--fg-3);font:600 11px/1 var(--sans);cursor:pointer;vertical-align:middle;flex:none}
+.full{max-width:520px;margin:96px auto;padding:0 16px}.full h1{font-size:22px;font-weight:650;margin-bottom:8px}
+@media(prefers-reduced-motion:reduce){*,::before,::after{animation-duration:0s!important;animation-iteration-count:1!important;transition-duration:0s!important}}
+:root[data-motion=reduce] *,:root[data-motion=reduce] ::before,:root[data-motion=reduce] ::after{animation-duration:0s!important;animation-iteration-count:1!important;transition-duration:0s!important}
+/* help: "?" opens a popover with a guide link; data-tip shows a one-line hint */
+.hq{position:relative;display:inline-grid;place-items:center;width:18px;height:18px;padding:0;margin-left:2px;border-radius:50%;border:0;background:var(--s2);box-shadow:inset 0 0 0 1px var(--line-strong);color:var(--fg-3);font:600 11px/1 var(--sans);cursor:pointer;vertical-align:middle;flex:none;transition:color var(--ease),box-shadow var(--ease)}
 .hq::after{content:"";position:absolute;inset:-6px}
-.hq:hover,.hq[aria-expanded=true]{color:var(--fg);border-color:var(--fg-3)}
+.hq:hover,.hq[aria-expanded=true]{color:var(--fg);box-shadow:inset 0 0 0 1px var(--fg-3)}
+.hq:focus-visible{box-shadow:var(--focus)}
 .pop.help{width:min(300px,calc(100vw - 16px));padding:14px}
 .pop.help:focus{outline:0}
 .pop.help h3{font-size:13px;font-weight:600;margin-bottom:4px}.pop.help p{font-size:13px;color:var(--fg-2)}.pop.help a{display:inline-block;margin-top:8px;font-size:13px}
-.tip{display:flex;align-items:center;gap:12px;border:1px dashed var(--line-strong);border-radius:6px;padding:8px 12px;margin-bottom:16px;font-size:13px;color:var(--fg-2)}
-.tip b{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-3);font-weight:600}.tip span{flex:1;min-width:0}
-.cb{position:relative;max-width:100%}.cb pre.snip{padding-right:44px}.cb .btn{position:absolute;top:6px;right:6px;width:28px;height:28px;padding:0}
-.empty .cb{width:100%;max-width:560px}
+.tip{display:flex;align-items:center;gap:10px;border-radius:var(--r2);padding:8px 12px;margin:-4px 0 20px;font-size:13px;color:var(--fg-2);background:color-mix(in srgb,var(--info) 8%,var(--s1));box-shadow:var(--e1)}
+.tip>.i{color:var(--info)}.tip span{flex:1;min-width:0}
+.cb{position:relative;max-width:100%}.cb pre.snip{padding-right:48px}.cb .btn{position:absolute;top:6px;right:6px;width:30px;height:30px;padding:0}
+.empty .cb{width:100%;max-width:600px}
 .hello{display:flex;flex-direction:column;align-items:flex-start;gap:8px;max-width:100%}.hello .cal{margin:0}
-.ck{list-style:none;padding:0;margin:0;display:grid;gap:4px}
-.wm{display:inline-flex;align-items:center;height:16px;padding:0 6px;margin-left:6px;border-radius:999px;border:1px solid var(--line-strong);font:500 11px/1 var(--sans);color:var(--fg-2);vertical-align:middle}
-.hlp{display:flex;align-items:center;gap:6px;margin-left:auto;padding:6px 10px;border-radius:6px;color:var(--fg-2);font-size:13px;text-decoration:none}
-.hlp:hover,.hlp[aria-current]{color:var(--fg);background:var(--raised)}.hlp+.cdot{margin-left:0}
-.gd{max-width:68ch}.gd h2{font-size:18px;font-weight:600}.gd>*+*{margin-top:12px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:4px}
-.gd code{font:12.5px var(--mono);background:var(--sunk);padding:1px 5px;border-radius:4px}
-.gd .tw{overflow-x:auto}.gd table{border-collapse:collapse;font-size:13px}.gd th,.gd td{border:1px solid var(--line);padding:4px 10px;text-align:left}
-.gnav{display:flex;justify-content:space-between;gap:16px;margin-top:32px;font-size:13px}
-@media(max-width:719px){.hq::after{inset:-12px}.cb .btn{width:40px;height:40px}.cb pre.snip{padding-right:52px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
+.ck{list-style:none;padding:0;margin:0;display:grid;gap:6px}.ck li{display:flex;align-items:center;gap:8px}
+.wm{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 7px 0 5px;margin-left:6px;border-radius:999px;background:color-mix(in srgb,var(--ember) 12%,transparent);font:500 11px/1 var(--sans);color:var(--ember);vertical-align:middle}
+.wm .i{width:12px;height:12px}
+.hlp{display:flex;align-items:center;gap:6px;margin-left:auto;height:34px;padding:0 10px;border-radius:8px;color:var(--fg-2);font-size:13px;font-weight:500;text-decoration:none;transition:background var(--ease),color var(--ease)}
+.hlp:hover{color:var(--fg);background:var(--s1)}.hlp[aria-current]{color:var(--fg);background:var(--s2);box-shadow:var(--e1)}.hlp+.cdot{margin-left:0}
+.gd{max-width:68ch;line-height:1.6}.gd h2{font-size:19px;font-weight:650;letter-spacing:-.01em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
+.gd .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
+.gnav{display:flex;justify-content:space-between;gap:16px;margin-top:40px;font-size:13px}
+.gnav a{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:8px;background:var(--s1);box-shadow:var(--e1);text-decoration:none}.gnav a:hover{box-shadow:var(--e2)}
+@media(max-width:719px){.hq::after{inset:-12px}.cb .btn{width:40px;height:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<!-- 20px grid, 1.5 stroke, currentColor. Use: <svg class="i"><use href="#i-name"/></svg> -->
+<symbol id="i-overview" viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/></symbol>
+<symbol id="i-jobs" viewBox="0 0 20 20"><path d="M7.5 5.5h9M7.5 10h9M7.5 14.5h9"/><circle cx="4" cy="5.5" r=".9"/><circle cx="4" cy="10" r=".9"/><circle cx="4" cy="14.5" r=".9"/></symbol>
+<symbol id="i-repos" viewBox="0 0 20 20"><path d="M4.5 15.5v-11A1.5 1.5 0 0 1 6 3h9.5v11H6a1.5 1.5 0 0 0-1.5 1.5Zm0 0A1.5 1.5 0 0 0 6 17h9.5M8 6.5h4"/></symbol>
+<symbol id="i-settings" viewBox="0 0 20 20"><path d="M3 5.5h8M15 5.5h2M3 10h3M10 10h7M3 14.5h10M17 14.5h0"/><circle cx="13" cy="5.5" r="2"/><circle cx="8" cy="10" r="2"/><circle cx="15" cy="14.5" r="2"/></symbol>
+<symbol id="i-help" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M8 8a2 2 0 1 1 2.8 1.8c-.5.3-.8.7-.8 1.3M10 13.75v.01"/></symbol>
+<symbol id="i-wrap" viewBox="0 0 20 20"><path d="M3 5h14M3 10h11.5a2.5 2.5 0 0 1 0 5H11m0 0 1.75-1.75M11 15l1.75 1.75M3 15h4"/></symbol>
+<symbol id="i-down" viewBox="0 0 20 20"><path d="M10 3.5v11m-4.5-4.5L10 14.5l4.5-4.5M5 17h10"/></symbol>
+<symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 6v4l2.75 1.75"/></symbol>
+<symbol id="i-copy" viewBox="0 0 20 20"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4.5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v.5"/></symbol>
+<symbol id="i-dl" viewBox="0 0 20 20"><path d="M10 3v10m-4-4 4 4 4-4M3.5 16.5h13"/></symbol>
+<symbol id="i-ext" viewBox="0 0 20 20"><path d="M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5V15a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V7.5A1.5 1.5 0 0 1 5 6h3.5"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 20 20"><path d="M16.25 10A6.25 6.25 0 1 1 14 5.2M14.5 2.5v3h-3"/></symbol>
+<symbol id="i-kill" viewBox="0 0 20 20"><path d="M7 2.75h6L17.25 7v6L13 17.25H7L2.75 13V7Z"/><path d="m7.75 7.75 4.5 4.5m0-4.5-4.5 4.5"/></symbol>
+<symbol id="i-release" viewBox="0 0 20 20"><rect x="4" y="9" width="12" height="8" rx="1.5"/><path d="M7 9V6.5a3 3 0 0 1 5.8-1.1"/></symbol>
+<symbol id="i-rerun" viewBox="0 0 20 20"><path d="M3.75 10a6.25 6.25 0 1 0 2.25-4.8M5.5 2.5v3h3"/><path d="m8.5 7.5 4 2.5-4 2.5Z"/></symbol>
+<symbol id="i-cancel" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="m5 15 10-10"/></symbol>
+<symbol id="i-check" viewBox="0 0 20 20"><path d="m4.5 10.5 3.5 3.5 7.5-8"/></symbol>
+<symbol id="i-x" viewBox="0 0 20 20"><path d="m5.5 5.5 9 9m0-9-9 9"/></symbol>
+<symbol id="i-back" viewBox="0 0 20 20"><path d="M12 4.5 6.5 10l5.5 5.5"/></symbol>
+<symbol id="i-next" viewBox="0 0 20 20"><path d="m8 4.5 5.5 5.5L8 15.5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></symbol>
+<symbol id="i-trash" viewBox="0 0 20 20"><path d="M3.5 5.5h13M8 5.5V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5M5 5.5l.8 10.1a1.5 1.5 0 0 0 1.5 1.4h5.4a1.5 1.5 0 0 0 1.5-1.4L15 5.5"/></symbol>
+<symbol id="i-play" viewBox="0 0 20 20"><path d="M6 4.25v11.5L15.5 10Z"/></symbol>
+<symbol id="i-flame" viewBox="0 0 20 20"><path d="M10 17.25c-3 0-5-1.9-5-4.4 0-3 2.6-4.1 3-7.1 2 1.4 2.9 3.2 2.7 4.9.8-.5 1.4-1.4 1.6-2.3 1.6 1.2 2.7 3 2.7 4.5 0 2.5-2 4.4-5 4.4Z"/></symbol>
+<symbol id="i-boot" viewBox="0 0 20 20"><path d="M10 2.75v6.5M6 5a6.25 6.25 0 1 0 8 0"/></symbol>
+<symbol id="i-wait" viewBox="0 0 20 20"><path d="M5.5 2.75h9M5.5 17.25h9M6.5 2.75c0 4 7 3.25 7 7.25s-7 3.25-7 7.25M13.5 2.75c0 2-1.75 2.75-3.5 3.75"/></symbol>
+<symbol id="i-held" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M8.25 7v6M11.75 7v6"/></symbol>
+<symbol id="i-stop" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><rect x="7.25" y="7.25" width="5.5" height="5.5" rx=".75"/></symbol>
+<symbol id="i-lost" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25" stroke-dasharray="2.5 2.6"/><path d="M8.25 8.25a1.75 1.75 0 1 1 2.45 1.6c-.45.2-.7.55-.7 1.05M10 13.25v.01"/></symbol>
+<symbol id="i-skip" viewBox="0 0 20 20"><path d="M5 5v10l7-5ZM15 5v10"/></symbol>
+<symbol id="i-alert" viewBox="0 0 20 20"><path d="M8.7 3.4 2.5 14.2a1.5 1.5 0 0 0 1.3 2.3h12.4a1.5 1.5 0 0 0 1.3-2.3L11.3 3.4a1.5 1.5 0 0 0-2.6 0ZM10 7.5v3.5M10 13.75v.01"/></symbol>
+<symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 9v4.5M10 6.25v.01"/></symbol>
+<symbol id="i-dot" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="1.5"/><path d="M8 2.5V5M12 2.5V5M8 15v2.5M12 15v2.5M2.5 8H5M2.5 12H5M15 8h2.5M15 12h2.5"/></symbol>
+<symbol id="i-timer" viewBox="0 0 20 20"><circle cx="10" cy="11" r="6.25"/><path d="M8 2.75h4M10 11V7.75M15 5.5l1.25-1.25"/></symbol>
+<symbol id="i-users" viewBox="0 0 20 20"><circle cx="7.5" cy="7" r="2.75"/><path d="M2.75 16.25a4.75 4.75 0 0 1 9.5 0M13 4.5a2.75 2.75 0 0 1 0 5M14.75 12a4.75 4.75 0 0 1 2.5 4.25"/></symbol>
+<symbol id="i-github" viewBox="0 0 20 20"><circle cx="5.5" cy="5" r="2"/><circle cx="5.5" cy="15" r="2"/><circle cx="14.5" cy="7" r="2"/><path d="M5.5 7v6M14.5 9c0 3-4 2.5-7.5 4.5"/></symbol>
+<symbol id="i-image" viewBox="0 0 20 20"><path d="m10 2.75 7.25 3.75L10 10.25 2.75 6.5Z"/><path d="m2.75 10 7.25 3.75L17.25 10M2.75 13.5 10 17.25l7.25-3.75"/></symbol>
+<symbol id="i-cache" viewBox="0 0 20 20"><ellipse cx="10" cy="5" rx="6.25" ry="2.25"/><path d="M3.75 5v10c0 1.25 2.8 2.25 6.25 2.25s6.25-1 6.25-2.25V5M3.75 10c0 1.25 2.8 2.25 6.25 2.25s6.25-1 6.25-2.25"/></symbol>
+<symbol id="i-debug" viewBox="0 0 20 20"><path d="m5.5 7.5 3 2.5-3 2.5M10.5 14h4"/><rect x="2.75" y="3.5" width="14.5" height="13" rx="2"/></symbol>
+<symbol id="i-network" viewBox="0 0 20 20"><path d="M10 2.75 16 5v4.5c0 3.7-2.6 6.6-6 7.75-3.4-1.15-6-4.05-6-7.75V5Z"/></symbol>
+<symbol id="i-bell" viewBox="0 0 20 20"><path d="M5 13.75V9a5 5 0 0 1 10 0v4.75l1.25 1.5H3.75ZM8.25 17.25h3.5"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 20 20"><path d="M2.5 10.5h3.25l2-5 3.5 9 2-4h4.25"/></symbol>
+<symbol id="i-palette" viewBox="0 0 20 20"><path d="M10 2.75a7.25 7.25 0 0 0 0 14.5c1.1 0 1.5-.8 1.2-1.6-.4-1-.1-2.15 1.3-2.15h1.75a3 3 0 0 0 3-3c0-4.3-3.25-7.75-7.25-7.75Z"/><circle cx="6.5" cy="9" r=".9"/><circle cx="9" cy="6" r=".9"/><circle cx="12.75" cy="6.75" r=".9"/></symbol>
+<symbol id="i-sun" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.25"/><path d="M10 2.5v1.5M10 16v1.5M2.5 10H4M16 10h1.5M4.7 4.7l1 1M14.3 14.3l1 1M4.7 15.3l1-1M14.3 5.7l1-1"/></symbol>
+<symbol id="i-moon" viewBox="0 0 20 20"><path d="M16.5 12.25A7 7 0 0 1 7.75 3.5a7 7 0 1 0 8.75 8.75Z"/></symbol>
+<symbol id="i-monitor" viewBox="0 0 20 20"><rect x="2.75" y="3.5" width="14.5" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/></symbol>
+<symbol id="i-key" viewBox="0 0 20 20"><circle cx="6.5" cy="13.5" r="3.25"/><path d="m8.8 11.2 7.45-7.45M14 6l2 2M12 8l1.5 1.5"/></symbol>
+<symbol id="i-tip" viewBox="0 0 20 20"><path d="M7.5 14.5h5M8.25 17h3.5M10 2.75a5 5 0 0 0-2.9 9.1c.25.2.4.5.4.85v.8h5v-.8c0-.35.15-.65.4-.85A5 5 0 0 0 10 2.75Z"/></symbol>
+</defs></svg>
 <header class="top"><div>
-  <a class="logo" href="#/"><svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
+  <a class="logo" href="#/" data-tip="kiln: one fresh VM per GitHub Actions job, on this box"><svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
   <nav class="nav" id="nav" aria-label="Sections"></nav>
-  <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/></svg><span>Help</span></a>
-  <span class="cdot" id="cdot" role="img" aria-label="Connected" title="Connected"></span>
+  <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides" data-tip="Guides and troubleshooting (g h). Press ? for keyboard shortcuts."><svg class="i l" aria-hidden="true"><use href="#i-help"/></svg><span>Help</span></a>
+  <span class="cdot" id="cdot" role="img" aria-label="Connected" tabindex="0"></span>
 </div></header>
 <div id="conn" role="status"></div>
 <main id="app"></main>
 <nav class="tabs" id="tabs" aria-label="Sections"></nav>
 <div id="toasts" role="status"></div>
+<div id="tip" role="tooltip"></div>
 <dialog id="dlg"></dialog>
 <dialog id="kdlg"><form method="dialog" id="kform"><h2>Dashboard key needed</h2>
   <p>This browser is on the CI box, so it needs the dashboard key.</p>
@@ -281,17 +451,27 @@ function dur(s) {
 const bytes = n => { n = +n || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + ' ' + u[i]; };
 const when = t => (t ? new Date(t * 1000).toLocaleString() : '—');
 const hhmm = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const P = {
-  overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-  jobs: '<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',
-  repos: '<path d="M4 20V5a2 2 0 0 1 2-2h13v14H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13"/>',
-  settings: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
-  wrap: '<path d="M3 6h18M3 12h14a3 3 0 0 1 0 6h-4m0 0 2-2m-2 2 2 2M3 18h5"/>', down: '<path d="M12 4v12m-6-5 6 6 6-6"/>',
-  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
-  dl: '<path d="M12 3v12m-5-5 5 5 5-5M4 21h16"/>',
+// Icons come from the <symbol> sprite at the top of <body>.
+const ic = (n, s = 16) => `<svg class="i${s > 16 ? ' l' : ''}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+// One badge component: colour class, icon and word. The tip says what a state means.
+const STATE = {
+  booting: ['boot', 'The VM is starting. Its runner usually comes online in about 4 s.'],
+  waiting: ['wait', 'The runner is online and waiting for GitHub to hand it a job.'],
+  running: ['flame', 'The job is running in this VM.'],
+  held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it or the hold ends.'],
+  passed: ['check', 'The job succeeded. Its VM is already deleted.'],
+  failed: ['x', 'The job failed, or its VM broke (for example the runner never came online). The note on the job page says which.'],
+  killed: ['stop', 'kiln stopped this VM: Kill VM, the job or idle timeout, or an expired debug hold.'],
+  lost: ['lost', 'This VM was running when kiln stopped, and it stopped with kiln.'],
+  cancelled: ['cancel', 'Cancelled on GitHub.'],
+  queued: ['clock', 'GitHub is waiting for a runner.'],
+  skipped: ['skip', 'GitHub skipped this job.'],
+  warn: ['alert'],
 };
-const ic = (n, s = 16) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
-const badge = (s, c = s) => `<span class="bdg s-${c}">${esc(s)}</span>`;
+const badge = (s, c = s, tip) => {
+  const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? STATE[s]?.[1];
+  return `<span class="bdg s-${c}"${t ? ` data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
+};
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
 function status(v) {
   const r = String(v.result || '').toLowerCase();
@@ -310,9 +490,9 @@ const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' 
   : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
 const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
-const sz = v => v.cpus ? `<span class="mono sm fg2" title="${v.mem_mb ? Math.round(v.mem_mb / 1024) + ' GB' : ''}">${+v.cpus} cpu</span>` : '';
+const sz = v => v.cpus ? `<span class="mono sm fg2" data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
-const wm = v => (v.warm && v.state === 'idle' ? '<span class="wm" title="Pre-booted VM waiting for a job">warm</span>' : '');
+const wm = v => (v.warm && v.state === 'idle' ? `<span class="wm" data-tip="Warm VM: booted ahead of time so a job starts in about a second. Set per repo on its Repos page.">${ic('flame')}warm</span>` : '');
 const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 const HELP = {
   maxvms: ["Max VMs", "How many job VMs may run at once. Each holds its vCPUs and memory while running. 0 pauses kiln: running jobs finish, new ones stay queued.", "stuck"],
@@ -333,7 +513,10 @@ const HELP = {
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
-const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class="btn" data-act="copycode" aria-label="Copy">${ic('copy')}</button></div>`;
+// The short form of a HELP entry (first sentence) for hover tips, so tips and "?" never disagree.
+const ht = id => HELP[id][1].replace('{R}', S?.config.warm_recycle_mins ?? 30).replace(/`/g, '').split(/(?<=\.) /)[0];
+const tip = t => t ? ` data-tip="${esc(t)}"` : '';
+const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class="btn" data-act="copycode" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>`;
 const WFSCOPE = "This token can't create workflow files. Add the `workflow` scope (classic), or Contents, Pull requests and Workflows: write (fine-grained), then save it again.";
 const TIPS = {
   overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
@@ -364,8 +547,9 @@ async function api(path, o = {}) {
     if (o.body !== undefined) init.body = JSON.stringify(o.body);
   }
   const r = await fetch(path, init);
-  if (r.status === 401) { await askKey(); return api(path, o); }
   const text = await r.text();
+  // Only kiln's own 401 asks for the dashboard key; a 401 that GitHub sent through the proxy is GitHub's.
+  if (r.status === 401 && /dashboard key/i.test(text)) { await askKey(); return api(path, o); }
   if (!r.ok) {
     let m = text; try { m = JSON.parse(text).message || text; } catch { /* plain text */ }
     throw Object.assign(new Error(m || `${r.status} ${r.statusText}`), { status: r.status });
@@ -376,9 +560,10 @@ const post = (p, body) => api(p, { method: 'POST', body });
 const gh = (repo, rest) => `/api/gh/repos/${repo}/actions/${rest}`;
 // Served repos: the GitHub App's installations in App mode, else the configured list.
 const REPOS = () => S.app ? S.app.repos : S.config.repos;
-const appInstall = () => S.app ? `<a class="btn" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener">Install on repos ↗</a>` : '';
+const appInstall = () => S.app ? `<a class="btn" href="${esc(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">Install on repos${ic('ext')}</a>` : '';
 function toast(msg, bad) {
-  const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
+  const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
+  s.textContent = msg; t.innerHTML = ic(bad ? 'alert' : 'check'); t.append(s);
   $('#toasts').append(t); setTimeout(() => t.remove(), bad ? 7000 : 3500);
 }
 const fail = e => toast(e.message || String(e), true);
@@ -419,6 +604,7 @@ function setHTML(el, html) {
   fillTimes(el);
   if (idx >= 0) fl()[idx]?.focus();
   if (popEl && popAnchor) rebindPop();
+  if (tipFor && !tipFor.isConnected) hideTip();
 }
 function fillTimes(r = document) { $$('[data-t]', r).forEach(e => (e.textContent = e.dataset.k === 'rel' ? rel(+e.dataset.t) : dur(now() - e.dataset.t))); }
 const relH = t => t ? `<span data-t="${t}" data-k="rel"></span>` : '—';
@@ -449,8 +635,9 @@ async function doPoll() {
 }
 function renderConn() {
   document.body.classList.toggle('down', down);
-  const dot = $('#cdot'); dot.classList.toggle('bad', down); dot.title = dot.ariaLabel = down ? 'Disconnected' : 'Connected';
-  setHTML($('#conn'), down ? `<div class="bn"><span>Can't reach kiln. Retrying in <b data-r>${Math.max(0, Math.ceil(retryAt - now()))}</b>s…</span><button class="btn" data-act="retry">Retry now</button></div>`
+  const dot = $('#cdot'); dot.classList.toggle('bad', down); dot.ariaLabel = down ? 'Disconnected' : 'Connected';
+  dot.dataset.tip = down ? "Disconnected: can't reach kiln. Retrying." : 'Connected. The page refreshes every 2 s while open.';
+  setHTML($('#conn'), down ? `<div class="bn">${ic('alert')}<span>Can't reach kiln. Retrying in <b data-r>${Math.max(0, Math.ceil(retryAt - now()))}</b>s…</span><button class="btn" data-act="retry">Retry now</button></div>`
     : now() < okUntil ? '<div class="bn" style="--c:var(--ok)"><span>Reconnected</span></div>' : '');
   if (okUntil && !down && now() >= okUntil) okUntil = 0;
 }
@@ -513,8 +700,9 @@ const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 /* ---------- router ---------- */
 const pages = {};
 let cur = null, mounted = false;
-const NAV = [['overview', '#/', 'Overview'], ['jobs', '#/jobs', 'Jobs'], ['repos', '#/repos', 'Repos'], ['settings', '#/settings/capacity', 'Settings']];
-$('#nav').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${l}</a>`).join('');
+const NAV = [['overview', '#/', 'Overview', 'VM slots, health and recent jobs (g o)'], ['jobs', '#/jobs', 'Jobs', 'Every VM kiln ran, newest first (g j)'],
+  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, GitHub, image, cache, network and more (g s)']];
+$('#nav').innerHTML = NAV.map(([k, h, l, t]) => `<a href="${h}" data-p="${k}"${tip(t)}>${ic(k)}${l}</a>`).join('');
 $('#tabs').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${ic(k, 20)}<span>${l}</span>${k === 'jobs' ? '<span class="n" hidden></span>' : ''}</a>`).join('');
 function parse() {
   const [path, q] = location.hash.replace(/^#/, '').split('?');
@@ -542,15 +730,17 @@ function route() {
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
   pg.mount(r);
   const pk = Object.keys(pages).find(k => pages[k] === pg), tk = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'repos' && r.seg.length ? null : pk;
-  if (TIPS[tk] && !lsGet('kiln-tip-' + tk) && !setupNeeded()) $('#app').insertAdjacentHTML('afterbegin', `<div class="tip" role="note"><b>Tip</b><span>${esc(TIPS[tk])}</span><button class="lnk sm" data-act="tipok" data-id="kiln-tip-${tk}">Got it</button></div>`);
   if (pk === 'setup' || pk === 'repos' || !S.vms.length) loadHello();
   pg.update?.(); notifyState();
+  // Tips go under the page header (on a job, above its log), so headers sit at the same place on every page.
+  const ph = $('#app > .ph'), lg = $('#jd-log'), html = `<div class="tip" role="note">${ic('tip')}<span><span class="sr">Tip: </span>${esc(TIPS[tk])}</span><button class="lnk sm" data-act="tipok" data-id="kiln-tip-${tk}">Got it</button></div>`;
+  if (TIPS[tk] && !lsGet('kiln-tip-' + tk) && !setupNeeded()) ph ? ph.insertAdjacentHTML('afterend', html) : lg ? lg.insertAdjacentHTML('beforebegin', html) : $('#app').insertAdjacentHTML('afterbegin', html);
 }
 function skeleton() {
-  return `<div aria-busy="true" aria-label="Loading"><div class="sk" style="height:16px;width:240px;margin-bottom:24px"></div>
+  return `<div aria-busy="true" aria-label="Loading"><div class="ph"><div class="sk" style="height:26px;width:180px"></div></div>
   <div class="chs">${'<div class="sk" style="height:64px"></div>'.repeat(2)}</div>
-  <div class="stats" style="margin:24px 0;background:none;border:0;gap:12px">${'<div class="sk" style="height:72px"></div>'.repeat(4)}</div>
-  ${'<div class="sk" style="height:40px;margin-bottom:8px"></div>'.repeat(6)}</div>`;
+  <div class="stats" style="margin:32px 0;background:none;box-shadow:none;gap:12px">${'<div class="sk" style="height:76px"></div>'.repeat(4)}</div>
+  ${'<div class="sk" style="height:48px;margin-bottom:8px"></div>'.repeat(6)}</div>`;
 }
 function onState() {
   if (!S.baking && !bk.was && bk.next === 0 && !bk.checked) pollBake();
@@ -583,12 +773,13 @@ function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
   const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>`;
   return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
-    <span class="w" title="${esc(when(v.started))}">${relH(v.started)}</span><span class="d">${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
+    <span class="w"${tip('Started ' + when(v.started))}>${relH(v.started)}</span><span class="d"${tip(ACTIVE(v) ? 'Running for' : 'Job time: from the job starting to the VM ending')}>${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
+const BI = { fail: 'alert', warn: 'alert', ember: 'flame', queued: 'info', ok: 'check' };
 function banners() {
   const p = S.poll, c = S.config, b = [], err = String(p.error || '');
-  const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})"><span>${msg}</span>${act || ''}</div>`);
+  const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
   const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
   if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
   else if (/401|Bad credentials/i.test(err)) B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
@@ -616,9 +807,11 @@ function banners() {
   else if (S.app && !S.app.repos.length) B('warn', 'The GitHub App is not installed on any repo yet.', appInstall());
   else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
-  if (!b.length) return `<div class="stline"><span class="d"></span><span>Healthy · polled ${relH(S.poll.last_ok)} · image ${esc(im?.runner_version || '—')}${S.version ? ` · kiln ${esc(S.version)}` : ''}${S.poll.rate ? ` · API ${S.poll.rate.remaining}/${S.poll.rate.limit}` : ''}</span></div>`;
-  return b.join('');
+  return b;
 }
+// Status line in the page header: always present, so banners never move the title.
+const statusLine = n => `<span class="d${n ? ' w' : ''}"></span><span>${n ? `${n} item${n > 1 ? 's' : ''} need${n > 1 ? '' : 's'} attention` : 'Healthy'}</span>
+  <span${tip('Last successful check with GitHub for queued jobs')}>· polled ${relH(S.poll.last_ok)}</span><span${tip('Actions runner version in the base image')}>· image ${esc(S.image?.runner_version || '—')}</span>${S.version ? `<span>· kiln ${esc(S.version)}</span>` : ''}${S.poll.rate ? `<span${tip('GitHub API requests left this hour')}>· API ${S.poll.rate.remaining}/${S.poll.rate.limit}</span>` : ''}`;
 const rate = () => { const r = parseFloat(lsGet('kiln-rate')); if (r > 0) return r; const c = S.config.vm_cpus; return c <= 2 ? 0.008 : c <= 4 ? 0.016 : c <= 8 ? 0.032 : 0.064; };
 const median = a => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 function stats() {
@@ -627,44 +820,45 @@ function stats() {
   const f24 = S.vms.filter(v => isFail(v) && (v.ended || v.started) > n - 86400).length;
   const med = median(ran.filter(v => v.ended).map(v => v.ended - v.busy_since));
   const saved = ran.filter(v => v.ended && v.started >= mo).reduce((s, v) => s + Math.ceil((v.ended - v.busy_since) / 60), 0) * rate();
-  const st = (l, v, x = '') => `<div class="stat"><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
-  return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length)}
-    <a class="stat" href="#/jobs?f=failed"><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
-    ${st('Median job time', med == null ? '—' : dur(med))}${st('Saved this month', '≈ $' + saved.toFixed(2))}</div>
-    <p class="foot">from last 100 jobs · billed at <button class="lnk" data-act="rate">$${rate()}/min</button></p>`;
+  const st = (l, v, t, x = '') => `<div class="stat" tabindex="0"${tip(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
+  return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length, 'Jobs that started running since midnight, your time')}
+    <a class="stat" href="#/jobs?f=failed"${tip('Jobs that failed, were lost, or were killed mid-job in the last 24 hours. Click to list them.')}><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
+    ${st('Median job time', med == null ? '—' : dur(med), 'Median time from a job starting to its VM ending, over the last 100 jobs')}${st('Saved this month', '≈ $' + saved.toFixed(2), "This month's job minutes, each rounded up as GitHub bills them, times the rate below for a hosted runner of this size")}</div>
+    <p class="foot">from last 100 jobs · billed at <button class="lnk" data-act="rate"${tip('Change the per-minute rate used for savings')}>$${rate()}/min</button></p>`;
 }
-function meter(l, val, max, txt) {
+function meter(l, val, max, txt, t) {
   const p = max > 0 ? Math.min(100, val / max * 100) : 0;
-  return `<div class="meter ${p > 85 ? 'hot' : ''}"><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
+  return `<div class="meter ${p > 85 ? 'hot' : ''}"${tip(t)}><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
 }
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.overview = {
   mount() {
-    $('#app').innerHTML = `<div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host"></div></aside></div>`;
+    $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host"></div></aside></div>`;
   },
   update() {
-    const c = S.config, h = S.host, act = S.vms.filter(ACTIVE).sort((a, b) => a.started - b.started);
-    setHTML($('#ov-st'), banners());
+    const c = S.config, h = S.host, act = S.vms.filter(ACTIVE).sort((a, b) => a.started - b.started), bn = banners();
+    setHTML($('#ov-st'), bn.join('')); setHTML($('#ov-hl'), statusLine(bn.length));
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>` : '<div class="ch">Idle</div>');
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(STATE[status(v)]?.[1])}><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
+        : `<div class="ch"${tip('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
-    if (!tiles.length) tiles.push('<div class="ch">Paused</div>');
-    setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" title="${esc(qTip())}">${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    if (!tiles.length) tiles.push(`<div class="ch"${tip('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
+    setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
     const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
-    setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
+    setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400;margin-left:auto">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
     const used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
-    setHTML($('#ov-host'), `<h2>Host</h2>${meter('Load', l[0], h.cpus, `${l.map(x => x.toFixed(2)).join(' ')}`)}
-      ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`)}
-      <div class="meter"><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
+    setHTML($('#ov-host'), `<h2>Host</h2>${meter('Load', l[0], h.cpus, `${l.map(x => x.toFixed(2)).join(' ')}`, `1, 5 and 15 minute load averages. The bar compares the first with this box's ${h.cpus} CPUs.`)}
+      ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`, "Host memory in use. kiln holds back launches when there isn't enough left for another VM.")}
+      <div class="meter"${tip('Free disk where kiln keeps the image, repo caches and VM disks')}><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
   },
 };
 const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
-const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty"><p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more →</a></div>`; };
+const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty">${ic('jobs')}<p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more</a></div>`; };
 
 /* ---------- jobs ---------- */
 const jf = { f: 'all', repo: '' };
@@ -700,32 +894,37 @@ function segs(v) {
   if (v.busy_since) o.push(['Job', end - v.busy_since, { passed: 'j-ok', running: 'j-run' }[status(v)] || 'j-fail']);
   return o;
 }
+// Timeline ("firing log"): one segment per phase. Tips reuse the HELP.timeline sentences.
+const tlDesc = n => HELP.timeline[1].split(/(?<=\.) /).find(x => x.startsWith(n + ':')) || '';
+const timeline = sg => { const tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1;
+  return `<div class="tl">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0" tabindex="0" role="img" aria-label="${s[0]} ${dur(s[1])}"${tip(`${s[0]}: ${dur(s[1])}\n${tlDesc(s[0]).replace(/^\w+: /, '')}`)}></i>`).join('')}</div>
+  <div class="tll">${sg.map(s => `<span class="${s[2]}">${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div>`; };
 pages.job = {
   mount(r) {
     this.id = r.seg[0]; this.lv = null;
-    $('#app').innerHTML = `<a class="back" href="#/jobs">← Jobs</a><div id="jd"></div><div id="jd-log"></div>`;
+    $('#app').innerHTML = `<div id="jd"></div><div id="jd-log"></div>`;
   },
   update() {
     const v = S.vms.find(x => x.id === this.id), box = $('#jd');
-    if (!v) { setHTML(box, '<div class="empty"><p>No job with this id. kiln only keeps the latest 100.</p><a class="btn" href="#/jobs">Back to jobs</a></div>'); this.lv?.destroy(); this.lv = null; return; }
+    const back = `<a class="back" href="#/jobs" aria-label="Back to jobs"${tip('Back to jobs')}>${ic('back', 20)}</a>`;
+    if (!v) { setHTML(box, `<div class="ph">${back}<h1>Job not found</h1></div><div class="empty">${ic('jobs')}<p>No job with this id. kiln only keeps the latest 100.</p><a class="btn" href="#/jobs">Back to jobs</a></div>`); this.lv?.destroy(); this.lv = null; return; }
     if (!v.online_at && v.state !== 'booting' && !fb.has(v.id)) {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
-    const sg = segs(v), tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1, calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
-    setHTML(box, `<div class="jh">${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener">View on GitHub ↗</a>` : ''}${v.state === 'held' ? '<button class="btn" data-act="release">Release now</button>' : ''}${ACTIVE(v) ? '<button class="btn dng" data-act="kill">Kill VM</button>' : ''}</div>
-      <div class="jm"><span class="mono">${esc(v.id)}</span>${sz(v)}${v.cpus ? hq('size') : ''}${wm(v)}<span>runner ${esc(v.runner_id ?? '—')}</span><span title="${esc(when(v.started))}">started ${rel(v.started)}</span></div>
-      <div class="card"><div class="sm fg2" style="display:flex;align-items:center;margin-bottom:8px"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div><div class="tl" role="img" aria-label="Timeline">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0"></i>`).join('')}</div>
-      <div class="tll">${sg.map(s => `<span>${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div></div>
-      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}">Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
+    const sg = segs(v), calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
+    setHTML(box, `<div class="ph">${back}${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
+      ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      <div class="jm"><span class="mono"${tip('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v)}${v.cpus ? hq('size') : ''}${wm(v)}<span${tip('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${tip('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
+      <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
+      ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv) {
       const id = v.id;
       this.lv = new Log($('#jd-log'), { id, live: () => ACTIVE(S.vms.find(x => x.id === id) || {}), sources: [
-        { k: 'console', label: 'Console', src: id, file: 'console' }, { k: 'steps', label: 'Steps', src: id, file: 'steps' },
-        { k: 'gh', label: 'GitHub', off: true, gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
+        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, { k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' },
+        { k: 'gh', label: 'GitHub', off: true, tip: "GitHub's final log for this job", gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
     }
     this.lv.setOff('gh', ACTIVE(v) || !v.ended);
   },
@@ -750,10 +949,10 @@ class Log {
     Object.assign(this, { el, o, raw: '', next: 0, k: o.sources[0].k, gen: 0, timer: null, busy: false, follow: true, st: new Set() });
     this.wrap = lsGet('kiln-wrap') === '1';
     el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
-    const T = (a, i, l, p) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}" title="${l}">${ic(i)}<span class="lbl">${l}</span></button>`;
-    el.innerHTML = `<div class="lt"><div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}">${s.label}</button>`).join('')}</div><span class="sp"></span>
-      ${T('wrap', 'wrap', 'Wrap', this.wrap)}${T('follow', 'down', 'Follow', true)}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false)}</span>${T('copy', 'copy', 'Copy', false)}${T('dl', 'dl', 'Download', false)}</div>
-      <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">Jump to latest</button></div>`;
+    const T = (a, i, l, p, t) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}"${tip(t)}>${ic(i)}<span class="lbl">${l}</span></button>`;
+    el.innerHTML = `<div class="lt"><div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div><span class="sp"></span>
+      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show GitHub's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
+      <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">${ic('down')}Jump to latest</button></div>`;
     this.pre = $('pre', el);
     el.addEventListener('click', e => {
       const b = e.target.closest('button'); if (!b || b.disabled) return;
@@ -763,7 +962,7 @@ class Log {
     LOGS.add(this); curLog = this; this.select(this.k);
   }
   src() { return this.o.sources.find(s => s.k === this.k); }
-  setOff(k, off) { const b = $(`[data-src=${k}]`, this.el); b.disabled = off; b.title = off ? 'Available when the job finishes' : ''; if (off && this.k === k) this.select(this.o.sources[0].k); }
+  setOff(k, off) { const b = $(`[data-src=${k}]`, this.el); b.disabled = off; b.dataset.tip = off ? "GitHub's log is available when the job finishes" : (this.o.sources.find(s => s.k === k)?.tip || ''); if (off && this.k === k) this.select(this.o.sources[0].k); }
   setFollow(f) { this.follow = f; $('[data-lv=follow]', this.el).setAttribute('aria-pressed', f); $('.jump', this.el).hidden = f; if (f) this.pre.scrollTop = this.pre.scrollHeight; }
   async toggle(a) {
     if (a === 'follow') return this.setFollow(!this.follow);
@@ -872,9 +1071,9 @@ pages.repos = {
     this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null;
     if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? `<p class="fg2" style="margin:16px 0 8px">Repos come from the GitHub App's installations.</p>${appInstall()}` : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
-    $('#app').innerHTML = `<a class="back" href="#/repos">← Repos</a><div class="ph"><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener">GitHub ↗</a></div>
+    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
-      ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">Remove ${esc(this.r)}</button></div></div>`}`;
+      ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div></div>`}`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
   },
   unmount() { clearInterval(this.t); },
@@ -898,19 +1097,19 @@ pages.repos = {
       setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
         const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
         return `<li><div class="row rr"><a class="nm" href="#/repos/${r}">${esc(r)}</a>
-          <span class="rt">${ok ? '<span class="ok sm">Routing to kiln</span>' : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}">No kiln jobs seen</button>`}</span>
-          <span class="lr">${lr ? lr === 'err' ? '<span class="fg3 sm">unavailable</span>' : badge(lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm">${n ? n + ' queued' : ''}</span></div>
+          <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
+          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
-      }).join('')}</ul>` : `<div class="empty"><p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
+      }).join('')}</ul>` : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
       return;
     }
     const wn = (S.config.warm || {})[this.r] || 0;
     const cb = ((S.config.cache_branches || {})[this.r] || []).join(', ');
     const cg = Object.entries(S.config.repo_cache_gb || {}).find(([k]) => k.toLowerCase() === this.r.toLowerCase())?.[1];
     setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
-    const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">Retry</button></div>` : '');
-    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}">Run</button></div></li>`).join('')}</ul>` : '<div class="empty"><p>No workflows in this repository.</p></div>' : '<div class="sk" style="height:48px"></div>'));
-    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : '<div class="empty"><p>No runs yet. Run a workflow or push a commit.</p></div>' : '<div class="sk" style="height:48px"></div>'));
+    const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
+    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button></div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>'));
+    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
   },
 };
 function runHTML(run) {
@@ -921,9 +1120,9 @@ function runHTML(run) {
     return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(ghStatus(j.status, j.conclusion))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
       ${j.runner_name ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner_name)}</span>` : ''}</div>`;
   }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
-  return `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
-    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn" href="${esc(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub">↗</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}">Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}">Cancel</button>`}</span></div>${jh}</li>`;
+  return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
+    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
+    <span style="display:flex;gap:8px"><a class="btn ic" href="${esc(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
   try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
@@ -932,11 +1131,12 @@ async function loadLast(r) {
 
 /* ---------- settings ---------- */
 const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', appearance: 'palette' };
 let ncHTML = '', tsOpen = false;
 let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
-const fld = (id, label, ctl, hint, help) => `<div class="fld"><div><label for="${id}">${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
+const fld = (id, label, ctl, hint, help, t) => `<div class="fld"><div><label for="${id}"${tip(t)}>${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
 const num = (k, v, step = 1) => `<input type="number" id="f-${k}" data-k="${k}" value="${esc(v)}" min="0" step="${step}">`;
 const G = {
   capacity: {
@@ -944,8 +1144,8 @@ const G = {
       const c = draft;
       return `<div class="card"><h2>Capacity</h2>
         <div class="fld"><span class="lb">Pause new jobs</span><div class="sw"><input type="checkbox" role="switch" id="f-pause" data-act="pause" ${c.max_vms === 0 ? 'checked' : ''} aria-label="Pause new jobs"><span class="fg2 sm">Sets max VMs to 0. Running jobs finish.</span></div></div>
-        ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus))}
-        ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5))}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb))}
+        ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus), '', '', 'Default size: VMs for jobs with the plain label get this many vCPUs')}
+        ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5), '', '', 'Memory of a default-size VM. Held for as long as the VM runs.')}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb), '', '', "Size of each VM's throwaway disk, deleted with the VM")}
         ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
         ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`, 'label')}
         ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
@@ -964,8 +1164,8 @@ const G = {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
       ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
-      <div class="fld"><span class="lb">Dashboard key</span>${hq('key')}<div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">Forget key in this browser</button></div></div></div>`,
-    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip">${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}">×</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
+      <div class="fld"><span class="lb">Dashboard key</span>${hq('key')}<div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">${ic('key')}Forget key in this browser</button></div></div></div>`,
+    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
   },
   github: {
     html: () => `<div class="card"><h2>GitHub App</h2><div id="app-st"></div></div><div class="card"><h2>GitHub</h2><div id="gh-st"></div>
@@ -975,10 +1175,10 @@ const G = {
       const a = S.app;
       setHTML($('#app-st'), a ? `<dl class="kv" style="margin-bottom:16px"><dt>App</dt><dd><a href="${esc(a.html_url)}" target="_blank" rel="noopener">${esc(a.slug || 'App ' + a.id)} ↗</a></dd>
         <dt>Repos</dt><dd>${a.repos.length ? a.repos.map(esc).join(', ') : '<span class="warn">none yet</span>'}</dd><dt>Refreshed</dt><dd>${a.discovered_at ? rel(a.discovered_at) : 'not yet'}</dd>${a.error ? `<dt>Error</dt><dd class="fail">${esc(a.error)}</dd>` : ''}</dl>
-        <div class="bar" style="margin:0">${appInstall()}<button class="btn dng" data-act="rmapp">Remove App</button></div>
+        <div class="bar" style="margin:0">${appInstall()}<button class="btn dng" data-act="rmapp"${tip('Go back to token auth. The App stays on GitHub.')}>${ic('trash')}Remove App</button></div>
         <p class="fg2 sm" style="margin-top:8px">kiln uses the App's installation tokens (they expire after an hour); the token below is not used.</p>`
       : `<p class="fg2" style="margin-bottom:12px">Safer than a token: the App gets only the permissions kiln needs, never write access to code, and its tokens expire after an hour. Installing it on a repo is what makes kiln serve that repo.</p>
-        <div class="bar" style="margin:0"><label class="sr" for="app-org">Organization</label><input id="app-org" placeholder="org (empty = your account)" style="width:220px"><button class="btn pri" data-act="mkapp">Create GitHub App</button></div>
+        <div class="bar" style="margin:0"><label class="sr" for="app-org">Organization</label><input id="app-org" placeholder="org (empty = your account)" style="width:220px"><button class="btn pri" data-act="mkapp"${tip('Opens GitHub with the App already filled in. You confirm there, then come back here.')}>Create GitHub App</button></div>
         <details style="margin-top:12px"><summary>Use an existing App</summary><form data-form="appmanual" class="bar" style="margin:8px 0 0"><label class="sr" for="app-id">App ID</label><input id="app-id" type="number" min="1" placeholder="App ID" style="width:120px" required><label class="sr" for="app-pem">Private key</label><input id="app-pem" type="file" accept=".pem" required><button class="btn">Save</button></form></details>`);
       const src = { env: 'environment variable', file: 'saved file', gh: 'gh keyring', none: 'none' }[S.token_source] || S.token_source || '—';
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
@@ -1000,7 +1200,7 @@ const G = {
       setHTML($('#img-info'), `<dl class="kv"><dt>Runner version</dt><dd>${esc(im?.runner_version || '—')}</dd><dt>Latest</dt><dd>${esc(im?.runner_latest || '—')}</dd>${im?.apt_wanted?.length ? `<dt>Extra apt</dt><dd>${esc(im.apt_wanted.join(', '))}</dd>` : ''}<dt>Node</dt><dd>${esc((im?.node_versions || (im ? ['24'] : ['—'])).join(', '))}</dd><dt>Baked</dt><dd>${im?.baked_at ? `${esc(when(im.baked_at))} (${rel(im.baked_at)})` : S.image_ready ? '—' : 'Not baked yet'}</dd></dl>
         ${im?.rebake ? `<div class="cal w">Rebake needed: ${esc(im.rebake)}.</div>` : ''}
         ${im?.stale && im.runner_latest && im.runner_latest !== im.runner_version ? `<div class="cal w">Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}</div>` : ''}
-        <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
+        <button class="btn pri" data-act="rebake" style="margin-top:16px" ${S.baking ? 'disabled' : ''}${tip('Build a fresh base image (~4 min). Running jobs are not affected.')}>${S.baking ? 'Baking…' : S.image_ready ? 'Rebake image' : 'Bake image'}</button>`);
       if (S.baking && !this.was) $('#bake-d').open = true; this.was = S.baking;
     },
   },
@@ -1011,7 +1211,7 @@ const G = {
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
       const c = S.caches || {}, repos = REPOS();
-      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. It is created on the first job and saved after a successful push to the default branch or a cache branch.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}">Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
+      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. It is created on the first job and saved after a successful push to the default branch or a cache branch.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
     },
   },
   debug: {
@@ -1023,7 +1223,7 @@ const G = {
     html: () => `<div class="card"><h2>Job network</h2>
       <div class="fld"><span class="lb" id="eg-l">Job network</span><div><div class="seg" role="radiogroup" aria-labelledby="eg-l">${['open', 'filtered'].map(m => `<button role="radio" aria-checked="${(draft.egress || 'open') === m}" data-act="egress" data-id="${m}">${m === 'open' ? 'Open' : 'Filtered'}</button>`).join('')}</div>
       <div class="h">Filtered: jobs reach the internet and kiln's Docker mirror only — not your LAN, tailnet, or other services on this box. Recommended before running untrusted pull requests. Open: jobs route like any process on the host.</div><div id="eg-st" class="sm" style="margin-top:8px"></div></div></div></div>
-      <div id="ts" style="margin-top:16px"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
+      <div id="ts" style="margin-top:16px"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">${ic('pulse')}Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
     open() { loadTs(); if (!doctor?.checks?.length) runDoctor(); },
     live() {
       const c = (doctor?.checks || []).find(x => x.name === 'filtered egress'), el = $('#eg-st');
@@ -1037,26 +1237,26 @@ const G = {
       const dns = String(TS?.status?.Self?.DNSName || '').replace(/\.$/, '') || 'your-host.ts.net';
       return `<div class="card"><h2>Notifications</h2><div class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></div>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p></div>
-        <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">Reset tips</button></div>`;
+        <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
     },
     open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
   },
   diagnostics: {
-    html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">Run checks</button></h2><div id="doc"></div></div>`,
+    html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">${ic('refresh')}Run checks</button></h2><div id="doc"></div></div>`,
     open() { runDoctor(); },
     live() {
-      setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
+      setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
     },
   },
 };
-const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:96px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
+const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
   mount(r) {
     const g = GROUPS[r.seg[0]] ? r.seg[0] : 'capacity'; this.g = g;
     cfgJ = JSON.stringify(S.config); draft = JSON.parse(cfgJ);
-    $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
+    $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${ic(GI[k])}${l}</a>`).join('')}</nav>
       <div><label class="sr" for="gsel">Settings group</label><select id="gsel" data-act="gsel">${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${k === g ? 'selected' : ''}>${l}</option>`).join('')}</select>
-      <div id="set-body"></div><div id="dbar" hidden><span class="sp fg2">Unsaved changes</span><button class="btn" data-act="discard">Discard</button><button class="btn pri" data-act="save">Save changes</button></div></div></div>`;
+      <div id="set-body"></div><div id="dbar" hidden><span class="sp fg2">Unsaved changes</span><button class="btn" data-act="discard"${tip('Undo the changes on this page')}>Discard</button><button class="btn pri" data-act="save"${tip('Applies within seconds, no restart (except the listen address)')}>${ic('check')}Save changes</button></div></div></div>`;
     this.render();
   },
   render() { G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html(); G[this.g].open?.(); this.live(); },
@@ -1072,15 +1272,15 @@ async function loadTs() {
 }
 addEventListener('toggle', e => { if (e.target.matches?.('#ts details')) tsOpen = e.target.open; }, true);
 function renderTs() {
-  if (TS.err) return setHTML($('#ts'), `<div class="card"><div class="cal">${esc(TS.err)}</div><button class="btn" data-act="tsr">Retry</button></div>`);
+  if (TS.err) return setHTML($('#ts'), `<div class="card"><div class="cal" style="margin-top:0">${esc(TS.err)}</div><button class="btn" data-act="tsr">${ic('refresh')}Retry</button></div>`);
   const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = !!TS.serve?.TCP?.['8443'], url = `https://${dns}:8443`;
   const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
   const row = p => {
     const ip = (p.TailscaleIPs || [])[0] || '', pg = pings.get(ip), ls = iso(p.LastSeen);
     const conn = !p.Online ? 'offline' : p.CurAddr ? `direct · ${p.CurAddr}` : p.Relay ? `relayed via ${p.Relay}` : 'idle';
     return `<li><div class="row pr"><span class="t" style="grid-area:n"><span class="tt">${esc(p.HostName)}</span><span class="id">${esc(ip)} · ${esc(p.OS || '')}</span></span>
-      <span class="pc sm ${p.Online ? (p.CurAddr ? 'ok' : 'warn') : 'fg2'}">${esc(conn)}</span><span class="ps sm fg2">${p.Online ? 'online' : ls ? relH(ls) : 'never seen'}</span>
-      <span style="grid-area:p;text-align:right">${ip && p.Online ? `<button class="btn" data-act="ping" data-id="${esc(ip)}" ${pg?.busy ? 'disabled' : ''}>${pg?.busy ? 'Pinging…' : 'Ping'}</button>` : ''}</span>${pg && !pg.busy ? `<span class="pg ${pg.ok ? '' : 'fail'}">${esc(pg.output)}</span>` : ''}</div></li>`;
+      <span class="pc sm ${p.Online ? (p.CurAddr ? 'ok' : 'warn') : 'fg2'}"${tip(p.Online ? (p.CurAddr ? 'Direct connection between this box and the peer' : 'Traffic goes through a Tailscale relay (DERP), which is slower') : '')}>${esc(conn)}</span><span class="ps sm fg2">${p.Online ? 'online' : ls ? relH(ls) : 'never seen'}</span>
+      <span style="grid-area:p;text-align:right">${ip && p.Online ? `<button class="btn" data-act="ping" data-id="${esc(ip)}" ${pg?.busy ? 'disabled' : ''}${tip('tailscale ping: shows whether the path is direct or relayed')}>${pg?.busy ? 'Pinging…' : 'Ping'}</button>` : ''}</span>${pg && !pg.busy ? `<span class="pg ${pg.ok ? '' : 'fail'}">${esc(pg.output)}</span>` : ''}</div></li>`;
   };
   setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn')}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
       <dt>This machine</dt><dd>${esc(self.HostName || '—')}</dd><dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd><dt>IPs</dt><dd class="mono">${(self.TailscaleIPs || []).map(esc).join(', ') || '—'}</dd></dl></div>
@@ -1104,18 +1304,18 @@ async function loadHello() {
 function helloBtn(repo, pri = true) {
   if (S.app) return '<p class="fg2 sm">Test PRs are off with the GitHub App, which cannot write code. Add the snippet below to a workflow instead.</p>';
   const h = hello[repo], e = helloErr[repo];
-  const btn = h ? `<a class="btn" href="${esc(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened ↗ · branch <code>${esc(h.branch)}</code>` : 'Test PR ↗'}</a>`
+  const btn = h ? `<a class="btn" href="${esc(h.pr_url)}" target="_blank" rel="noopener">${h.branch ? `PR opened · branch <code>${esc(h.branch)}</code>` : 'Test PR'}${ic('ext')}</a>`
     : `<button class="btn${pri ? ' pri' : ''}" data-act="hello" data-id="${esc(repo)}" ${helloSt[repo] ? 'disabled' : ''}>${helloSt[repo] ? 'Opening PR…' : 'Open a test PR'}</button>`;
   return `<div class="hello">${btn}${e && !h ? `<div class="cal">${esc(e)}${/workflow/i.test(e) ? ` ${md(WFSCOPE)} <button class="btn" data-act="updtok">Update token</button>` : ''}</div>` : ''}</div>`;
 }
-const imgStrip = () => S.image_ready ? ['o', '<span class="ok">✓ VM image ready</span>']
+const imgStrip = () => S.image_ready ? ['o', `<span class="ok">${ic('check')} VM image ready</span>`]
   : S.baking ? ['neu', `Preparing the VM image in the background · ${PH[bakeIdx()]?.[1] || 'Starting'} · ${dur((Date.now() - bk.t0) / 1000)} of ~4 min`]
   : bakeFailed() ? ['', 'Image bake failed. <a class="btn" href="#/settings/image">View log</a> <button class="btn" data-act="bake">Try again</button>']
   : ['w', 'The VM image isn\'t built yet. <button class="btn" data-act="bake">Bake image</button>'];
 pages.setup = {
   mount() {
-    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip">Skip for now</button></div>
-      <p class="fg2" style="margin:-8px 0 16px">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div class="card" id="su"></div>`;
+    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › GitHub.')}>Skip for now</button></div>
+      <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div class="card" id="su"></div>`;
     setupOpen = null;
   },
   update() {
@@ -1123,10 +1323,10 @@ pages.setup = {
     if (!S.image_ready && !S.baking && bk.checked && !bakeFailed() && !lsGet('kiln-bake-auto')) { lsSet('kiln-bake-auto', '1'); ACT.bake().catch(fail); }
     const [cls, st] = imgStrip(), strip = `<div class="cal ${cls}" style="margin:0 0 20px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">${st}</div>`;
     if (first) {
-      const ok = status(first) === 'passed', sg = segs(first), tot = sg.reduce((a, x) => a + Math.max(x[1], 0), 0) || 1;
-      return setHTML($('#su'), `${strip}<h2><span class="ok">✓</span> kiln ran its first job</h2>
+      const ok = status(first) === 'passed', sg = segs(first);
+      return setHTML($('#su'), `${strip}<h2><span class="ok">${ic('check', 20)}</span> kiln ran its first job</h2>
         <p>${esc(first.repo)} / ${esc(first.job || 'job')} ${ok ? 'passed' : 'failed'} in ${dur(jdur(first))}, on a fresh VM that's already gone.</p>
-        <div class="card" style="margin-top:12px"><div class="tl" role="img" aria-label="Timeline">${sg.map(x => `<i class="${x[2]}" style="flex:${Math.max(x[1], 0) / tot} 1 0"></i>`).join('')}</div><div class="tll">${sg.map(x => `<span>${x[0]}<b>${dur(x[1])}</b></span>`).join('')}</div></div>
+        <div class="card" style="margin-top:12px">${timeline(sg)}</div>
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin:16px 0"><a class="btn pri" href="#/jobs/${encodeURIComponent(first.id)}">View the job</a><a class="btn" href="#/" data-act="finish">Go to overview</a></div>
         <p class="fg2">${ok ? 'Next: close or merge the test PR, then <a href="#/guides/move">move a real workflow →</a>' : 'kiln worked; the workflow failed. <a href="#/guides/debug">Debug a failed job →</a>'}</p>`);
     }
@@ -1141,7 +1341,7 @@ pages.setup = {
       const vm = S.vms.find(v => v.repo === repo && (ACTIVE(v) || v.started >= h.at - 5)), q = ((S.poll.queued || {})[repo] || 0) > 0 || !!vm;
       const rows = [[1, `<a href="${esc(h.pr_url)}" target="_blank" rel="noopener">PR opened ↗</a>`], [q, 'GitHub queued the job'], [!!vm, 'VM booting'],
         [!!vm?.busy_since, vm?.busy_since ? `Running <span data-t="${vm.busy_since}" data-k="dur"></span>` : 'Running']];
-      return `${sel}<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${on ? '✓' : '○'}</span> <span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>
+      return `${sel}<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${ic(on ? 'check' : 'dot')}</span><span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>
         ${S.image_ready ? '' : '<p class="fg2 sm">The job starts as soon as the image is ready.</p>'}
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
@@ -1154,7 +1354,7 @@ pages.setup = {
     ];
     setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', 'Choose a repo', 'Run a test job'].map((t, i) => {
       const d = done[i] && i !== open;
-      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? '✓' : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
+      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
   },
 };
@@ -1205,10 +1405,10 @@ const GUIDES = [
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>';
-    $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${x[1]}</a>`).join('')}</nav>
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', cache: 'cache', network: 'network', image: 'image', stuck: 'help' };
+    $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
-      <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], '← ' + (GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], (GUIDES[i + 1]?.[1] || '') + ' →')}</div></div></div>`;
+      <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
   },
 };
 
@@ -1403,6 +1603,39 @@ addEventListener('keydown', e => {
   else if (e.key === '?') modal(`<form method="dialog"><h2>Keyboard shortcuts</h2><div class="kbd"><span><kbd>g</kbd> <kbd>o</kbd></span><span>Overview</span><span><kbd>g</kbd> <kbd>j</kbd></span><span>Jobs</span><span><kbd>g</kbd> <kbd>r</kbd></span><span>Repos</span><span><kbd>g</kbd> <kbd>s</kbd></span><span>Settings</span><span><kbd>g</kbd> <kbd>h</kbd></span><span>Guides</span>
     <kbd>/</kbd><span>Filter jobs</span><kbd>f</kbd><span>Toggle follow in the log</span><kbd>w</kbd><span>Toggle wrap in the log</span><kbd>Esc</kbd><span>Close overlays</span></div><div class="act"><button class="btn" data-act="guides" type="button">Open guides</button><button class="btn pri" autofocus>Close</button></div></form>`);
 });
+
+/* ---------- tooltips: one #tip element for every [data-tip], on hover and on keyboard focus ---------- */
+const tipEl = $('#tip');
+let tipFor = null, tipWant = null, tipT = 0;
+function showTip(el) {
+  const t = el.dataset.tip; if (!t || !el.isConnected) return;
+  tipFor = el; tipEl.textContent = t; tipEl.classList.add('on');
+  if (!el.hasAttribute('aria-describedby')) el.setAttribute('aria-describedby', 'tip');
+  const r = el.getBoundingClientRect(), w = tipEl.offsetWidth, h = tipEl.offsetHeight, cw = document.documentElement.clientWidth;
+  const x = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, cw - w - 8));
+  const y = r.top - h - 8 >= 8 ? r.top - h - 8 : Math.min(r.bottom + 8, innerHeight - h - 8);
+  tipEl.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
+}
+function hideTip() {
+  clearTimeout(tipT); tipWant = null; if (!tipFor) return;
+  if (tipFor.getAttribute('aria-describedby') === 'tip') tipFor.removeAttribute('aria-describedby');
+  tipFor = null; tipEl.classList.remove('on');
+}
+document.addEventListener('pointerover', e => {
+  if (e.pointerType === 'touch') return;
+  const el = e.target.closest?.('[data-tip]'); if (el === tipWant || (el && el === tipFor)) return;
+  hideTip(); if (el) { tipWant = el; tipT = setTimeout(() => showTip(el), 400); }
+});
+document.addEventListener('pointerout', e => { const el = e.target.closest?.('[data-tip]'); if (el && !el.contains(e.relatedTarget)) hideTip(); });
+document.addEventListener('focusin', e => { const el = e.target; hideTip(); if (el.dataset?.tip && el.matches(':focus-visible')) showTip(el); });
+document.addEventListener('focusout', hideTip);
+// Touch: tap a hint-only element (badge, stat, timeline) to read its tip; any next tap hides it.
+document.addEventListener('pointerdown', e => {
+  const el = e.target.closest?.('[data-tip]'); hideTip();
+  if (e.pointerType === 'touch' && el && !el.closest('a,button,input,select,label')) { showTip(el); tipT = setTimeout(hideTip, 4000); }
+});
+addEventListener('scroll', hideTip, true);
+addEventListener('keydown', e => { if (e.key === 'Escape') hideTip(); });
 
 $('#fav').href = FAV(null);
 route(); poll();
