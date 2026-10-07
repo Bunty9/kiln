@@ -37,7 +37,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `poll_secs` | integer | `5` | at least `3` | live | Seconds between GitHub polls. 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. |
+| `poll_secs` | integer | `5` | at least `3` | live | Seconds between GitHub polls. 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. With a GitHub App each installation has its own limit: only the repos of the limited installation pause (shown as a repo error), the rest keep polling, and the 20% check uses the most constrained installation. |
 | `job_timeout_mins` | integer | `60` | `1` to `1440` | live (VMs started after the change) | Longest a job may run, counted from when the runner reports "Running job". |
 | `idle_timeout_mins` | integer | `10` | `1` to `1440` | live (VMs started after the change) | A VM that never gets a job (boot included) is killed after this. |
 
@@ -100,6 +100,8 @@ The dashboard is an installable web app: its own window, a dock or home-screen i
 
 1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only.
 2. Open that URL. In Chrome or Edge click **Install app** at the top right (or the install icon in the address bar). On iOS use Share › Add to Home Screen; on Android, the menu's Install app.
+
+No dashboard key is needed over HTTPS: `tailscale serve` proxies to kiln's unix socket `<data>/serve.sock` and tells kiln who you are (`Tailscale-User-Login`), and the same `allowed_users` rule applies as over plain HTTP. A browser on the CI box itself still needs the key; a tagged node is refused unless `tagged-devices` is in `allowed_users`. Never point a raw TCP forward (`--tcp`, `--tls-terminated-tcp`) or Funnel at the socket: kiln then stops trusting it and asks for the key (see SECURITY.md). Funnel (serving to the public internet) is refused. If you turned Serve on with kiln 0.2.1 or older, turn it off and on again once: the old setting proxies to `127.0.0.1:7878`, where every request looks local and needs the key. The macOS App Store build of Tailscale is sandboxed and may not be able to reach the socket; the standalone `tailscaled` can.
 
 Over plain `http://<box>:7878` nothing is installed and Settings › Notifications says so. The app talks to the same server as the tab; the API is never cached. If kiln is unreachable, the app shows the last loaded dashboard (or a short "kiln is unreachable" page) and retries on its own. A new kiln release installs a new service worker on the next load.
 
@@ -172,6 +174,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
+  serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

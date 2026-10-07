@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode, header};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 
 pub struct Gh {
@@ -13,10 +13,11 @@ pub struct Gh {
     token: std::sync::RwLock<String>,
     /// Where the token came from: "env" | "file" | "gh" | "none".
     source: std::sync::RwLock<&'static str>,
-    /// Last seen (remaining, limit, reset) from x-ratelimit-* headers.
-    pub rate: std::sync::Mutex<Option<(u64, u64, u64)>>,
-    /// Unix time until which GitHub told us to back off (0 = not paused).
-    paused_until: AtomicU64,
+    /// Per auth identity (0 = the token, else the installation id): last seen
+    /// (remaining, limit, reset) from x-ratelimit-* headers.
+    rates: std::sync::Mutex<BTreeMap<u64, (u64, u64, u64)>>,
+    /// Per auth identity: unix time until which GitHub told us to back off.
+    paused: std::sync::Mutex<BTreeMap<u64, u64>>,
     /// (latest runner release, don't refetch before this unix time).
     latest: std::sync::Mutex<(Option<String>, u64)>,
     // URL -> (etag, body). Conditional GETs that return 304 are free against
@@ -48,8 +49,8 @@ impl Gh {
             http,
             token: std::sync::RwLock::new(token),
             source: std::sync::RwLock::new(source),
-            rate: Default::default(),
-            paused_until: AtomicU64::new(0),
+            rates: Default::default(),
+            paused: Default::default(),
             latest: Default::default(),
             etags: Mutex::default(),
             defaults: Default::default(),
@@ -73,14 +74,47 @@ impl Gh {
     pub fn set_app(&self, a: Option<std::sync::Arc<crate::app_auth::AppAuth>>) {
         *self.app.write().unwrap() = a;
         *self.expires.lock().unwrap() = None;
+        // Identities change meaning between token and App mode.
+        self.rates.lock().unwrap().clear();
+        self.paused.lock().unwrap().clear();
     }
 
     pub fn app(&self) -> Option<std::sync::Arc<crate::app_auth::AppAuth>> {
         self.app.read().unwrap().clone()
     }
 
+    /// Token mode's pause (App mode pauses per installation: see `repo_paused`).
     pub fn paused_until(&self) -> Option<u64> {
-        Some(self.paused_until.load(Ordering::Relaxed)).filter(|&t| t > crate::now())
+        self.paused_of(0)
+    }
+
+    fn paused_of(&self, who: u64) -> Option<u64> {
+        self.paused.lock().unwrap().get(&who).copied().filter(|&t| t > crate::now())
+    }
+
+    fn pause(&self, who: u64, t: u64) {
+        if !billed(self.app().is_some(), who) {
+            return;
+        }
+        let mut p = self.paused.lock().unwrap();
+        let e = p.entry(who).or_default();
+        *e = (*e).max(t);
+    }
+
+    /// App mode: why `repo` must not be polled now (its installation is paused).
+    pub fn repo_paused(&self, repo: &str) -> Option<String> {
+        let a = self.app()?;
+        let inst = crate::app_auth::install_for(&format!("repos/{repo}"), &a.repos.read().unwrap())?;
+        self.paused_of(inst).map(|t| paused_msg(repo, t))
+    }
+
+    /// The most constrained identity's (remaining, limit, reset).
+    pub fn rate(&self) -> Option<(u64, u64, u64)> {
+        tightest(&self.rates.lock().unwrap(), crate::now())
+    }
+
+    pub fn rates(&self) -> BTreeMap<u64, (u64, u64, u64)> {
+        live(&self.rates.lock().unwrap(), crate::now())
     }
 
     pub fn has_token(&self) -> bool {
@@ -93,25 +127,27 @@ impl Gh {
     /// installation exists. Other paths use any installation, or none if there is none.
     /// The App JWT is never handed out here: only `mint`, `discover` and `app_info` use it.
     /// `anon_unserved`: an unserved repo goes unauthenticated instead (update releases).
-    async fn token_for(&self, path: &str, anon_unserved: bool) -> Result<String> {
-        let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
+    /// Also returns the identity the rate limit is tracked under (0 = the token, or none).
+    async fn token_for(&self, path: &str, anon_unserved: bool) -> Result<(String, u64)> {
+        let Some(a) = self.app() else { return Ok((self.token.read().unwrap().clone(), 0)) };
         if crate::app_auth::is_public(path) {
-            return Ok(String::new());
+            return Ok((String::new(), 0));
         }
         // CLI commands (bake, doctor) never ran the scheduler's discovery.
         let found = if a.discovered_at.load(Ordering::Relaxed) == 0 { self.discover().await.map(|_| ()) } else { Ok(()) };
         let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap());
         match (inst, crate::app_auth::repo_of(path)) {
-            (Some(i), Some(_)) => self.mint(&a, i).await,
-            (None, Some(_)) if anon_unserved => Ok(String::new()),
+            (Some(i), Some(_)) => Ok((self.mint(&a, i).await?, i)),
+            (None, Some(_)) if anon_unserved => Ok((String::new(), 0)),
             (None, Some(r)) => {
                 found?;
                 bail!(
                     "repo {r} is not served by the GitHub App: install the App on it (an account other than the App owner's must be in app_accounts)"
                 )
             }
-            (Some(i), None) => Ok(self.mint(&a, i).await.unwrap_or_default()),
-            (None, None) => Ok(String::new()),
+            // A failed mint goes out unauthenticated: the anonymous budget, not the installation's.
+            (Some(i), None) => Ok(self.mint(&a, i).await.map_or((String::new(), 0), |t| (t, i))),
+            (None, None) => Ok((String::new(), 0)),
         }
     }
 
@@ -134,20 +170,23 @@ impl Gh {
         Ok(t)
     }
 
-    async fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
-        Ok(self.request_with(&self.token_for(path, false).await?, method, path))
+    /// The request and the identity to pass to `exec`.
+    async fn request(&self, method: Method, path: &str) -> Result<(reqwest::RequestBuilder, u64)> {
+        let (t, who) = self.token_for(path, false).await?;
+        Ok((self.request_with(&t, method, path), who))
     }
 
     /// GET from the update repo's releases (update.rs): the token, or in App mode the serving
     /// installation's, else unauthenticated (a public repo). `asset` downloads a release asset
     /// (follows the redirect to blob storage, which gets no auth header).
     pub async fn release(&self, path: &str, asset: bool) -> Result<reqwest::Response> {
-        let mut req = self.request_with(&self.token_for(path, true).await?, Method::GET, path).build()?;
+        let (t, who) = self.token_for(path, true).await?;
+        let mut req = self.request_with(&t, Method::GET, path).build()?;
         if asset {
             req.headers_mut().insert(header::ACCEPT, header::HeaderValue::from_static("application/octet-stream"));
             *req.timeout_mut() = Some(std::time::Duration::from_secs(600));
         }
-        self.exec(reqwest::RequestBuilder::from_parts(self.http.clone(), req)).await
+        self.exec(reqwest::RequestBuilder::from_parts(self.http.clone(), req), who).await
     }
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
@@ -161,16 +200,17 @@ impl Gh {
         if token.is_empty() { rb } else { rb.bearer_auth(token) }
     }
 
-    /// Every call goes through here so the rate-limit state stays current.
-    async fn exec(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    /// Every call goes through here so the rate-limit state of `who` (from `token_for`) stays current.
+    async fn exec(&self, rb: reqwest::RequestBuilder, who: u64) -> Result<reqwest::Response> {
         let r = rb.send().await?;
         let num = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         let (remaining, reset) = (num("x-ratelimit-remaining"), num("x-ratelimit-reset"));
-        // An unauthenticated call (the App's runner-release lookup) spends the per-IP
-        // anonymous budget, not ours: it must neither show as our rate nor pause polling.
-        let ours = !anonymous_budget(num("x-ratelimit-limit"));
+        // An unauthenticated call (the App's runner-release lookup, or any call whose mint
+        // failed) spends the per-IP anonymous budget, not ours: it must neither show as our
+        // rate nor pause polling.
+        let ours = !anonymous_budget(num("x-ratelimit-limit")) && billed(self.app().is_some(), who);
         if ours && let (Some(rem), Some(lim), Some(reset)) = (remaining, num("x-ratelimit-limit"), reset) {
-            *self.rate.lock().unwrap() = Some((rem, lim, reset));
+            self.rates.lock().unwrap().insert(who, (rem, lim, reset));
         }
         // "2026-11-01 00:00:00 UTC": fine-grained tokens, and classic ones with an expiry.
         // Every successful API response says it, so a rotated token without one clears it.
@@ -186,15 +226,15 @@ impl Gh {
             a.mark_stale();
         }
         if ours && let Some(t) = pause_until(r.status().as_u16(), remaining, reset, num("retry-after"), crate::now()) {
-            self.paused_until.fetch_max(t, Ordering::Relaxed);
+            self.pause(who, t);
         }
         Ok(r)
     }
 
     /// Secondary limits come as a 403 whose only marker is the body text.
-    fn note_body(&self, status: u16, body: &str) {
+    fn note_body(&self, who: u64, status: u16, body: &str) {
         if secondary_limit(status, body) {
-            self.paused_until.fetch_max(crate::now() + 60, Ordering::Relaxed);
+            self.pause(who, crate::now() + 60);
         }
     }
 
@@ -230,15 +270,15 @@ impl Gh {
     /// Raw call for the dashboard proxy. Follows redirects (job logs redirect
     /// to a signed blob URL; reqwest drops the auth header cross-origin).
     pub async fn raw(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
-        let mut rb = self.request(method, path).await?;
+        let (mut rb, who) = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
         }
-        let r = self.exec(rb).await?;
+        let r = self.exec(rb, who).await?;
         let status = r.status().as_u16();
         let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
         let body = r.bytes().await?;
-        self.note_body(status, &String::from_utf8_lossy(&body));
+        self.note_body(who, status, &String::from_utf8_lossy(&body));
         Ok(Resp { status, content_type, body })
     }
 
@@ -251,11 +291,11 @@ impl Gh {
             }
             c.get(path).cloned()
         };
-        let mut rb = self.request(Method::GET, path).await?;
+        let (mut rb, who) = self.request(Method::GET, path).await?;
         if let Some((etag, _)) = &cached {
             rb = rb.header(header::IF_NONE_MATCH, etag);
         }
-        let r = self.exec(rb).await?;
+        let r = self.exec(rb, who).await?;
         if r.status() == StatusCode::NOT_MODIFIED
             && let Some((_, v)) = cached
         {
@@ -264,7 +304,7 @@ impl Gh {
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            self.note_body(status.as_u16(), &body);
+            self.note_body(who, status.as_u16(), &body);
             bail!("GET {path}: {status} {body}");
         }
         let etag = r.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(String::from);
@@ -276,11 +316,12 @@ impl Gh {
     }
 
     async fn send(&self, method: Method, path: &str, body: Value) -> Result<Value> {
-        let r = self.exec(self.request(method.clone(), path).await?.json(&body)).await?;
+        let (rb, who) = self.request(method.clone(), path).await?;
+        let r = self.exec(rb.json(&body), who).await?;
         if !r.status().is_success() {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            self.note_body(status.as_u16(), &body);
+            self.note_body(who, status.as_u16(), &body);
             bail!("{method} {path}: {status} {body}");
         }
         Ok(r.json().await.unwrap_or(Value::Null))
@@ -627,7 +668,8 @@ impl Gh {
 
     /// Unused JIT registrations linger as offline runners; clean them up.
     pub async fn delete_runner(&self, repo: &str, id: u64) -> Result<()> {
-        let r = self.exec(self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?).await?;
+        let (rb, who) = self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?;
+        let r = self.exec(rb, who).await?;
         // 404 = the ephemeral runner already deregistered itself after its job.
         if !r.status().is_success() && r.status() != StatusCode::NOT_FOUND {
             bail!("delete runner {id}: {}", r.status());
@@ -752,6 +794,28 @@ fn pause_until(status: u16, remaining: Option<u64>, reset: Option<u64>, retry_af
     }
 }
 
+/// Whether `who`'s rate limit is ours to track and pause on. In App mode identity 0 only
+/// makes unauthenticated calls, which spend GitHub's per-IP budget, not an installation's.
+fn billed(app_mode: bool, who: u64) -> bool {
+    !app_mode || who != 0
+}
+
+/// The entries whose rate-limit window has not reset yet.
+fn live(rates: &BTreeMap<u64, (u64, u64, u64)>, now: u64) -> BTreeMap<u64, (u64, u64, u64)> {
+    rates.iter().filter(|(_, r)| r.2 > now).map(|(&k, &v)| (k, v)).collect()
+}
+
+/// The identity with the lowest remaining/limit ratio, among windows not yet reset.
+fn tightest(rates: &BTreeMap<u64, (u64, u64, u64)>, now: u64) -> Option<(u64, u64, u64)> {
+    live(rates, now).into_values().min_by_key(|&(rem, lim, _)| (rem as u128 * 1_000_000) / lim.max(1) as u128)
+}
+
+/// Repo error for a repo whose installation (on the repo's owner) is paused until `t`.
+fn paused_msg(repo: &str, t: u64) -> String {
+    let owner = repo.split('/').next().unwrap_or(repo);
+    format!("GitHub rate limit for installation on {owner}: paused until {:02}:{:02} UTC", t / 3600 % 24, t / 60 % 60)
+}
+
 fn secondary_limit(status: u16, body: &str) -> bool {
     status == 403 && body.to_ascii_lowercase().contains("secondary rate limit")
 }
@@ -810,6 +874,41 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-10-06T10:51:50Z"), Some(1791283910));
         assert_eq!(parse_rfc3339("2024-02-29T23:59:59Z"), Some(1709251199));
         assert_eq!(parse_rfc3339("garbage"), None);
+    }
+
+    #[test]
+    fn tightest_rate() {
+        let m = |v: &[(u64, (u64, u64, u64))]| v.iter().copied().collect::<BTreeMap<_, _>>();
+        assert_eq!(tightest(&m(&[]), 0), None);
+        // PAT mode: the single identity, as before
+        assert_eq!(tightest(&m(&[(0, (4000, 5000, 9))]), 0), Some((4000, 5000, 9)));
+        // lowest remaining/limit ratio wins, not the lowest remaining count
+        assert_eq!(tightest(&m(&[(1, (900, 1000, 1)), (2, (1000, 15000, 2)), (3, (4000, 5000, 3))]), 0), Some((1000, 15000, 2)));
+    }
+
+    #[test]
+    fn expired_rates_ignored() {
+        let m: BTreeMap<_, _> = [(1, (0, 5000, 100)), (2, (4000, 5000, 900))].into_iter().collect();
+        // Identity 1's window reset at 100: its empty budget is history.
+        assert_eq!(tightest(&m, 99), Some((0, 5000, 100)));
+        assert_eq!(tightest(&m, 100), Some((4000, 5000, 900)));
+        assert_eq!(live(&m, 100).keys().copied().collect::<Vec<_>>(), [2]);
+        assert_eq!(tightest(&m, 900), None);
+    }
+
+    #[test]
+    fn app_mode_identity_zero_is_anonymous() {
+        // Token mode: 0 is the token, tracked and paused.
+        assert!(billed(false, 0));
+        // App mode: 0 is an unauthenticated call (public lookup, or a failed mint), never ours.
+        assert!(!billed(true, 0));
+        assert!(billed(true, 42));
+    }
+
+    #[test]
+    fn install_pause_message() {
+        // 1791283910 = 2026-10-06 10:51:50 UTC
+        assert_eq!(paused_msg("Bunty9/kiln", 1791283910), "GitHub rate limit for installation on Bunty9: paused until 10:51 UTC");
     }
 
     #[test]
