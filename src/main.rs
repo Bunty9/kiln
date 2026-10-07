@@ -1,5 +1,6 @@
 mod app_auth;
 mod github;
+mod host;
 mod mirror;
 mod update;
 mod vm;
@@ -111,12 +112,24 @@ impl Default for Config {
 
 impl Config {
     /// A VM of `cpus` serves `<label>-<cpus>cpu`, and the plain label only if it is the default size.
+    /// On an arm64 host the label is `<label>-arm64`, so x64 jobs never land on it.
     pub fn runner_labels(&self, cpus: u32) -> Vec<String> {
-        let mut l = vec!["self-hosted".into(), "linux".into(), "x64".into(), format!("{}-{cpus}cpu", self.label)];
+        self.labels_for(cpus, host::ARM64)
+    }
+
+    fn labels_for(&self, cpus: u32, arm64: bool) -> Vec<String> {
+        let label = github::arch_label(&self.label, arm64);
+        let arch = if arm64 { "ARM64" } else { "x64" };
+        let mut l = vec!["self-hosted".into(), "linux".into(), arch.into(), format!("{label}-{cpus}cpu")];
         if cpus == self.vm_cpus {
-            l.push(self.label.clone());
+            l.push(label);
         }
         l
+    }
+
+    /// What jobs put in `runs-on` for this host's default size: `<label>`, or `<label>-arm64`.
+    pub fn job_label(&self) -> String {
+        github::arch_label(&self.label, host::ARM64)
     }
 
     /// Warm VMs wanted for `repo` at size `cpus`: default size only, none while paused.
@@ -229,6 +242,9 @@ impl Config {
         }
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
+        }
+        if self.egress == "filtered" && host::MACOS {
+            bail!("{}", vm::FILTERED_LINUX_ONLY);
         }
         if let Some(a) = self.app_accounts.iter().find(|a| !valid_login(a)) {
             bail!("app_accounts: {a:?} is not a GitHub user or org login (letters, digits, single hyphens, at most 39)");
@@ -641,7 +657,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     app.gh.refresh_latest().await;
     // Launching during a bake is fine: new VMs use the old base until the atomic swap.
     auto_rebake(app, cfg);
-    let (mem_avail, disk) = (vm::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
+    let (mem_avail, disk) = (host::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
     // Shown on the dashboard; each size is gated on its own memory below.
     let mirror_mb = cfg.docker_mirror.then(|| mirror::cache_mb(app)).flatten();
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
@@ -660,7 +676,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
         let (mb, cpus) = act.fold((0, 0), |(m, c), v| (m + v.mem_mb as u64, c + v.cpus as u64));
-        vm::Budget::new(vm::meminfo_kb("MemTotal:") / 1024, mb, cpus, host_threads())
+        vm::Budget::new(host::mem_total_mb(), mb, cpus, host_threads())
     };
 
     let mut queued_by_repo = HashMap::new();
@@ -835,7 +851,7 @@ mod tests {
         assert!(!ok(|c| c.debug_hold_mins = 121));
         assert!(ok(|c| c.debug_ssh_keys = vec!["ssh-ed25519 AAAA me@x".into()]));
         assert!(!ok(|c| c.debug_ssh_keys = vec!["rm -rf /".into()]));
-        assert!(ok(|c| c.egress = "filtered".into()));
+        assert_eq!(ok(|c| c.egress = "filtered".into()), !host::MACOS, "filtered egress is Linux-only");
         assert!(!ok(|c| c.egress = "closed".into()));
         let warm = |repos: &[&str], r: &str, n: u32| {
             let mut c = Config { repos: repos.iter().map(|s| s.to_string()).collect(), ..Config::default() };
@@ -944,8 +960,13 @@ mod tests {
     #[test]
     fn size_labels_and_memory() {
         let c = Config::default();
-        assert_eq!(c.runner_labels(4), ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"]);
-        assert_eq!(c.runner_labels(8), ["self-hosted", "linux", "x64", "kiln-8cpu"]);
+        assert_eq!(c.labels_for(4, false), ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"]);
+        assert_eq!(c.labels_for(8, false), ["self-hosted", "linux", "x64", "kiln-8cpu"]);
+        assert_eq!(c.runner_labels(8), c.labels_for(8, host::ARM64));
+        // arm64 hosts never advertise the plain label: x64 jobs must not land there.
+        assert_eq!(c.labels_for(4, true), ["self-hosted", "linux", "ARM64", "kiln-arm64-4cpu", "kiln-arm64"]);
+        assert_eq!(c.labels_for(8, true), ["self-hosted", "linux", "ARM64", "kiln-arm64-8cpu"]);
+        assert_eq!(c.job_label(), if host::ARM64 { "kiln-arm64" } else { "kiln" });
         assert_eq!((c.mem_mb(4), c.mem_mb(2), c.mem_mb(16)), (8192, 4096, 24576));
         let c = Config { size_mem_mb: [(8, 12288), (4, 1024)].into(), ..Config::default() };
         // overrides apply to non-default sizes only; the default size is vm_mem_mb

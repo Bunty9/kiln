@@ -1,7 +1,9 @@
 #cloud-config
 # Bake recipe for the kiln base image. Runs once (`kiln bake`), then the image
 # is frozen; every job boots a throwaway qcow2 overlay of it.
-# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln.
+# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln, and so are,
+# per guest architecture (`Guest` in src/vm.rs): {{ARCH}} (GitHub's and Node's name for it),
+# {{CONSOLE}} (the kernel console, also kiln's control channel) and {{STEPS}} (the step-log device).
 hostname: kiln
 users:
   - name: runner
@@ -58,7 +60,7 @@ write_files:
       V={{RUNNER_VERSION}}
       usermod -aG docker runner
       mkdir -p /home/runner/actions-runner /opt/hostedtoolcache
-      curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" \
+      curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-{{ARCH}}-$V.tar.gz" \
         | tar -xz -C /home/runner/actions-runner
       /home/runner/actions-runner/bin/installdependencies.sh
       # Write environment variables to both .env and /etc/environment
@@ -86,18 +88,18 @@ write_files:
       # the bare `node` on PATH is the newest.
       # Each tarball is checked against the release's SHASUMS256.txt before it is unpacked.
       for N in {{NODE_VERSIONS}}; do
-        T=node-v$N-linux-x64.tar.xz
+        T=node-v$N-linux-{{ARCH}}.tar.xz
         curl -fsSL -o "/tmp/$T" "https://nodejs.org/dist/v$N/$T"
         curl -fsSL -o /tmp/SHASUMS256.txt "https://nodejs.org/dist/v$N/SHASUMS256.txt"
         # Exactly this file's line; none (or a mismatch) fails sha256sum, and so the bake.
         awk -v f="$T" '$2 == f' /tmp/SHASUMS256.txt | (cd /tmp && sha256sum --strict -c -)
-        mkdir -p /opt/hostedtoolcache/node/$N/x64
-        tar -xJf "/tmp/$T" -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
+        mkdir -p /opt/hostedtoolcache/node/$N/{{ARCH}}
+        tar -xJf "/tmp/$T" -C /opt/hostedtoolcache/node/$N/{{ARCH}} --strip-components=1
         rm -f "/tmp/$T" /tmp/SHASUMS256.txt
-        touch /opt/hostedtoolcache/node/$N/x64.complete
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/node /usr/local/bin/node
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npm /usr/local/bin/npm
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npx /usr/local/bin/npx
+        touch /opt/hostedtoolcache/node/$N/{{ARCH}}.complete
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/node /usr/local/bin/node
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/npm /usr/local/bin/npm
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/npx /usr/local/bin/npx
       done
       # Docker Hub mirror: kiln runs a registry proxy at 127.0.0.1:5000 (host); guests reach via 10.0.2.2:5000 (QEMU user networking)
       # Pulls are mirrored locally; falls back to Docker Hub if proxy is down
@@ -121,19 +123,29 @@ write_files:
       # No baked host keys: kiln-job generates fresh ones per boot, at hold time.
       rm -f /etc/ssh/ssh_host_*
       systemctl disable ssh.service ssh.socket || true
-      # kiln talks to the guest over ttyS0 input; nothing else may read it.
-      systemctl mask serial-getty@ttyS0.service
+      # kiln talks to the guest over the console's input; nothing else may read it.
+      systemctl mask serial-getty@{{CONSOLE}}.service
       touch /etc/cloud/cloud-init.disabled
       cloud-init clean --logs --machine-id
-      echo KILN_BAKE_OK > /dev/ttyS0
+      echo KILN_BAKE_OK > /dev/{{CONSOLE}}
   - path: /usr/local/sbin/kiln-job
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Boot entry of a job VM: read the JIT config kiln passed as an SMBIOS
-      # OEM string, run exactly one job, power off. QEMU exits and the
-      # overlay is deleted.
-      jit=$(dmidecode -q -t 11 | sed -n 's/^[[:space:]]*String [0-9]*: kiln.jit=//p')
+      # Boot entry of a job VM: read the JIT config kiln passed in, run exactly
+      # one job, power off. QEMU exits and the overlay is deleted.
+      # kiln's secrets ("kiln.<name>=<value>"): a fw_cfg file (every guest; arm64 has
+      # nothing else), else an SMBIOS OEM string (x86 gets both, should the module be missing).
+      secret() {
+        local f=/sys/firmware/qemu_fw_cfg/by_name/opt/kiln/$1/raw
+        modprobe qemu_fw_cfg 2>/dev/null
+        if [ -r "$f" ]; then
+          sed -n "s/^kiln\.$1=//p" "$f"
+        else
+          dmidecode -q -t 11 2>/dev/null | sed -n "s/^[[:space:]]*String [0-9]*: kiln\.$1=//p"
+        fi
+      }
+      jit=$(secret jit)
       if [ -z "$jit" ]; then
         echo "kiln: no JIT config passed, powering off"
       else
@@ -142,17 +154,17 @@ write_files:
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
         sleep 1 # let kiln-steps flush the last page
-        # Host->guest control channel is ttyS0 input. Open it once and keep it open:
+        # Host->guest control channel is the console's input. Open it once and keep it open:
         # input that arrives while no fd is open would be flushed.
-        stty -F /dev/ttyS0 -echo 2>/dev/null
-        exec 3</dev/ttyS0
+        stty -F /dev/{{CONSOLE}} -echo 2>/dev/null
+        exec 3</dev/{{CONSOLE}}
         echo "kiln: decide"
         cmd=""
         read -r -t 20 cmd <&3 || true
         secs=${cmd#hold }
         if [ "$secs" != "$cmd" ] && [[ $secs =~ ^[0-9]+$ ]]; then
           echo "kiln: holding for ${secs}s"
-          keys=$(dmidecode -q -t 11 | sed -n 's/^[[:space:]]*String [0-9]*: kiln.ssh=//p')
+          keys=$(secret ssh)
           if [ -n "$keys" ]; then
             install -d -m 700 -o runner -g runner /home/runner/.ssh
             echo "$keys" | base64 -d > /home/runner/.ssh/authorized_keys
@@ -243,12 +255,13 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Mirror live step output (runner _diag/pages/*.log) to the second serial
-      # port, which kiln saves as steps.log. The runner deletes a page once
-      # uploaded, so poll fast and simply forget files that vanish.
+      # Mirror live step output (runner _diag/pages/*.log) to the steps channel (the
+      # second serial port, or a virtio-serial port on arm64), which kiln saves as
+      # steps.log. The runner deletes a page once uploaded, so poll fast and simply
+      # forget files that vanish.
       pages=/home/runner/actions-runner/_diag/pages
       declare -A off
-      exec >/dev/ttyS1
+      exec >{{STEPS}}
       while sleep 0.3; do
         for f in "$pages"/*.log; do
           size=$(stat -c %s "$f" 2>/dev/null) || continue

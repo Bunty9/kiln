@@ -624,7 +624,9 @@ const TIPS = {
 };
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
-const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v7\n`;
+// The runs-on label of the default size: the configured label, plus -arm64 on an arm64 host.
+const JL = () => S?.job_label || S?.config.label || 'kiln';
+const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${JL()}]\n    steps:\n      - uses: actions/checkout@v7\n`;
 
 /* ---------- api, dialogs, toasts ---------- */
 let keyWait = null;
@@ -993,8 +995,8 @@ pages.overview = {
       <div class="meter"${kt('Free disk where kiln keeps the image, repo caches and VM disks')}><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
   },
 };
-const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
-const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty">${ic('jobs')}<p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more</a></div>`; };
+const SIZES = () => `Sizes: runs-on: [self-hosted, ${JL()}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
+const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty">${ic('jobs')}<p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(JL())}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more</a></div>`; };
 
 /* ---------- jobs ---------- */
 const jf = { f: 'all', repo: '' };
@@ -1289,7 +1291,7 @@ const G = {
         ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus), '', '', 'Default size: VMs for jobs with the plain label get this many vCPUs')}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5), '', '', 'Memory of a default-size VM. Held for as long as the VM runs.')}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb), '', '', "Size of each VM's throwaway disk, deleted with the VM")}
         ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
-        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`, 'label')}
+        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(JL())}]`, 'label')}
         ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
         <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
     },
@@ -1611,7 +1613,7 @@ const GUIDES = [
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', cache: 'cache', network: 'network', image: 'image', stuck: 'help' };
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', cache: 'cache', network: 'network', image: 'image', stuck: 'help' };
     $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
       <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;

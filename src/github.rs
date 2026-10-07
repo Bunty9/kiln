@@ -402,7 +402,7 @@ impl Gh {
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
-                        && let Some(n) = job_size(&j["labels"], label, default_cpus).filter(|&n| n <= host)
+                        && let Some(n) = job_size(&j["labels"], label, default_cpus, crate::host::ARM64).filter(|&n| n <= host)
                     {
                         let jid = j["id"].as_u64().unwrap_or_default();
                         if fork {
@@ -577,13 +577,16 @@ impl Gh {
         }
     }
 
-    /// Delete offline, idle `kiln-*` runners left behind by a crash.
+    /// Delete offline, idle `kiln-*` runners left behind by a crash. Only runners of this
+    /// host's architecture: a kiln of the other one may serve the same repo, and its
+    /// runners are offline while their VMs boot.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
             if let Some(id) = r["id"].as_u64()
                 && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-"))
+                && same_arch(&r["labels"], crate::host::ARM64)
                 && r["status"] == "offline"
                 && r["busy"] == false
             {
@@ -749,17 +752,32 @@ fn is_fork_run(run: &Value) -> bool {
     }
 }
 
+/// The configured label as runners of this architecture advertise it: arm64 hosts
+/// add `-arm64`, so a job written for x64 (`<label>`) never lands on an arm64 VM.
+pub fn arch_label(label: &str, arm64: bool) -> String {
+    if arm64 { format!("{label}-arm64") } else { label.to_string() }
+}
+
+/// Does a runner (its `labels` from the runners API) have this host's architecture label?
+fn same_arch(labels: &Value, arm64: bool) -> bool {
+    let arch = if arm64 { "arm64" } else { "x64" };
+    labels.as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(arch)))
+}
+
 /// The VM size a job asks for, if it is ours: every label must be implicit
-/// (GitHub adds `self-hosted`, `linux`, `x64` to self-hosted runners) or one
-/// of ours, and exactly one of ours must be present. `<label>` is the default
-/// size, `<label>-Ncpu` size N. A plain `self-hosted` job is someone else's.
-fn job_size(job_labels: &Value, label: &str, default_cpus: u32) -> Option<u32> {
-    let label = label.to_ascii_lowercase();
+/// (GitHub adds `self-hosted`, `linux` and the architecture, `x64` or `ARM64`, to
+/// self-hosted runners) or one of ours, and exactly one of ours must be present.
+/// `<label>` is the default size, `<label>-Ncpu` size N (`<label>-arm64`... on an
+/// arm64 host). A plain `self-hosted` job is someone else's, and so is a job for
+/// the other architecture.
+fn job_size(job_labels: &Value, label: &str, default_cpus: u32, arm64: bool) -> Option<u32> {
+    let label = arch_label(label, arm64).to_ascii_lowercase();
+    let arch = if arm64 { "arm64" } else { "x64" };
     let mut size = None;
     let mut found = 0;
     for l in job_labels.as_array()? {
         let l = l.as_str()?.to_ascii_lowercase();
-        if ["self-hosted", "linux", "x64"].contains(&l.as_str()) {
+        if ["self-hosted", "linux", arch].contains(&l.as_str()) {
             continue;
         }
         found += 1;
@@ -925,7 +943,7 @@ mod tests {
 
     #[test]
     fn label_matching() {
-        let size = |v: Value| job_size(&v, "kiln", 4);
+        let size = |v: Value| job_size(&v, "kiln", 4, false);
         assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));
         assert_eq!(size(json!(["kiln"])), Some(4));
         assert_eq!(size(json!(["Self-Hosted", "Linux", "KILN"])), Some(4));
@@ -933,7 +951,7 @@ mod tests {
         assert_eq!(size(json!(["kiln-8cpu"])), Some(8));
         assert_eq!(size(json!(["self-hosted", "Kiln-2CPU"])), Some(2));
         assert_eq!(size(json!(["kiln-4cpu"])), Some(4));
-        assert_eq!(job_size(&json!(["kiln"]), "kiln", 6), Some(6));
+        assert_eq!(job_size(&json!(["kiln"]), "kiln", 6, false), Some(6));
         assert_eq!(size(json!(["ubuntu-latest"])), None);
         assert_eq!(size(json!(["self-hosted"])), None);
         assert_eq!(size(json!(["self-hosted", "linux"])), None);
@@ -947,6 +965,34 @@ mod tests {
         assert_eq!(size(json!(["kilnx-8cpu"])), None);
         assert_eq!(size(json!([])), None);
         assert_eq!(size(json!(null)), None);
+        // An x64 host ignores arm64 jobs.
+        assert_eq!(size(json!(["self-hosted", "kiln-arm64"])), None);
+        assert_eq!(size(json!(["self-hosted", "kiln-arm64-8cpu"])), None);
+        assert_eq!(size(json!(["self-hosted", "ARM64", "kiln"])), None);
+    }
+
+    #[test]
+    fn arm64_label_matching() {
+        let size = |v: Value| job_size(&v, "kiln", 4, true);
+        assert_eq!(size(json!(["self-hosted", "kiln-arm64"])), Some(4));
+        assert_eq!(size(json!(["self-hosted", "linux", "ARM64", "kiln-arm64"])), Some(4));
+        assert_eq!(size(json!(["kiln-arm64-8cpu"])), Some(8));
+        assert_eq!(size(json!(["self-hosted", "Kiln-ARM64-16CPU"])), Some(16));
+        // x64 jobs never land on an arm64 host.
+        assert_eq!(size(json!(["self-hosted", "kiln"])), None);
+        assert_eq!(size(json!(["self-hosted", "kiln-8cpu"])), None);
+        assert_eq!(size(json!(["self-hosted", "x64", "kiln-arm64"])), None);
+        assert_eq!(size(json!(["kiln-arm64", "kiln-arm64-8cpu"])), None);
+        assert_eq!(size(json!(["kiln-arm64-3cpu"])), None);
+        assert_eq!(size(json!(["kiln-arm64-"])), None);
+        assert_eq!(arch_label("kiln", true), "kiln-arm64");
+        assert_eq!(arch_label("kiln", false), "kiln");
+        let labels = |names: &[&str]| Value::from(names.iter().map(|n| json!({ "id": 1, "name": n })).collect::<Vec<_>>());
+        assert!(same_arch(&labels(&["self-hosted", "Linux", "X64", "kiln"]), false));
+        assert!(!same_arch(&labels(&["self-hosted", "Linux", "X64", "kiln"]), true), "an arm64 kiln leaves x64 runners alone");
+        assert!(same_arch(&labels(&["self-hosted", "Linux", "ARM64", "kiln-arm64"]), true));
+        assert!(!same_arch(&labels(&["self-hosted", "Linux", "ARM64", "kiln-arm64"]), false));
+        assert!(!same_arch(&Value::Null, false));
     }
 
     #[test]

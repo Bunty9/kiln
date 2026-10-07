@@ -20,6 +20,8 @@ pub const PUBLIC_KEY: &str = "zOK6AdHJZXwFqAOUApNnaU7r5PZSCjkpAjLRu2w16ZM=";
 const MAX_BOOTS: u32 = 2;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MUSL: bool = cfg!(target_env = "musl");
+/// This build's release flavor: `x86_64-linux`, `x86_64-linux-musl` or `aarch64-macos`.
+const FLAVOR: &str = flavor(cfg!(target_os = "macos"), std::env::consts::ARCH, MUSL);
 
 #[derive(Clone)]
 struct Release {
@@ -84,7 +86,7 @@ pub fn json(app: &App) -> Value {
         "available": l.is_some_and(|r| newer(&r.version, VERSION)),
         "notes": l.map(|r| &r.notes),
         "published_at": l.map(|r| &r.published_at),
-        "flavor": if MUSL { "musl" } else { "gnu" },
+        "flavor": if crate::host::MACOS { "macos" } else if MUSL { "musl" } else { "gnu" },
         "state": s.state,
         "error": s.error,
         "progress": s.progress,
@@ -221,10 +223,11 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     s.into()
 }
 
-/// This process's executable (/proc/self/exe), refused once it was replaced on disk.
+/// This process's executable, refused once it was replaced on disk (Linux reports
+/// that as a " (deleted)" suffix of /proc/self/exe).
 fn current_exe() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("resolving /proc/self/exe")?;
-    if exe.to_string_lossy().ends_with(" (deleted)") {
+    let exe = std::env::current_exe().context("resolving kiln's own executable")?;
+    if cfg!(target_os = "linux") && exe.to_string_lossy().ends_with(" (deleted)") {
         bail!("kiln's binary was replaced on disk since it started: restart kiln first");
     }
     Ok(exe)
@@ -245,7 +248,7 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     if !manual && !auto_apply(Some(&rel.version), VERSION, skip.as_deref()) {
         bail!("kiln {} was rolled back: auto_update skips it (apply it by hand to retry)", rel.version);
     }
-    let name = asset_name(&rel.version, MUSL);
+    let name = asset_name(&rel.version, FLAVOR);
     let [tgz, sha, sig] =
         pick_assets(&rel.assets, &name).with_context(|| format!("release {} has no signed {name} (with .sha256 and .sig)", rel.version))?;
     let (tgz, sha, sig) = (download(app, &repo, tgz).await?, download(app, &repo, sha).await?, download(app, &repo, sig).await?);
@@ -453,9 +456,20 @@ fn auto_apply(latest: Option<&str>, current: &str, skip: Option<&str>) -> bool {
     latest.is_some_and(|l| newer(l, current) && skip.is_none_or(|s| newer(l, s)))
 }
 
-/// Tarball of `version` for this build's libc flavor.
-fn asset_name(version: &str, musl: bool) -> String {
-    format!("kiln-{version}-x86_64-linux{}.tar.gz", if musl { "-musl" } else { "" })
+/// `<arch>-macos`, or `<arch>-linux` with a `-musl` suffix for the static build.
+const fn flavor(macos: bool, arch: &str, musl: bool) -> &'static str {
+    match (macos, arch.as_bytes(), musl) {
+        (true, b"aarch64", _) => "aarch64-macos",
+        (false, b"aarch64", false) => "aarch64-linux",
+        (false, b"aarch64", true) => "aarch64-linux-musl",
+        (_, _, true) => "x86_64-linux-musl",
+        _ => "x86_64-linux",
+    }
+}
+
+/// Tarball of `version` for this build's flavor.
+fn asset_name(version: &str, flavor: &str) -> String {
+    format!("kiln-{version}-{flavor}.tar.gz")
 }
 
 /// Asset ids of `name`, `name.sha256` and `name.sig` in a release's `assets`.
@@ -532,8 +546,16 @@ mod tests {
 
     #[test]
     fn assets_by_flavor() {
-        assert_eq!(asset_name("0.2.0", false), "kiln-0.2.0-x86_64-linux.tar.gz");
-        assert_eq!(asset_name("0.2.0", true), "kiln-0.2.0-x86_64-linux-musl.tar.gz");
+        assert_eq!(asset_name("0.2.0", flavor(false, "x86_64", false)), "kiln-0.2.0-x86_64-linux.tar.gz");
+        assert_eq!(asset_name("0.2.0", flavor(false, "x86_64", true)), "kiln-0.2.0-x86_64-linux-musl.tar.gz");
+        assert_eq!(asset_name("0.2.0", flavor(true, "aarch64", false)), "kiln-0.2.0-aarch64-macos.tar.gz");
+        assert_eq!(flavor(false, "aarch64", false), "aarch64-linux");
+        if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) {
+            assert_eq!(FLAVOR, "x86_64-linux");
+        }
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert_eq!(FLAVOR, "aarch64-macos");
+        }
         let a = json!([
             { "id": 1, "name": "kiln-0.2.0-x86_64-linux.tar.gz" },
             { "id": 2, "name": "kiln-0.2.0-x86_64-linux.tar.gz.sha256" },
