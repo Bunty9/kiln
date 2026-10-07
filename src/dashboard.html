@@ -1597,7 +1597,7 @@ const GUIDES = [
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
     <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
     <p>The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
-    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.73.48.98')}</li>
+    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
     <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
   ['cache', 'Caching', () => `<h2>Caching</h2>

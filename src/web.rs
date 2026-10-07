@@ -1157,7 +1157,7 @@ mod tests {
     #[test]
     fn https_certs_preflight() {
         let st = |j: &str| no_certs(&serde_json::from_str(j).unwrap());
-        // Shape seen on luxora (tailscale 1.102.4, HTTPS certificates off).
+        // Shape seen on a tailnet with HTTPS certificates off (tailscale 1.102.4).
         assert!(st(r#"{"BackendState":"Running","CertDomains":null}"#));
         assert!(st(r#"{"BackendState":"Running","CertDomains":[]}"#));
         assert!(st(r#"{"BackendState":"Running"}"#));
@@ -1196,10 +1196,10 @@ mod tests {
 
     #[test]
     fn host_header() {
-        assert!(host_ok(Some("100.73.48.98:7878")));
+        assert!(host_ok(Some("100.64.0.7:7878")));
         assert!(host_ok(Some("[fd7a:115c:a1e0::7001:307a]:7878")));
         assert!(host_ok(Some("ryzen7:7878")));
-        assert!(host_ok(Some("ryzen7.tailedf5ce.ts.net:8443")));
+        assert!(host_ok(Some("box.example.ts.net:8443")));
         assert!(host_ok(Some("localhost:7878")));
         assert!(!host_ok(Some("evil.example.com:7878")));
         assert!(!host_ok(Some("evil.example.com")));
@@ -1289,26 +1289,26 @@ mod tests {
     #[test]
     fn identity_claims() {
         let tcp = |a: &str| Via::Tcp(a.parse().unwrap());
-        let peer: IpAddr = "100.73.48.98".parse().unwrap();
+        let peer: IpAddr = "100.64.0.7".parse().unwrap();
         // TCP: the source address decides; identity headers are never read.
         assert_eq!(claim(tcp("127.0.0.1:5000"), None, None, false), Claim::Local);
         assert_eq!(claim(tcp("[::ffff:127.0.0.1]:5000"), None, None, false), Claim::Local);
-        assert_eq!(claim(tcp("127.0.0.1:5000"), Some("me@x.com"), Some("100.73.48.98"), false), Claim::Local);
-        assert_eq!(claim(tcp("100.73.48.98:5000"), None, None, false), Claim::Peer(peer));
-        assert_eq!(claim(tcp("100.73.48.98:5000"), Some("evil@x.com"), None, false), Claim::Peer(peer));
-        assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.73.48.98"), false), Claim::Outside(_)));
+        assert_eq!(claim(tcp("127.0.0.1:5000"), Some("me@x.com"), Some("100.64.0.7"), false), Claim::Local);
+        assert_eq!(claim(tcp("100.64.0.7:5000"), None, None, false), Claim::Peer(peer));
+        assert_eq!(claim(tcp("100.64.0.7:5000"), Some("evil@x.com"), None, false), Claim::Peer(peer));
+        assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.64.0.7"), false), Claim::Outside(_)));
         // The serve socket: tailscaled's login header, from the tailnet address it saw.
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), false), Claim::Login("me@x.com".into(), peer));
+        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Login("me@x.com".into(), peer));
         // No user from a tailnet address: a tagged node (or the box itself), judged as over TCP.
-        assert_eq!(claim(Via::Serve, None, Some("100.73.48.98"), false), Claim::Peer(peer));
-        assert_eq!(claim(Via::Serve, Some(""), Some("100.73.48.98"), false), Claim::Peer(peer));
+        assert_eq!(claim(Via::Serve, None, Some("100.64.0.7"), false), Claim::Peer(peer));
+        assert_eq!(claim(Via::Serve, Some(""), Some("100.64.0.7"), false), Claim::Peer(peer));
         // No tailnet source: key needed.
         assert_eq!(claim(Via::Serve, None, None, false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), None, false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
         assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
         // Funnel (the public internet) is refused outright.
-        assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), true), Claim::Outside(_)));
+        assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Outside(_)));
         assert!(matches!(claim(Via::Serve, None, None, true), Claim::Outside(_)));
     }
 
@@ -1319,19 +1319,19 @@ mod tests {
         let who = |l: &str, n: &str| Some((l.to_string(), n.to_string()));
         let login = |l: &str, a: &str| Claim::Login(l.into(), ip(a));
         // Serve login: whois must name the same user, on another node.
-        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("me@x.com", "nPEER")), Some(Some("me@x.com".into())));
-        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("evil@x.com", "nPEER")), Some(None));
-        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, None), Some(None));
+        assert_eq!(identify(login("me@x.com", "100.64.0.7"), &me, who("me@x.com", "nPEER")), Some(Some("me@x.com".into())));
+        assert_eq!(identify(login("me@x.com", "100.64.0.7"), &me, who("evil@x.com", "nPEER")), Some(None));
+        assert_eq!(identify(login("me@x.com", "100.64.0.7"), &me, None), Some(None));
         // whois says it is this box (an address not in the cached list): local, key needed.
-        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &me, who("me@x.com", "nSELF")), None);
+        assert_eq!(identify(login("me@x.com", "100.64.0.7"), &me, who("me@x.com", "nSELF")), None);
         assert_eq!(identify(login("me@x.com", "100.64.0.1"), &me, who("me@x.com", "nPEER")), None);
         // Tagged node through serve (no login): whois names the pseudo-user, which allowed_users refuses.
-        let tagged = identify(Claim::Peer(ip("100.73.48.98")), &me, who(TAGGED, "nTAG"));
+        let tagged = identify(Claim::Peer(ip("100.64.0.7")), &me, who(TAGGED, "nTAG"));
         assert_eq!(tagged, Some(Some(TAGGED.into())));
         assert!(!peer_allowed(&[], me.owner.clone(), TAGGED));
         assert_eq!(identify(Claim::Peer(ip("100.64.0.1")), &me, who(TAGGED, "nSELF")), None);
         // Fail closed when we don't know ourselves.
-        assert_eq!(identify(login("me@x.com", "100.73.48.98"), &SelfInfo::default(), who("me@x.com", "nPEER")), None);
+        assert_eq!(identify(login("me@x.com", "100.64.0.7"), &SelfInfo::default(), who("me@x.com", "nPEER")), None);
         assert_eq!(identify(Claim::Local, &me, None), None);
     }
 
@@ -1352,7 +1352,7 @@ mod tests {
     fn serve_config_checks() {
         let sock = std::path::Path::new("/home/k/.local/share/kiln/serve.sock");
         let check = |v: Value| serve_use(&v, sock);
-        let host = "ryzen7.tailedf5ce.ts.net";
+        let host = "box.example.ts.net";
         // Shape seen on ryzen7 (tailscale 1.102): unrelated loopback proxies only.
         let unrelated = json!({
             "TCP": { "443": { "HTTPS": true }, "8443": { "HTTPS": true } },
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn tailnet_ranges() {
-        assert!(is_tailnet("100.73.48.98".parse().unwrap()));
+        assert!(is_tailnet("100.64.0.7".parse().unwrap()));
         assert!(is_tailnet("100.127.255.255".parse().unwrap()));
         assert!(!is_tailnet("100.128.0.1".parse().unwrap()));
         assert!(!is_tailnet("192.168.1.6".parse().unwrap()));

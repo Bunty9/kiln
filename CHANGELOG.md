@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
+
 ## [0.2.3] - 2026-10-07
 
 ### Fixed

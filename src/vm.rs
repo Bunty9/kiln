@@ -2155,20 +2155,20 @@ mod tests {
             std::process::Command::new("bash")
                 .args(["-c", &script])
                 .env("GITHUB_EVENT_PATH", &p)
-                .env("GITHUB_REPOSITORY", "Bunty9/kiln")
+                .env("GITHUB_REPOSITORY", "Acme/kiln")
                 .output()
                 .unwrap()
                 .status
                 .success()
         };
         let pr = |head: serde_json::Value| serde_json::json!({ "pull_request": { "head": { "repo": head } } });
-        assert!(run(Some(pr(serde_json::json!({ "full_name": "bunty9/KILN" })))), "same-repo PR");
+        assert!(run(Some(pr(serde_json::json!({ "full_name": "acme/KILN" })))), "same-repo PR");
         assert!(!run(Some(pr(serde_json::json!({ "full_name": "evil/kiln" })))), "fork PR");
         assert!(!run(Some(pr(serde_json::Value::Null))), "deleted fork");
         assert!(run(Some(serde_json::json!({ "ref": "refs/heads/main", "head_commit": {} }))), "push");
         let wr = |head: serde_json::Value| serde_json::json!({ "workflow_run": { "head_repository": head } });
         assert!(!run(Some(wr(serde_json::json!({ "full_name": "evil/kiln" })))), "workflow_run from a fork");
-        assert!(run(Some(wr(serde_json::json!({ "full_name": "Bunty9/kiln" })))), "workflow_run same repo");
+        assert!(run(Some(wr(serde_json::json!({ "full_name": "Acme/kiln" })))), "workflow_run same repo");
         assert!(!run(Some(serde_json::json!({ "workflow_run": {} }))), "workflow_run, head repo missing");
         assert!(!run(None), "missing payload");
         let _ = std::fs::remove_dir_all(&dir);

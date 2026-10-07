@@ -934,7 +934,7 @@ mod tests {
         assert!(ok(|c| c.vm_cpus = 8));
         assert!(!ok(|c| c.vm_cpus = 9));
         assert!(ok(|c| c.repos = vec!["a/b".into(), "a/c".into()]));
-        assert!(!ok(|c| c.repos = vec!["Bunty9/Kiln".into(), "bunty9/kiln".into()]));
+        assert!(!ok(|c| c.repos = vec!["Acme/Kiln".into(), "acme/kiln".into()]));
         assert!(ok(|c| c.cache_gb = 500));
         assert!(!ok(|c| c.cache_gb = 4));
         assert!(!ok(|c| c.cache_gb = 501));
