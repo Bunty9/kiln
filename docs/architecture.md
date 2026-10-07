@@ -196,7 +196,7 @@ The runner's console lines drive the VM's state: "Listening for Jobs" (booting t
 
 ## Shutdown and crash recovery
 
-On the first SIGTERM or SIGINT kiln stops launching, reaps idle VMs and gives running jobs up to `stop_grace_secs` (default 25) to finish; a second signal ends the wait. Then it marks active VMs "kiln shutting down", signals every VM's kill notifier and waits up to 20 seconds in total for the supervisors to finish cleanup (delete disk and JIT secret, deregister the runner, persist the record). The systemd unit uses `KillMode=mixed` with `TimeoutStopSec=600`. To restart without killing jobs at all, use **Restart when idle** (`POST /api/restart`): it drains exactly like an update (below) and re-executes the same binary in place.
+On the first SIGTERM or SIGINT kiln stops launching, reaps idle VMs and gives running jobs up to `stop_grace_secs` (default 25) to finish; a second signal ends the wait (under systemd: `systemctl --user kill --kill-whom=main kiln`). Job VMs run in their own process group, so a terminal's Ctrl-C reaches kiln only. Then it marks active VMs "kiln shutting down", signals every VM's kill notifier and waits up to 20 seconds in total for the supervisors to finish cleanup (delete disk and JIT secret, deregister the runner, persist the record). The systemd unit uses `KillMode=mixed` with `TimeoutStopSec=600`. To restart without killing jobs at all, use **Restart when idle** (`POST /api/restart`): it drains exactly like an update (below) and re-executes the same binary in place.
 
 Under systemd, the unit's cgroup kill takes QEMU down with kiln; outside systemd QEMU can outlive a SIGKILLed kiln, and `kiln doctor` reports it as stray. On the next `serve`, any VM recorded as active is marked `lost` and its disk, cache overlay and JIT secret are deleted, and the scheduler's startup sweep deletes offline idle `kiln-*` runners from GitHub. A parked cache overlay survives and is committed by a later tick.
 
@@ -234,7 +234,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/update` | Update status: `{current, latest, available, notes, published_at, flavor, state, error, progress, rollback, checked_at, auto, repo}`; `state` is `idle`, `checking`, `downloading`, `verifying`, `draining`, `applying` or `error`. `/api/state` carries a compact copy as `update` |
 | `POST /api/update/check` | Check for a release now; returns the status (a failed check is in its `error`). 409 while a check or update runs |
 | `POST /api/update/apply` | Download, verify, drain and restart into the latest release (202). 409 while a check or update runs |
-| `POST /api/restart` | Drain like an update, then re-exec in place (`?now=true` skips the wait and kills running jobs). 409 while an update runs. `/api/state` carries it as `restart` |
+| `POST /api/restart` | Drain like an update (held VMs are not waited for), then re-exec in place (`?now=true` skips the wait and kills running jobs). 409 while an update runs or when `listen` cannot be bound. `/api/state` carries it as `restart` |
 | `POST /api/restart/cancel` | Cancel a draining restart and resume launching |
 | `POST /api/update/cancel` | Stop a draining update and resume launching. 409 unless one is draining |
 | `GET /api/tailscale` | Tailscale status and serve config |

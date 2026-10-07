@@ -37,10 +37,76 @@ type R<T> = Result<T, Error>;
 
 /// The address actually bound; a config change to `listen` needs a restart.
 static RUNNING_LISTEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Set when the configured listen could not be bound and kiln serves elsewhere (banner).
+static LISTEN_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Where kiln serves when neither the configured nor the last working listen binds.
+const LOCAL_LISTEN: &str = "127.0.0.1:7878";
+
+/// Why kiln could not serve on `new` once restarted, from a test bind's error (`e`, None if
+/// it bound); None if it can. `AddrInUse` on the port of `running` (the listener this
+/// process holds) is expected: the restart releases it.
+fn bind_refusal(new: &str, running: Option<&str>, e: Option<&std::io::Error>) -> Option<String> {
+    use std::io::ErrorKind::*;
+    let Ok(addr) = new.parse::<SocketAddr>() else {
+        return Some(format!("listen {new:?} is not an address like 0.0.0.0:7878"));
+    };
+    let e = e?;
+    let held = running.and_then(|r| r.parse::<SocketAddr>().ok()).is_some_and(|r| r.port() == addr.port());
+    Some(match e.kind() {
+        AddrInUse if held => return None,
+        AddrNotAvailable => format!("listen {new} cannot be bound: {} is not an address of this machine ({e})", addr.ip()),
+        PermissionDenied => format!("listen {new} cannot be bound: port {} is privileged, use 1024 or above ({e})", addr.port()),
+        AddrInUse => format!("listen {new} cannot be bound: port {} is in use by another program ({e})", addr.port()),
+        _ => format!("listen {new} cannot be bound: {e}"),
+    })
+}
+
+/// Test-bind `new` (then release it): why a kiln restarted on it would not serve, if it would not.
+pub fn listen_refusal(new: &str) -> Option<String> {
+    let e = new.parse::<SocketAddr>().ok().and_then(|a| std::net::TcpListener::bind(a).err());
+    bind_refusal(new, RUNNING_LISTEN.get().map(String::as_str), e.as_ref())
+}
+
+/// Startup: addresses to try when `configured` fails to bind with `kind`. Only an address
+/// problem (not on this machine, privileged port) falls back: the last listen that bound,
+/// then loopback, so the box stays reachable. Anything else fails as before.
+fn listen_fallbacks(configured: &str, last: Option<&str>, kind: std::io::ErrorKind) -> Vec<String> {
+    use std::io::ErrorKind::*;
+    let mut v: Vec<String> = vec![];
+    if matches!(kind, AddrNotAvailable | PermissionDenied) {
+        for a in last.into_iter().chain([LOCAL_LISTEN]) {
+            if a != configured && a.parse::<SocketAddr>().is_ok() && !v.iter().any(|x| x == a) {
+                v.push(a.into());
+            }
+        }
+    }
+    v
+}
+
+/// Bind the configured listen, else a fallback (see `listen_fallbacks`). The listen that
+/// bound is kept in <data>/listen.last.
+async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(tokio::net::TcpListener, String)> {
+    let last_file = data.join("listen.last");
+    let e = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => {
+            let _ = std::fs::write(&last_file, listen);
+            return Ok((l, listen.into()));
+        }
+        Err(e) => e,
+    };
+    let last = std::fs::read_to_string(&last_file).ok();
+    for alt in listen_fallbacks(listen, last.as_deref().map(str::trim), e.kind()) {
+        if let Ok(l) = tokio::net::TcpListener::bind(&alt).await {
+            let msg = format!("listen {listen} could not be bound ({e}); serving on {alt}");
+            tracing::error!("{msg}. Fix the listen address in Settings › Access");
+            let _ = LISTEN_FALLBACK.set(msg);
+            return Ok((l, alt));
+        }
+    }
+    Err(e).with_context(|| format!("bind {listen}"))
+}
 
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    let addr = app.cfg().listen;
-    let _ = RUNNING_LISTEN.set(addr.clone());
     load_key(&app.data)?;
     let router = Router::new()
         .route("/", get(|| async { Html(PAGE.as_str()) }))
@@ -77,7 +143,8 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/gh/{*path}", any(gh_proxy))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
-    let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
+    let (listener, addr) = bind_listen(&app.data, &app.cfg().listen).await?;
+    let _ = RUNNING_LISTEN.set(addr.clone());
     let sock = app.data.join("serve.sock");
     // Without the socket (e.g. a KILN_DATA path past the ~108-byte unix socket limit) kiln still
     // serves; HTTPS via tailscale serve then proxies to loopback, where the API needs the key.
@@ -710,6 +777,8 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "caches": vm::cache_stats(&app.data, &app.repos()),
         "update": update::compact(&app),
         "restart": update::restart_json(&app, RUNNING_LISTEN.get().map(String::as_str)),
+        "serve_socket": SERVE_SOCKET.get() == Some(&true),
+        "listen_fallback": LISTEN_FALLBACK.get(),
     })))
 }
 
@@ -734,6 +803,12 @@ async fn doctor(State(app): S) -> R<Json<Value>> {
 }
 
 async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
+    // Refused now rather than found out at the restart, which would leave kiln unreachable.
+    if c.listen != app.cfg().listen
+        && let Some(why) = listen_refusal(&c.listen)
+    {
+        bail_r(&why)?;
+    }
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
@@ -887,7 +962,7 @@ fn conflict(msg: &str) -> Response {
 /// Check now; a failed check is reported in the returned status, not as an HTTP error.
 async fn update_check(State(app): S) -> Response {
     if !update::check(&app).await {
-        return conflict("an update check or update is already running");
+        return conflict(update::busy_msg(&app));
     }
     Json(update::json(&app)).into_response()
 }
@@ -895,7 +970,7 @@ async fn update_check(State(app): S) -> Response {
 /// Download, verify, drain and restart into the latest release (progress in GET /api/update).
 async fn update_apply(State(app): S) -> Response {
     if !update::start(&app, true) {
-        return conflict("an update check or update is already running");
+        return conflict(update::busy_msg(&app));
     }
     (StatusCode::ACCEPTED, Json(update::json(&app))).into_response()
 }
@@ -917,10 +992,12 @@ struct RestartQuery {
 /// Restart kiln in place (same binary): drain first, or with `?now=true` kill running jobs.
 /// During a restart's drain, `?now=true` ends the wait. Progress in /api/state `restart`.
 async fn restart(State(app): S, Query(q): Query<RestartQuery>) -> Response {
-    if !update::restart(&app, q.now) {
-        return conflict("an update or update check is running: try again once it is done");
+    let running = update::restart_waits_for(&app);
+    if let Err(why) = update::restart(&app, q.now) {
+        return conflict(&why);
     }
-    StatusCode::ACCEPTED.into_response()
+    let note = if q.now { format!("now: killed {running} running VMs") } else { format!("when idle: {running} running") };
+    (StatusCode::ACCEPTED, Extension(crate::audit::Note(note))).into_response()
 }
 
 /// Stop a restart's drain and resume launching.
@@ -948,7 +1025,7 @@ pub async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
 /// `tailscale serve --https` on a tailnet without certs prints an enable-HTTPS URL and waits
 /// forever, and a forked helper that still holds stdout would keep `output()` waiting even
 /// after the direct child is gone, which `kill_on_drop` alone does not reach.
-async fn bounded(prog: &str, args: &[&str], limit: Duration) -> anyhow::Result<std::process::Output> {
+pub async fn bounded(prog: &str, args: &[&str], limit: Duration) -> anyhow::Result<std::process::Output> {
     let child = Command::new(prog)
         .args(args)
         .stdin(Stdio::null())
@@ -1221,6 +1298,39 @@ fn proxy_post_ok(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listen_bind_decisions() {
+        use std::io::{Error, ErrorKind::*};
+        let r = |new, running, k: Option<std::io::ErrorKind>| bind_refusal(new, running, k.map(Error::from).as_ref());
+        assert_eq!(r("127.0.0.1:17878", Some("127.0.0.1:17878"), None), None, "bound fine");
+        let no = r("10.255.255.1:17878", Some("127.0.0.1:17878"), Some(AddrNotAvailable)).unwrap();
+        assert!(no.contains("10.255.255.1") && no.contains("not an address of this machine"), "{no}");
+        assert!(r("0.0.0.0:80", Some("0.0.0.0:7878"), Some(PermissionDenied)).unwrap().contains("1024"));
+        // The port kiln holds now: in use by this very process, which the restart replaces.
+        assert_eq!(r("0.0.0.0:7878", Some("127.0.0.1:7878"), Some(AddrInUse)), None);
+        assert_eq!(r("127.0.0.1:7878", Some("127.0.0.1:7878"), Some(AddrInUse)), None);
+        assert!(r("0.0.0.0:7879", Some("127.0.0.1:7878"), Some(AddrInUse)).unwrap().contains("in use"));
+        assert!(r("0.0.0.0:7878", None, Some(AddrInUse)).is_some(), "not serving: someone else holds it");
+        assert!(r("nope", None, None).is_some());
+        assert!(r("1.2.3.4:5", None, Some(Other)).is_some());
+    }
+
+    #[test]
+    fn listen_fallback_order() {
+        use std::io::ErrorKind::*;
+        assert_eq!(
+            listen_fallbacks("10.255.255.1:17878", Some("127.0.0.1:17878"), AddrNotAvailable),
+            ["127.0.0.1:17878", "127.0.0.1:7878"]
+        );
+        assert_eq!(listen_fallbacks("10.255.255.1:17878", None, AddrNotAvailable), ["127.0.0.1:7878"]);
+        assert_eq!(listen_fallbacks("0.0.0.0:80", Some("0.0.0.0:80"), PermissionDenied), ["127.0.0.1:7878"], "last = configured");
+        assert_eq!(listen_fallbacks("10.0.0.9:7878", Some("garbage"), AddrNotAvailable), ["127.0.0.1:7878"]);
+        assert_eq!(listen_fallbacks("10.0.0.9:7878", Some("127.0.0.1:7878"), AddrNotAvailable), ["127.0.0.1:7878"], "no duplicates");
+        assert!(listen_fallbacks("127.0.0.1:7878", None, PermissionDenied).is_empty());
+        // Anything else (port in use, ...) is not an address problem: fail as before.
+        assert!(listen_fallbacks("0.0.0.0:7878", Some("127.0.0.1:7878"), AddrInUse).is_empty());
+    }
 
     #[test]
     fn only_admitted_writes_are_audited() {

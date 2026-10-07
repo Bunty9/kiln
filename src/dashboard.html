@@ -940,6 +940,13 @@ function jobRow(v) {
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
 const BI = { fail: 'alert', warn: 'alert', ember: 'flame', queued: 'info', ok: 'check' };
+// After a restart that applies a changed listen address: where kiln will be.
+function newListen() {
+  if (!S.restart?.needed?.includes('listen')) return '';
+  const h = S.config.listen.replace(/^(0\.0\.0\.0|\[::\]):/, location.hostname + ':');
+  return ` kiln will be at <b class="mono">http://${esc(h)}</b>.` + (S.serve_socket ? '' : ' If HTTPS via tailscale serve is on, it still proxies the old port: switch it off and on in Settings › Network afterwards.');
+}
+const RESTART_WAITS = v => ACTIVE(v) && v.state !== 'held';
 function banners() {
   const p = S.poll, c = S.config, b = [], err = String(p.error || '');
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
@@ -958,8 +965,9 @@ function banners() {
   if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
   const rs = S.restart || {};
+  if (S.listen_fallback) B('fail', esc(S.listen_fallback) + '.', A('Fix listen address', '#/settings/access'));
   if (rs.state === 'stopping') B('ember', `<b>kiln is stopping</b> · ${esc(rs.progress || 'stopping VMs')}`);
-  else if (rs.state === 'restarting') B('ember', '<b>Restarting kiln</b> · back in a few seconds…');
+  else if (rs.state === 'restarting') B('ember', '<b>Restarting kiln</b> · back in a few seconds.' + newListen());
   else if (rs.state === 'draining') B('ember', `<b>Restart pending</b> · ${esc(rs.progress || 'draining')}. No new VMs start meanwhile.`, X('Cancel restart', 'rscancel') + X('Restart now', 'rsnow'));
   else if (rs.needed?.length) B('warn', `Restart needed to apply: ${rs.needed.map(esc).join(', ')}.`, X('Restart when idle', 'rsidle', 1) + X('Restart now', 'rsnow'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
@@ -1495,7 +1503,7 @@ const G = {
   },
   timeouts: { html: () => `<div class="card"><h2>Timeouts</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
     ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}
-    ${fld('f-stop_grace_secs', 'Stop grace (s)', num('stop_grace_secs', draft.stop_grace_secs ?? 25), 'On systemctl stop/restart, running jobs get this long to finish before their VMs are killed (0 to 3600). Keep it ~30 s under the unit\'s TimeoutStopSec.')}</div>` },
+    ${fld('f-stop_grace_secs', 'Stop grace (s)', num('stop_grace_secs', draft.stop_grace_secs ?? 25), 'On systemctl stop/restart, running jobs get this long to finish before their VMs are killed (0 to 570). A host shutdown or logout waits up to this long too.')}</div>` },
   access: {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
@@ -1936,13 +1944,13 @@ const ACT = {
   },
   async updcancel() { await post('/api/update/cancel'); toast('Update cancelled. Launching resumes.'); await poll(); loadUpd(); },
   async rsidle() {
-    const n = S.vms.filter(ACTIVE).length;
-    if (!await ask({ title: 'Restart kiln when idle?', action: 'Restart when idle', body: `kiln drains first: it starts no new VMs (warm ones included) and waits for ${n ? `the <b>${n} running VM${n > 1 ? 's' : ''}</b>` : 'running jobs'} to finish, at most the job timeout (${+S.config.job_timeout_mins} min). Queued jobs wait meanwhile. Then kiln restarts in place, which takes a few seconds. You can cancel while it drains.` })) return;
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln when idle?', action: 'Restart when idle', body: `kiln drains first: it starts no new VMs (warm ones included) and waits for ${n ? `the <b>${n} running VM${n > 1 ? 's' : ''}</b>` : 'running jobs'} to finish, at most the job timeout (${+S.config.job_timeout_mins} min). Held debug VMs are not waited for: the restart ends them. Queued jobs wait meanwhile. Then kiln restarts in place, which takes a few seconds. You can cancel while it drains.${newListen()}` })) return;
     await post('/api/restart'); toast('Restart pending: draining'); await poll();
   },
   async rsnow() {
-    const n = S.vms.filter(ACTIVE).length;
-    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on GitHub with "The runner has received a shutdown signal". Use <b>Restart when idle</b> to let them finish first.` : 'No VM is running: kiln restarts in place right away, which takes a few seconds.' })) return;
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: (n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on GitHub with "The runner has received a shutdown signal". Use <b>Restart when idle</b> to let them finish first.` : 'No job is running: kiln restarts in place right away, which takes a few seconds.') + newListen() })) return;
     await post('/api/restart?now=true'); toast('Restarting kiln'); await poll();
   },
   async rscancel() { await post('/api/restart/cancel'); toast('Restart cancelled. Launching resumes.'); await poll(); },
