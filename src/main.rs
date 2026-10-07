@@ -343,15 +343,16 @@ pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// Where a GitHub token may come from in the environment. Children kiln starts for VMs never
-/// inherit these (see `vm::no_secrets`).
+/// GitHub tokens the environment may hold. kiln reads the first two itself; `GH_TOKEN` reaches
+/// it only through `gh auth token`, last. Children kiln starts for VMs inherit none of them
+/// (see `vm::no_secrets`).
 pub const TOKEN_ENV: [&str; 3] = ["KILN_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
 
 /// Env var, then the token file the dashboard writes, then the gh CLI login.
 /// `only_file`: a token was saved from the dashboard, so only that file counts
 /// (a stale env token must not take over again on reload).
 fn load_token(data: &std::path::Path, only_file: bool) -> (String, &'static str) {
-    let env = TOKEN_ENV.iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
+    let env = TOKEN_ENV[..2].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
     let file = std::fs::read_to_string(data.join("token")).ok();
     pick_token(env, file, only_file, || {
         std::process::Command::new("gh")

@@ -1128,7 +1128,7 @@ const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="$
   <div class="meter" id="hm-mem" tabindex="0" style="margin-top:12px"><div class="l"><span>Memory</span><span data-v></span></div><div class="b st" role="meter" aria-label="Memory" aria-valuemin="0"></div></div>
   <div class="meter" id="hm-disk" tabindex="0" style="margin-top:12px" data-tip="Free disk where kiln keeps the image, repo caches and VM disks"><div class="l"><span>Disk free</span><span data-v></span></div></div></div>
   <div class="hx" id="hx"${HV.open ? '' : ' hidden'}><div class="seg" role="radiogroup" aria-label="Time window">${[300, 900, 3600].map(w => `<button role="radio" aria-checked="${HV.win === w}" data-act="hostwin" data-w="${w}">${winTxt(w)}</button>`).join('')}</div>
-  ${[['cpu', 'CPU', 'cores'], ['mem', 'Memory', 'GB']].map(([k, t, u]) => `<figure><figcaption><span>${t}</span><span class="fg2 sm">by VM, ${u}</span></figcaption><div class="cv"><canvas id="hc-${k}" tabindex="0" role="img" data-t="${t}" aria-label="${t} use by job VM over the last ${winTxt(HV.win)}; values are listed below"></canvas></div><div class="ax"><span data-wl>−${winTxt(HV.win)}</span><span>now</span></div></figure>`).join('')}
+  ${[['cpu', 'CPU', 'cores'], ['mem', 'Memory', 'GB']].map(([k, t, u]) => `<figure><figcaption><span>${t}</span><span class="fg2 sm">by VM, ${u}</span></figcaption><div class="cv"><canvas id="hc-${k}" tabindex="0" role="img" data-title="${t}" aria-label="${t} use by job VM over the last ${winTxt(HV.win)}; values are listed below"></canvas></div><div class="ax"><span data-wl>−${winTxt(HV.win)}</span><span>now</span></div></figure>`).join('')}
   <p class="fg2 sm" id="hxe" hidden></p><ul class="lg" id="hlg" aria-label="Now, by VM: cores · memory"></ul></div>`;
 function hostWire() {
   const hx = $('#hx'), at = (c, x) => { HV.hover = { id: c.id, x }; hvKick(); };
@@ -1801,7 +1801,7 @@ pages.guides = {
 const ACT = {
   hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
   hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
-    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.t} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
+    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
   async mkapp() {
     const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;
