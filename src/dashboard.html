@@ -337,7 +337,7 @@ dialog input{width:100%;margin-top:16px}
 .pop{position:fixed;z-index:50;background:var(--s2);border-radius:var(--r2);box-shadow:var(--e3);padding:12px;width:240px}
 .pop form{display:flex;flex-direction:column;gap:8px}.pop label{font-size:12px;color:var(--fg-2)}
 #tip{position:fixed;z-index:70;left:0;top:0;max-width:min(280px,calc(100vw - 16px));padding:6px 10px;border-radius:7px;background:var(--fg);color:var(--bg);font-size:12px;line-height:1.45;white-space:pre-line;box-shadow:0 6px 18px -4px rgb(0 0 0/.45);pointer-events:none;opacity:0;transition:opacity 100ms}
-#tip.on{opacity:1}
+#tip.on{opacity:1;pointer-events:auto}
 #tip code{background:color-mix(in srgb,var(--bg) 18%,transparent);color:inherit}
 .tabs{display:none}
 @media(max-width:719px){
@@ -498,9 +498,9 @@ const STATE = {
   skipped: ['skip', 'GitHub skipped this job.'],
   warn: ['alert'],
 };
-const badge = (s, c = s, tip) => {
+const badge = (s, c = s, tip, f) => {
   const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? STATE[s]?.[1];
-  return `<span class="bdg s-${c}"${t ? ` data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
+  return `<span class="bdg s-${c}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
 function status(v) {
@@ -520,9 +520,9 @@ const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' 
   : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
 const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
-const sz = v => v.cpus ? `<span class="mono sm fg2" data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
+const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
-const wm = v => (v.warm && v.state === 'idle' ? `<span class="wm" data-tip="Warm VM: booted ahead of time so a job starts in about a second. Set per repo on its Repos page.">${ic('flame')}warm</span>` : '');
+const wm = (v, f) => (v.warm && v.state === 'idle' ? `<span class="wm"${f ? ' tabindex="0"' : ''} data-tip="Warm VM: booted ahead of time so a job starts in about a second. Set per repo on its Repos page.">${ic('flame')}warm</span>` : '');
 const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 const HELP = {
   maxvms: ["Max VMs", "How many job VMs may run at once. Each holds its vCPUs and memory while running. 0 pauses kiln: running jobs finish, new ones stay queued.", "stuck"],
@@ -546,6 +546,8 @@ const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label=
 // The short form of a HELP entry (first sentence) for hover tips, so tips and "?" never disagree.
 const ht = id => HELP[id][1].replace('{R}', S?.config.warm_recycle_mins ?? 30).replace(/`/g, '').split(/(?<=\.) /)[0];
 const tip = t => t ? ` data-tip="${esc(t)}"` : '';
+// A tip on a non-interactive element: focusable too, so keyboard users can read it. Not for long lists.
+const kt = t => t ? ' tabindex="0"' + tip(t) : '';
 const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class="btn" data-act="copycode" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>`;
 const WFSCOPE = "This token can't create workflow files. Add the `workflow` scope (classic), or Contents, Pull requests and Workflows: write (fine-grained), then save it again.";
 const TIPS = {
@@ -833,7 +835,7 @@ const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !
 function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
   const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>`;
-  return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
+  return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}${tip([STATE[status(v)]?.[1], 'Started ' + when(v.started)].filter(Boolean).join('\n'))}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
     <span class="w"${tip('Started ' + when(v.started))}>${relH(v.started)}</span><span class="d"${tip(ACTIVE(v) ? 'Running for' : 'Job time: from the job starting to the VM ending')}>${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
@@ -855,14 +857,15 @@ function banners() {
   if (up.rollback) B('fail', 'Update rolled back: ' + esc(up.rollback), A('Updates', '#/settings/updates'));
   if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
-  if (p.blocked && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
+  const im = S.image, oldImg = im?.rebake && /predates/.test(p.blocked || '');
+  if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
   for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on GitHub-hosted runners.`);
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
-  const im = S.image;
-  if (im?.rebake) B('warn', `Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
+  if (im?.rebake) B('warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
   const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/github'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
@@ -878,7 +881,7 @@ function banners() {
 }
 // Status line in the page header: always present, so banners never move the title.
 const statusLine = n => `<span class="d${n ? ' w' : ''}"></span><span>${n ? `${n} item${n > 1 ? 's' : ''} need${n > 1 ? '' : 's'} attention` : 'Healthy'}</span>
-  <span${tip('Last successful check with GitHub for queued jobs')}>· polled ${relH(S.poll.last_ok)}</span><span${tip('Actions runner version in the base image')}>· image ${esc(S.image?.runner_version || '—')}</span>${S.version ? `<span>· kiln ${esc(S.version)}</span>` : ''}${S.poll.rate ? `<span${tip('GitHub API requests left this hour')}>· API ${S.poll.rate.remaining}/${S.poll.rate.limit}</span>` : ''}`;
+  <span${kt('Last successful check with GitHub for queued jobs')}>· polled ${relH(S.poll.last_ok)}</span><span${kt('Actions runner version in the base image')}>· image ${esc(S.image?.runner_version || '—')}</span>${S.version ? `<span>· kiln ${esc(S.version)}</span>` : ''}${S.poll.rate ? `<span${kt('GitHub API requests left this hour')}>· API ${S.poll.rate.remaining}/${S.poll.rate.limit}</span>` : ''}`;
 const rate = () => { const r = parseFloat(lsGet('kiln-rate')); if (r > 0) return r; const c = S.config.vm_cpus; return c <= 2 ? 0.008 : c <= 4 ? 0.016 : c <= 8 ? 0.032 : 0.064; };
 const median = a => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 function stats() {
@@ -895,7 +898,7 @@ function stats() {
 }
 function meter(l, val, max, txt, t) {
   const p = max > 0 ? Math.min(100, val / max * 100) : 0;
-  return `<div class="meter ${p > 85 ? 'hot' : ''}"${tip(t)}><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
+  return `<div class="meter ${p > 85 ? 'hot' : ''}"${kt(t)}><div class="l"><span>${l}</span><span>${txt}</span></div><div class="b" role="meter" aria-label="${l}" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
 }
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.overview = {
@@ -909,10 +912,10 @@ pages.overview = {
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
       tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(STATE[status(v)]?.[1])}><span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
-        : `<div class="ch"${tip('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
+        : `<div class="ch"${(i === act.length ? kt : tip)('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
-    if (!tiles.length) tiles.push(`<div class="ch"${tip('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
+    if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
     setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
     const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
@@ -921,7 +924,7 @@ pages.overview = {
     const used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
     setHTML($('#ov-host'), `<h2>Host</h2>${meter('Load', l[0], h.cpus, `${l.map(x => x.toFixed(2)).join(' ')}`, `1, 5 and 15 minute load averages. The bar compares the first with this box's ${h.cpus} CPUs.`)}
       ${meter('Memory', used, h.mem_total_mb, `${(used / 1024).toFixed(1)} / ${(h.mem_total_mb / 1024).toFixed(1)} GB`, "Host memory in use. kiln holds back launches when there isn't enough left for another VM.")}
-      <div class="meter"${tip('Free disk where kiln keeps the image, repo caches and VM disks')}><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
+      <div class="meter"${kt('Free disk where kiln keeps the image, repo caches and VM disks')}><div class="l"><span>Disk free</span><span>${h.disk_free_gb} GB</span></div></div>`);
   },
 };
 const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
@@ -980,9 +983,9 @@ pages.job = {
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
     const sg = segs(v), calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
-    setHTML(box, `<div class="ph">${back}${badge(status(v))}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
+    setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${tip('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v)}${v.cpus ? hq('size') : ''}${wm(v)}<span${tip('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${tip('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
@@ -1136,7 +1139,7 @@ const repoForm = `<form class="bar" data-form="addrepo" style="margin:16px 0 0">
 const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() };
 pages.repos = {
   mount(r) {
-    this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null;
+    this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null; this.app = !!S.app;
     if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
     $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
@@ -1160,6 +1163,7 @@ pages.repos = {
     if (repo === rd.repo) this.update();
   },
   update() {
+    if (cur === this && this.app !== !!S.app) return route(); // App mode flipped: the layout depends on it
     if (!this.r) {
       const rs = REPOS();
       setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
@@ -1412,7 +1416,7 @@ function renderTs() {
       <span class="pc sm ${p.Online ? (p.CurAddr ? 'ok' : 'warn') : 'fg2'}"${tip(p.Online ? (p.CurAddr ? 'Direct connection between this box and the peer' : 'Traffic goes through a Tailscale relay (DERP), which is slower') : '')}>${esc(conn)}</span><span class="ps sm fg2">${p.Online ? 'online' : ls ? relH(ls) : 'never seen'}</span>
       <span style="grid-area:p;text-align:right">${ip && p.Online ? `<button class="btn" data-act="ping" data-id="${esc(ip)}" ${pg?.busy ? 'disabled' : ''}${tip('tailscale ping: shows whether the path is direct or relayed')}>${pg?.busy ? 'Pinging…' : 'Ping'}</button>` : ''}</span>${pg && !pg.busy ? `<span class="pg ${pg.ok ? '' : 'fail'}">${esc(pg.output)}</span>` : ''}</div></li>`;
   };
-  setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn')}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
+  setHTML($('#ts'), `<div class="card"><h2>Network</h2><dl class="kv"><dt>State</dt><dd>${badge(st.BackendState || 'unknown', st.BackendState === 'Running' ? 'passed' : 'warn', undefined, 1)}</dd><dt>Tailnet</dt><dd>${esc(st.CurrentTailnet?.Name || '—')}</dd>
       <dt>This machine</dt><dd>${esc(self.HostName || '—')}</dd><dt>DNS name</dt><dd class="mono">${esc(dns || '—')}</dd><dt>IPs</dt><dd class="mono">${(self.TailscaleIPs || []).map(esc).join(', ') || '—'}</dd></dl></div>
     <div class="card"><h2>Serve over HTTPS${hq('serve')}</h2><div class="sw"><input type="checkbox" role="switch" id="serve" data-act="serve" aria-label="Serve over HTTPS" ${on ? 'checked' : ''}><span>${on ? `On at <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>` : 'Off. Turns on the dashboard at port 8443 with a real certificate.'}</span></div>
       <details${(document.querySelector('#ts details')?.open ?? tsOpen) ? ' open' : ''}><summary>Raw serve config</summary><pre class="raw">${esc(JSON.stringify(TS.serve ?? {}, null, 2))}</pre></details></div>
@@ -1763,8 +1767,8 @@ addEventListener('keydown', e => {
 /* ---------- tooltips: one #tip element for every [data-tip], on hover and on keyboard focus ---------- */
 const tipEl = $('#tip');
 let tipFor = null, tipWant = null, tipT = 0;
-function showTip(el) {
-  const t = el.dataset.tip; if (!t || !el.isConnected) return;
+function showTip(el, t = el.dataset.tip) {
+  if (!t || !el.isConnected) return;
   tipFor = el; tipEl.textContent = t; tipEl.classList.add('on');
   if (!el.hasAttribute('aria-describedby')) el.setAttribute('aria-describedby', 'tip');
   const r = el.getBoundingClientRect(), w = tipEl.offsetWidth, h = tipEl.offsetHeight, cw = document.documentElement.clientWidth;
@@ -1777,16 +1781,27 @@ function hideTip() {
   if (tipFor.getAttribute('aria-describedby') === 'tip') tipFor.removeAttribute('aria-describedby');
   tipFor = null; tipEl.classList.remove('on');
 }
+// Job rows carry a tip for keyboard focus only: on hover, their badge and times have their own.
+const TIPS_HOVER = '[data-tip]:not(.row)';
+// The tip itself is hoverable (WCAG 1.4.13): leaving the trigger hides it after a short delay, so the pointer can cross onto it.
+const tipLater = () => { clearTimeout(tipT); tipWant = null; tipT = setTimeout(hideTip, 300); };
 document.addEventListener('pointerover', e => {
   if (e.pointerType === 'touch') return;
-  const el = e.target.closest?.('[data-tip]'); if (el === tipWant || (el && el === tipFor)) return;
+  if (tipEl.contains(e.target)) return clearTimeout(tipT);
+  const el = e.target.closest?.(TIPS_HOVER); if (el && el === tipFor) return clearTimeout(tipT);
+  if (el === tipWant) return;
   hideTip(); if (el) { tipWant = el; tipT = setTimeout(() => showTip(el), 400); }
 });
-document.addEventListener('pointerout', e => { const el = e.target.closest?.('[data-tip]'); if (el && !el.contains(e.relatedTarget)) hideTip(); });
-document.addEventListener('focusin', e => { const el = e.target; hideTip(); if (el.dataset?.tip && el.matches(':focus-visible')) showTip(el); });
+document.addEventListener('pointerout', e => {
+  const el = tipEl.contains(e.target) ? tipEl : e.target.closest?.(TIPS_HOVER), to = e.relatedTarget;
+  if (el && !el.contains(to) && !tipEl.contains(to) && !tipFor?.contains(to)) tipFor ? tipLater() : hideTip();
+});
+// Keyboard focus shows the element's tip, or for a form control, its label's.
+document.addEventListener('focusin', e => { const el = e.target, t = el.dataset?.tip || el.labels?.[0]?.dataset.tip; hideTip(); if (t && el.matches(':focus-visible')) showTip(el, t); });
 document.addEventListener('focusout', hideTip);
 // Touch: tap a hint-only element (badge, stat, timeline) to read its tip; any next tap hides it.
 document.addEventListener('pointerdown', e => {
+  if (tipEl.contains(e.target)) return;
   const el = e.target.closest?.('[data-tip]'); hideTip();
   if (e.pointerType === 'touch' && el && !el.closest('a,button,input,select,label')) { showTip(el); tipT = setTimeout(hideTip, 4000); }
 });
