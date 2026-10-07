@@ -858,7 +858,7 @@ function banners() {
   if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
-  const im = S.image, oldImg = im?.rebake && /predates/.test(p.blocked || '');
+  const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);

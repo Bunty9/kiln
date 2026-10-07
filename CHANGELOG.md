@@ -4,6 +4,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub App mode tracks rate limits per installation: one installation hitting its limit pauses only its own repos (with a repo error saying until when) instead of all polling. `/api/state` reports the most constrained installation's limit in `poll.rate` and each installation's in `poll.rates`.
+- The dashboard recognizes the "base image too old" launch block by a new `poll.blocked_kind` field instead of matching the message text.
+
 ## [0.2.1] - 2026-10-07
 
 ### Fixed

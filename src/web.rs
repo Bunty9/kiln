@@ -341,10 +341,12 @@ async fn state(State(app): S) -> R<Json<Value>> {
         .map(|(r, &(fails, retry_at))| (r.clone(), json!({ "fails": fails, "retry_at": retry_at })))
         .collect::<serde_json::Map<_, _>>()
         .into();
-    poll["rate"] = match *app.gh.rate.lock().unwrap() {
-        Some((remaining, limit, reset)) => json!({ "remaining": remaining, "limit": limit, "reset": reset }),
-        None => Value::Null,
-    };
+    let rate = |(remaining, limit, reset): (u64, u64, u64)| json!({ "remaining": remaining, "limit": limit, "reset": reset });
+    // App mode: the most constrained installation, plus each one's.
+    poll["rate"] = app.gh.rate().map(rate).into();
+    if app.gh.app().is_some() {
+        poll["rates"] = app.gh.rates().into_iter().map(|(i, r)| (i.to_string(), rate(r))).collect::<serde_json::Map<_, _>>().into();
+    }
     poll["paused_until"] = json!(app.gh.paused_until());
     Ok(Json(json!({
         "config": app.cfg(),

@@ -271,6 +271,8 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
+    /// What `blocked` is: "draining", "old_image", "egress", "memory", "disk" or "budget".
+    pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
 }
@@ -554,7 +556,7 @@ async fn scheduler(app: Arc<App>) {
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
-        let rate = *app.gh.rate.lock().unwrap();
+        let rate = app.gh.rate();
         tokio::time::sleep(Duration::from_secs(poll_sleep(cfg.poll_secs, rate))).await;
     }
 }
@@ -567,6 +569,11 @@ fn poll_sleep(poll_secs: u64, rate: Option<(u64, u64, u64)>) -> u64 {
         Some((rem, lim, _)) if rem * 5 < lim => 30,
         _ => poll_secs.max(3),
     }
+}
+
+/// `blocked_kind` of a `vm::launch_gate` reason.
+fn gate_kind(m: &str) -> &'static str {
+    if m.starts_with("low disk") { "disk" } else { "memory" }
 }
 
 /// Pick up a token that appeared (keyring unlocked, env fixed) or was rotated.
@@ -643,11 +650,12 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     // An image from an older recipe may lack the fork-refusal hook: launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
+    let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
     let mut blocked = draining
-        .then(|| "draining for a kiln update: running jobs finish, then kiln restarts".to_string())
-        .or_else(|| old_image.then(|| "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string()))
-        .or_else(|| egress_err.as_ref().map(|e| format!("egress filtering unavailable: {e}")))
-        .or_else(|| vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb));
+        .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
+        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's fork-refusal hook: rebake (Settings › Image)".to_string())))
+        .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
+        .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
@@ -663,6 +671,12 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let repos = app.repos();
     let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
     for repo in repos.iter().cycle().skip(start).take(repos.len()) {
+        // App mode: only the repos of a rate-limited installation wait.
+        if let Some(m) = app.gh.repo_paused(repo) {
+            errors.push(format!("{repo}: {m}"));
+            repo_errors.insert(repo.clone(), m);
+            continue;
+        }
         let (by_size, runners, forks) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
             Ok(r) => r,
             Err(e) => {
@@ -703,7 +717,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             }
             let gate = vm::launch_gate(mem_avail, cfg.mem_mb(n), disk, mirror_mb, cache_mb);
             if queued > waiting && blocked.is_none() {
-                blocked = gate.clone();
+                blocked = gated(gate.clone());
             }
             let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
@@ -715,7 +729,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
             if blocked.is_none() {
-                blocked = limit;
+                blocked = limit.map(|m| ("budget", m));
             }
             for i in 0..want {
                 vm::launch(app.clone(), repo.clone(), n, i >= demand);
@@ -727,7 +741,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         let mut p = app.poll.lock().unwrap();
         p.repo_errors = repo_errors;
         p.refused_forks = refused_forks;
-        p.blocked = blocked;
+        p.blocked_kind = blocked.as_ref().map(|b| b.0.to_string());
+        p.blocked = blocked.map(|b| b.1);
     }
     if !errors.is_empty() {
         bail!(errors.join("; "));
@@ -773,6 +788,12 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_kinds() {
+        assert_eq!(gate_kind(&vm::launch_gate(0, 2048, Some(500), None, None).unwrap()), "memory");
+        assert_eq!(gate_kind(&vm::launch_gate(1 << 20, 2048, Some(1), None, None).unwrap()), "disk");
+    }
 
     #[test]
     fn only_serve_counts_update_boots() {

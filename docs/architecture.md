@@ -37,7 +37,7 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 **Scheduler and poller** (`main.rs`). A loop that runs a "tick" every `poll_secs`. Each tick checks the token, rate-limit pause and base image, asks GitHub which jobs are queued, decides how many VMs to launch or drop per repo and size, and publishes the poll status that the dashboard shows. At startup, before the first tick, it deletes offline idle `kiln-*` runners that a crashed kiln left registered.
 
-**GitHub client** (`github.rs`). A small `reqwest` wrapper. GET responses are cached by ETag, so a 304 is free against the rate limit. It tracks `x-ratelimit-*` headers and pauses on a rate-limit 403 or a 429. It also does JIT config generation, runner deletion, the cache trust lookup, the optional hello PR and the dashboard's proxied calls.
+**GitHub client** (`github.rs`). A small `reqwest` wrapper. GET responses are cached by ETag, so a 304 is free against the rate limit. It tracks `x-ratelimit-*` headers and pauses on a rate-limit 403 or a 429, per auth identity: the token, or in App mode each installation. A paused token stops the whole tick; a paused installation only skips its repos, each with a repo error. It also does JIT config generation, runner deletion, the cache trust lookup, the optional hello PR and the dashboard's proxied calls.
 
 **VM supervisor** (`vm.rs`). One async task per VM. It creates the overlay, spawns QEMU, reads the console, tracks the runner's lifecycle, enforces timeouts, takes the debug-hold decision, commits or discards the cache overlay, and deletes everything when the VM ends. The same module holds the launch gates, the resource budget, the reaper, the egress ruleset and probe, `bake`, and the `doctor` checks.
 
@@ -199,7 +199,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | Method and path | Purpose |
 |---|---|
 | `GET /` | The dashboard page |
-| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit, blocked reason), the last 100 VMs, image info, host stats, mirror status, cache sizes |
+| `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `egress`, `memory`, `disk` or `budget`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
 | `POST /api/config` | Save settings (validated); returns `{restart_required}` |
 | `POST /api/token` | Validate and save a GitHub token |
 | `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |
