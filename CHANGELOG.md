@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- **Serve over HTTPS** no longer asks for the dashboard key. `tailscale serve` now proxies to a unix socket, `<data>/serve.sock` (mode 0600), and kiln identifies the tailnet user from the `Tailscale-User-Login` header tailscaled sets there, applying the usual `allowed_users` rule. Before, every HTTPS request arrived from `127.0.0.1` and looked local. A tagged node or a browser on the box itself still needs the key; Funnel requests are refused; identity headers on the TCP port are ignored. If Serve was already on, turn it off and on again in Settings › Network to switch to the socket.
+
 ### Fixed
 
 - GitHub App mode tracks rate limits per installation: one installation hitting its limit pauses only its own repos (with a repo error saying until when) instead of all polling. `/api/state` reports the most constrained installation's limit in `poll.rate` and each installation's in `poll.rates`.

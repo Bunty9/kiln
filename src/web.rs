@@ -71,11 +71,93 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/tailscale/serve", post(ts_serve))
         .route("/api/gh/{*path}", any(gh_proxy))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
-        .with_state(app);
+        .with_state(app.clone());
     let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
-    tracing::info!("dashboard on http://{addr}");
-    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    let sock = app.data.join("serve.sock");
+    let unix = bind_serve_socket(&sock).with_context(|| format!("bind {}", sock.display()))?;
+    tracing::info!("dashboard on http://{addr} and {} (for tailscale serve)", sock.display());
+    tokio::try_join!(
+        axum::serve(listener, router.clone().into_make_service_with_connect_info::<Via>()).into_future(),
+        axum::serve(unix, router.into_make_service_with_connect_info::<Via>()).into_future(),
+    )?;
     Ok(())
+}
+
+/// The socket `tailscale serve` proxies to. Mode 0600: tailscaled (root) can connect,
+/// other local users can't, and job VMs (QEMU NAT) can't reach a unix socket at all.
+/// Bound in a private directory and then moved into place, so it is never reachable
+/// with looser permissions; a stale socket from a previous run is replaced.
+fn bind_serve_socket(path: &std::path::Path) -> anyhow::Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let tmp = path.with_extension("d");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::DirBuilder::new().mode(0o700).create(&tmp)?;
+    let inner = tmp.join("s");
+    let bound = (|| {
+        let l = tokio::net::UnixListener::bind(&inner)?;
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&inner, path)?;
+        anyhow::Ok(l)
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    bound
+}
+
+/// How a connection reached kiln: the TCP listener, or the unix socket only
+/// `tailscale serve` (tailscaled, as root) can connect to.
+#[derive(Clone, Copy)]
+enum Via {
+    Tcp(SocketAddr),
+    Serve,
+}
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>> for Via {
+    fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        Via::Tcp(*s.remote_addr())
+    }
+}
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>> for Via {
+    fn connect_info(_: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        Via::Serve
+    }
+}
+
+/// Who a request says it is, before the Tailscale lookups in `admit`.
+#[derive(Debug, PartialEq)]
+enum Claim {
+    /// From the box itself, or a serve request without a tailnet user: the API needs the key.
+    Local,
+    /// TCP from a tailnet address: identified with `tailscale whois`.
+    Peer(IpAddr),
+    /// Through `tailscale serve`: the login tailscaled vouches for, and the address it saw.
+    Login(String, IpAddr),
+    /// Refused outright.
+    Outside(&'static str),
+}
+
+/// `login`, `fwd_for` and `funnel` are the `Tailscale-User-Login`, `X-Forwarded-For` and
+/// `Tailscale-Funnel-Request` headers. They mean something only on the serve socket, where
+/// tailscaled has replaced whatever the client sent; on TCP anyone can set them.
+fn claim(via: Via, login: Option<&str>, fwd_for: Option<&str>, funnel: bool) -> Claim {
+    match via {
+        Via::Tcp(peer) => {
+            let ip = peer.ip().to_canonical();
+            if ip.is_loopback() {
+                Claim::Local
+            } else if is_tailnet(ip) {
+                Claim::Peer(ip)
+            } else {
+                // LAN and internet sources are refused whatever Tailscale's state:
+                // over plain HTTP they could otherwise be asked for the dashboard key.
+                Claim::Outside("kiln only answers on the tailnet")
+            }
+        }
+        Via::Serve if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
+        // No login: a tagged node. No tailnet source: this machine itself.
+        Via::Serve => match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
+            (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
+            _ => Claim::Local,
+        },
+    }
 }
 
 fn is_tailnet(ip: IpAddr) -> bool {
@@ -176,14 +258,16 @@ fn host_ok(host: Option<&str>) -> bool {
 }
 
 /// Who may talk to kiln:
-/// - Tailnet peers whose `tailscale whois` login is in `allowed_users`
-///   (default: the owner of this machine, so shared-in nodes are out).
+/// - Tailnet peers whose login is in `allowed_users` (default: the owner of
+///   this machine, so shared-in nodes are out). Over TCP the login comes from
+///   `tailscale whois`; through `tailscale serve` (the unix socket) from the
+///   `Tailscale-User-Login` header tailscaled sets.
 /// - Requests from this machine itself only with the dashboard key. Job VMs
 ///   reach the host through QEMU's NAT and arrive as loopback or as this
 ///   host's own tailnet IP, so a local source address proves nothing.
-async fn guard(State(app): S, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
+async fn guard(State(app): S, ConnectInfo(via): ConnectInfo<Via>, req: Request, next: Next) -> Response {
     let api = req.uri().path().starts_with("/api/");
-    let mut r = admit(app, peer, req, next).await;
+    let mut r = admit(app, via, req, next).await;
     let h = r.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     // No script-src: the dashboard uses an inline script.
@@ -277,13 +361,20 @@ fn peer_allowed(allowed: &[String], owner: Option<String>, login: &str) -> bool 
     allowed.iter().any(|a| a.eq_ignore_ascii_case(login))
 }
 
-async fn admit(app: Arc<App>, peer: SocketAddr, req: Request, next: Next) -> Response {
-    let ip = peer.ip().to_canonical();
+async fn admit(app: Arc<App>, via: Via, mut req: Request, next: Next) -> Response {
     let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
+    // tailscaled sends `Host: localhost` to a unix socket and the name the browser
+    // used in X-Forwarded-Host; put that back so the Host check and handlers see it.
+    if matches!(via, Via::Serve)
+        && let Some(fh) = req.headers().get("x-forwarded-host").cloned()
+    {
+        req.headers_mut().insert(header::HOST, fh);
+    }
     // Owned copies: `req` (its body) is not Sync, so no borrows across awaits.
-    let (host, csrf, key) = {
+    let (host, csrf, key, claim) = {
         let h = |k: &str| req.headers().get(k).and_then(|v| v.to_str().ok()).map(String::from);
-        (h("host"), h("x-kiln"), h("x-kiln-key"))
+        let funnel = req.headers().contains_key("tailscale-funnel-request");
+        (h("host"), h("x-kiln"), h("x-kiln-key"), claim(via, h("tailscale-user-login").as_deref(), h("x-forwarded-for").as_deref(), funnel))
     };
     let api = req.uri().path().starts_with("/api/");
     let get = req.method() == Method::GET;
@@ -295,26 +386,33 @@ async fn admit(app: Arc<App>, peer: SocketAddr, req: Request, next: Next) -> Res
     if api && !get && csrf.is_none() {
         return deny(StatusCode::FORBIDDEN, "missing x-kiln header");
     }
-    // LAN and internet sources are refused outright, whatever Tailscale's state:
-    // over plain HTTP they could otherwise be asked for the dashboard key.
-    if !ip.is_loopback() && !is_tailnet(ip) {
-        return deny(StatusCode::FORBIDDEN, "kiln only answers on the tailnet");
+    if let Claim::Outside(msg) = claim {
+        return deny(StatusCode::FORBIDDEN, msg);
     }
     let me = self_info().await;
-    let who = if is_tailnet(ip) && !ip.is_loopback() { whois(ip).await } else { None };
     // Fail closed: if we can't tell our own addresses or node apart from a
-    // peer (tailscale down, CLI error), treat the request as local.
-    let local = ip.is_loopback()
-        || me.ips.is_empty()
-        || me.node.is_none()
-        || me.ips.contains(&ip)
-        || who.as_ref().is_some_and(|(_, node)| Some(node) == me.node.as_ref());
-    if local {
-        if api && !key_ok(key.as_deref()) {
+    // peer (tailscale down, CLI error), treat the request as local. tailscaled
+    // names this box's owner for traffic from the box itself (a job VM
+    // through QEMU's NAT, too), so a serve login from our own IP is local.
+    let ours = |ip: &IpAddr| me.ips.is_empty() || me.node.is_none() || me.ips.contains(ip);
+    // None: local, needs the key. Some(login): a tailnet user (None if unknown).
+    let user = match claim {
+        Claim::Outside(_) | Claim::Local => None,
+        Claim::Login(_, ip) if ours(&ip) => None,
+        Claim::Login(login, _) => Some(Some(login)),
+        Claim::Peer(ip) => {
+            let who = whois(ip).await;
+            if ours(&ip) || who.as_ref().is_some_and(|(_, node)| Some(node) == me.node.as_ref()) { None } else { Some(who.map(|(l, _)| l)) }
+        }
+    };
+    match user {
+        None if api && !key_ok(key.as_deref()) => {
             return deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)");
         }
-    } else if !who.is_some_and(|(l, _)| peer_allowed(&app.cfg().allowed_users, me.owner, &l)) {
-        return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
+        Some(login) if !login.as_deref().is_some_and(|l| peer_allowed(&app.cfg().allowed_users, me.owner.clone(), l)) => {
+            return deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)");
+        }
+        _ => {}
     }
     next.run(req).await
 }
@@ -601,10 +699,10 @@ struct ServeBody {
     on: bool,
 }
 /// Publishes the dashboard as https://<host>.<tailnet>.ts.net:8443 with a real
-/// cert. 8443 so we never disturb whatever already lives on :443.
+/// cert. 8443 so we never disturb whatever already lives on :443. It proxies to
+/// the unix socket, where `admit` trusts tailscaled's identity headers.
 async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
-    let port = app.cfg().listen.rsplit(':').next().unwrap_or("7878").to_string();
-    let target = format!("http://127.0.0.1:{port}");
+    let target = format!("unix:{}", app.data.join("serve.sock").display());
     let args: Vec<&str> = if b.on { vec!["serve", "--bg", "--https=8443", &target] } else { vec!["serve", "--https=8443", "off"] };
     let out = tailscale(&args).await?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -878,6 +976,44 @@ mod tests {
             assert_eq!(&bytes[1..4], b"PNG");
             assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), px);
         }
+    }
+
+    #[test]
+    fn identity_claims() {
+        let tcp = |a: &str| Via::Tcp(a.parse().unwrap());
+        let peer: IpAddr = "100.73.48.98".parse().unwrap();
+        // TCP: the source address decides; identity headers are never read.
+        assert_eq!(claim(tcp("127.0.0.1:5000"), None, None, false), Claim::Local);
+        assert_eq!(claim(tcp("[::ffff:127.0.0.1]:5000"), None, None, false), Claim::Local);
+        assert_eq!(claim(tcp("127.0.0.1:5000"), Some("me@x.com"), Some("100.73.48.98"), false), Claim::Local);
+        assert_eq!(claim(tcp("100.73.48.98:5000"), None, None, false), Claim::Peer(peer));
+        assert_eq!(claim(tcp("100.73.48.98:5000"), Some("evil@x.com"), None, false), Claim::Peer(peer));
+        assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.73.48.98"), false), Claim::Outside(_)));
+        // The serve socket: tailscaled's login header, from the tailnet address it saw.
+        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), false), Claim::Login("me@x.com".into(), peer));
+        // No user (tagged node, Funnel or the box itself) or no tailnet source: key needed.
+        assert_eq!(claim(Via::Serve, None, Some("100.73.48.98"), false), Claim::Local);
+        assert_eq!(claim(Via::Serve, Some(""), Some("100.73.48.98"), false), Claim::Local);
+        assert_eq!(claim(Via::Serve, Some("me@x.com"), None, false), Claim::Local);
+        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
+        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
+        // Funnel (the public internet) is refused outright.
+        assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.73.48.98"), true), Claim::Outside(_)));
+        assert!(matches!(claim(Via::Serve, None, None, true), Claim::Outside(_)));
+    }
+
+    #[tokio::test]
+    async fn serve_socket_is_private() {
+        let dir = std::env::temp_dir().join(format!("kiln-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("serve.sock");
+        std::fs::write(&path, "stale").unwrap();
+        let _l = bind_serve_socket(&path).unwrap();
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let m = std::fs::metadata(&path).unwrap();
+        assert!(m.file_type().is_socket());
+        assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

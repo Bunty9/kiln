@@ -101,6 +101,8 @@ The dashboard is an installable web app: its own window, a dock or home-screen i
 1. Turn on **Serve over HTTPS** in Settings › Network (it runs `tailscale serve`). The dashboard is then at `https://<box>.<tailnet>.ts.net:8443`, still tailnet-only.
 2. Open that URL. In Chrome or Edge click **Install app** at the top right (or the install icon in the address bar). On iOS use Share › Add to Home Screen; on Android, the menu's Install app.
 
+No dashboard key is needed over HTTPS: `tailscale serve` proxies to kiln's unix socket `<data>/serve.sock` and tells kiln who you are (`Tailscale-User-Login`), and the same `allowed_users` rule applies as over plain HTTP. A browser on the CI box itself, or a tagged node, still needs the key. Funnel (serving to the public internet) is refused. If you turned Serve on with kiln 0.2.1 or older, turn it off and on again once: the old setting proxies to `127.0.0.1:7878`, where every request looks local and needs the key. The macOS App Store build of Tailscale is sandboxed and may not be able to reach the socket; the standalone `tailscaled` can.
+
 Over plain `http://<box>:7878` nothing is installed and Settings › Notifications says so. The app talks to the same server as the tab; the API is never cached. If kiln is unreachable, the app shows the last loaded dashboard (or a short "kiln is unreachable" page) and retries on its own. A new kiln release installs a new service worker on the next load.
 
 ## Updates
@@ -172,6 +174,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
+  serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked
