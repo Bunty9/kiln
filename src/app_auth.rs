@@ -67,6 +67,12 @@ pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
     }
 }
 
+/// Reuse the last discovery (finished at `finished_at`, 0 = never) for a caller that
+/// accepts one finished at or after `since`.
+pub fn reuse_discovery(finished_at: u64, since: u64) -> bool {
+    finished_at != 0 && finished_at >= since
+}
+
 /// Origin the browser reached the dashboard at: its (already vetted) Host header, and
 /// https when it came through `tailscale serve`.
 pub fn origin(host: &str, https: bool) -> String {
@@ -168,6 +174,8 @@ pub struct AppAuth {
     pub discovered_at: std::sync::atomic::AtomicU64,
     /// Why the last discovery failed (cleared by a successful one).
     pub error: std::sync::Mutex<Option<String>>,
+    /// One discovery at a time: (when the last one finished, its error if it failed outright).
+    pub discovery: tokio::sync::Mutex<(u64, Option<String>)>,
 }
 
 impl AppAuth {
@@ -184,6 +192,7 @@ impl AppAuth {
             names: Default::default(),
             discovered_at: Default::default(),
             error: Default::default(),
+            discovery: Default::default(),
         })
     }
 
@@ -397,6 +406,17 @@ mod tests {
         assert_eq!(a.id, 42);
         assert_eq!(std::fs::metadata(d.join("app.json")).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(load(&d).unwrap().unwrap().slug, "kiln-x");
+    }
+
+    #[test]
+    fn discovery_reuse() {
+        // throttled callers (doctor) pass now-60; "now" callers reuse only one that
+        // finished while they waited on the lock
+        assert!(!reuse_discovery(0, 0), "never ran");
+        assert!(reuse_discovery(1000, 1000 - 60));
+        assert!(!reuse_discovery(1000, 1061 - 60));
+        assert!(reuse_discovery(1005, 1005));
+        assert!(!reuse_discovery(1004, 1005));
     }
 
     #[test]

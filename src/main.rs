@@ -466,16 +466,30 @@ async fn shutdown(app: &Arc<App>) {
     }
 }
 
-/// App mode: refresh which repos the App is installed on, at most every 5 minutes.
+/// Seconds between App discoveries: 30 while it serves no repo or has never discovered
+/// successfully (so a fresh install shows up quickly), else 5 minutes.
+fn app_refresh_secs(repos: usize, ever_ok: bool) -> u64 {
+    if repos == 0 || !ever_ok { 30 } else { 300 }
+}
+
+/// App mode: refresh which repos the App is installed on (see `app_refresh_secs`).
 /// A failure keeps the previous list (a GitHub hiccup must not unschedule every repo).
 async fn refresh_app(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    if app.gh.app().is_none() || now() < LAST.load(Ordering::Relaxed) + 300 {
+    let Some(a) = app.gh.app() else { return };
+    let every = app_refresh_secs(a.names.read().unwrap().len(), a.discovered_at.load(Ordering::Relaxed) != 0);
+    if now() < LAST.load(Ordering::Relaxed) + every {
         return;
     }
     LAST.store(now(), Ordering::Relaxed);
-    match app.gh.discover().await {
-        Ok(n) => tracing::info!("GitHub App: {n} repo(s) installed"),
+    match app.gh.discover_now().await {
+        Ok(n) => {
+            tracing::info!("GitHub App: {n} repo(s) installed");
+            // Per-installation failures and ignored installations.
+            if let Some(e) = a.error.lock().unwrap().clone() {
+                tracing::warn!("GitHub App discovery: {e}");
+            }
+        }
         Err(e) => tracing::warn!("GitHub App discovery: {e:#}"),
     }
 }
@@ -893,6 +907,14 @@ mod tests {
         // saved from the dashboard: a stale env token never wins again
         assert_eq!(pick(s("e"), s("f"), true), ("f".into(), "file"));
         assert_eq!(pick(s("e"), None, true), ("".into(), "none"));
+    }
+
+    #[test]
+    fn app_refresh_cadence() {
+        assert_eq!(app_refresh_secs(0, false), 30, "never discovered");
+        assert_eq!(app_refresh_secs(3, false), 30, "only an old map, never a successful discovery");
+        assert_eq!(app_refresh_secs(0, true), 30, "installed nowhere yet: pick up a new install quickly");
+        assert_eq!(app_refresh_secs(3, true), 300);
     }
 
     #[test]

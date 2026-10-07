@@ -397,16 +397,35 @@ impl Gh {
         Ok(v)
     }
 
-    /// App mode: map every repo of every installation to its installation id.
-    /// Leaves the previous map in place on any error.
+    /// App mode: map every repo of every installation to its installation id, reusing
+    /// a discovery that finished in the last 60 s (doctor, CLI commands).
     pub async fn discover(&self) -> Result<usize> {
+        self.discover_since(crate::now().saturating_sub(60)).await
+    }
+
+    /// Discover now (scheduler, dashboard Refresh). A caller that waited for a discovery
+    /// already running takes its result instead of starting another.
+    pub async fn discover_now(&self) -> Result<usize> {
+        self.discover_since(crate::now()).await
+    }
+
+    /// Leaves the previous map in place on any error.
+    async fn discover_since(&self, since: u64) -> Result<usize> {
         let a = self.app().context("not in GitHub App mode")?;
+        let mut last = a.discovery.lock().await;
+        if crate::app_auth::reuse_discovery(last.0, since) {
+            return match &last.1 {
+                Some(e) => Err(anyhow::anyhow!("{e}")),
+                None => Ok(a.names.read().unwrap().len()),
+            };
+        }
         let r = self.discover_into(&a).await;
         *a.error.lock().unwrap() = match &r {
             Ok((_, errs)) if errs.is_empty() => None,
             Ok((_, errs)) => Some(errs.join("; ")),
             Err(e) => Some(format!("{e:#}")),
         };
+        *last = (crate::now(), r.as_ref().err().map(|e| format!("{e:#}")));
         r.map(|(n, _)| n)
     }
 

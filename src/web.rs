@@ -48,6 +48,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/app", post(app_manual).delete(app_remove))
         .route("/api/app/manifest", post(app_manifest))
         .route("/api/app/convert", post(app_convert))
+        .route("/api/app/refresh", post(app_refresh))
         .route("/api/doctor", get(doctor))
         .route("/api/log", get(log))
         .route("/api/vms/{id}/kill", post(kill))
@@ -571,6 +572,16 @@ async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> 
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))
+}
+
+/// Run discovery now (after installing the App, or changing `app_accounts`). Returns the
+/// `app` object of /api/state; a failure is in its `error`, and the last map is kept.
+async fn app_refresh(State(app): S) -> R<Json<Value>> {
+    if app.gh.app().is_none() {
+        bail_r("not in GitHub App mode: create or add the App in Settings › GitHub first")?;
+    }
+    let _ = app.gh.discover_now().await;
+    Ok(Json(app_json(&app)))
 }
 
 /// Back to token auth: delete the App's key and record.
