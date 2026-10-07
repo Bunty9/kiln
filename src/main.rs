@@ -33,6 +33,9 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// GitHub App mode: accounts (user or org logins) whose installations are served,
+    /// besides the App owner's. Empty = the owner's only.
+    pub app_accounts: Vec<String>,
     /// Docker Hub pull-through cache for job VMs (host loopback :5000).
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
@@ -80,6 +83,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
             bake_node_versions: vec!["24".into()],
@@ -218,8 +222,20 @@ impl Config {
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
         }
+        if let Some(a) = self.app_accounts.iter().find(|a| !valid_login(a)) {
+            bail!("app_accounts: {a:?} is not a GitHub user or org login (letters, digits, single hyphens, at most 39)");
+        }
         Ok(())
     }
+}
+
+/// GitHub login: 1-39 alphanumerics or single hyphens, not at either end.
+fn valid_login(l: &str) -> bool {
+    (1..=39).contains(&l.len())
+        && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+        && !l.contains("--")
 }
 
 /// Conservative git branch name check: no spaces, no ref syntax, no "..".
@@ -273,6 +289,7 @@ impl App {
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
+        *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
@@ -356,6 +373,7 @@ async fn main() -> Result<()> {
     };
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
+    *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
     match app_auth::load(&data) {
         Some(Ok(a)) => gh.set_app(Some(Arc::new(a))),
         Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
@@ -365,7 +383,6 @@ async fn main() -> Result<()> {
         gh,
         cfg: RwLock::new(cfg),
         vms: Mutex::default(),
-        data,
         kills: Mutex::default(),
         releases: Mutex::default(),
         committing: Mutex::default(),
@@ -374,7 +391,8 @@ async fn main() -> Result<()> {
         stopping: Default::default(),
         backoff: Default::default(),
         mirror: Default::default(),
-        app_states: Default::default(),
+        app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+        data,
     });
 
     match std::env::args().nth(1).as_deref() {
@@ -450,16 +468,30 @@ async fn shutdown(app: &Arc<App>) {
     }
 }
 
-/// App mode: refresh which repos the App is installed on, at most every 5 minutes.
+/// Seconds between App discoveries: 30 while it serves no repo or has never discovered
+/// successfully (so a fresh install shows up quickly), else 5 minutes.
+fn app_refresh_secs(repos: usize, ever_ok: bool) -> u64 {
+    if repos == 0 || !ever_ok { 30 } else { 300 }
+}
+
+/// App mode: refresh which repos the App is installed on (see `app_refresh_secs`).
 /// A failure keeps the previous list (a GitHub hiccup must not unschedule every repo).
 async fn refresh_app(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
-    if app.gh.app().is_none() || now() < LAST.load(Ordering::Relaxed) + 300 {
+    let Some(a) = app.gh.app() else { return };
+    let every = app_refresh_secs(a.names.read().unwrap().len(), a.discovered_at.load(Ordering::Relaxed) != 0);
+    if now() < LAST.load(Ordering::Relaxed) + every {
         return;
     }
     LAST.store(now(), Ordering::Relaxed);
-    match app.gh.discover().await {
-        Ok(n) => tracing::info!("GitHub App: {n} repo(s) installed"),
+    match app.gh.discover_now().await {
+        Ok(n) => {
+            tracing::info!("GitHub App: {n} repo(s) installed");
+            // Per-installation failures and ignored installations.
+            if let Some(e) = a.error.lock().unwrap().clone() {
+                tracing::warn!("GitHub App discovery: {e}");
+            }
+        }
         Err(e) => tracing::warn!("GitHub App discovery: {e:#}"),
     }
 }
@@ -824,6 +856,21 @@ mod tests {
     }
 
     #[test]
+    fn app_accounts_are_github_logins() {
+        let ok =
+            |a: &[&str]| Config { app_accounts: a.iter().map(|s| s.to_string()).collect(), ..Config::default() }.validate_for(8).is_ok();
+        assert!(ok(&[]));
+        assert!(ok(&["Bunty9", "my-org", &"a".repeat(39)]));
+        assert!(!ok(&[""]));
+        assert!(!ok(&["-org"]));
+        assert!(!ok(&["org-"]));
+        assert!(!ok(&["my--org"]));
+        assert!(!ok(&["my_org"]));
+        assert!(!ok(&["o/rg"]));
+        assert!(!ok(&[&"a".repeat(40)]));
+    }
+
+    #[test]
     fn size_labels_and_memory() {
         let c = Config::default();
         assert_eq!(c.runner_labels(4), ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"]);
@@ -869,6 +916,14 @@ mod tests {
         // saved from the dashboard: a stale env token never wins again
         assert_eq!(pick(s("e"), s("f"), true), ("f".into(), "file"));
         assert_eq!(pick(s("e"), None, true), ("".into(), "none"));
+    }
+
+    #[test]
+    fn app_refresh_cadence() {
+        assert_eq!(app_refresh_secs(0, false), 30, "never discovered");
+        assert_eq!(app_refresh_secs(3, false), 30, "only an old map, never a successful discovery");
+        assert_eq!(app_refresh_secs(0, true), 30, "installed nowhere yet: pick up a new install quickly");
+        assert_eq!(app_refresh_secs(3, true), 300);
     }
 
     #[test]

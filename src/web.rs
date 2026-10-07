@@ -48,6 +48,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/app", post(app_manual).delete(app_remove))
         .route("/api/app/manifest", post(app_manifest))
         .route("/api/app/convert", post(app_convert))
+        .route("/api/app/refresh", post(app_refresh))
         .route("/api/doctor", get(doctor))
         .route("/api/log", get(log))
         .route("/api/vms/{id}/kill", post(kill))
@@ -271,14 +272,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
     Ok(Json(json!({
         "config": app.cfg(),
         "token_set": app.gh.has_token(),
-        "app": app.gh.app().map(|a| json!({
-            "id": a.id,
-            "slug": a.slug,
-            "html_url": a.html_url,
-            "repos": a.names.read().unwrap().clone(),
-            "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
-            "error": a.error.lock().unwrap().clone(),
-        })),
+        "app": app_json(&app),
         "token_source": app.gh.source(),
         "token_expires": *app.gh.expires.lock().unwrap(),
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
@@ -292,6 +286,21 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.repos()),
     })))
+}
+
+/// The `app` object of /api/state (null in token mode).
+fn app_json(app: &App) -> Value {
+    let Some(a) = app.gh.app() else { return Value::Null };
+    json!({
+        "id": a.id,
+        "slug": a.slug,
+        "html_url": a.html_url,
+        "owner": *a.owner.read().unwrap(),
+        "accounts": app.cfg().app_accounts,
+        "repos": a.names.read().unwrap().clone(),
+        "discovered_at": a.discovered_at.load(std::sync::atomic::Ordering::Relaxed),
+        "error": a.error.lock().unwrap().clone(),
+    })
 }
 
 async fn doctor(State(app): S) -> R<Json<Value>> {
@@ -505,7 +514,7 @@ async fn app_manifest(State(app): S, headers: HeaderMap, Json(b): Json<ManifestB
         bail_r("org must be a GitHub org login")?;
     }
     let name = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "box".into());
-    let state = app.app_states.lock().unwrap().issue(now());
+    let state = app.app_states.lock().unwrap().issue(now()).context("saving the setup state (app_states.json)")?;
     let base = if org.is_empty() {
         "https://github.com/settings/apps/new".to_string()
     } else {
@@ -526,16 +535,22 @@ struct ConvertBody {
 
 /// Finish the one-click flow: trade GitHub's code for the App's id and key, and switch to it.
 async fn app_convert(State(app): S, Json(b): Json<ConvertBody>) -> R<Json<Value>> {
-    if !app.app_states.lock().unwrap().take(&b.state, now()) {
+    if !app.app_states.lock().unwrap().valid(&b.state, now()) {
         bail_r("this setup link is unknown, already used or older than an hour: start again")?;
     }
     if b.code.is_empty() || !b.code.chars().all(|c| c.is_ascii_alphanumeric()) {
         bail_r("bad code")?;
     }
+    // The state is used up only once GitHub has handed over the App: a network error
+    // or a 5xx leaves it valid so the same code can be retried.
     let v = app.gh.manifest_conversion(&b.code).await?;
+    // Best effort: the App exists now whatever happens to the state file.
+    let _ = app.app_states.lock().unwrap().consume(&b.state);
     let id = v["id"].as_u64().ok_or_else(|| anyhow!("GitHub returned no app id"))?;
     let (slug, url, pem) = (v["slug"].as_str().unwrap_or(""), v["html_url"].as_str().unwrap_or(""), v["pem"].as_str().unwrap_or(""));
-    let a = crate::app_auth::save(&app.data, id, slug, url, pem)?;
+    // Empty if GitHub ever leaves it out: discovery then asks GET /app once.
+    let owner = v["owner"]["login"].as_str().unwrap_or("");
+    let a = crate::app_auth::save(&app.data, id, slug, url, owner, pem)?;
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))
@@ -552,10 +567,21 @@ async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> 
     let a = crate::app_auth::AppAuth::new(b.id, String::new(), String::new(), &b.pem)?;
     let me = app.gh.app_info(&a).await?;
     let (slug, url) = (me["slug"].as_str().unwrap_or(""), me["html_url"].as_str().unwrap_or(""));
-    let a = crate::app_auth::save(&app.data, b.id, slug, url, &b.pem)?;
+    let owner = me["owner"]["login"].as_str().unwrap_or("");
+    let a = crate::app_auth::save(&app.data, b.id, slug, url, owner, &b.pem)?;
     app.gh.set_app(Some(Arc::new(a)));
     let _ = app.gh.discover().await;
     Ok(Json(json!({ "slug": slug, "html_url": url })))
+}
+
+/// Run discovery now (after installing the App, or changing `app_accounts`). Returns the
+/// `app` object of /api/state; a failure is in its `error`, and the last map is kept.
+async fn app_refresh(State(app): S) -> R<Json<Value>> {
+    if app.gh.app().is_none() {
+        bail_r("not in GitHub App mode: create or add the App in Settings › GitHub first")?;
+    }
+    let _ = app.gh.discover_now().await;
+    Ok(Json(app_json(&app)))
 }
 
 /// Back to token auth: delete the App's key and record.
