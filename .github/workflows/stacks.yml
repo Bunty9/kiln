@@ -78,7 +78,7 @@ jobs:
         working-directory: examples/docker-build
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
           context: examples/docker-build
