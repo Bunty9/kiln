@@ -319,7 +319,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 static PAGE: LazyLock<String> = LazyLock::new(|| include_str!("dashboard.html").replace("{{KILN_VERSION}}", VERSION));
 
 /// Dashboard dark background; the installed window's title bar and splash.
-const THEME: &str = "#14110E";
+const THEME: &str = "#0A0A0A";
 
 fn manifest_json(version: &str) -> Value {
     let icon = |file: &str, size: &str, purpose: &str| json!({ "src": format!("/icons/{file}?v={version}"), "sizes": size, "type": "image/png", "purpose": purpose });

@@ -31,7 +31,7 @@ self.addEventListener('fetch', e => {
 
 function offline() {
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>kiln is unreachable</title><link rel="icon" href="/icon.svg">
-<style>:root{--bg:#14110E;--fg:#EEE7DE;--fg2:#B6AB9E;--ember:#F59E4C}@media(prefers-color-scheme:light){:root{--bg:#F4F3F1;--fg:#1C1813;--fg2:#5A5248;--ember:#A34B07}}
+<style>:root{--bg:#0A0A0A;--fg:#FAFAFA;--fg2:#C4C4C4;--ember:#F59E4C}@media(prefers-color-scheme:light){:root{--bg:#F5F5F5;--fg:#0A0A0A;--fg2:#404040;--ember:#933F00}}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;padding:16px;box-sizing:border-box}
 main{max-width:420px}h1{font-size:22px;font-weight:650;letter-spacing:-.015em;margin:16px 0 8px}p{margin:0;color:var(--fg2)}svg{display:block}</style></head>
 <body><main><svg viewBox="0 0 16 16" width="40" height="40" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>
