@@ -6,7 +6,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
-- **Serve over HTTPS** no longer hangs and leaks a `tailscale serve` process on a tailnet without HTTPS certificates (#15). kiln reads `CertDomains` from `tailscale status` first and refuses with "This tailnet can't issue HTTPS certificates. Enable DNS › HTTPS Certificates in the Tailscale admin console…". Every tailscale CLI call now runs with stdin closed in its own process group, bounded (15 s for `serve`, 20 s otherwise), and the whole group is killed on timeout or when the client goes away, so the request always returns and nothing is left behind.
+- **Serve over HTTPS** no longer hangs and leaks a `tailscale serve` process on a tailnet without HTTPS certificates (#15). kiln reads `CertDomains` from `tailscale status` first and refuses with "This tailnet can't issue HTTPS certificates. Enable DNS › HTTPS Certificates in the Tailscale admin console…". Every tailscale CLI call now runs with stdin closed in its own process group, bounded (15 s for `serve`, 20 s otherwise; turning serve on takes at most 35 s end to end: the ≤20 s `tailscale status` preflight plus the ≤15 s `serve`), and the whole group is killed on timeout or when the client goes away, so the request always returns and nothing is left behind.
 - The Serve toggle shows the server's error (including a timeout) next to it instead of silently reverting, and warns up front when the tailnet has HTTPS certificates off. `kiln doctor` and Diagnostics show "tailscale HTTPS: unavailable on this tailnet (DNS › HTTPS Certificates is off)" in that case.
 
 ## [0.2.2] - 2026-10-07

@@ -863,13 +863,24 @@ struct KillGroup(Option<u32>);
 impl Drop for KillGroup {
     fn drop(&mut self) {
         if let Some(pg) = self.0 {
-            let _ = std::process::Command::new("kill")
+            let bin = kill_bin(|p| std::path::Path::new(p).exists());
+            let r = std::process::Command::new(bin)
                 .args(["-KILL", "--", &format!("-{pg}")])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+            match r {
+                Ok(s) if s.success() => {}
+                Ok(s) => tracing::warn!("`{bin} -KILL -{pg}` exited with {s}; its processes may linger"),
+                Err(e) => tracing::warn!("could not run `{bin}` to stop process group {pg}: {e}"),
+            }
         }
     }
+}
+
+/// The service PATH may lack `kill`, so try the absolute paths first.
+fn kill_bin(exists: impl Fn(&str) -> bool) -> &'static str {
+    ["/usr/bin/kill", "/bin/kill"].into_iter().find(|p| exists(p)).unwrap_or("kill")
 }
 
 /// `tailscale status --json` of a running node whose tailnet issues no HTTPS certificates:
@@ -1086,6 +1097,13 @@ fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_bin_prefers_absolute_paths() {
+        assert_eq!(kill_bin(|_| true), "/usr/bin/kill");
+        assert_eq!(kill_bin(|p| p == "/bin/kill"), "/bin/kill");
+        assert_eq!(kill_bin(|_| false), "kill");
+    }
 
     /// Processes whose argv mentions `marker`.
     fn alive(marker: &str) -> Vec<String> {

@@ -1669,7 +1669,12 @@ fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
 }
 
 async fn output(bin: &str, args: &[&str]) -> Result<String> {
-    let o = Command::new(bin).args(args).output().await.with_context(|| format!("running {bin}"))?;
+    // Every tailscale call is bounded: the CLI can wait forever on a wedged tailscaled.
+    let o = if bin == "tailscale" {
+        crate::web::tailscale(args).await?
+    } else {
+        Command::new(bin).args(args).output().await.with_context(|| format!("running {bin}"))?
+    };
     if !o.status.success() {
         bail!("{bin} exited with {}", o.status);
     }

@@ -1466,14 +1466,18 @@ pages.settings = {
   },
   live() { G[this.g].live?.(); $('#dbar').hidden = !isDirty() && !$('#f-adduser')?.value; },
 };
+const serveOn = t => !!t?.serve?.TCP?.['8443'];
 async function loadTs() {
+  const was = TS && !TS.err ? serveOn(TS) : null;
   try { TS = await api('/api/tailscale'); } catch (e) { TS = { err: e.message }; }
+  // Serve changed some other way (CLI, another tab): the last toggle error no longer applies.
+  if (serveSt?.err && !TS.err && was !== null && serveOn(TS) !== was) serveSt = null;
   if (cur === pages.settings && pages.settings.g === 'network') renderTs();
 }
 addEventListener('toggle', e => { if (e.target.matches?.('#ts details')) tsOpen = e.target.open; }, true);
 function renderTs() {
   if (TS.err) return setHTML($('#ts'), `<div class="card"><div class="cal" style="margin-top:0">${esc(TS.err)}</div><button class="btn" data-act="tsr">${ic('refresh')}Retry</button></div>`);
-  const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = !!TS.serve?.TCP?.['8443'], url = `https://${dns}:8443`;
+  const st = TS.status || {}, self = st.Self || {}, dns = String(self.DNSName || '').replace(/\.$/, ''), on = serveOn(TS), url = `https://${dns}:8443`;
   const peers = Object.values(st.Peer || {}).sort((a, b) => (b.Online - a.Online) || String(a.HostName).localeCompare(b.HostName));
   const row = p => {
     const ip = (p.TailscaleIPs || [])[0] || '', pg = pings.get(ip), ls = iso(p.LastSeen);
