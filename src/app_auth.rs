@@ -43,17 +43,28 @@ pub fn needs_mint(expires_at: u64, now: u64) -> bool {
     now + 300 >= expires_at
 }
 
-/// Installation whose token serves `path`: the repo's own for `repos/{o}/{n}/...`,
-/// else any (public reads like runner releases work with any installation token).
-pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
+/// The latest actions/runner release (bake, staleness check): public, so it is read
+/// without a token in App mode and works before the App is installed anywhere.
+pub fn is_public(path: &str) -> bool {
+    path.trim_start_matches('/') == "repos/actions/runner/releases/latest"
+}
+
+/// "owner/name" of a `repos/{o}/{n}/...` path.
+pub fn repo_of(path: &str) -> Option<String> {
     let mut seg = path.trim_start_matches('/').split('/');
-    if seg.next() == Some("repos")
-        && let (Some(o), Some(n)) = (seg.next(), seg.next())
-        && let Some(&id) = repos.get(&format!("{o}/{n}").to_ascii_lowercase())
-    {
-        return Some(id);
+    match (seg.next(), seg.next(), seg.next()) {
+        (Some("repos"), Some(o), Some(n)) if !o.is_empty() && !n.is_empty() => Some(format!("{o}/{n}")),
+        _ => None,
     }
-    repos.values().next().copied()
+}
+
+/// Installation whose token serves `path`: the repo's own for `repos/{o}/{n}/...` (None
+/// when the App does not serve that repo: never another installation's token), else any.
+pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
+    match repo_of(path) {
+        Some(r) => repos.get(&r.to_ascii_lowercase()).copied(),
+        None => repos.values().next().copied(),
+    }
 }
 
 /// Origin the browser reached the dashboard at: its (already vetted) Host header, and
@@ -387,8 +398,18 @@ mod tests {
         let m: BTreeMap<String, u64> = [("bunty9/kiln".to_string(), 7), ("org/x".to_string(), 9)].into();
         assert_eq!(install_for("repos/Bunty9/Kiln/actions/runs", &m), Some(7));
         assert_eq!(install_for("repos/org/x/compare/a...b", &m), Some(9));
-        // not installed (public runner releases): any installation's token
-        assert!(install_for("repos/actions/runner/releases/latest", &m).is_some());
-        assert_eq!(install_for("repos/a/b", &BTreeMap::new()), None);
+        // a repo the App does not serve never borrows another installation's token
+        assert_eq!(install_for("repos/other/repo/actions/runners", &m), None);
+        assert_eq!(install_for("repos/actions/runner/releases/latest", &m), None);
+        assert_eq!(repo_of("/repos/Other/Repo/actions"), Some("Other/Repo".into()));
+        assert_eq!(repo_of("repos/only-owner"), None);
+        // the runner release lookup is public: unauthenticated, even with no installation
+        assert!(is_public("repos/actions/runner/releases/latest"));
+        assert!(is_public("/repos/actions/runner/releases/latest"));
+        assert!(!is_public("repos/actions/runner/releases/latest/x"));
+        assert!(!is_public("repos/actions/runner/actions/runners"));
+        // a non-repo path may use any installation
+        assert!(install_for("rate_limit", &m).is_some());
+        assert_eq!(install_for("rate_limit", &BTreeMap::new()), None);
     }
 }

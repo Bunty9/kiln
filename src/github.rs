@@ -87,16 +87,30 @@ impl Gh {
         self.app().is_some() || !self.token.read().unwrap().is_empty()
     }
 
-    /// Bearer for `path`: the PAT, or the owning installation's token. The App JWT is
-    /// never handed out here: only `mint`, `discover` and `app_info` use it, directly.
+    /// Bearer for `path` ("" = unauthenticated): the PAT, or in App mode the serving
+    /// installation's token. A repo the App does not serve is an error, except the public
+    /// runner release lookup, which goes unauthenticated so a bake works before any
+    /// installation exists. Other paths use any installation, or none if there is none.
+    /// The App JWT is never handed out here: only `mint`, `discover` and `app_info` use it.
     async fn token_for(&self, path: &str) -> Result<String> {
         let Some(a) = self.app() else { return Ok(self.token.read().unwrap().clone()) };
-        // CLI commands (bake, doctor) never ran the scheduler's discovery.
-        if a.discovered_at.load(Ordering::Relaxed) == 0 {
-            self.discover().await?;
+        if crate::app_auth::is_public(path) {
+            return Ok(String::new());
         }
-        let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap()).context("the GitHub App has no installations")?;
-        self.mint(&a, inst).await
+        // CLI commands (bake, doctor) never ran the scheduler's discovery.
+        let found = if a.discovered_at.load(Ordering::Relaxed) == 0 { self.discover().await.map(|_| ()) } else { Ok(()) };
+        let inst = crate::app_auth::install_for(path, &a.repos.read().unwrap());
+        match (inst, crate::app_auth::repo_of(path)) {
+            (Some(i), Some(_)) => self.mint(&a, i).await,
+            (None, Some(r)) => {
+                found?;
+                bail!(
+                    "repo {r} is not served by the GitHub App: install the App on it (an account other than the App owner's must be in app_accounts)"
+                )
+            }
+            (Some(i), None) => Ok(self.mint(&a, i).await.unwrap_or_default()),
+            (None, None) => Ok(String::new()),
+        }
     }
 
     /// Cached installation token, minted when missing or within 5 min of expiry.
@@ -126,11 +140,13 @@ impl Gh {
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("https://api.github.com/{}", path.trim_start_matches('/'));
-        self.http
+        let rb = self
+            .http
             .request(method, url)
-            .bearer_auth(token)
             .header(header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        // "" = unauthenticated (public reads in App mode; no token at all in token mode).
+        if token.is_empty() { rb } else { rb.bearer_auth(token) }
     }
 
     /// Every call goes through here so the rate-limit state stays current.
