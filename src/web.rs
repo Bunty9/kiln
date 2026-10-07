@@ -491,6 +491,9 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
 struct ManifestBody {
     #[serde(default)]
     org: String,
+    /// The page was loaded over https (tailscale serve); the host comes from the Host header.
+    #[serde(default)]
+    https: bool,
 }
 
 /// Start the one-click App creation: the manifest, GitHub's form URL and a one-time state.
@@ -510,7 +513,7 @@ async fn app_manifest(State(app): S, headers: HeaderMap, Json(b): Json<ManifestB
     };
     Ok(Json(json!({
         "url": format!("{base}?state={state}"),
-        "manifest": crate::app_auth::manifest(&format!("http://{host}"), name.trim()),
+        "manifest": crate::app_auth::manifest(&crate::app_auth::origin(host, b.https), name.trim()),
         "state": state,
     })))
 }

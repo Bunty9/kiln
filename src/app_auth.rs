@@ -56,13 +56,24 @@ pub fn install_for(path: &str, repos: &BTreeMap<String, u64>) -> Option<u64> {
     repos.values().next().copied()
 }
 
+/// Origin the browser reached the dashboard at: its (already vetted) Host header, and
+/// https when it came through `tailscale serve`.
+pub fn origin(host: &str, https: bool) -> String {
+    format!("{}://{host}", if https { "https" } else { "http" })
+}
+
+/// Installations kiln can use: a suspended one can't mint tokens.
+pub fn live_installations(insts: &[serde_json::Value]) -> Vec<u64> {
+    insts.iter().filter(|i| i["suspended_at"].is_null()).filter_map(|i| i["id"].as_u64()).collect()
+}
+
 /// App manifest for GitHub's one-click creation flow. GitHub sends the browser back
 /// to the dashboard page (not an API route, so no headers are needed) with ?code&state.
 pub fn manifest(origin: &str, host: &str) -> serde_json::Value {
     serde_json::json!({
         "name": format!("kiln-{host}"),
         "url": "https://github.com/Bunty9/kiln",
-        "redirect_url": format!("{}/#/app", origin.trim_end_matches('/')),
+        "redirect_url": format!("{}/", origin.trim_end_matches('/')),
         "public": false,
         "hook_attributes": { "url": "https://example.invalid/kiln", "active": false },
         "default_permissions": { "administration": "write", "actions": "write", "contents": "read", "metadata": "read" },
@@ -184,7 +195,11 @@ mod tests {
     #[test]
     fn manifest_shape() {
         let m = manifest("http://ryzen7.tail1234.ts.net:7878", "ryzen7");
-        assert_eq!(m["redirect_url"], "http://ryzen7.tail1234.ts.net:7878/#/app");
+        // GitHub appends ?code&state: a plain path keeps them in location.search
+        assert_eq!(m["redirect_url"], "http://ryzen7.tail1234.ts.net:7878/");
+        // the dashboard behind tailscale serve is https
+        assert_eq!(origin("box.ts.net:8443", true), "https://box.ts.net:8443");
+        assert_eq!(origin("127.0.0.1:7878", false), "http://127.0.0.1:7878");
         assert_eq!(m["name"], "kiln-ryzen7");
         assert_eq!(m["public"], false);
         assert_eq!(m["hook_attributes"]["active"], false);
@@ -205,6 +220,13 @@ mod tests {
         assert!(!s.take(&a, 1000), "single use");
         let b = s.issue(1000);
         assert!(!s.take(&b, 1000 + 3601), "expired");
+    }
+
+    #[test]
+    fn suspended_installations_are_skipped() {
+        let insts =
+            serde_json::json!([{ "id": 1, "suspended_at": null }, { "id": 2, "suspended_at": "2026-10-01T00:00:00Z" }, { "id": 3 }]);
+        assert_eq!(live_installations(insts.as_array().unwrap()), [1, 3]);
     }
 
     #[test]

@@ -134,14 +134,13 @@ impl Config {
         self.repo_cache_gb.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(self.cache_gb, |(_, &g)| g)
     }
 
-    /// `app_mode`: repos come from the GitHub App's installations, so per-repo keys
-    /// need not name a configured repo (keys for repos not installed are ignored).
-    pub fn validate(&self, app_mode: bool) -> Result<()> {
-        self.validate_for(host_threads(), app_mode)
+    /// Per-repo maps (`warm`, `cache_branches`, `repo_cache_gb`) may name repos that are
+    /// not served (removed, or a GitHub App no longer installed there): lookups ignore them.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_for(host_threads())
     }
 
-    fn validate_for(&self, host: u32, app_mode: bool) -> Result<()> {
-        let served = |r: &str| app_mode || self.repos.iter().any(|x| x.eq_ignore_ascii_case(r));
+    fn validate_for(&self, host: u32) -> Result<()> {
         for (i, r) in self.repos.iter().enumerate() {
             if self.repos[..i].iter().any(|p| p.eq_ignore_ascii_case(r)) {
                 bail!("repo listed twice (GitHub names are case-insensitive): {r:?}");
@@ -174,8 +173,8 @@ impl Config {
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
         }
-        if let Some((r, _)) = self.repo_cache_gb.iter().find(|(r, g)| !(5..=500).contains(*g) || !served(r)) {
-            bail!("repo_cache_gb: {r:?} must be a configured repo with 5..=500 GB");
+        if let Some((r, _)) = self.repo_cache_gb.iter().find(|(_, g)| !(5..=500).contains(*g)) {
+            bail!("repo_cache_gb: {r:?} must be 5..=500 GB");
         }
         if let Some((n, _)) = self.size_mem_mb.iter().find(|(n, m)| !(1..=host).contains(*n) || !(1024..=1_048_576).contains(*m)) {
             bail!("size_mem_mb: size {n} must be 1..={host} vCPUs with 1024..=1048576 MB");
@@ -196,13 +195,10 @@ impl Config {
         if let Some(k) = self.debug_ssh_keys.iter().find(|k| !vm::valid_ssh_key(k)) {
             bail!("debug_ssh_keys: not a single-line ssh-/ecdsa-/sk- public key: {:?}", k.chars().take(24).collect::<String>());
         }
-        if let Some((r, _)) = self.warm.iter().find(|(r, n)| **n > 4 || !served(r)) {
-            bail!("warm: {r:?} must be a configured repo with a count of 0..=4");
+        if let Some((r, _)) = self.warm.iter().find(|(_, n)| **n > 4) {
+            bail!("warm: {r:?} must have a count of 0..=4");
         }
-        for (r, bs) in &self.cache_branches {
-            if !served(r) {
-                bail!("cache_branches: {r:?} is not a configured repo");
-            }
+        for bs in self.cache_branches.values() {
             if let Some(b) = bs.iter().find(|b| !valid_branch(b)) {
                 bail!("cache_branches: {b:?} is not a branch name");
             }
@@ -274,7 +270,7 @@ impl App {
     }
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
-        c.validate(self.gh.app().is_some())?;
+        c.validate()?;
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
@@ -712,7 +708,7 @@ mod tests {
         let ok = |f: fn(&mut Config)| {
             let mut c = Config::default();
             f(&mut c);
-            c.validate_for(8, false).is_ok()
+            c.validate_for(8).is_ok()
         };
         assert!(ok(|_| {}));
         assert!(ok(|c| c.max_vms = 0));
@@ -743,32 +739,32 @@ mod tests {
         let warm = |repos: &[&str], r: &str, n: u32| {
             let mut c = Config { repos: repos.iter().map(|s| s.to_string()).collect(), ..Config::default() };
             c.warm.insert(r.into(), n);
-            c.validate_for(8, false).is_ok()
+            c.validate_for(8).is_ok()
         };
         assert!(warm(&["a/b"], "A/B", 4));
         assert!(warm(&["a/b"], "a/b", 0));
         assert!(!warm(&["a/b"], "a/b", 5));
-        assert!(!warm(&["a/b"], "x/y", 1));
+        assert!(warm(&["a/b"], "x/y", 1), "unserved repos are ignored, not rejected");
         let branches = |r: &str, b: &str| {
             let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
             c.cache_branches.insert(r.into(), vec![b.into()]);
-            c.validate_for(8, false).is_ok()
+            c.validate_for(8).is_ok()
         };
         assert!(branches("A/B", "dev"));
         assert!(!branches("a/b", "dev/") && !branches("a/b", ".dev") && !branches("a/b", "dev?x") && !branches("a/b", "release/*"));
         let sized = |r: &str, g: u32| {
             let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
             c.repo_cache_gb.insert(r.into(), g);
-            c.validate_for(8, false).is_ok()
+            c.validate_for(8).is_ok()
         };
         assert!(sized("A/B", 60) && sized("a/b", 5) && sized("a/b", 500));
-        assert!(!sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
+        assert!(sized("x/y", 60) && !sized("a/b", 4) && !sized("a/b", 501));
         let mut c = Config::default();
         c.cache_branches.insert("Owner/Repo".into(), vec!["dev".into()]);
         assert_eq!(c.cache_branches("owner/repo"), ["dev"]);
         assert!(c.cache_branches("other/repo").is_empty());
         assert!(branches("a/b", "release/1.x"));
-        assert!(!branches("x/y", "dev"));
+        assert!(branches("x/y", "dev"));
         assert!(!branches("a/b", ""));
         assert!(!branches("a/b", "a..b"));
         assert!(!branches("a/b", "dev branch"));
@@ -794,6 +790,17 @@ mod tests {
     }
 
     #[test]
+    fn unserved_per_repo_keys_never_block_saves() {
+        // After Remove App (or when app.pem stops loading) the keys set in App mode
+        // stay in config.json; they must not lock every later save or bake.
+        let mut c = Config { repos: vec!["a/b".into()], ..Config::default() };
+        c.warm.insert("other/repo".into(), 1);
+        c.cache_branches.insert("other/repo".into(), vec!["dev".into()]);
+        c.repo_cache_gb.insert("other/repo".into(), 60);
+        assert!(c.validate_for(8).is_ok());
+    }
+
+    #[test]
     fn app_mode_per_repo_keys() {
         // In App mode the served repos come from the installation, so per-repo keys
         // for repos not (or no longer) installed are kept and ignored, not rejected.
@@ -801,11 +808,10 @@ mod tests {
         c.warm.insert("gone/repo".into(), 1);
         c.cache_branches.insert("gone/repo".into(), vec!["dev".into()]);
         c.repo_cache_gb.insert("gone/repo".into(), 60);
-        assert!(c.validate_for(8, true).is_ok());
-        assert!(c.validate_for(8, false).is_err());
+        assert!(c.validate_for(8).is_ok());
         // shape is still checked
         c.cache_branches.insert("gone/repo".into(), vec!["bad branch".into()]);
-        assert!(c.validate_for(8, true).is_err());
+        assert!(c.validate_for(8).is_err());
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub struct Gh {
     // URL -> (etag, body). Conditional GETs that return 304 are free against
     // the rate limit, which is what makes 5s polling of several repos viable.
     etags: Mutex<HashMap<String, (String, Value)>>,
+    /// lowercase "owner/name" -> GitHub's spelling, from App discovery.
+    spelled: std::sync::Mutex<HashMap<String, String>>,
     /// GitHub App mode: tokens come from the App's installations, not `token`.
     app: std::sync::RwLock<Option<std::sync::Arc<crate::app_auth::AppAuth>>>,
     /// Unix time the token expires, from GitHub's response header (None = no expiry seen).
@@ -51,6 +53,7 @@ impl Gh {
             defaults: Default::default(),
             expires: Default::default(),
             app: Default::default(),
+            spelled: Default::default(),
         }
     }
 
@@ -379,13 +382,20 @@ impl Gh {
     pub async fn discover(&self) -> Result<usize> {
         let a = self.app().context("not in GitHub App mode")?;
         let r = self.discover_into(&a).await;
-        *a.error.lock().unwrap() = r.as_ref().err().map(|e| format!("{e:#}"));
-        r
+        *a.error.lock().unwrap() = match &r {
+            Ok((_, errs)) if errs.is_empty() => None,
+            Ok((_, errs)) => Some(errs.join("; ")),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        r.map(|(n, _)| n)
     }
 
-    async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<usize> {
+    /// (repos found, per-installation errors). One failing installation keeps its previous
+    /// repos and does not stop the others; suspended installations are skipped.
+    async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<(usize, Vec<String>)> {
         let jwt = a.jwt(crate::now())?;
-        let (mut map, mut names) = (BTreeMap::new(), vec![]);
+        let mut map = BTreeMap::new();
+        let mut errs = vec![];
         let mut page = 1;
         loop {
             let r = self.request_with(&jwt, Method::GET, &format!("app/installations?per_page=100&page={page}")).send().await?;
@@ -393,28 +403,14 @@ impl Gh {
                 bail!("listing App installations: {}", r.status());
             }
             let insts: Vec<Value> = r.json().await?;
-            for i in &insts {
-                let id = i["id"].as_u64().context("installation id")?;
-                let token = self.mint(a, id).await?;
-                let mut p = 1;
-                loop {
-                    let path = format!("installation/repositories?per_page=100&page={p}");
-                    let r = self.request_with(&token, Method::GET, &path).send().await?;
-                    if !r.status().is_success() {
-                        bail!("listing repos of installation {id}: {}", r.status());
+            for id in crate::app_auth::live_installations(&insts) {
+                match self.installation_repos(a, id).await {
+                    Ok(repos) => map.extend(repos.into_iter().map(|n| (n, id))),
+                    Err(e) => {
+                        errs.push(format!("installation {id}: {e:#}"));
+                        let old = a.repos.read().unwrap().clone();
+                        map.extend(old.into_iter().filter(|(_, i)| *i == id));
                     }
-                    let v: Value = r.json().await?;
-                    let repos = v["repositories"].as_array().cloned().unwrap_or_default();
-                    for repo in &repos {
-                        if let Some(n) = repo["full_name"].as_str() {
-                            map.insert(n.to_ascii_lowercase(), id);
-                            names.push(n.to_string());
-                        }
-                    }
-                    if repos.len() < 100 {
-                        break;
-                    }
-                    p += 1;
                 }
             }
             if insts.len() < 100 {
@@ -422,12 +418,50 @@ impl Gh {
             }
             page += 1;
         }
+        // Display names: GitHub's spelling from the last successful listing, else the key.
+        let prev: Vec<String> = a.names.read().unwrap().clone();
+        let mut names: Vec<String> = map
+            .keys()
+            .map(|k| {
+                self.spelled
+                    .lock()
+                    .unwrap()
+                    .get(k)
+                    .cloned()
+                    .or_else(|| prev.iter().find(|p| p.to_ascii_lowercase() == *k).cloned())
+                    .unwrap_or_else(|| k.clone())
+            })
+            .collect();
         names.sort_by_key(|n| n.to_ascii_lowercase());
         let n = names.len();
         *a.repos.write().unwrap() = map;
         *a.names.write().unwrap() = names;
         a.discovered_at.store(crate::now(), Ordering::Relaxed);
-        Ok(n)
+        Ok((n, errs))
+    }
+
+    /// Lowercase names of an installation's repos; records GitHub's spelling in `spelled`.
+    async fn installation_repos(&self, a: &crate::app_auth::AppAuth, id: u64) -> Result<Vec<String>> {
+        let token = self.mint(a, id).await?;
+        let mut out = vec![];
+        let mut p = 1;
+        loop {
+            let path = format!("installation/repositories?per_page=100&page={p}");
+            let r = self.request_with(&token, Method::GET, &path).send().await?;
+            if !r.status().is_success() {
+                bail!("listing its repos: {}", r.status());
+            }
+            let v: Value = r.json().await?;
+            let repos = v["repositories"].as_array().cloned().unwrap_or_default();
+            for n in repos.iter().filter_map(|r| r["full_name"].as_str()) {
+                self.spelled.lock().unwrap().insert(n.to_ascii_lowercase(), n.to_string());
+                out.push(n.to_ascii_lowercase());
+            }
+            if repos.len() < 100 {
+                return Ok(out);
+            }
+            p += 1;
+        }
     }
 
     /// Delete offline, idle `kiln-*` runners left behind by a crash.

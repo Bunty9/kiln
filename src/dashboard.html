@@ -521,11 +521,10 @@ function parse() {
   const seg = path.split('/').filter(Boolean).map(decodeURIComponent);
   return { page: seg[0] || 'overview', seg: seg.slice(1), q: new URLSearchParams(q || '') };
 }
-// GitHub's manifest flow sends the browser back to #/app?code=…&state=….
+// GitHub's manifest flow sends the browser back to /?code=…&state=….
 async function appCallback() {
-  const q = new URLSearchParams(location.hash.split('?')[1] || '');
-  history.replaceState(null, '', '#/settings/github');
-  if (!q.get('code')) return route();
+  const q = new URLSearchParams(location.search);
+  history.replaceState(null, '', location.pathname + '#/settings/github');
   try {
     const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
     toast(`GitHub App ${r.slug} created. Now install it on your repos.`); await poll();
@@ -534,7 +533,7 @@ async function appCallback() {
   route();
 }
 function route() {
-  if (location.hash.startsWith('#/app')) return void appCallback();
+  if (new URLSearchParams(location.search).get('code')) return void appCallback();
   cur?.unmount?.(); closePop();
   const r = parse(), pg = pages[r.page] || pages.overview;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
@@ -1216,7 +1215,7 @@ pages.guides = {
 /* ---------- actions ---------- */
 const ACT = {
   async mkapp() {
-    const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim() });
+    const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;
     const i = document.createElement('input'); i.name = 'manifest'; i.value = JSON.stringify(m.manifest); f.append(i);
     document.body.append(f); f.submit();
