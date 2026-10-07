@@ -959,7 +959,12 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(load_config(&d).unwrap().egress, "open", "no file: defaults");
         std::fs::write(d.join("config.json"), r#"{"egress":"filtered"}"#).unwrap();
-        assert_eq!(load_config(&d).unwrap().egress, "filtered");
+        // Filtered egress is Linux-only (rootlesskit, nftables); elsewhere it is refused, not ignored.
+        if cfg!(target_os = "linux") {
+            assert_eq!(load_config(&d).unwrap().egress, "filtered");
+        } else {
+            assert!(load_config(&d).is_err(), "filtered egress must not silently become open");
+        }
         std::fs::write(d.join("config.json"), r#"{"egress":"Filtered"}"#).unwrap();
         assert!(load_config(&d).is_err(), "a typo never means open");
         std::fs::write(d.join("config.json"), "{").unwrap();
