@@ -115,7 +115,7 @@ fn parse_load(s: &str) -> Vec<String> {
 /// Command lines of the host's processes, to spot QEMUs nobody accounts for.
 pub fn process_cmdlines() -> Vec<String> {
     if MACOS {
-        return parse_ps(&run("ps", &["-axo", "pid=,command="]));
+        return parse_ps(&run("ps", &["-axww", "-o", "pid=,command="]));
     }
     std::fs::read_dir("/proc")
         .into_iter()
@@ -126,7 +126,7 @@ pub fn process_cmdlines() -> Vec<String> {
         .collect()
 }
 
-/// `ps -axo pid=,command=` lines ("  412 /opt/homebrew/bin/qemu-system-aarch64 -machine ...") without the pid.
+/// `ps -axww -o pid=,command=` (-ww: never cut long command lines) lines ("  412 /opt/homebrew/bin/qemu-system-aarch64 -machine ...") without the pid.
 fn parse_ps(out: &str) -> Vec<String> {
     out.lines().filter_map(|l| Some(l.trim_start().split_once(' ')?.1.trim_start().to_string())).collect()
 }
@@ -148,6 +148,26 @@ mod tests {
     fn linux_parsers() {
         assert_eq!(kb_of("MemTotal: 10 kB\nMemAvailable:    2048 kB\n", "MemAvailable:"), 2048);
         assert_eq!(parse_load("0.52 0.58 0.59 1/389 1234\n"), ["0.52", "0.58", "0.59"]);
+    }
+
+    /// The real readings of whatever host runs the tests (the macOS CI runner included).
+    #[test]
+    fn live_host_readings() {
+        let (total, avail) = (mem_total_mb(), mem_avail_mb());
+        assert!(total > 0 && avail > 0 && avail <= total, "memory {avail} of {total} MB");
+        let load = load_avg();
+        assert!(load.len() == 3 && load.iter().all(|l| l.parse::<f64>().is_ok()), "load {load:?}");
+        let me = std::env::current_exe().unwrap();
+        let name = me.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(process_cmdlines().iter().any(|c| c.contains(&name)), "this test process is among the processes");
+        // A long command line is seen whole (QEMU's VM path sits far into its arguments).
+        let tail = format!("/kiln-test-{}/vms/x/disk.qcow2", "y".repeat(400));
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 5; :", "sh", &tail]).spawn().unwrap();
+        let seen = process_cmdlines().iter().any(|c| c.contains(&tail));
+        child.kill().ok();
+        child.wait().ok();
+        assert!(seen, "long command line cut short");
+        eprintln!("hypervisor: {:?}; memory {avail}/{total} MB; load {load:?}", hypervisor());
     }
 
     #[test]

@@ -19,7 +19,7 @@ The guest always has the host's architecture (`std::env::consts::ARCH`), so an a
 | Runner, Node | `actions-runner-linux-x64`, `node-...-linux-x64`, tool cache `.../x64` | `actions-runner-linux-arm64`, `node-...-linux-arm64`, tool cache `.../arm64` |
 | Hypervisor check | `/dev/kvm` read/write, `kvm` group | `sysctl -n kern.hv_support` = 1 |
 | Memory, load | `/proc/meminfo`, `/proc/loadavg` | `sysctl hw.memsize`, `vm_stat` (free + inactive pages), `sysctl vm.loadavg` |
-| Stray QEMU scan | `/proc/*/cmdline` | `ps -axo pid=,command=` |
+| Stray QEMU scan | `/proc/*/cmdline` | `ps -axww -o pid=,command=` |
 | Service | systemd user unit (`deploy/kiln.service`) | launchd LaunchAgent (`deploy/kiln.plist`) |
 | Networking | user-mode (slirp); `egress: "filtered"` available | user-mode (slirp) only |
 | Docker mirror | pinned `registry` on `127.0.0.1:5000` | none (no darwin build of the registry) |
