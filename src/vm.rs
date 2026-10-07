@@ -31,6 +31,10 @@ pub enum State {
     /// The runner came online but no job reached it (another runner took it, or it
     /// was cancelled), and it exited. Normal, not a failure.
     Unneeded,
+    /// A state written by a newer kiln (read after a rollback): ended, shown neutrally,
+    /// so the record stays in the history instead of being dropped.
+    #[serde(other)]
+    Unknown,
 }
 
 const NOT_NEEDED: &str = "not needed: the queued job went to another runner or was cancelled";
@@ -1919,6 +1923,15 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_states_from_newer_versions_load_as_ended() {
+        let s: State = serde_json::from_str("\"frozen\"").unwrap();
+        assert_eq!(s, State::Unknown);
+        assert!(!s.is_active() && !s.is_waiting());
+        let s: State = serde_json::from_str("\"unneeded\"").unwrap();
+        assert_eq!(s, State::Unneeded);
+    }
 
     fn vm(id: &str, state: State, online_at: Option<u64>) -> Vm {
         Vm {

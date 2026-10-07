@@ -559,6 +559,7 @@ const STATE = {
   killed: ['stop', 'kiln stopped this VM: Kill VM, the job or idle timeout, or an expired debug hold.'],
   lost: ['lost', 'This VM was running when kiln stopped, and it stopped with kiln.'],
   'not needed': ['skip', 'No job reached this VM: the queued job went to another runner or was cancelled. Nothing went wrong.'],
+  ended: ['skip', 'Ended in a state this kiln version does not know (recorded by a newer kiln, read after a rollback).'],
   cancelled: ['cancel', 'Cancelled on GitHub.'],
   queued: ['clock', 'GitHub is waiting for a runner.'],
   skipped: ['skip', 'GitHub skipped this job.'],
@@ -580,6 +581,7 @@ function status(v) {
     case 'failed': return 'failed';
     case 'killed': return 'killed';
     case 'unneeded': return 'not needed';
+    case 'unknown': return 'ended';
     default: return 'lost';
   }
 }
