@@ -558,6 +558,8 @@ const STATE = {
   failed: ['x', 'The job failed, or its VM broke (for example the runner never came online). The note on the job page says which.'],
   killed: ['stop', 'kiln stopped this VM: Kill VM, the job or idle timeout, or an expired debug hold.'],
   lost: ['lost', 'This VM was running when kiln stopped, and it stopped with kiln.'],
+  'not needed': ['skip', 'No job reached this VM: the queued job went to another runner or was cancelled. Nothing went wrong.'],
+  ended: ['skip', 'Ended in a state this kiln version does not know (recorded by a newer kiln, read after a rollback).'],
   cancelled: ['cancel', 'Cancelled on GitHub.'],
   queued: ['clock', 'GitHub is waiting for a runner.'],
   skipped: ['skip', 'GitHub skipped this job.'],
@@ -565,7 +567,7 @@ const STATE = {
 };
 const badge = (s, c = s, tip, f) => {
   const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? STATE[s]?.[1];
-  return `<span class="bdg s-${c}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
+  return `<span class="bdg s-${c.replace(/ /g, '-')}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
 function status(v) {
@@ -578,12 +580,14 @@ function status(v) {
     case 'done': return r === 'succeeded' || !r ? 'passed' : /cancel/.test(r) ? 'cancelled' : 'failed';
     case 'failed': return 'failed';
     case 'killed': return 'killed';
+    case 'unneeded': return 'not needed';
+    case 'unknown': return 'ended';
     default: return 'lost';
   }
 }
 const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
   : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
-const isFail = v => { const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
+const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
@@ -925,7 +929,8 @@ function banners() {
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
-  if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
+  else if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
@@ -1048,7 +1053,7 @@ pages.job = {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
-    const sg = segs(v), calm = v.state === 'killed' && /idle timeout|no job left/i.test(v.note || '');
+    const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${esc(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
@@ -1610,7 +1615,7 @@ const GUIDES = [
     <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
     <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
     <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
 ];
