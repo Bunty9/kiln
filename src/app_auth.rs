@@ -73,17 +73,20 @@ pub fn origin(host: &str, https: bool) -> String {
     format!("{}://{host}", if https { "https" } else { "http" })
 }
 
-/// Installations kiln serves, and a note per one it ignores. Anyone can install a
-/// (private) App only if they own it, but a public one, or one made public later, can be
-/// installed by strangers: only the App owner's account and `app_accounts` are served.
-/// Suspended installations can't mint tokens and are skipped silently.
-pub fn served_installations(insts: &[serde_json::Value], owner: &str, accounts: &[String]) -> (Vec<u64>, Vec<String>) {
+/// Installations kiln serves, and a note per one it ignores. Only the owner can install a
+/// private App, but a public one (or one made public later) can be installed by anyone:
+/// only the owner's account and `app_accounts` are served. The owner is matched by its
+/// numeric account id (`owner_id`, 0 = unknown), which survives renames and can't be
+/// claimed by whoever takes over an old login. `app_accounts` are logins, matched
+/// case-insensitively against the account's current login (a rename needs the list
+/// updated). Suspended installations can't mint tokens and are skipped silently.
+pub fn served_installations(insts: &[serde_json::Value], owner_id: u64, accounts: &[String]) -> (Vec<u64>, Vec<String>) {
     let (mut ids, mut notes) = (vec![], vec![]);
     for i in insts.iter().filter(|i| i["suspended_at"].is_null()) {
         let Some(id) = i["id"].as_u64() else { continue };
         let login = i["account"]["login"].as_str().unwrap_or("");
-        let ok = !login.is_empty()
-            && ((!owner.is_empty() && login.eq_ignore_ascii_case(owner)) || accounts.iter().any(|a| a.eq_ignore_ascii_case(login)));
+        let account = i["account"]["id"].as_u64().unwrap_or(0);
+        let ok = (owner_id != 0 && account == owner_id) || (!login.is_empty() && accounts.iter().any(|a| a.eq_ignore_ascii_case(login)));
         if ok {
             ids.push(id);
         } else {
@@ -150,7 +153,8 @@ pub struct AppAuth {
     pub id: u64,
     pub slug: String,
     pub html_url: String,
-    /// Login of the account that owns the App; "" until known (app.json from before it was kept).
+    /// Login of the account that owns the App, for display only ("" until known): discovery
+    /// matches installations by the owner's account id, read fresh from GET /app each time.
     pub owner: std::sync::RwLock<String>,
     /// Data directory the App's files live in (None: a key being checked, not saved yet).
     dir: Option<std::path::PathBuf>,
@@ -318,29 +322,38 @@ mod tests {
 
     #[test]
     fn suspended_installations_are_skipped() {
-        let me = serde_json::json!({ "login": "Bunty9" });
+        let me = serde_json::json!({ "id": 7, "login": "Bunty9" });
         let insts = serde_json::json!([{ "id": 1, "account": me, "suspended_at": null }, { "id": 2, "account": me, "suspended_at": "2026-10-01T00:00:00Z" }, { "id": 3, "account": me }]);
-        assert_eq!(served_installations(insts.as_array().unwrap(), "Bunty9", &[]).0, [1, 3]);
+        assert_eq!(served_installations(insts.as_array().unwrap(), 7, &[]).0, [1, 3]);
     }
 
     #[test]
     fn only_the_owners_and_allowed_accounts_are_served() {
         let insts = serde_json::json!([
-            { "id": 1, "account": { "login": "bunty9" } },
-            { "id": 2, "account": { "login": "stranger" } },
-            { "id": 3, "account": { "login": "MyOrg" } },
+            { "id": 1, "account": { "id": 7, "login": "Bunty9" } },
+            { "id": 2, "account": { "id": 8, "login": "stranger" } },
+            { "id": 3, "account": { "id": 9, "login": "MyOrg" } },
             { "id": 4, "account": null },
         ]);
         let insts = insts.as_array().unwrap();
-        let (ids, notes) = served_installations(insts, "Bunty9", &[]);
-        assert_eq!(ids, [1], "owner only by default, case-insensitive");
+        let (ids, notes) = served_installations(insts, 7, &[]);
+        assert_eq!(ids, [1], "owner only by default");
         assert_eq!(notes.len(), 3);
         assert_eq!(notes[0], "ignored installation on stranger: not the App owner; add it to app_accounts to serve it");
-        let (ids, _) = served_installations(insts, "Bunty9", &["myorg".into()]);
-        assert_eq!(ids, [1, 3]);
-        // no known owner: only the allowlist, never an account-less installation
-        let (ids, _) = served_installations(insts, "", &[]);
-        assert!(ids.is_empty());
+        let (ids, _) = served_installations(insts, 7, &["myorg".into()]);
+        assert_eq!(ids, [1, 3], "allowlist matches the login case-insensitively");
+        // owner unknown (id 0): only the allowlist, never an account-less installation
+        assert!(served_installations(insts, 0, &[]).0.is_empty());
+    }
+
+    #[test]
+    fn owner_is_matched_by_account_id_not_login() {
+        // the owner renamed their account: same id, new login, still served
+        let renamed = serde_json::json!([{ "id": 1, "account": { "id": 7, "login": "new-name" } }]);
+        assert_eq!(served_installations(renamed.as_array().unwrap(), 7, &[]).0, [1]);
+        // someone else later took the owner's old login: same login, other id, refused
+        let squatter = serde_json::json!([{ "id": 2, "account": { "id": 99, "login": "Bunty9" } }]);
+        assert!(served_installations(squatter.as_array().unwrap(), 7, &[]).0.is_empty());
     }
 
     #[test]
@@ -349,7 +362,7 @@ mod tests {
         save(&d, 42, "kiln-x", "https://github.com/apps/kiln-x", "Bunty9", PEM).unwrap();
         let a = load(&d).unwrap().unwrap();
         assert_eq!(*a.owner.read().unwrap(), "Bunty9");
-        // an app.json from before `owner` existed loads with none, and learns it once
+        // an app.json from before `owner` existed loads with none; discovery fills it in
         std::fs::write(d.join("app.json"), r#"{"id":42,"slug":"kiln-x","html_url":"u"}"#).unwrap();
         let a = load(&d).unwrap().unwrap();
         assert_eq!(*a.owner.read().unwrap(), "");

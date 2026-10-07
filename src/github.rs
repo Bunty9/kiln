@@ -414,13 +414,16 @@ impl Gh {
     /// installation keeps its previous repos and does not stop the others; suspended
     /// installations and those on accounts other than the owner's and `app_accounts` are skipped.
     async fn discover_into(&self, a: &crate::app_auth::AppAuth) -> Result<(usize, Vec<String>)> {
-        if a.owner.read().unwrap().is_empty() {
-            // app.json from before the owner was kept: learn it once.
-            let me = self.app_info(a).await?;
-            let owner = me["owner"]["login"].as_str().context("GitHub's GET /app response names no owner")?;
-            a.set_owner(owner).context("saving the App owner to app.json")?;
+        // The owner comes from GitHub every time (one JWT call): app.json's copy is for
+        // display only. If it can't be read, discovery fails and the last map stays.
+        let me = self.app_info(a).await.context("reading the App's owner (GET /app)")?;
+        let owner = me["owner"]["id"].as_u64().context("GitHub's GET /app response names no owner")?;
+        if let Some(login) = me["owner"]["login"].as_str()
+            && *a.owner.read().unwrap() != login
+            && let Err(e) = a.set_owner(login)
+        {
+            tracing::warn!("saving the App owner to app.json: {e:#}");
         }
-        let owner = a.owner.read().unwrap().clone();
         let accounts = self.app_accounts.read().unwrap().clone();
         let jwt = a.jwt(crate::now())?;
         let mut map = BTreeMap::new();
@@ -432,7 +435,7 @@ impl Gh {
                 bail!("listing App installations: {}", r.status());
             }
             let insts: Vec<Value> = r.json().await?;
-            let (ids, ignored) = crate::app_auth::served_installations(&insts, &owner, &accounts);
+            let (ids, ignored) = crate::app_auth::served_installations(&insts, owner, &accounts);
             errs.extend(ignored);
             for id in ids {
                 match self.installation_repos(a, id).await {
