@@ -4,6 +4,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
 ### Added
 
 - GitHub App authentication: create the App from the dashboard (manifest flow) or use an existing one. Installation tokens are minted per installation and refreshed before they expire; only the private key is stored. The repos kiln serves are the repos the App is installed on, refreshed every 5 minutes (every 30 s while it serves none), or at once with `POST /api/app/refresh`. Token auth still works.
@@ -70,5 +72,6 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Bunty9/kiln/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Bunty9/kiln/releases/tag/v0.1.0

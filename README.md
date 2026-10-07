@@ -46,19 +46,25 @@ On the CI box.
 
 ### Install from a GitHub Release
 
-The repository is private, so use an authenticated `gh`:
+The repository is private, so use an authenticated `gh`. Two builds are published: `x86_64-linux` (glibc 2.39+, Ubuntu 24.04 / Debian 13 or newer) and `x86_64-linux-musl` (fully static, any x86_64 Linux).
 
 ```sh
+v=0.2.0 flavor=x86_64-linux          # or x86_64-linux-musl
 cd "$(mktemp -d)"
-gh release download v0.1.0 -R Bunty9/kiln -p 'kiln-*-x86_64-linux.tar.gz*'
-sha256sum -c kiln-0.1.0-x86_64-linux.tar.gz.sha256
-tar -xzf kiln-0.1.0-x86_64-linux.tar.gz
-install -Dm755 kiln-0.1.0-x86_64-linux/kiln ~/.local/bin/kiln
-install -Dm644 kiln-0.1.0-x86_64-linux/deploy/kiln.service ~/.config/systemd/user/kiln.service
+gh release download "v$v" -R Bunty9/kiln -p "kiln-$v-$flavor.tar.gz*"
+sha256sum -c "kiln-$v-$flavor.tar.gz.sha256"
+# Optional: check the Ed25519 release signature (the same key kiln uses for its own updates)
+printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > pub.der
+printf '%s' zOK6AdHJZXwFqAOUApNnaU7r5PZSCjkpAjLRu2w16ZM= | base64 -d >> pub.der
+openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin \
+  -in "kiln-$v-$flavor.tar.gz" -sigfile "kiln-$v-$flavor.tar.gz.sig"
+tar -xzf "kiln-$v-$flavor.tar.gz"
+install -Dm755 "kiln-$v-$flavor/kiln" ~/.local/bin/kiln
+install -Dm644 "kiln-$v-$flavor/deploy/kiln.service" ~/.config/systemd/user/kiln.service
 kiln --version
 ```
 
-On a host older than glibc 2.39, use the static build `kiln-*-x86_64-linux-musl.tar.gz` instead (from the first release that ships it). Each tarball also has a `.sig`, the Ed25519 signature kiln checks when it updates itself.
+After that, kiln updates itself from the dashboard (Settings › Updates), installing only releases signed with that key.
 
 ### Or build from source
 
