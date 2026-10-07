@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
+<meta name="kiln-version" content="{{KILN_VERSION}}">
 <title>kiln</title>
 <link rel="icon" id="fav" href="/icon.svg" type="image/svg+xml">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -655,7 +656,9 @@ function fillTimes(r = document) { $$('[data-t]', r).forEach(e => (e.textContent
 const relH = t => t ? `<span data-t="${t}" data-k="rel"></span>` : '—';
 
 /* ---------- state polling ---------- */
-let S = null, fails = 0, down = false, pollT, retryAt = 0, okUntil = 0, bootV = null;
+// The version that served this page (kiln stamps it in), not the first poll's: a shell the
+// service worker kept from an older kiln must notice the new one.
+let S = null, fails = 0, down = false, pollT, retryAt = 0, okUntil = 0, bootV = document.querySelector('meta[name="kiln-version"]')?.content || null;
 const DELAYS = [2, 2, 4, 8, 15];
 const notifyOn = () => lsGet('kiln-notify') === '1' && window.Notification && Notification.permission === 'granted';
 let inflight = null;
@@ -666,9 +669,13 @@ async function doPoll() {
     const s = await api('/api/state');
     s.config.repos ||= []; s.config.allowed_users ||= []; s.poll ||= {}; s.vms ||= []; s.host ||= { load: [0, 0, 0], cpus: 0, mem_total_mb: 0, mem_avail_mb: 0, disk_free_gb: 0 };
     S = s;
-    // kiln re-execs into a new version after an update: reload once so this page is the new one too.
-    if (bootV && S.version && S.version !== bootV) { lsSet('kiln-updated', S.version); return location.reload(); }
-    if (!bootV) { bootV = S.version; if (S.version && lsGet('kiln-updated') === S.version) { lsSet('kiln-updated', null); toast(`kiln updated to ${S.version}`); } }
+    // A page older than the kiln answering (re-exec after an update, or a cached shell) reloads
+    // once; the service worker fetches navigations network-first, so the reload is the new page.
+    // The marker stops a loop should the reload still get an old page.
+    bootV ||= S.version;
+    if (S.version && S.version !== bootV) {
+      if (lsGet('kiln-updated') !== S.version) { lsSet('kiln-updated', S.version); return location.reload(); }
+    } else if (S.version && lsGet('kiln-updated') === S.version) { lsSet('kiln-updated', null); toast(`kiln updated to ${S.version}`); }
     if (down) okUntil = now() + 2;
     fails = 0; down = false; renderConn(); onState();
   } catch (e) {
