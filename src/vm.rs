@@ -1915,8 +1915,11 @@ mod tests {
         }
         let yaml = include_str!("../guest/user-data.yaml");
         let body = yaml.split("path: /usr/local/sbin/kiln-prejob.sh").nth(1).unwrap().split_once("content: |\n").unwrap().1;
-        let script: String =
-            body.lines().take_while(|l| l.is_empty() || l.starts_with("      ")).map(|l| format!("{}\n", l.get(6..).unwrap_or(""))).collect();
+        let script: String = body
+            .lines()
+            .take_while(|l| l.is_empty() || l.starts_with("      "))
+            .map(|l| format!("{}\n", l.get(6..).unwrap_or("")))
+            .collect();
         assert!(script.starts_with("#!/bin/bash"));
         let dir = std::env::temp_dir().join(format!("kiln-prejob-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2172,7 +2175,9 @@ mod tests {
         assert!(rebake_reason(&serde_json::json!({ "runner_version": "2.338.0" }), &n(&["24"]), &[]).unwrap().contains("older kiln"));
         assert!(rebake_reason(&serde_json::json!({ "recipe": 1, "node_wanted": ["24"] }), &n(&["24"]), &[]).is_some());
         // recipe 2 had the PR hook but not the workflow_run check or Node checksums
-        assert!(rebake_reason(&serde_json::json!({ "recipe": 2, "node_wanted": ["24"] }), &n(&["24"]), &[]).unwrap().contains("older kiln"));
+        assert!(
+            rebake_reason(&serde_json::json!({ "recipe": 2, "node_wanted": ["24"] }), &n(&["24"]), &[]).unwrap().contains("older kiln")
+        );
         // and kiln launches nothing on it (nor on an image without a marker) until rebaked
         assert!(!image_recipe_ok(&serde_json::json!({ "recipe": 2 })) && !image_recipe_ok(&serde_json::json!({})));
         assert!(image_recipe_ok(&serde_json::json!({ "recipe": RECIPE })) && image_recipe_ok(&serde_json::json!({ "recipe": RECIPE + 1 })));
