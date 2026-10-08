@@ -77,6 +77,8 @@ pub fn install_hook(data: &Path) {
     }));
 }
 
+const CRASH_KEYS: [&str; 8] = ["arch", "at", "build", "kind", "location", "thread", "uptime_secs", "version"];
+
 /// A crash report. The panic message is left out: it can quote a repo, a path or a login.
 /// The location plus the version is enough to find the panic site.
 fn crash(location: &str, thread: Option<&str>) -> Value {
@@ -95,17 +97,20 @@ fn crash(location: &str, thread: Option<&str>) -> Value {
     })
 }
 
-/// A dependency's panic location is an absolute path on the build machine
-/// (`/home/runner/.cargo/registry/src/<index>/tokio-1.47.1/src/...`): keep from the crate on.
+/// A panic location without the build machine's paths. kiln's own files are relative
+/// (`src/vm.rs`). Absolute ones keep only what names no one: from the crate directory in
+/// cargo's registry (`.../registry/src/<index>/tokio-1.47.1/src/...`) or from the standard
+/// library (`/rustc/<hash>/library/core/...`); anything else (generated code under a target
+/// dir, a vendored or path dependency in someone's home) is reduced to its file name.
 fn short_path(f: &str) -> String {
-    if !f.starts_with('/') {
+    if !f.starts_with('/') && !f.split('/').any(|p| p == "..") {
         return f.to_string();
     }
     let parts: Vec<&str> = f.split('/').collect();
-    match parts.iter().rposition(|p| *p == "src") {
-        Some(i) if i > 0 => parts[i - 1..].join("/"),
-        _ => parts.last().unwrap_or(&"").to_string(),
-    }
+    let from = |i: usize| (i < parts.len()).then(|| parts[i..].join("/"));
+    let registry = parts.windows(2).position(|w| w == ["registry", "src"]).and_then(|i| from(i + 3));
+    let std = (parts.get(1) == Some(&"rustc")).then(|| parts.iter().position(|p| *p == "library")).flatten().and_then(|i| from(i + 1));
+    registry.or(std).unwrap_or_else(|| parts.last().unwrap_or(&"").to_string())
 }
 
 fn record(dir: &Path, report: &Value) -> std::io::Result<()> {
@@ -264,28 +269,35 @@ async fn round(app: &App, http: &reqwest::Client) {
         }
         return;
     };
+    let last = app.data.join("telemetry_last");
+    let sent = std::fs::read_to_string(&last).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+    // A few minutes' slack so an hourly round doesn't slip a day's report by an hour.
+    let usage_due = usage_on && now().saturating_sub(sent) >= 86_400 - 600;
+    let crashes = if crash_on { pending(&app.data) } else { vec![] };
+    if !usage_due && crashes.is_empty() {
+        return;
+    }
+    // Made only now, right before the first report that carries it.
     let Some(id) = install_id(&app.data) else {
         tracing::debug!("telemetry: cannot create {}", app.data.join("telemetry_id").display());
         return;
     };
-    if crash_on {
-        for f in pending(&app.data) {
-            let r = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-            let Some(mut r) = r.filter(Value::is_object) else {
-                let _ = std::fs::remove_file(&f);
-                continue;
-            };
-            r["id"] = json!(id);
-            if send(http, &url, &r).await == Sent::Retry {
-                break;
-            }
+    for f in crashes {
+        let r = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let Some(Value::Object(m)) = r else {
             let _ = std::fs::remove_file(&f);
+            continue;
+        };
+        // Only crash()'s own fields leave the box, whatever a file on disk says.
+        let mut r: serde_json::Map<String, Value> = m.into_iter().filter(|(k, _)| CRASH_KEYS.contains(&k.as_str())).collect();
+        r.insert("id".into(), json!(id));
+        let r = Value::Object(r);
+        if send(http, &url, &r).await == Sent::Retry {
+            break;
         }
+        let _ = std::fs::remove_file(&f);
     }
-    let last = app.data.join("telemetry_last");
-    let sent = std::fs::read_to_string(&last).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
-    // A few minutes' slack so an hourly round doesn't slip a day's report by an hour.
-    if usage_on && now().saturating_sub(sent) >= 86_400 - 600 && send(http, &url, &usage(app, &id)).await != Sent::Retry {
+    if usage_due && send(http, &url, &usage(app, &id)).await != Sent::Retry {
         let _ = std::fs::write(&last, now().to_string());
     }
 }
@@ -302,6 +314,14 @@ mod tests {
             "tokio-1.47.1/src/runtime/task.rs"
         );
         assert_eq!(short_path("/rustc/abc/library/core/src/option.rs"), "core/src/option.rs");
+        assert_eq!(
+            short_path("/home/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.0.15+zstd.1.5.7/src/lib.rs"),
+            "zstd-sys-2.0.15+zstd.1.5.7/src/lib.rs"
+        );
+        // A self-built binary: generated code, a vendored or path dependency, a parent-relative path.
+        assert_eq!(short_path("/home/alice/src/kiln/target/release/build/foo-1a2b/out/gen.rs"), "gen.rs");
+        assert_eq!(short_path("/home/alice/src/acme-secret/vendor/bar/src/lib.rs"), "lib.rs");
+        assert_eq!(short_path("../acme-secret/src/lib.rs"), "lib.rs");
     }
 
     #[test]
@@ -309,7 +329,7 @@ mod tests {
         let r = crash("src/web.rs:1:1", Some("worker-for-acme/secret-repo"));
         assert_eq!(r["thread"], "other");
         let keys: Vec<_> = r.as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys, ["arch", "at", "build", "kind", "location", "thread", "uptime_secs", "version"]);
+        assert_eq!(keys, CRASH_KEYS);
     }
 
     #[test]
