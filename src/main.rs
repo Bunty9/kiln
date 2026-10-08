@@ -841,30 +841,49 @@ async fn scheduler(app: Arc<App>) {
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
-        let mut problems = {
+        let (health, poll_error) = {
             let p = app.poll.lock().unwrap();
-            match &p.error {
-                Some(e) => vec![("poll".to_string(), e.clone())],
-                None => p.health.clone(),
-            }
+            (p.health.clone(), p.error.clone())
         };
-        if !confine::ENFORCED.load(Ordering::Relaxed) {
-            problems.push(("landlock".into(), "job VMs' QEMU runs unconfined: this kernel has no Landlock".into()));
-        }
-        if let Some(e) = app.notify.load_error.lock().unwrap().clone() {
-            problems.push(("notify_failing".into(), e));
-        }
-        let failing = notify::failing(&app);
-        if !failing.is_empty() {
-            problems.push((
-                "notify_failing".into(),
-                format!("notifications failing: {}", failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ")),
-            ));
-        }
+        let load_error = app.notify.load_error.lock().unwrap().clone();
+        let problems = health_list(
+            &health,
+            poll_error.as_deref(),
+            confine::ENFORCED.load(Ordering::Relaxed),
+            load_error.as_deref(),
+            &notify::failing(&app),
+        );
         notify::health(&app, problems, now());
         let rate = app.gh.rate();
         tokio::time::sleep(Duration::from_secs(poll_sleep(cfg.poll_secs, rate))).await;
     }
+}
+
+/// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
+/// instead of replacing them. "draining" is left out: health state is in memory, so a restart
+/// would orphan its raise with no clear.
+fn health_list(
+    health: &[(String, String)],
+    poll_error: Option<&str>,
+    landlock: bool,
+    load_error: Option<&str>,
+    failing: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut l: Vec<_> = health.iter().filter(|h| h.0 != "draining").cloned().collect();
+    if let Some(e) = poll_error {
+        l.push(("poll".into(), e.into()));
+    }
+    if !landlock {
+        l.push(("landlock".into(), "job VMs' QEMU runs unconfined: this kernel has no Landlock".into()));
+    }
+    if let Some(e) = load_error {
+        l.push(("notify_failing".into(), e.into()));
+    }
+    if !failing.is_empty() {
+        let f = failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ");
+        l.push(("notify_failing".into(), format!("notifications failing: {f}")));
+    }
+    l
 }
 
 /// Seconds to wait between ticks. in_progress runs of hosted runners keep
@@ -1191,6 +1210,16 @@ mod tests {
         std::fs::create_dir(d.join("config.json")).unwrap();
         assert!(load_config(&d).is_err(), "unreadable is not missing");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn health_list_composition() {
+        let h = |k: &str| (k.to_string(), "m".to_string());
+        let base = [h("disk"), h("draining")];
+        let kinds = |l: Vec<(String, String)>| l.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        assert_eq!(kinds(health_list(&base, Some("x"), true, None, &[])), ["disk", "poll"]);
+        assert_eq!(kinds(health_list(&[], None, false, None, &[])), ["landlock"]);
+        assert_eq!(kinds(health_list(&[], None, true, Some("bad"), &[h("d1")])), ["notify_failing", "notify_failing"]);
     }
 
     #[test]
