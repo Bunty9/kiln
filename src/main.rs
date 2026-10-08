@@ -4,6 +4,7 @@ mod confine;
 mod github;
 mod host;
 mod mirror;
+mod notify;
 mod telemetry;
 mod update;
 mod vm;
@@ -38,6 +39,8 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// Which finished jobs notify which destinations (see notify.rs).
+    pub notify_rules: Vec<notify::Rule>,
     /// GitHub App mode: accounts (user or org logins) whose installations are served,
     /// besides the App owner's. Empty = the owner's only.
     pub app_accounts: Vec<String>,
@@ -99,6 +102,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            notify_rules: vec![],
             app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
@@ -217,6 +221,30 @@ impl Config {
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
         }
+        if self.notify_rules.len() > 50 {
+            bail!("notify_rules: at most 50");
+        }
+        let wf_ok = |w: &str| {
+            w == "*"
+                || (w.len() <= 100
+                    && (w.ends_with(".yml") || w.ends_with(".yaml"))
+                    && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+        };
+        for r in &self.notify_rules {
+            // Membership in the served repos is checked in web::set_config (App mode learns them at runtime).
+            if r.repo != "*" && !valid_repo(&r.repo) {
+                bail!("notify_rules: repo must be \"*\" or look like owner/name: {:?}", r.repo);
+            }
+            if !wf_ok(&r.workflow) {
+                bail!("notify_rules: workflow must be \"*\" or a file name like release.yml: {:?}", r.workflow);
+            }
+            if !["success", "failure", "any"].contains(&r.outcome.as_str()) {
+                bail!("notify_rules: outcome must be success, failure or any");
+            }
+            if r.to.is_empty() || r.to.len() > 20 || !r.to.iter().all(|t| t.len() == 8 && t.bytes().all(|b| b.is_ascii_hexdigit())) {
+                bail!("notify_rules: each rule needs 1 to 20 destinations");
+            }
+        }
         if self.debug_hold_mins > 120 {
             bail!("debug_hold_mins must be 0..=120 (0 = off)");
         }
@@ -292,6 +320,8 @@ pub struct PollStatus {
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
+    /// Every launch blocker active this tick, (kind, message), in priority order.
+    pub health: Vec<(String, String)>,
 }
 
 /// Pause after the n-th consecutive GitHub-wide registration failure: 1, 2, 5, then 10 min.
@@ -384,9 +414,22 @@ pub struct App {
     /// An update, restart or stop is draining: launch nothing (warm included), reap idle VMs.
     pub draining: AtomicBool,
     pub update: Mutex<update::Status>,
+    /// Outbound webhook notifications (destinations, queues, delivery status).
+    pub notify: notify::Hub,
 }
 
 impl App {
+    /// An App on a unique temp data dir (parallel tests each get their own).
+    #[cfg(test)]
+    pub fn for_tests() -> Arc<App> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("kiln-test-app-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Arc::new(App::new(d, Config::default(), github::Gh::new(String::new(), "none")))
+    }
+
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
         App {
             gh,
@@ -404,6 +447,7 @@ impl App {
             app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
             draining: Default::default(),
             update: Mutex::new(update::Status::load(&data)),
+            notify: Default::default(),
             data,
         }
     }
@@ -551,6 +595,10 @@ async fn run() -> Result<()> {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
+            notify::start(&app);
+            for v in vm::take_newly_lost() {
+                notify::job_ended(&app, &v);
+            }
             let (ok, d) = confine::probe();
             confine::ENFORCED.store(ok, std::sync::atomic::Ordering::Relaxed);
             match ok {
@@ -746,6 +794,7 @@ async fn shutdown(app: &Arc<App>) {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    notify::flush(app).await;
 }
 
 /// Seconds between App discoveries: 30 while it serves no repo or has never discovered
@@ -803,9 +852,49 @@ async fn scheduler(app: Arc<App>) {
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
+        let (health, poll_error) = {
+            let p = app.poll.lock().unwrap();
+            (p.health.clone(), p.error.clone())
+        };
+        let load_error = app.notify.load_error.lock().unwrap().clone();
+        let problems = health_list(
+            &health,
+            poll_error.as_deref(),
+            confine::ENFORCED.load(Ordering::Relaxed),
+            load_error.as_deref(),
+            &notify::failing(&app),
+        );
+        notify::health(&app, problems, now());
         let rate = app.gh.rate();
         tokio::time::sleep(Duration::from_secs(poll_sleep(cfg.poll_secs, rate))).await;
     }
+}
+
+/// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
+/// instead of replacing them. "draining" is left out: health state is in memory, so a restart
+/// would orphan its raise with no clear.
+fn health_list(
+    health: &[(String, String)],
+    poll_error: Option<&str>,
+    landlock: bool,
+    load_error: Option<&str>,
+    failing: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut l: Vec<_> = health.iter().filter(|h| h.0 != "draining").cloned().collect();
+    if let Some(e) = poll_error {
+        l.push(("poll".into(), e.into()));
+    }
+    if !landlock {
+        l.push(("landlock".into(), "job VMs' QEMU runs unconfined: this kernel has no Landlock".into()));
+    }
+    if let Some(e) = load_error {
+        l.push(("notify_failing".into(), e.into()));
+    }
+    if !failing.is_empty() {
+        let f = failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ");
+        l.push(("notify_failing".into(), format!("notifications failing: {f}")));
+    }
+    l
 }
 
 /// Seconds to wait between ticks. in_progress runs of hosted runners keep
@@ -909,12 +998,23 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut probing = api.fails > 0 && app.vms.lock().unwrap().iter().any(|v| v.state == vm::State::Booting && v.runner_id.is_none());
     let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
-    let mut blocked = draining
-        .then(|| ("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()))
-        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
-        .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
-        .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
-        .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
+    let mut problems: Vec<(&str, String)> = vec![];
+    if draining {
+        problems.push(("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()));
+    }
+    if old_image {
+        problems.push(("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string()));
+    }
+    if let Some(m) = api.banner(now()).filter(|_| api.held(now())) {
+        problems.push(("github_api", m));
+    }
+    if let Some(e) = egress_err.as_ref() {
+        problems.push(("egress", format!("egress filtering unavailable: {e}")));
+    }
+    if let Some(g) = gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)) {
+        problems.push(g);
+    }
+    let mut blocked = problems.first().cloned();
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
@@ -1019,6 +1119,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         let mut p = app.poll.lock().unwrap();
         p.repo_errors = repo_errors;
         p.refused_forks = refused_forks;
+        p.health = problems.iter().map(|(k, m)| (k.to_string(), m.clone())).collect();
         p.blocked_kind = blocked.as_ref().map(|b| b.0.to_string());
         p.blocked = blocked.map(|b| b.1);
     }
@@ -1036,6 +1137,7 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool, vm::Run)
     for (id, _) in runners.iter().filter(|(_, r)| r.2) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
             v.note = Some("refused: pull request from a fork".into());
+            v.fork = true;
         });
         if hit.is_some()
             && let Some(k) = app.kills.lock().unwrap().get(id)
@@ -1049,10 +1151,11 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool, vm::Run)
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at, _, run) = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) && v.run.as_ref() == Some(run) {
+            let (url, at, fork, run) = runners.get(&v.id)?;
+            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) && v.run.as_ref() == Some(run) && v.fork == *fork {
                 return None;
             }
+            v.fork = *fork;
             v.job_url = Some(url.clone());
             v.queued_at = Some(*at);
             v.run = Some(run.clone());
@@ -1079,6 +1182,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attach_jobs_marks_fork_vms() {
+        let app = test_app("attach-fork");
+        let mut v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v.clone());
+        v.id = "kiln-5-1".into();
+        app.vms.lock().unwrap().push(v);
+        let r = |fork| ("https://github.com/acme/kiln/actions/runs/1/job/2".to_string(), 1, fork, vm::Run::default());
+        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
+        let vms = app.vms.lock().unwrap();
+        assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
+        assert!(!vms[1].fork && vms[1].note.is_none());
+    }
+
+    #[test]
+    fn notify_rules_validate() {
+        let mut c = Config { repos: vec!["acme/kiln".into()], ..Default::default() };
+        let rule = |repo: &str, wf: &str, oc: &str, to: Vec<&str>| notify::Rule {
+            repo: repo.into(),
+            workflow: wf.into(),
+            outcome: oc.into(),
+            to: to.into_iter().map(String::from).collect(),
+        };
+        c.notify_rules = vec![rule("acme/kiln", "release.yml", "any", vec!["a1b2c3d4"]), rule("*", "*", "failure", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_ok());
+        for bad in [
+            rule("not a repo", "*", "any", vec!["a1b2c3d4"]),
+            rule("*", "../x.yml", "any", vec!["a1b2c3d4"]),
+            rule("*", "release.txt", "any", vec!["a1b2c3d4"]),
+            rule("*", "*", "sometimes", vec!["a1b2c3d4"]),
+            rule("*", "*", "any", vec![]),
+            rule("*", "*", "any", vec!["NOT-HEX!"]),
+        ] {
+            c.notify_rules = vec![bad.clone()];
+            assert!(c.validate_for(8).is_err(), "{bad:?}");
+        }
+        c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
+        assert!(c.validate_for(8).is_err(), "at most 50");
+    }
+
+    #[test]
     fn config_load_fails_closed() {
         let d = std::env::temp_dir().join(format!("kiln-test-cfg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1094,6 +1241,16 @@ mod tests {
         std::fs::create_dir(d.join("config.json")).unwrap();
         assert!(load_config(&d).is_err(), "unreadable is not missing");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn health_list_composition() {
+        let h = |k: &str| (k.to_string(), "m".to_string());
+        let base = [h("disk"), h("draining")];
+        let kinds = |l: Vec<(String, String)>| l.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        assert_eq!(kinds(health_list(&base, Some("x"), true, None, &[])), ["disk", "poll"]);
+        assert_eq!(kinds(health_list(&[], None, false, None, &[])), ["landlock"]);
+        assert_eq!(kinds(health_list(&[], None, true, Some("bad"), &[h("d1")])), ["notify_failing", "notify_failing"]);
     }
 
     #[test]
