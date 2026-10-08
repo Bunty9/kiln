@@ -4,6 +4,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- **Settings › Analytics.** Jobs, success rate, median and p95 job time, time to start, job minutes and savings for the last 24 hours, 7 or 30 days, filtered by repo and VM size; stacked charts of jobs by outcome and minutes by VM size, the median queue/boot/wait/job split, a per-repo table and the slowest jobs. A last chart reads the usage ledger, so it covers every job of the last 30 days.
+- **Swipe between tabs on phones.** A quick sideways swipe on the page moves to the next or previous bottom tab; it is ignored on form fields, charts, sideways-scrolling tables and logs, and at the screen edges (the browser's back gesture).
+
 ## [0.2.4] - 2026-10-08
 
 ### Security
