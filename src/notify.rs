@@ -381,9 +381,16 @@ fn random<const N: usize>() -> [u8; N] {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Events {
+    #[serde(default = "yes")]
     pub job: bool,
+    #[serde(default = "yes")]
     pub health: bool,
+    #[serde(default = "yes")]
     pub security: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Events {
@@ -448,9 +455,12 @@ pub struct Status {
 /// A missing file is no destinations. An unreadable one is an error and is never rewritten.
 pub fn load(data: &Path) -> Result<Vec<Dest>, String> {
     match std::fs::read(data.join("notify.json")) {
-        Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("notify.json unreadable ({e}): fix or remove it")),
+        // Only the category and position: serde's message can echo file values (secrets).
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| {
+            format!("notify.json unreadable ({:?} error at line {}, column {}): fix or remove it", e.classify(), e.line(), e.column())
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
-        Err(e) => Err(format!("notify.json unreadable ({e}): fix or remove it")),
+        Err(e) => Err(format!("notify.json unreadable ({:?}): fix or remove it", e.kind())),
     }
 }
 
@@ -739,6 +749,28 @@ mod tests {
         assert!(load(&d).is_err());
         assert_eq!(std::fs::read_to_string(d.join("notify.json")).unwrap(), "{not json", "never rewritten");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn load_errors_never_echo_file_contents() {
+        let d = std::env::temp_dir().join(format!("kiln-test-notify-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let bad_type = r#"[{"id":"a1b2c3d4","name":"x","kind":"slack","url":"https://hooks.slack.com/services/T000/B000/XXXX","tailnet":"SECRETMARK_42"}]"#;
+        std::fs::write(d.join("notify.json"), bad_type).unwrap();
+        let Err(e) = load(&d) else { panic!("expected an error") };
+        assert!(!e.contains("SECRETMARK_42"), "leaked: {e}");
+        let cut = r#"[{"id":"a1b2c3d4","name":"x","kind":"slack","url":"https://hooks.slack.com/services/T000/B000/SECRETMARK_43"}]"#;
+        std::fs::write(d.join("notify.json"), &cut[..cut.find("SECRETMARK_43").unwrap() + 8]).unwrap();
+        let Err(e) = load(&d) else { panic!("expected an error") };
+        assert!(!e.contains("SECRETMARK_43") && !e.contains("SECRETMARK"), "leaked: {e}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn partial_events_default_on() {
+        let e: Events = serde_json::from_str(r#"{"job":false}"#).unwrap();
+        assert_eq!(e, Events { job: false, health: true, security: true });
     }
 
     #[test]
