@@ -191,12 +191,14 @@ fn bind_serve_socket(path: &std::path::Path) -> anyhow::Result<tokio::net::UnixL
     bound
 }
 
-/// How a connection reached kiln: the TCP listener, or the unix socket only
-/// `tailscale serve` (tailscaled, as root) can connect to.
+/// How a connection reached kiln: the TCP listener, or the unix socket `tailscale serve`
+/// (tailscaled, as root) connects to. `root` is the peer's SO_PEERCRED uid being 0: kiln's
+/// own uid can also connect (the socket is 0600, owned by kiln), and so can a job VM's
+/// QEMU when the kernel has no Landlock socket scoping, so only root's headers are trusted.
 #[derive(Clone, Copy)]
 enum Via {
     Tcp(SocketAddr),
-    Serve,
+    Serve { root: bool },
 }
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>> for Via {
     fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
@@ -204,8 +206,8 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, toki
     }
 }
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>> for Via {
-    fn connect_info(_: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
-        Via::Serve
+    fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        Via::Serve { root: s.io().peer_cred().is_ok_and(|c| c.uid() == 0) }
     }
 }
 
@@ -240,13 +242,17 @@ fn claim(via: Via, login: Option<&str>, fwd_for: Option<&str>, funnel: bool) -> 
                 Claim::Outside("kiln only answers on the tailnet")
             }
         }
-        Via::Serve if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
+        // Not tailscaled: the identity headers are whatever the caller wrote. The key decides.
+        Via::Serve { root: false } => Claim::Local,
+        Via::Serve { .. } if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
         // No login: a tagged node (or this machine), identified like a TCP peer. No tailnet source: local.
-        Via::Serve => match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
-            (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
-            (None, Some(ip)) if is_tailnet(ip) => Claim::Peer(ip),
-            _ => Claim::Local,
-        },
+        Via::Serve { .. } => {
+            match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
+                (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
+                (None, Some(ip)) if is_tailnet(ip) => Claim::Peer(ip),
+                _ => Claim::Local,
+            }
+        }
     }
 }
 
@@ -611,9 +617,28 @@ pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
         ServeUse::Unsafe(why) => {
             (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
         }
+        // Identity headers are trusted only from a root peer (see `Via`).
+        ServeUse::Proxied if !tailscaled_is_root() => {
+            (false, "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into())
+        }
         ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
         ServeUse::Unused => (true, "kiln's socket is not served".into()),
     })
+}
+
+/// Whether a process named tailscaled runs as root (true when none is found: the tailscale check covers that).
+fn tailscaled_is_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mut found = false;
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "tailscaled") {
+            found = true;
+            if e.metadata().is_ok_and(|m| m.uid() == 0) {
+                return true;
+            }
+        }
+    }
+    !found
 }
 
 /// Admission, then the handler. Admitted API writes go to the audit log; refused ones only to
@@ -664,13 +689,13 @@ struct Requester {
 async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Response>, Requester) {
     let from = match via {
         Via::Tcp(peer) => peer.ip().to_canonical().to_string(),
-        Via::Serve => "tailscale serve".into(),
+        Via::Serve { .. } => "tailscale serve".into(),
     };
     let mut who = Requester { actor: "unknown".into(), from };
     let deny = |code: StatusCode, msg: &str, who: Requester| (Err((code, msg.to_string()).into_response()), who);
     // tailscaled sends `Host: localhost` to a unix socket and the name the browser
     // used in X-Forwarded-Host; put that back so the Host check and handlers see it.
-    if matches!(via, Via::Serve)
+    if matches!(via, Via::Serve { .. })
         && let Some(fh) = req.headers().get("x-forwarded-host").cloned()
     {
         req.headers_mut().insert(header::HOST, fh);
@@ -695,7 +720,7 @@ async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Re
         return deny(StatusCode::FORBIDDEN, msg, who);
     }
     // The identity headers mean something only if tailscaled's web proxy is all that reaches the socket.
-    let claim = if matches!(via, Via::Serve) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
+    let claim = if matches!(via, Via::Serve { .. }) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
         Claim::Local
     } else {
         claim
@@ -1585,6 +1610,7 @@ mod tests {
     #[test]
     fn identity_claims() {
         let tcp = |a: &str| Via::Tcp(a.parse().unwrap());
+        const SERVE: Via = Via::Serve { root: true };
         let peer: IpAddr = "100.64.0.7".parse().unwrap();
         // TCP: the source address decides; identity headers are never read.
         assert_eq!(claim(tcp("127.0.0.1:5000"), None, None, false), Claim::Local);
@@ -1594,18 +1620,24 @@ mod tests {
         assert_eq!(claim(tcp("100.64.0.7:5000"), Some("evil@x.com"), None, false), Claim::Peer(peer));
         assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.64.0.7"), false), Claim::Outside(_)));
         // The serve socket: tailscaled's login header, from the tailnet address it saw.
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Login("me@x.com".into(), peer));
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Login("me@x.com".into(), peer));
         // No user from a tailnet address: a tagged node (or the box itself), judged as over TCP.
-        assert_eq!(claim(Via::Serve, None, Some("100.64.0.7"), false), Claim::Peer(peer));
-        assert_eq!(claim(Via::Serve, Some(""), Some("100.64.0.7"), false), Claim::Peer(peer));
+        assert_eq!(claim(SERVE, None, Some("100.64.0.7"), false), Claim::Peer(peer));
+        assert_eq!(claim(SERVE, Some(""), Some("100.64.0.7"), false), Claim::Peer(peer));
         // No tailnet source: key needed.
-        assert_eq!(claim(Via::Serve, None, None, false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), None, false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
+        assert_eq!(claim(SERVE, None, None, false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), None, false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
         // Funnel (the public internet) is refused outright.
-        assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Outside(_)));
-        assert!(matches!(claim(Via::Serve, None, None, true), Claim::Outside(_)));
+        assert!(matches!(claim(SERVE, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Outside(_)));
+        assert!(matches!(claim(SERVE, None, None, true), Claim::Outside(_)));
+        // The same headers from a non-root peer on the socket (kiln's uid, a confined
+        // QEMU) are ignored: the dashboard key is required.
+        let user = Via::Serve { root: false };
+        assert_eq!(claim(user, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Local);
+        assert_eq!(claim(user, None, Some("100.64.0.7"), false), Claim::Local);
+        assert_eq!(claim(user, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Local);
     }
 
     #[test]

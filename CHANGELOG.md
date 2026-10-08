@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- **The HTTPS socket trusts only tailscaled.** kiln checks the uid of whatever connects to `serve.sock` and reads the `Tailscale-User-Login` and `X-Forwarded-For` headers only from root (tailscaled). Before, any process running as the kiln user could connect and claim to be a tailnet user. That includes a job VM's QEMU after a VM escape on kernels without Landlock socket scoping, and it bypassed the dashboard key. `kiln doctor` flags a tailscaled that does not run as root, because HTTPS then needs the key.
+
 ### Added
 
 - **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs and ntfy tokens are write-only; a signing secret is returned once (on create, rotate, or a kind or origin change) and never again; moving a URL to another host drops its token and issues a new secret. Repo text is escaped per target. See docs/configuration.md.
