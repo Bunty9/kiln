@@ -13,6 +13,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - Job rows show where the code came from: branch, PR number, short commit and the run's title (commit message or PR title), plus the trigger when it is not a push or PR (manual, scheduled, ...). The job page shows the same, with the PR and commit linked to GitHub, and the workflow name with its run number. kiln records this on the VM when its runner picks up a job, so jobs from before the upgrade show none.
 
 - Help for the new pages: guides for Analytics & savings and for Privacy & reports (what each report holds, and how to turn both off for good with `DO_NOT_TRACK=1`), and "?" help on Settings › Analytics, Settings › Privacy, the Overview's Recent failures and a job's branch/PR/commit line. Getting started mentions swiping between tabs on phones, and the Jobs tip and Debug guide mention the new run details.
+- An Alerts & webhooks guide for Settings › Notifications: what each destination kind and event switch sends, workflow rules, which addresses are allowed, retries and the failing banner, and where to find how to verify signed requests.
 
 ### Changed
 
