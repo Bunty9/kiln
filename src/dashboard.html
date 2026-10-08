@@ -368,6 +368,7 @@ input[role=switch]:disabled{opacity:.5;cursor:not-allowed}
 #gsel,#guide-sel{display:none;width:100%;margin-bottom:16px}
 @media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel,#guide-sel{display:flex}}
 /* settings rows: label column (centred on a 36px control), control, hint under the control */
+.nd{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;font-size:13px}.nd .t{flex:1 1 220px;min-width:0}.nd .id{display:block;font-size:12px;color:var(--fg-2);overflow-wrap:anywhere}.nsw,.nb{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px}.nb{gap:8px}
 .fld{display:grid;grid-template-columns:220px minmax(0,1fr);gap:6px 24px;align-items:start;padding:16px 0;border-top:1px solid var(--line)}
 .fld>:first-child{display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-height:36px}
 :root[data-density=compact] .fld{padding:10px 0}
@@ -988,6 +989,9 @@ function banners() {
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
   if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
+  const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && now() - d.status.failing_since > 3600) || d.status?.permanent_streak >= 3);
+  if (nbad.length) B('fail', 'Notifications failing: ' + nbad.map(d => esc(d.name)).join(', '), A('Fix', '#/settings/notifications'));
+  if (S.notify?.load_error) B('fail', 'Notification destinations: ' + esc(S.notify.load_error), A('Fix', '#/settings/notifications'));
   else if (S.app && !S.app.repos.length) b.push(`<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> kiln serves exactly the repos the GitHub App is installed on, and it is on none yet.</span>${appInstall(1)}</div>`);
   else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
@@ -1591,9 +1595,14 @@ const G = {
       return `<div class="card"><h2>Notifications</h2><label class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></label>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
+        <div class="card"><h2>Webhooks</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
+          <div id="nlist" style="margin-top:12px"></div><div id="nsecret">${nSecretHTML()}</div><div id="nform" style="margin-top:12px">${nFormHTML()}</div></div>
+        <div class="card"><h2>Workflow rules</h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Rules save with the other settings.</p>
+          <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div></div>
         <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
     },
-    open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
+    open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) { $('#set-body').innerHTML = this.html(); this.live(); } }); },
+    live() { setHTML($('#nlist'), nListHTML()); },
   },
   diagnostics: {
     html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">${ic('refresh')}Run checks</button></h2><div id="doc"></div></div>`,
@@ -1628,6 +1637,54 @@ const G = {
     },
   },
 };
+/* ---------- webhooks (Settings › Notifications) ---------- */
+// nf: the open add/edit form; nsecret: a signing secret shown once. Neither keeps a URL: URL and token live only in password fields, cleared on save.
+let nf = null, nsecret = null;
+const NK = { generic: 'Generic', slack: 'Slack', discord: 'Discord', ntfy: 'ntfy' };
+const NPH = { slack: 'https://hooks.slack.com/services/…', discord: 'https://discord.com/api/webhooks/…', ntfy: 'https://ntfy.sh/your-topic', generic: 'https://…' };
+const NEV = [['job', 'Jobs'], ['health', 'Health'], ['security', 'Security']];
+const nDests = () => S.notify?.dests || [];
+function nListHTML() {
+  const n = S.notify || {}, ds = nDests();
+  const st = d => { const s = d.status || {}; return s.last_error && (!s.last_ok || s.last_error[0] > s.last_ok) ? `<span class="fail">failing · ${esc(s.last_error[1])}</span>` : s.last_ok ? `<span class="ok">ok · ${relH(s.last_ok)}</span>` : '<span class="fg2">not used yet</span>'; };
+  return (n.load_error ? `<div class="cal w" style="margin-top:0">${esc(n.load_error)}</div>` : '') + (ds.length ? `<ul class="list">${ds.map(d => `<li><div class="nd"><span class="t"><span class="tt">${esc(d.name)} <span class="bdg">${esc(NK[d.kind] || d.kind)}</span></span><span class="id" style="font-family:var(--sans)">${esc(d.host)} · ${st(d)}${d.status?.dropped ? ` · ${+d.status.dropped} dropped` : ''}</span></span>
+    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''}><span class="sm">${l}</span></label>`).join('')}</span>
+    <span class="nb"><button class="btn sm" data-act="ntest" data-id="${esc(d.id)}"${tip('Send a test message. One every 10 seconds.')}>Send test</button><button class="btn sm" data-act="nedit" data-id="${esc(d.id)}">Edit</button>${d.kind === 'generic' ? `<button class="btn sm" data-act="nrot" data-id="${esc(d.id)}"${tip('Make a new signing secret. The old one stops working.')}>Rotate secret</button>` : ''}<button class="btn sm dng" data-act="ndel" data-id="${esc(d.id)}">${ic('trash')}Remove</button></span></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No destinations yet.</p>');
+}
+function nSecretHTML() {
+  return !nsecret ? '' : `<div class="cal o"><b>Signing secret for ${esc(nsecret.name)}</b>
+    <div class="cb"><pre class="snip" id="nsec-t">${esc(nsecret.text)}</pre><button class="btn" data-act="ncopy" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>
+    <p class="sm" style="margin-top:8px;max-width:none">Shown once. kiln signs each request with Standard Webhooks headers (webhook-id, webhook-timestamp, webhook-signature); verify the HMAC-SHA256 and reject timestamps more than 5 minutes old.</p>
+    <div class="bar" style="margin:12px 0 0"><button class="btn pri" data-act="ndone">Done</button></div></div>`;
+}
+function nFormHTML() {
+  if (!nf) return `<button class="btn" data-act="nadd">${ic('plus')}Add destination</button>`;
+  const k = nf.kind, edit = !!nf.id;
+  return `<form data-form="notify" autocomplete="off"><h3 style="font-size:15px;margin-bottom:8px">${edit ? 'Edit ' + esc(nf.name0) : 'Add destination'}</h3>
+    ${fld('nf-kind', 'Kind', `<div class="seg" role="radiogroup" aria-label="Kind">${Object.entries(NK).map(([v, l]) => `<button type="button" role="radio" aria-checked="${v === k}" data-act="nkind" data-v="${v}">${l}</button>`).join('')}</div>`)}
+    ${fld('nf-name', 'Name', `<input type="text" id="nf-name" value="${esc(nf.name)}" maxlength="40" spellcheck="false">`)}
+    ${fld('nf-url', 'URL', `<input type="password" id="nf-url" autocomplete="off" spellcheck="false" placeholder="${esc(edit ? 'leave empty to keep the current URL' : NPH[k])}">`, edit ? `Stored URL is hidden. Current host: <span class="mono">${esc(nf.host)}</span>` : 'The URL is a secret. It is never shown again after saving.')}
+    <div class="fld" id="nf-tokf" ${k === 'ntfy' ? '' : 'hidden'}><div><label for="nf-token">ntfy token</label></div><div><input type="password" id="nf-token" autocomplete="off" spellcheck="false" placeholder="${edit ? 'leave empty to keep the current token' : 'optional'}"></div></div>
+    <div class="fld"><span class="lb">Options</span><div>
+      <label class="sw"${tip('Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.')}><input type="checkbox" id="nf-ts" ${nf.tailnet ? 'checked' : ''}><span>On my tailnet</span></label>
+      <label class="sw"${tip('Needs Serve over HTTPS; coming in a later version')}><input type="checkbox" id="nf-link" disabled><span class="fg2">Include dashboard link</span></label></div></div>
+    <p class="ferr" id="nf-err" role="alert"></p>
+    <div class="bar" style="margin:12px 0 0"><button class="btn pri">${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel">Cancel</button></div></form>`;
+}
+function nRulesHTML() {
+  const rs = draft.notify_rules ||= [], ds = nDests(), repos = REPOS();
+  const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  return (rs.length ? `<ul class="list">${rs.map((r, i) => `<li><div class="nd"><span class="nb">${sel(i, 'repo', r.repo, [['*', 'Any repo'], ...[...new Set([...repos, ...(r.repo === '*' ? [] : [r.repo])])].map(x => [x, x])])}
+    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>
+    ${sel(i, 'outcome', r.outcome, [['success', 'On success'], ['failure', 'On failure'], ['any', 'Any outcome']])}</span>
+    <span class="nsw">${ds.map(d => `<label class="sw"><input type="checkbox" data-act="nrule" data-i="${i}" data-f="to" data-d="${esc(d.id)}" ${r.to.includes(d.id) ? 'checked' : ''}><span class="sm">${esc(d.name)}</span></label>`).join('')}</span>
+    <button class="btn sm ic" data-act="nruledel" data-i="${i}" aria-label="Remove rule"${tip('Remove this rule')}>${ic('x')}</button></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No rules.</p>')
+    + `<div class="bar" style="margin:12px 0 0"><button class="btn" data-act="nruleadd" ${ds.length && rs.length < 50 ? '' : 'disabled'}${tip(ds.length ? 'At most 50 rules' : 'Add a destination first')}>${ic('plus')}Add rule</button></div>`;
+}
+// A signing secret must not outlive the page it was shown on.
+addEventListener('hashchange', () => { if (nsecret) { nsecret = null; const e = $('#nsec-t'); if (e) e.textContent = ''; } });
+document.addEventListener('input', e => { const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t); });
+
 // GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
 let UP = null, upBusy = false;
 async function loadUpd() {
@@ -1977,6 +2034,63 @@ const ACT = {
         <dt>Fastest</dt><dd>${lat.map(([id, ns]) => `${esc(n.DERPMap?.Regions?.[id]?.RegionName || id)}: ${(ns / 1e6).toFixed(1)} ms`).join('<br>') || '—'}</dd></dl>`;
     } catch (e) { $('#nc').textContent = e.message; } finally { b.disabled = false; }
   },
+  // --- webhooks: Settings › Notifications
+  nrender() { if (cur === pages.settings && pages.settings.g === 'notifications') { $('#nform').innerHTML = nFormHTML(); $('#nsecret').innerHTML = nSecretHTML(); $('#nrules').innerHTML = nRulesHTML(); rove($('#nform')); pages.settings.live(); } },
+  async nev(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
+    await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
+    await poll();
+  },
+  async ntest(b) { await post('/api/notify/' + encodeURIComponent(b.dataset.id) + '/test'); toast('Test queued'); },
+  nadd() { nf = { id: null, kind: 'generic', name: '', tailnet: false, events: { job: true, health: true, security: true } }; ACT.nrender(); $('#nf-name').focus(); },
+  nedit(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    nf = { id: d.id, kind: d.kind, name: d.name, name0: d.name, host: d.host, tailnet: d.tailnet, events: { ...d.events } }; ACT.nrender(); $('#nf-name').focus();
+  },
+  ncancel() { for (const i of ['#nf-url', '#nf-token']) if ($(i)) $(i).value = ''; nf = null; ACT.nrender(); },
+  nkind(b) {
+    nf.kind = b.dataset.v; $$('#nform [data-act=nkind]').forEach(x => x.setAttribute('aria-checked', x === b)); rove($('#nform'));
+    if (!nf.id) $('#nf-url').placeholder = NPH[nf.kind]; $('#nf-tokf').hidden = nf.kind !== 'ntfy';
+  },
+  async nsave() {
+    if (!nf) return;
+    const name = $('#nf-name').value.trim(), url = $('#nf-url').value.trim(), token = $('#nf-token').value.trim(), err = $('#nf-err');
+    err.textContent = '';
+    if (!name) { err.textContent = 'Give the destination a name.'; return $('#nf-name').focus(); }
+    if (!nf.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
+    const body = { name, kind: nf.kind, tailnet: $('#nf-ts').checked, link: false, events: nf.events };
+    if (url) body.url = url; if (nf.kind === 'ntfy' && token) body.token = token;
+    let r;
+    try { r = await (nf.id ? api('/api/notify/' + encodeURIComponent(nf.id), { method: 'PUT', body }) : post('/api/notify', body)); }
+    catch (e) { err.textContent = e.message; return; }
+    for (const i of ['#nf-url', '#nf-token']) $(i).value = '';
+    nf = null; if (r.secret) nsecret = { text: r.secret, name: r.dest?.name || name };
+    await poll(); toast('Destination saved'); ACT.nrender();
+  },
+  async nrot(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    if (!await ask({ title: `Rotate the secret for ${d.name}?`, body: 'The old secret stops working at once. Update the receiver with the new one.', action: 'Rotate', danger: 1 })) return;
+    const r = await post('/api/notify/' + encodeURIComponent(d.id) + '/rotate'); nsecret = { text: r.secret, name: d.name }; ACT.nrender();
+  },
+  async ndel(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    if (!await ask({ title: `Remove ${d.name}?`, body: 'It stops receiving messages, and is dropped from any workflow rule that names it. A rule left with no destination is removed.', action: 'Remove', danger: 1 })) return;
+    await api('/api/notify/' + encodeURIComponent(d.id), { method: 'DELETE' });
+    // The server drops it from saved rules; do the same in the draft so Save does not name a dead id.
+    draft.notify_rules = (draft.notify_rules || []).map(r => ({ ...r, to: r.to.filter(t => t !== d.id) })).filter(r => r.to.length);
+    toast('Removed ' + d.name); await poll(); ACT.nrender();
+  },
+  async ncopy(b) { if (nsecret) { await copy(nsecret.text, 'Secret copied'); copied(b); } },
+  ndone() { const e = $('#nsec-t'); if (e) e.textContent = ''; nsecret = null; ACT.nrender(); },
+  nrule(el) {
+    const r = draft.notify_rules[+el.dataset.i], f = el.dataset.f; if (!r) return;
+    if (f === 'to') r.to = el.checked ? [...new Set([...r.to, el.dataset.d])] : r.to.filter(t => t !== el.dataset.d);
+    else r[f] = f === 'workflow' ? el.value.trim() || '*' : el.value;
+    pages.settings.live();
+  },
+  nruleadd() { draft.notify_rules.push({ repo: '*', workflow: '*', outcome: 'failure', to: nDests().length === 1 ? [nDests()[0].id] : [] }); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live(); },
+  nruledel(b) { draft.notify_rules.splice(+b.dataset.i, 1); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live(); },
   skip() { lsSet('kiln-skip-setup', '1'); location.hash = '#/'; },
   finish() { lsSet('kiln-skip-setup', '1'); },
   stepopen(b) { setupOpen = +b.dataset.id; pages.setup.update(); },
@@ -2030,6 +2144,7 @@ document.addEventListener('submit', async e => {
       if (n && (n < 5 || n > 500)) return toast('Cache size must be 5 to 500 GB', true);
       await saveCfg({ ...S.config, repo_cache_gb: ciPut(S.config.repo_cache_gb, r, n || null) }); toast(n ? `Cache size for ${r}: ${n} GB` : `Cache size for ${r}: global ${S.config.cache_gb} GB`);
     }
+    else if (k === 'notify') await ACT.nsave();
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {
       tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();

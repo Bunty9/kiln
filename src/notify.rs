@@ -3,8 +3,6 @@
 //! text from a repo format, mention or inject into the target. See
 //! docs/superpowers/specs/2026-10-08-webhook-notifications-design.md.
 
-#![allow(dead_code)]
-
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
