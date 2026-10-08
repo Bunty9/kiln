@@ -4,9 +4,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-### Security
-
-- **The HTTPS socket trusts only tailscaled.** kiln checks the uid of whatever connects to `serve.sock` and reads the `Tailscale-User-Login` and `X-Forwarded-For` headers only from root (tailscaled). Before, any process running as the kiln user could connect and claim to be a tailnet user. That includes a job VM's QEMU after a VM escape on kernels without Landlock socket scoping, and it bypassed the dashboard key. `kiln doctor` flags a tailscaled that does not run as root, because HTTPS then needs the key.
+## [0.2.5] - 2026-10-08
 
 ### Added
 
@@ -28,6 +26,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Security
 
+- **The HTTPS socket trusts only tailscaled.** kiln checks the uid of whatever connects to `serve.sock` and reads the `Tailscale-User-Login` and `X-Forwarded-For` headers only from root (tailscaled). Before, any process running as the kiln user could connect and claim to be a tailnet user. That includes a job VM's QEMU after a VM escape on kernels without Landlock socket scoping, and it bypassed the dashboard key. `kiln doctor` flags a tailscaled that does not run as root, because HTTPS then needs the key.
 - Notification delivery uses an SSRF-safe client (public addresses only, checked in the resolver, no redirects, no proxies, tailnet ranges only by opt-in), stored URLs are re-checked on every send, and destination URLs and tokens are write-only, signing secrets shown once, all stored mode 0600.
 
 ## [0.2.4] - 2026-10-08
@@ -174,7 +173,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/Bunty9/kiln/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
