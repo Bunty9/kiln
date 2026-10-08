@@ -1479,7 +1479,7 @@ const PRIV = {
   crash_reports: ['Crash reports', 'When kiln panics: the version and the line of code. Not the error message, which can quote a repo or a path.'],
 };
 const consentHTML = () => `<div class="card"><h2>${ic('shield', 20)} Help improve kiln?</h2>
-  <p class="fg2">kiln can send anonymous reports to its maintainers. Both are off unless you turn them on. They never include repo, account or host names, IPs, paths, tokens or logs. You can change this any time in Settings › Privacy, where you can also see exactly what is sent.</p>
+  <p class="fg2">kiln can send anonymous reports to its maintainers. Both are off unless you turn them on. They never include repo, account or host names, IPs, file paths on this box, tokens or logs. You can change this any time in Settings › Privacy, where you can also see exactly what is sent.</p>
   ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="cs-${k}" aria-label="${l}"><span class="fg2 sm">${h}</span></label></div>`).join('')}
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"><button class="btn pri" data-act="consent">Save choice</button><a class="btn" href="#/settings/privacy">See what is sent</a></div></div>`;
 
@@ -1629,15 +1629,17 @@ const G = {
   },
   privacy: {
     html: () => consentUnset() ? consentHTML() + '<div class="card"><h2>What is sent</h2><div id="tel"></div></div>' : `<div class="card"><h2>Privacy</h2>
-      <p class="fg2">Anonymous reports to kiln's maintainers, sent by this box (never by your browser). They never include repo, account or host names, IPs, paths, tokens or logs.</p>
+      <p class="fg2">Anonymous reports to kiln's maintainers, sent by this box (never by your browser). They never include repo, account or host names, IPs, file paths on this box, tokens or logs.</p>
       ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="f-${k}" data-k="${k}" aria-label="${l}" ${draft[k] ? 'checked' : ''}><span class="fg2 sm">${h}</span></label></div>`).join('')}</div>
       <div class="card"><h2>What is sent</h2><div id="tel"></div></div>`,
     async open() {
-      let t; try { t = await api('/api/telemetry'); } catch (e) { return setHTML($('#tel'), `<div class="cal">${esc(e.message)}</div>`); }
-      setHTML($('#tel'), `${t.disabled_by_env ? '<div class="cal w" style="margin:0 0 12px">Turned off on this box by <code>DO_NOT_TRACK</code> or <code>KILN_TELEMETRY</code>, whatever is set here.</div>' : ''}
+      let t, err; try { t = await api('/api/telemetry'); } catch (e) { err = e; }
+      const el = $('#tel'); if (!el) return;
+      if (err) return setHTML(el, `<div class="cal">${esc(err.message)}</div>`);
+      setHTML(el, `${t.disabled_by_env ? '<div class="cal w" style="margin:0 0 12px">Turned off on this box by <code>DO_NOT_TRACK</code> or <code>KILN_TELEMETRY</code>, whatever is set here.</div>' : ''}
         ${t.endpoint ? '' : '<p class="fg2 sm">This build has no report address, so nothing is sent yet, even when turned on.</p>'}
-        <p class="fg2 sm">The usage report this box would send now. <code>id</code> is random, made on this box, and replaced if you turn both off.</p>${cb(JSON.stringify(t.usage, null, 2))}
-        <p class="fg2 sm">A crash report (example). ${t.pending_crashes ? `${+t.pending_crashes} waiting to be sent.` : 'None waiting.'}</p>${cb(JSON.stringify(t.crash_example, null, 2))}`);
+        <p class="fg2 sm">The usage report this box would send now. <code>id</code> is random, made on this box at the first send, and deleted as soon as you turn both off.</p>${cb(JSON.stringify(t.usage, null, 2))}
+        <p class="fg2 sm">An example crash report (a real one has the actual code location). ${t.pending_crashes ? `${+t.pending_crashes} waiting to be sent.` : 'None waiting.'}</p>${cb(JSON.stringify(t.crash_example, null, 2))}`);
     },
   },
   // Stored in this browser only (localStorage), applied by the script in <head> before first paint.

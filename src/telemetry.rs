@@ -3,9 +3,10 @@
 //! dashboard's CSP keeps the browser offline. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0`
 //! turns both off whatever config.json says.
 //!
-//! Nothing that names anything is sent: no repo, account, host name, IP, path, token,
-//! job name or log. A random install id (`<data>/telemetry_id`, deleted when both are
-//! off) groups one box's reports. GET /api/telemetry returns the exact payloads.
+//! Nothing that names anything is sent: no repo, account, host name, IP, path on this box,
+//! token, job name or log. A random install id (`<data>/telemetry_id`, made at the first
+//! send, deleted as soon as both are off) groups one box's reports. GET /api/telemetry
+//! returns the usage report as it would be sent and an example crash report.
 
 use crate::{App, Config, now};
 use serde_json::{Value, json};
@@ -16,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Where reports go: kiln's own Cloudflare Worker (deploy/telemetry). None = send nothing.
-/// `KILN_TELEMETRY_URL` overrides it (an https URL), e.g. to test a Worker.
+/// `KILN_TELEMETRY_URL` overrides it, e.g. to test a Worker; set but not https, nothing is sent.
 const ENDPOINT: Option<&str> = None;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD: &str = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
@@ -33,13 +34,32 @@ pub fn disabled_by_env() -> bool {
     set("DO_NOT_TRACK", &["1", "true", "yes"]) || set("KILN_TELEMETRY", &["0", "false", "no", "off"])
 }
 
+/// A bad override never falls back to the built-in address: test traffic must not reach it.
 fn endpoint() -> Option<String> {
-    std::env::var("KILN_TELEMETRY_URL").ok().filter(|u| u.starts_with("https://")).or(ENDPOINT.map(String::from))
+    match std::env::var("KILN_TELEMETRY_URL") {
+        Ok(u) => u.starts_with("https://").then_some(u),
+        Err(_) => ENDPOINT.map(String::from),
+    }
 }
 
-/// Call at startup and on every config save.
-pub fn apply(c: &Config) {
-    CRASH_ON.store(c.crash_reports == Some(true) && !disabled_by_env(), Ordering::Relaxed);
+/// (usage, crash) switches in effect: on in the config and not disabled by env.
+fn enabled(c: &Config) -> (bool, bool) {
+    let off = disabled_by_env();
+    (c.usage_stats == Some(true) && !off, c.crash_reports == Some(true) && !off)
+}
+
+/// Call at startup and after every config save: arms the panic hook, and forgets what a
+/// switch turned off no longer needs (waiting crash files, the install id).
+pub fn apply(data: &Path, c: &Config) {
+    let (usage_on, crash_on) = enabled(c);
+    CRASH_ON.store(crash_on, Ordering::Relaxed);
+    if !crash_on {
+        let _ = std::fs::remove_dir_all(data.join("crash"));
+    }
+    if !usage_on && !crash_on {
+        // Opting back in later starts a new id, not linked to the old reports.
+        let _ = std::fs::remove_file(data.join("telemetry_id"));
+    }
 }
 
 /// Record panics to `<data>/crash/` (while `crash_reports` is on); the default hook still runs.
@@ -102,22 +122,27 @@ fn pending(data: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The install id, created on first use. Random: nothing about the box goes into it.
-fn install_id(data: &Path) -> String {
-    let path = data.join("telemetry_id");
-    if let Ok(s) = std::fs::read_to_string(&path)
-        && s.trim().len() == 32
-    {
-        return s.trim().to_string();
-    }
-    let mut b = [0u8; 16];
-    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
-    let id: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    let _ = std::fs::write(&path, &id);
-    id
+fn read_id(data: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(data.join("telemetry_id")).ok()?;
+    let s = s.trim();
+    (s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then(|| s.to_string())
 }
 
-/// The daily usage report: counts and settings, never names. The Worker
+/// The install id, made on first use. Random: nothing about the box goes into it. None when
+/// it cannot be made or kept: a new id per send would count one box as many.
+fn install_id(data: &Path) -> Option<String> {
+    if let Some(id) = read_id(data) {
+        return Some(id);
+    }
+    let mut b = [0u8; 16];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).ok()?;
+    let id: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    std::fs::write(data.join("telemetry_id"), &id).ok()?;
+    Some(id)
+}
+
+/// The daily usage report: counts and settings, never names. Job counts come from the VM
+/// records kiln keeps (the last 200), so a busier box reports at most those. The Worker
 /// (deploy/telemetry/worker.js) accepts exactly these fields: change both together.
 fn usage(app: &App, id: &str) -> Value {
     let c = app.cfg();
@@ -164,9 +189,10 @@ fn usage(app: &App, id: &str) -> Value {
     })
 }
 
-/// GET /api/telemetry: the settings' state and the exact bytes each report would carry.
+/// GET /api/telemetry: the settings' state, the usage report as it would be sent now and an
+/// example crash report. It never creates the id: looking is not opting in.
 pub fn preview(app: &App) -> Value {
-    let id = install_id(&app.data);
+    let id = read_id(&app.data).unwrap_or_else(|| "(random, made at the first send)".into());
     let mut example = crash("src/vm.rs:123:45", Some("tokio-runtime-worker"));
     example["id"] = json!(id);
     json!({
@@ -188,16 +214,29 @@ fn client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-async fn send(http: &reqwest::Client, url: &str, body: &Value) -> bool {
+#[derive(PartialEq)]
+enum Sent {
+    Ok,
+    /// The receiver refused this report for good (a 4xx): resending it can't help.
+    Rejected,
+    /// Network trouble or a server error: try again next round.
+    Retry,
+}
+
+async fn send(http: &reqwest::Client, url: &str, body: &Value) -> Sent {
     match http.post(url).json(body).send().await {
-        Ok(r) if r.status().is_success() => true,
+        Ok(r) if r.status().is_success() => Sent::Ok,
+        Ok(r) if r.status().is_client_error() && r.status() != reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            tracing::warn!("telemetry: report refused ({}), dropped", r.status());
+            Sent::Rejected
+        }
         Ok(r) => {
             tracing::debug!("telemetry: {}", r.status());
-            false
+            Sent::Retry
         }
         Err(e) => {
             tracing::debug!("telemetry: {e}");
-            false
+            Sent::Retry
         }
     }
 }
@@ -214,27 +253,29 @@ pub async fn supervise(app: Arc<App>) {
 }
 
 async fn round(app: &App, http: &reqwest::Client) {
-    let c = app.cfg();
-    let off = disabled_by_env();
-    let (usage_on, crash_on) = (c.usage_stats == Some(true) && !off, c.crash_reports == Some(true) && !off);
-    if !crash_on {
-        let _ = std::fs::remove_dir_all(app.data.join("crash"));
-    }
+    let (usage_on, crash_on) = enabled(&app.cfg());
     if !usage_on && !crash_on {
-        // Opting back in later starts a new id, not linked to the old reports.
-        let _ = std::fs::remove_file(app.data.join("telemetry_id"));
         return;
     }
-    let Some(url) = endpoint() else { return };
-    let id = install_id(&app.data);
+    let Some(url) = endpoint() else {
+        if std::env::var_os("KILN_TELEMETRY_URL").is_some() {
+            tracing::warn!("telemetry: KILN_TELEMETRY_URL must be an https:// URL; sending nothing");
+        }
+        return;
+    };
+    let Some(id) = install_id(&app.data) else {
+        tracing::debug!("telemetry: cannot create {}", app.data.join("telemetry_id").display());
+        return;
+    };
     if crash_on {
         for f in pending(&app.data) {
-            let Some(mut r) = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else {
+            let r = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let Some(mut r) = r.filter(Value::is_object) else {
                 let _ = std::fs::remove_file(&f);
                 continue;
             };
             r["id"] = json!(id);
-            if !send(http, &url, &r).await {
+            if send(http, &url, &r).await == Sent::Retry {
                 break;
             }
             let _ = std::fs::remove_file(&f);
@@ -243,7 +284,7 @@ async fn round(app: &App, http: &reqwest::Client) {
     let last = app.data.join("telemetry_last");
     let sent = std::fs::read_to_string(&last).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
     // A few minutes' slack so an hourly round doesn't slip a day's report by an hour.
-    if usage_on && now().saturating_sub(sent) >= 86_400 - 600 && send(http, &url, &usage(app, &id)).await {
+    if usage_on && now().saturating_sub(sent) >= 86_400 - 600 && send(http, &url, &usage(app, &id)).await != Sent::Retry {
         let _ = std::fs::write(&last, now().to_string());
     }
 }
@@ -285,11 +326,65 @@ mod tests {
         }
         assert_eq!(preview(&app)["usage"]["repos"], 1);
         assert_eq!(preview(&app)["usage"]["warm_vms"], 2);
+        assert!(!app.data.join("telemetry_id").exists(), "looking at the preview must not create the id");
+    }
+
+    /// worker.js refuses a report whose fields differ: every report would be dropped.
+    #[test]
+    fn usage_fields_match_the_worker() {
+        let u = usage(&crate::test_app("telemetry-shape"), "0");
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            keys(&u),
+            [
+                "arch",
+                "auth",
+                "build",
+                "egress",
+                "features",
+                "host_mem_gb",
+                "host_threads",
+                "id",
+                "job_minutes_24h",
+                "jobs_24h",
+                "kind",
+                "max_vms",
+                "passed_24h",
+                "repos",
+                "sizes_24h",
+                "uptime_hours",
+                "version",
+                "vm_cpus",
+                "warm_vms"
+            ]
+        );
+        assert_eq!(keys(&u["features"]), ["auto_rebake", "auto_update", "cache", "confined", "debug_hold", "docker_mirror"]);
+    }
+
+    #[test]
+    fn opting_out_forgets_the_box() {
+        let app = crate::test_app("telemetry-optout");
+        let mut c = app.cfg();
+        c.usage_stats = Some(true);
+        c.crash_reports = Some(true);
+        apply(&app.data, &c);
+        assert!(install_id(&app.data).is_some());
+        std::fs::create_dir_all(app.data.join("crash")).unwrap();
+        // usage still on: the waiting crash files go, the id stays
+        c.crash_reports = Some(false);
+        apply(&app.data, &c);
+        assert!(!app.data.join("crash").exists());
+        assert!(read_id(&app.data).is_some());
+        // both off: the id goes too
+        c.usage_stats = None;
+        apply(&app.data, &c);
+        assert!(!app.data.join("telemetry_id").exists());
     }
 
     #[test]
     fn crash_files_are_capped() {
         let dir = std::env::temp_dir().join(format!("kiln-crash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         for _ in 0..MAX_PENDING + 5 {
             record(&dir, &json!({})).unwrap();
         }

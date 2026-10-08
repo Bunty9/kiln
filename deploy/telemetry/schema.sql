@@ -1,5 +1,6 @@
--- kiln telemetry: one row per usage report (at most one per install per UTC day) and
--- per crash report. No IP, user agent or other request metadata is stored.
+-- kiln telemetry: one row per usage report (at most one per install per UTC day) and per
+-- stored crash report (at most 20 per install per UTC day; more are accepted but dropped).
+-- No IP, user agent or other request metadata is stored.
 CREATE TABLE IF NOT EXISTS usage (
   id TEXT NOT NULL,
   day TEXT NOT NULL,

@@ -2,8 +2,8 @@
 
 A Cloudflare Worker with a D1 database that stores kiln's opt-in usage and crash reports
 (see `src/telemetry.rs` and SECURITY.md › Telemetry). It accepts only the exact fields kiln
-sends, stores no IP or request metadata, keeps at most one usage report per install per day
-and 20 crash reports per install per day.
+sends, stores no IP or request metadata, keeps at most one usage report per install per UTC
+day and 20 crash reports per install per UTC day.
 
 ## Deploy
 
@@ -16,7 +16,11 @@ npx wrangler deploy
 
 Then set `ENDPOINT` in `src/telemetry.rs` to `https://<worker host>/v1` and release. Until
 then kiln sends nothing. To test a Worker without a release, run kiln with
-`KILN_TELEMETRY_URL=https://<worker host>/v1`.
+`KILN_TELEMETRY_URL=https://<worker host>/v1` (anything not `https://` sends nothing).
+
+The Worker must accept exactly the fields kiln sends (`usage()` and `crash()` in
+`src/telemetry.rs`; the `usage_fields_match_the_worker` test pins kiln's side). Deploy a
+Worker change before the kiln release that needs it: kiln drops a report the Worker refuses.
 
 ## Queries
 

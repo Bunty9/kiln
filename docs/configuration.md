@@ -102,10 +102,10 @@ In practice a hold lasts `debug_hold_mins` only while the box has spare slots; u
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `usage_stats` | bool or null | `null` | | live | Send an anonymous usage report once a day. `null` means not chosen yet: the dashboard asks (Setup page, or an Overview banner), and nothing is sent. |
-| `crash_reports` | bool or null | `null` | | live | Record kiln's panics (version and code location only) and send them. `null` behaves like `false`. |
+| `usage_stats` | bool or null | `null` | | live (sending at the next hourly check) | Send an anonymous usage report about once a day. `null` means not chosen yet: it sends nothing, and the dashboard asks (Setup page, or an Overview banner) while either switch is `null`. |
+| `crash_reports` | bool or null | `null` | | live | Record kiln's panics (no panic message) and send them hourly. `null` means not chosen yet: nothing is recorded or sent, and the dashboard asks. Turning it off deletes waiting crash files at once. |
 
-What each report contains, and what it never contains, is in [SECURITY.md › Telemetry](../SECURITY.md#telemetry); Settings › Privacy shows the exact payload this box would send. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off whatever is set here.
+What each report contains, and what it never contains, is in [SECURITY.md › Telemetry](../SECURITY.md#telemetry); Settings › Privacy shows the usage report as this box would send it now, and an example crash report. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off whatever is set here.
 
 ### Warm pool
 
@@ -164,7 +164,7 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 | `HOME` | Used to find the default data directory. |
 | `DO_NOT_TRACK` | `1`, `true` or `yes`: no usage or crash reports, whatever `usage_stats` and `crash_reports` say. |
 | `KILN_TELEMETRY` | `0`, `false`, `no` or `off`: same as `DO_NOT_TRACK=1`. |
-| `KILN_TELEMETRY_URL` | An `https://` address to send reports to instead of the built-in one (for testing a receiver). |
+| `KILN_TELEMETRY_URL` | An `https://` address to send reports to instead of the built-in one (for testing a receiver). Set to anything else, nothing is sent. |
 
 kiln logs through `tracing` to stderr (the systemd journal for the user unit). To set a token for the unit, add `Environment=KILN_GITHUB_TOKEN=...` to the service, or save it from the dashboard instead.
 
@@ -210,9 +210,9 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
-  telemetry_id                   random install id for usage and crash reports; created when one is turned on, deleted when both are off
+  telemetry_id                   random install id for usage and crash reports; created at the first send, deleted as soon as both are off
   telemetry_last                 when the last usage report was sent
-  crash/                         crash reports not yet sent (at most 20; only while crash_reports is on)
+  crash/                         crash reports not yet sent (at most 20; only while crash_reports is on, deleted when it is turned off)
   audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

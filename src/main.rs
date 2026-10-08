@@ -77,7 +77,7 @@ pub struct Config {
     pub update_repo: String,
     /// Opt-in daily usage report (see telemetry.rs). None = not asked yet: the dashboard asks.
     pub usage_stats: Option<bool>,
-    /// Opt-in crash reports (panic location and version only). None = not asked yet.
+    /// Opt-in crash reports (no panic message; see telemetry.rs). None = not asked yet.
     pub crash_reports: Option<bool>,
     /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
     /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
@@ -414,12 +414,12 @@ impl App {
 
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
-        telemetry::apply(&c);
         *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
+        telemetry::apply(&self.data, &c);
         *w = c;
         Ok(())
     }
@@ -520,7 +520,7 @@ async fn run() -> Result<()> {
             .with_context(|| format!("chmod 0700 {}", data.display()))?;
     }
     let cfg = load_config(&data)?;
-    telemetry::apply(&cfg);
+    telemetry::apply(&data, &cfg);
     telemetry::install_hook(&data);
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
