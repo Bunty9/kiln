@@ -12,6 +12,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - **Swipe between tabs on phones.** A quick sideways swipe on the page moves to the next or previous bottom tab; it is ignored on form fields, the host graphs, anything that scrolls sideways, and at the screen edges (the browser's back gesture).
 - Job rows show where the code came from: branch, PR number, short commit and the run's title (commit message or PR title), plus the trigger when it is not a push or PR (manual, scheduled, ...). The job page shows the same, with the PR and commit linked to GitHub, and the workflow name with its run number. kiln records this on the VM when its runner picks up a job, so jobs from before the upgrade show none.
 
+- Help for the new pages: guides for Analytics & savings and for Privacy & reports (what each report holds, and how to turn both off for good with `DO_NOT_TRACK=1`), and "?" help on Settings › Analytics, Settings › Privacy, the Overview's Recent failures and a job's branch/PR/commit line. Getting started mentions swiping between tabs on phones, and the Jobs tip and Debug guide mention the new run details.
+
 ### Changed
 
 - README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, replaces the generated cover image with a recorded demo of the real dashboard (`docs/media/`), and links measured benchmarks with their method (`docs/benchmarks.md`).
