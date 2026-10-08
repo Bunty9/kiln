@@ -193,7 +193,7 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 
 **Kinds:** `generic` (signed JSON, below), `slack` (incoming webhook), `discord` (webhook) and `ntfy` (optional access token). The URL, the signing secret and the token are write-only: the API never returns them, and they are kept out of logs, the audit log and job VMs.
 
-**URL rules:** https only, no `user:password`, at most 2048 characters. Slack must be on `hooks.slack.com`; Discord on `discord.com` or `discordapp.com` under `/api/webhooks/`. Only public addresses are allowed. The "on my tailnet" option for a destination also allows `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, for a receiver on your tailnet such as `https://100.64.0.7/hook`. LAN, loopback, link-local, cloud metadata (`169.254.0.0/16`), other CGNAT, documentation, multicast and reserved ranges are always refused. IPv6 mapped, compatible, NAT64 and 6to4 addresses are judged by the IPv4 address inside them.
+**URL rules:** https only, no `user:password`, at most 2048 characters. Slack must be on `hooks.slack.com`; Discord on `discord.com` or `discordapp.com` under `/api/webhooks/`. Only public addresses are allowed. CGNAT `100.64.0.0/10` and IPv6 unique-local `fc00::/7` are refused unless the destination is marked "on my tailnet", which then allows only `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, for a receiver on your tailnet such as `https://100.64.0.7/hook`. LAN, loopback, link-local, cloud metadata (`169.254.0.0/16`), documentation, multicast and reserved ranges are always refused. IPv6 mapped, compatible, NAT64 and 6to4 addresses are judged by the IPv4 address inside them.
 
 **Events** (each destination picks job, health and security alerts):
 
@@ -203,11 +203,14 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 | `job.finished` | A job succeeded and a workflow rule (below) matches it. |
 | `health.raised`, `health.cleared` | A launch blocker (old image, GitHub registration outage, egress filtering broken, low memory or disk), a poll error, Landlock missing, or a failing destination. Sent only after the state has held for 2 scheduler ticks and 60 s. "Draining" is not announced. |
 | `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed. A save that changes nothing is not announced. Destination changes (added, changed, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
+| `more` | Rate-limit summary: "+N more events" in place of events beyond 30 a minute. |
 | `test` | The **Send test** button, at most once per destination every 10 s. |
 
-**Delivery:** each destination has its own queue (256 events; the oldest are dropped and counted) and is limited to 30 messages a minute, with the overflow folded into one "+N more events" message. A failed send is retried up to 3 times after about 5 s, 30 s and 2 min (±20 %). A 429 honours `Retry-After` (1–300 s); other 4xx responses and refused addresses are permanent. The client follows no redirects (a 3xx is a failure), ignores proxy environment variables, and uses a 5 s connect and 10 s total timeout. A destination that has failed for an hour, or permanently 3 times in a row, is "failing": the Overview shows a banner and the other destinations are told (never itself). On shutdown, alerts get up to 2 s to go out.
+**Delivery:** each destination has its own queue (256 events; the oldest are dropped and counted) and is limited to 30 messages a minute, with the overflow folded into one "+N more events" message. A failed send is retried up to 3 times after about 5 s, 30 s and 2 min (±20 %). A 429 honours `Retry-After` (1–300 s). 408, 429 and 5xx responses, timeouts and connection errors are retried; other 4xx responses, refused addresses and an invalid signing secret are permanent. The client follows no redirects (a 3xx is a failure), ignores proxy environment variables, and uses a 5 s connect and 10 s total timeout. A destination that has failed for an hour, or permanently 3 times in a row, is "failing": the Overview shows a banner and it is announced through the destinations that are not themselves failing. On shutdown, alerts get up to 2 s to go out.
 
-**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped with `mrkdwn` and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In chat targets a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are kiln's own GitHub job URLs on `https://github.com/`. The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
+**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped, `mrkdwn` off and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In Slack, Discord and ntfy a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are kiln's own GitHub job URLs on `https://github.com/`. The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
+
+**Limits:** names are 1–40 characters; an ntfy token is up to 200 printable ASCII characters.
 
 ### Workflow rules
 
@@ -219,7 +222,7 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 ]
 ```
 
-`repo` is `owner/name` or `*`; `workflow` is `*` or a file name such as `release.yml`; `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
+`repo` is `owner/name` or `*`; `workflow` is `*` or a file name such as `release.yml`; `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). `repo` must be one of your repos or `*`; `to` is 1–20 destination ids (8 hex characters), and unknown ids are rejected. Removing a destination prunes it from the rules and drops rules left empty. A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
 
 ### The generic payload
 
@@ -248,12 +251,15 @@ import base64, hashlib, hmac, time
 
 def verify(secret, headers, body: bytes) -> bool:
     id_, ts = headers["webhook-id"], headers["webhook-timestamp"]
-    if abs(time.time() - int(ts)) > 300:
+    try:
+        if abs(time.time() - int(ts)) > 300:
+            return False
+    except ValueError:
         return False
     key = base64.b64decode(secret.removeprefix("whsec_"))
     mac = hmac.new(key, f"{id_}.{ts}.".encode() + body, hashlib.sha256).digest()
     want = "v1," + base64.b64encode(mac).decode()
-    return any(hmac.compare_digest(want, s) for s in headers["webhook-signature"].split())
+    return any(hmac.compare_digest(want.encode(), s.encode()) for s in headers["webhook-signature"].split())
 ```
 
 Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub webhooks are a separate, future feature.

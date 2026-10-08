@@ -6,7 +6,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
-- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint, as Standard Webhooks-signed JSON. Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the others. Destination URLs, signing secrets and tokens are write-only and repo text is escaped per target. See docs/configuration.md.
+- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint, (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs, signing secrets and tokens are write-only and repo text is escaped per target. See docs/configuration.md.
 
 ### Security
 
