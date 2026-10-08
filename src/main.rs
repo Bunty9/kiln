@@ -1017,11 +1017,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     Ok(queued_by_repo)
 }
 
-/// Copy job page and queue time onto the VM whose runner picked the job up.
+/// Copy job page, queue time and run (branch, commit, PR) onto the VM whose runner picked the job up.
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
+fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool, vm::Run)>) {
     for (id, _) in runners.iter().filter(|(_, r)| r.2) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
             v.note = Some("refused: pull request from a fork".into());
@@ -1038,12 +1038,13 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at, _) = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) {
+            let (url, at, _, run) = runners.get(&v.id)?;
+            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) && v.run.as_ref() == Some(run) {
                 return None;
             }
             v.job_url = Some(url.clone());
             v.queued_at = Some(*at);
+            v.run = Some(run.clone());
             Some(v.clone())
         })
         .collect();
