@@ -652,6 +652,11 @@ const HELP = {
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
+  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min.", "analytics"],
+  privacy: ["Privacy", "Usage statistics and crash reports stay off unless you turn them on. This box sends them, never your browser, and they never include repo, account or host names, IPs, file paths, tokens or logs. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever is set here.", "privacy"],
+  runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when GitHub hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
+  failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes. The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
+  webhooks: ["Webhooks", "This box sends alerts to Slack, Discord, ntfy or any https URL, with no dashboard open. Each destination picks job, health and security alerts, and workflow rules add the successes you choose. A URL is a secret: it is never shown again after saving.", "alerts"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -664,7 +669,7 @@ const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class=
 const WFSCOPE = "This token can't create workflow files. Add the `workflow` scope (classic), or Contents, Pull requests and Workflows: write (fine-grained), then save it again.";
 const TIPS = {
   overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
-  jobs: "Every row is one throwaway VM that ran one job. Open a row for its timeline and logs.",
+  jobs: "Every row is one throwaway VM that ran one job, with the branch, PR and commit it ran for. Open a row for its timeline and logs.",
   job: "Console is boot and runner output, Steps is your steps live, and the GitHub log appears when the job ends.",
   repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
   settings: "Changes apply within seconds, with no restart. The listen address is the only exception: Overview then offers Restart when idle.",
@@ -1225,7 +1230,7 @@ pages.overview = {
     setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
     const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 15 * 60).slice(0, 3);
-    setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
+    setHTML($('#ov-fail'), f.length ? `<h2>Recent failures${hq('failures')}</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
     setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400;margin-left:auto">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
     hostCard();
   },
@@ -1288,7 +1293,7 @@ pages.job = {
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v)}</div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
@@ -1638,7 +1643,7 @@ const G = {
       return `<div class="card"><h2>Notifications</h2><label class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></label>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
-        <div class="card"><h2>Webhooks</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
+        <div class="card"><h2>Webhooks${hq('webhooks')}</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
           <div id="nlist" style="margin-top:12px"></div><div id="nsecret">${nSecretHTML()}</div><div id="nform" style="margin-top:12px">${nFormHTML()}</div></div>
         <div class="card"><h2>Workflow rules</h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Rules save with the other settings.</p>
           <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div></div>
@@ -1672,7 +1677,7 @@ const G = {
     },
   },
   privacy: {
-    html: () => consentUnset() ? consentHTML() + '<div class="card"><h2>What is sent</h2><div id="tel"></div></div>' : `<div class="card"><h2>Privacy</h2>
+    html: () => consentUnset() ? consentHTML() + '<div class="card"><h2>What is sent</h2><div id="tel"></div></div>' : `<div class="card"><h2>Privacy${hq('privacy')}</h2>
       <p class="fg2">Anonymous reports to kiln's maintainers, sent by this box (never by your browser). They never include repo, account or host names, IPs, file paths on this box, tokens or logs.</p>
       ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="f-${k}" data-k="${k}" aria-label="${l}" ${draft[k] ? 'checked' : ''}><span class="fg2 sm">${h}</span></label></div>`).join('')}</div>
       <div class="card"><h2>What is sent</h2><div id="tel"></div></div>`,
@@ -1843,7 +1848,7 @@ G.analytics = {
     if (!repos.includes(AN.repo)) AN.repo = ''; if (!sizes.includes(AN.cpus)) AN.cpus = 0;
     return `<div class="an"><div class="bar"><div class="seg" role="radiogroup" aria-label="Range">${[[1, '24 hours'], [7, '7 days'], [30, '30 days']].map(([v, l]) => `<button role="radio" aria-checked="${v === AN.r}" data-act="anr" data-v="${v}">${l}</button>`).join('')}</div>
       <label class="sr" for="an-repo">Repository</label><select id="an-repo" data-act="anrepo"><option value="">All repos</option>${repos.map(r => `<option ${r === AN.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
-      <label class="sr" for="an-cpu">VM size</label><select id="an-cpu" data-act="ancpu"><option value="0">All sizes</option>${sizes.map(c => `<option value="${c}" ${c === AN.cpus ? 'selected' : ''}>${c} cpu</option>`).join('')}</select></div><div id="an"></div></div>`;
+      <label class="sr" for="an-cpu">VM size</label><select id="an-cpu" data-act="ancpu"><option value="0">All sizes</option>${sizes.map(c => `<option value="${c}" ${c === AN.cpus ? 'selected' : ''}>${c} cpu</option>`).join('')}</select>${hq('analytics')}</div><div id="an"></div></div>`;
   },
   // Runs inside the poll: a drawing bug must not read as "kiln unreachable".
   live() { try { setHTML($('#an'), anHTML()); } catch (e) { console.error('analytics', e); setHTML($('#an'), `<div class="cal">Analytics could not be drawn: ${esc(e.message)}</div>`); } },
@@ -2000,7 +2005,8 @@ const GUIDES = [
     <p>You need three things:</p>
     <ol><li><b>A GitHub token</b> (Settings › GitHub), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
     <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
-    <p>Day to day, glance at Overview: banners mean something needs you.</p>`],
+    <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
+    <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
   ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
     ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
     <p>For another size, use exactly one size label:</p>
@@ -2010,10 +2016,19 @@ const GUIDES = [
     <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. macOS, Windows and GPUs are not supported.</p>`],
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
     <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
-    <p>The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
+    <p>Under the job's name you see the branch, PR and commit it ran for, linked to GitHub. The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
     <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
     <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
+  ['alerts', 'Alerts & webhooks', () => `<h2>Alerts &amp; webhooks</h2>
+    <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
+    <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Click <b>Send test</b> to check it.</p>
+    <p>Each destination picks what it gets:</p>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted.</li><li><b>Health:</b> something stops launches (an old image, a GitHub registration outage, a broken network filter, low memory or disk) or polling fails, and again when it clears.</li><li><b>Security:</b> settings saved (only the names of what changed), the GitHub token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. A failed job matched by a rule is still sent only once.</p>
+    <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
+    <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
+    <p><b>Generic</b> destinations are signed the Standard Webhooks way. The signing secret is shown once, when you create the destination or rotate its secret. To verify it, see Notifications in <code>docs/configuration.md</code>.</p>`],
   ['cache', 'Caching', () => `<h2>Caching</h2>
     <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
     <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch, or to one of the repo's <b>cache branches</b> (Repos › your repo). Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
@@ -2029,17 +2044,29 @@ const GUIDES = [
     <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in.</p>
     <p><b>By hand:</b> Settings › Image › Rebake image. It takes ~4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
     <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
+  ['analytics', 'Analytics & savings', () => `<h2>Analytics &amp; savings</h2>
+    <p>Settings › Analytics sums up finished jobs for the last 24 hours, 7 or 30 days, for all repos or one, and all VM sizes or one.</p>
+    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from GitHub queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try warm VMs (Repos › your repo).</li>
+    <li><b>Job minutes and Saved:</b> each job is rounded up to the minute, as GitHub bills it, and priced at the GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute). To use one flat rate instead, click the rate under the Overview stats.</li>
+    <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
+    <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
+    <p>Each chart's numbers are also a table under <b>Show numbers</b>.</p>`],
+  ['privacy', 'Privacy & reports', () => `<h2>Privacy &amp; reports</h2>
+    <p>kiln can send two kinds of anonymous report to its maintainers. Both are off until you choose; kiln asks once, during setup or with an Overview banner.</p>
+    <ul><li><b>Usage statistics:</b> once a day, the kiln version, host CPU and memory size, how many repos and VMs, which features are on, and job counts and minutes for the last 24 hours.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
+    <p>Neither includes repo, account or host names, IPs, file paths on this box, tokens or logs. This box sends them; your browser never does. Settings › Privacy shows the usage report exactly as it would be sent, and an example crash report.</p>
+    <p>To turn both off for good, whatever the dashboard says, set <code>DO_NOT_TRACK=1</code> in kiln's environment. Under systemd, run <code>systemctl --user edit kiln</code>, add these lines, then restart kiln:${cb('[Service]\nEnvironment=DO_NOT_TRACK=1')}</p>`],
   ['stuck', 'Troubleshooting', L => `<h2>Troubleshooting</h2><p><i>A job stays queued.</i> Check these in order:</p>
     <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
     <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li><li><i>Notifications failing:</i> a webhook destination keeps failing; its row in Settings › Notifications shows the last error.</li></ul></li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
     <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', cache: 'cache', network: 'network', image: 'image', stuck: 'help' };
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
     $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
       <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
