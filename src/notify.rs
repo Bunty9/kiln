@@ -8,7 +8,10 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
+use std::sync::Mutex;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -376,6 +379,117 @@ fn random<const N: usize>() -> [u8; N] {
     b
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Events {
+    pub job: bool,
+    pub health: bool,
+    pub security: bool,
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Events { job: true, health: true, security: true }
+    }
+}
+
+/// One destination as stored in `<data>/notify.json` (0600). `url`, `secret` and `token` are
+/// secrets: they leave this module only towards the destination itself.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Dest {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub tailnet: bool,
+    #[serde(default)]
+    pub link: bool,
+    #[serde(default)]
+    pub events: Events,
+}
+
+impl Dest {
+    pub fn host(&self) -> String {
+        reqwest::Url::parse(&self.url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "?".into())
+    }
+
+    /// How logs and audit notes name it: never the URL.
+    pub fn label(&self) -> String {
+        format!("{} ({})", self.name, self.host())
+    }
+
+    pub fn wants(&self, e: &Event) -> bool {
+        if e.to.iter().any(|t| t == &self.id) {
+            return true;
+        }
+        match e.class {
+            Class::Job => self.events.job,
+            Class::Health => self.events.health,
+            Class::Security => self.events.security,
+            Class::Direct => false,
+        }
+    }
+}
+
+#[derive(Serialize, Default, Clone)]
+pub struct Status {
+    pub last_ok: Option<u64>,
+    /// (when, what): an HTTP status or error kind, ≤ 200 chars, no secrets.
+    pub last_error: Option<(u64, String)>,
+    pub failing_since: Option<u64>,
+    pub permanent_streak: u32,
+    pub dropped: u64,
+}
+
+/// A missing file is no destinations. An unreadable one is an error and is never rewritten.
+pub fn load(data: &Path) -> Result<Vec<Dest>, String> {
+    match std::fs::read(data.join("notify.json")) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("notify.json unreadable ({e}): fix or remove it")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(format!("notify.json unreadable ({e}): fix or remove it")),
+    }
+}
+
+pub fn save(data: &Path, d: &[Dest]) -> anyhow::Result<()> {
+    crate::app_auth::write_private(&data.join("notify.json"), &serde_json::to_vec_pretty(d)?)
+}
+
+/// What the API and dashboard may see of a destination.
+pub fn public(d: &Dest, st: &Status) -> Value {
+    json!({ "id": d.id, "name": d.name, "kind": d.kind, "host": d.host(), "tailnet": d.tailnet, "link": d.link, "events": d.events, "status": st })
+}
+
+/// One destination's queue: bounded, dropping the oldest.
+#[derive(Default)]
+pub struct Queue {
+    pub q: Mutex<VecDeque<Event>>,
+    pub wake: tokio::sync::Notify,
+    /// Set when the destination was removed or replaced: the worker drains, then exits.
+    pub retired: std::sync::atomic::AtomicBool,
+}
+
+/// All notification state, on `App`.
+#[derive(Default)]
+pub struct Hub {
+    pub dests: Mutex<Vec<Dest>>,
+    /// Why notify.json could not be loaded (notifications off until fixed).
+    pub load_error: Mutex<Option<String>>,
+    pub status: Mutex<HashMap<String, Status>>,
+    pub queues: Mutex<HashMap<String, std::sync::Arc<Queue>>>,
+    /// VM ids already alerted, so a VM never alerts twice.
+    pub alerted: Mutex<std::collections::HashSet<String>>,
+    pub health: Mutex<HealthTrack>,
+    pub last_test: Mutex<HashMap<String, std::time::Instant>>,
+}
+
+/// Placeholder until the health tracker lands.
+#[derive(Default)]
+pub struct HealthTrack;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +703,54 @@ mod tests {
         for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://github.com/x|y>", "javascript:alert(1)"] {
             assert!(github_link(bad).is_none(), "{bad}");
         }
+    }
+
+    fn dest(kind: Kind, url: &str) -> Dest {
+        Dest {
+            id: "a1b2c3d4".into(),
+            name: "ops".into(),
+            kind,
+            url: url.into(),
+            secret: Some(new_secret()),
+            token: Some("tk_marker_9f3".into()),
+            tailnet: false,
+            link: false,
+            events: Events::default(),
+        }
+    }
+
+    #[test]
+    fn store_is_private_and_redacted() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("kiln-test-notify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(load(&d).unwrap().len(), 0, "missing file = none");
+        let x = dest(Kind::Slack, "https://hooks.slack.com/services/T000/B000/MARKERURL");
+        save(&d, std::slice::from_ref(&x)).unwrap();
+        assert_eq!(std::fs::metadata(d.join("notify.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load(&d).unwrap()[0].url, x.url);
+        let shown = public(&x, &Status::default()).to_string();
+        for secret in ["MARKERURL", "tk_marker_9f3", x.secret.as_deref().unwrap(), "services/T000"] {
+            assert!(!shown.contains(secret), "leaked {secret}: {shown}");
+        }
+        assert!(shown.contains("hooks.slack.com") && shown.contains("\"ops\""));
+        std::fs::write(d.join("notify.json"), "{not json").unwrap();
+        assert!(load(&d).is_err());
+        assert_eq!(std::fs::read_to_string(d.join("notify.json")).unwrap(), "{not json", "never rewritten");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn routing_obeys_switches_and_explicit_targets() {
+        let mut x = dest(Kind::Generic, "https://hooks.example.com/k");
+        let ev = |class, to: Vec<&str>| Event { ty: "test", class, detail: Detail::Test, to: to.into_iter().map(String::from).collect() };
+        assert!(x.wants(&ev(Class::Job, vec![])));
+        assert!(x.wants(&ev(Class::Job, vec!["ffffffff"])), "job-enabled destinations also get a failed job matching a rule");
+        x.events.job = false;
+        assert!(!x.wants(&ev(Class::Job, vec![])));
+        assert!(x.wants(&ev(Class::Job, vec!["a1b2c3d4"])), "a rule naming it wins over the switch");
+        assert!(!x.wants(&ev(Class::Direct, vec!["ffffffff"])));
+        assert!(x.wants(&ev(Class::Direct, vec!["a1b2c3d4"])));
     }
 }

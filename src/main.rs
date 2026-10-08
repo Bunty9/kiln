@@ -378,6 +378,8 @@ pub struct App {
     /// An update, restart or stop is draining: launch nothing (warm included), reap idle VMs.
     pub draining: AtomicBool,
     pub update: Mutex<update::Status>,
+    /// Outbound webhook notifications (destinations, queues, delivery status).
+    pub notify: notify::Hub,
 }
 
 impl App {
@@ -398,6 +400,7 @@ impl App {
             app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
             draining: Default::default(),
             update: Mutex::new(update::Status::load(&data)),
+            notify: Default::default(),
             data,
         }
     }
