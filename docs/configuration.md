@@ -98,6 +98,15 @@ In practice a hold lasts `debug_hold_mins` only while the box has spare slots; u
 | `auto_update` | bool | `false` | | live | Install a newer signed release by itself, once no job runs, no demand VM waits for one, no VM is held for debugging and no bake runs (looked at every minute after a successful check). Idle warm VMs do not hold it back; the drain reaps them. A version that was rolled back is never installed by itself again, only a newer one. See [Updates](#updates). |
 | `update_repo` | string | `"Bunty9/kiln"` | `owner/name` | live (next check) | Repository whose GitHub releases kiln checks and installs. Only releases signed with kiln's release key are installed, whatever the repo. |
 
+### Privacy
+
+| Field | Type | Default | Valid values | Applies | What it does |
+|---|---|---|---|---|---|
+| `usage_stats` | bool or null | `null` | | live (sending at the next hourly check) | Send an anonymous usage report about once a day. `null` means not chosen yet: it sends nothing, and the dashboard asks (Setup page, or an Overview banner) while either switch is `null`. |
+| `crash_reports` | bool or null | `null` | | live | Record kiln's panics (no panic message) and send them hourly. `null` means not chosen yet: nothing is recorded or sent, and the dashboard asks. Turning it off deletes waiting crash files at once. |
+
+What each report contains, and what it never contains, is in [SECURITY.md › Telemetry](../SECURITY.md#telemetry); Settings › Privacy shows the usage report as this box would send it now, and an example crash report. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off whatever is set here.
+
 ### Warm pool
 
 | Field | Type | Default | Valid values | Applies | What it does |
@@ -153,6 +162,9 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 | `KILN_GITHUB_TOKEN` | GitHub token, highest precedence. |
 | `GITHUB_TOKEN` | GitHub token, used when `KILN_GITHUB_TOKEN` is unset. |
 | `HOME` | Used to find the default data directory. |
+| `DO_NOT_TRACK` | `1`, `true` or `yes`: no usage or crash reports, whatever `usage_stats` and `crash_reports` say. |
+| `KILN_TELEMETRY` | `0`, `false`, `no` or `off`: same as `DO_NOT_TRACK=1`. |
+| `KILN_TELEMETRY_URL` | An `https://` address to send reports to instead of the built-in one (for testing a receiver). Set to anything else, nothing is sent. |
 
 kiln logs through `tracing` to stderr (the systemd journal for the user unit). To set a token for the unit, add `Environment=KILN_GITHUB_TOKEN=...` to the service, or save it from the dashboard instead.
 
@@ -276,6 +288,9 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
   notify.json                    notification destinations and their secrets, mode 0600
+  telemetry_id                   random install id for usage and crash reports; created at the first send, deleted as soon as both are off
+  telemetry_last                 when the last usage report was sent
+  crash/                         crash reports not yet sent (at most 20; only while crash_reports is on, deleted when it is turned off)
   audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

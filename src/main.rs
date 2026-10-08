@@ -5,6 +5,7 @@ mod github;
 mod host;
 mod mirror;
 mod notify;
+mod telemetry;
 mod update;
 mod vm;
 mod web;
@@ -77,6 +78,10 @@ pub struct Config {
     pub auto_update: bool,
     /// "owner/name" whose GitHub releases kiln updates from.
     pub update_repo: String,
+    /// Opt-in daily usage report (see telemetry.rs). None = not asked yet: the dashboard asks.
+    pub usage_stats: Option<bool>,
+    /// Opt-in crash reports (no panic message; see telemetry.rs). None = not asked yet.
+    pub crash_reports: Option<bool>,
     /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
     /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
     pub stop_grace_secs: u64,
@@ -115,6 +120,8 @@ impl Default for Config {
             warm_recycle_mins: 30,
             auto_update: false,
             update_repo: "Bunty9/kiln".into(),
+            usage_stats: None,
+            crash_reports: None,
             stop_grace_secs: 25,
         }
     }
@@ -456,6 +463,7 @@ impl App {
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
+        telemetry::apply(&self.data, &c);
         *w = c;
         Ok(())
     }
@@ -556,6 +564,8 @@ async fn run() -> Result<()> {
             .with_context(|| format!("chmod 0700 {}", data.display()))?;
     }
     let cfg = load_config(&data)?;
+    telemetry::apply(&data, &cfg);
+    telemetry::install_hook(&data);
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
     *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
@@ -613,6 +623,7 @@ async fn run() -> Result<()> {
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
+            tokio::spawn(telemetry::supervise(app.clone()));
             // In its own task: the dashboard keeps serving while a stop drains.
             let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
@@ -1118,12 +1129,12 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     Ok(queued_by_repo)
 }
 
-/// Copy job page and queue time onto the VM whose runner picked the job up.
+/// Copy job page, queue time and run (branch, commit, PR) onto the VM whose runner picked the job up.
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, github::JobRef>) {
-    for (id, _) in runners.iter().filter(|(_, r)| r.fork) {
+fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool, vm::Run)>) {
+    for (id, _) in runners.iter().filter(|(_, r)| r.2) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
             v.note = Some("refused: pull request from a fork".into());
             v.fork = true;
@@ -1140,18 +1151,14 @@ fn attach_jobs(app: &App, runners: &HashMap<String, github::JobRef>) {
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let r = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(&r.url)
-                && v.queued_at == Some(r.queued_at)
-                && v.run.as_ref() == Some(&r.run)
-                && v.fork == r.fork
-            {
+            let (url, at, fork, run) = runners.get(&v.id)?;
+            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) && v.run.as_ref() == Some(run) && v.fork == *fork {
                 return None;
             }
-            v.fork = r.fork;
-            v.job_url = Some(r.url.clone());
-            v.queued_at = Some(r.queued_at);
-            v.run = Some(r.run.clone());
+            v.fork = *fork;
+            v.job_url = Some(url.clone());
+            v.queued_at = Some(*at);
+            v.run = Some(run.clone());
             Some(v.clone())
         })
         .collect();
@@ -1185,12 +1192,7 @@ mod tests {
         app.vms.lock().unwrap().push(v.clone());
         v.id = "kiln-5-1".into();
         app.vms.lock().unwrap().push(v);
-        let r = |fork| github::JobRef {
-            url: "https://github.com/acme/kiln/actions/runs/1/job/2".into(),
-            queued_at: 1,
-            fork,
-            run: Default::default(),
-        };
+        let r = |fork| ("https://github.com/acme/kiln/actions/runs/1/job/2".to_string(), 1, fork, vm::Run::default());
         attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
         let vms = app.vms.lock().unwrap();
         assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));

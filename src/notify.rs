@@ -1000,7 +1000,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     }
     let Some(oc) = outcome(v) else { return };
     let ok = oc == "succeeded";
-    let wf = v.run.as_ref().map(|r| r.workflow.as_str()).filter(|w| !w.is_empty());
+    let wf = v.run.as_ref().map(|r| r.file.as_str()).filter(|w| !w.is_empty());
     let mut to: Vec<String> =
         app.cfg().notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
     if ok && to.is_empty() {
@@ -1021,8 +1021,8 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     let opt = |s: &str| (!s.is_empty()).then(|| clean(s));
     let info = JobInfo {
         repo: clean(&v.repo),
-        workflow: opt(&run.workflow),
-        workflow_name: opt(&run.workflow_name),
+        workflow: opt(&run.file),
+        workflow_name: opt(&run.workflow),
         job: clean(v.job.as_deref().unwrap_or("job")),
         branch: opt(&run.branch),
         event: opt(&run.event),
@@ -1452,12 +1452,12 @@ mod tests {
         .unwrap();
         v.state = state;
         v.result = result.map(String::from);
-        v.run = Some(crate::github::RunFacts {
-            run_id: 1,
-            workflow: "release.yml".into(),
-            workflow_name: "release".into(),
+        v.run = Some(crate::vm::Run {
+            file: "release.yml".into(),
+            workflow: "release".into(),
             branch: "main".into(),
             event: "push".into(),
+            ..Default::default()
         });
         v
     }

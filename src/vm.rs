@@ -78,6 +78,24 @@ pub fn take_newly_lost() -> Vec<Vm> {
     std::mem::take(&mut NEWLY_LOST.lock().unwrap())
 }
 
+/// The workflow run behind a VM's job, for the dashboard: where the code came from.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct Run {
+    pub branch: String,
+    pub sha: String,
+    /// Pull request number (same-repo PRs only: GitHub lists none for forks).
+    pub pr: Option<u64>,
+    /// `push`, `pull_request`, `workflow_dispatch`, ...
+    pub event: String,
+    /// Commit message head or PR title, as GitHub shows the run.
+    pub title: String,
+    pub workflow: String,
+    pub number: u64,
+    /// Workflow file name (e.g. `release.yml`), what `notify_rules` match on; empty if unknown.
+    #[serde(default)]
+    pub file: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Vm {
     pub id: String,
@@ -134,9 +152,9 @@ pub struct Vm {
     /// (no directory) and not counted as a job failure on the dashboard.
     #[serde(default)]
     pub mint_failed: bool,
-    /// The workflow run of the job this VM ran, from the queued scan.
+    /// Set once the runner picks up a job (see `attach_jobs`).
     #[serde(default)]
-    pub run: Option<crate::github::RunFacts>,
+    pub run: Option<Run>,
     /// The job came from a fork pull request, which kiln refuses to run.
     #[serde(default)]
     pub fork: bool,

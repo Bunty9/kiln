@@ -130,6 +130,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/onboard", get(onboard))
         .route("/api/onboard/hello", post(onboard_hello))
         .route("/api/bake", post(bake))
+        .route("/api/telemetry", get(|State(app): S| async move { Json(crate::telemetry::preview(&app)) }))
         .route("/api/update", get(update_get))
         .route("/api/update/check", post(update_check))
         .route("/api/update/apply", post(update_apply))

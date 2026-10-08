@@ -1,53 +1,26 @@
 # kiln
 
-![kiln: self-hosted CI that boots one fresh rootless VM per GitHub Actions job](docs/cover.jpg)
+[![check](https://github.com/Bunty9/kiln/actions/workflows/check.yml/badge.svg)](https://github.com/Bunty9/kiln/actions/workflows/check.yml)
+
+![kiln dashboard: a GitHub Actions job is queued, a VM boots in its slot, live step logs stream, and the VM is deleted when the job finishes](docs/media/demo.gif)
 
 Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions job.
 
-kiln is a single Rust binary with an embedded dashboard. It polls GitHub for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no tap devices, no runner fleet to babysit.
+kiln is a single Rust binary with an embedded dashboard. It polls GitHub for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
 
-## Why
+**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub. It runs on one host with no failover; while the box is down, jobs wait in GitHub's queue.
 
-- **Your hardware, no minutes.** An always-on Linux box (the reference setup is a Ryzen 7 on a Tailscale tailnet) replaces hosted runner minutes. kiln itself costs nothing to run per job.
-- **A clean machine for every job.** Each job gets its own VM with a private copy-on-write disk. Nothing survives the job, so there is no state to leak between runs and no cleanup to forget.
-- **Fast enough to feel like containers.** A job VM reaches "runner listening" in about 4 seconds (measured on the Ryzen box), and an opt-in warm pool brings job start-up down to about a second.
-- **Hosted-runner feel.** Real Docker, `services:`, `sudo apt install`, nested KVM and the usual `setup-*` actions work, because it is a real VM and not a container.
+**What you need:**
 
-## Features
+- **x86_64 Linux with KVM** (`/dev/kvm`, user in the `kvm` group). Jobs run in Ubuntu 24.04 x86_64 guests only: no macOS, Windows or arm64 jobs.
+- **Tailscale.** The dashboard answers only your tailnet (and the box itself, with a key). kiln polls GitHub, so no inbound port or public IP is needed.
+- **GitHub Actions.** kiln serves GitHub repos through a GitHub App or a token. GitLab, Gitea and Forgejo are not supported.
 
-- One VM per job, QEMU/KVM with direct kernel boot, on a qcow2 overlay of a frozen base image. Deleting the overlay erases the job.
-- Rootless: needs only `/dev/kvm` and QEMU. Runs as a systemd user service.
-- JIT runners (single-use, auto-deregistering) so no long-lived registration token sits on disk.
-- VM sizes chosen by label: `kiln`, `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu`, `kiln-16cpu`.
-- Demand-based scheduling by queued-job count, with memory, vCPU and disk gates and per-repo failure backoff.
-- Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch (or a configured cache branch such as `dev`) writes it.
-- Built-in Docker Hub pull-through mirror, so fresh VMs do not hit Docker Hub rate limits.
-- Optional filtered egress: job VMs reach the internet and the mirror only, not your LAN or tailnet.
-- Debug hold: a failed job's VM stays up for SSH for a while.
-- Optional warm pool of pre-booted idle VMs per repo.
-- Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
-- Installable as an app (PWA) over Tailscale HTTPS, with its own window, icon and shortcuts. See [Install as an app](docs/configuration.md#install-as-an-app).
-- Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
-- Fork pull requests refused by kiln itself, before any of their code runs.
-- Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.
-- **Alerts anywhere.** Job failures, chosen workflows, box health and security changes go to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints get Standard Webhooks signatures).
-
-## Requirements
-
-- Linux x86_64 with read/write access to `/dev/kvm` (the user must be in the `kvm` group).
-- `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale` on `PATH` (`kiln doctor` checks them).
-- About 15 GB of free disk at a minimum (kiln refuses to launch VMs below that), plus room for the base image, caches and the Docker mirror.
-- A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
-- The release binary is built on Ubuntu 24.04, so it needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later). To build from source you need Rust 1.89 or newer.
-- For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
+Full list: [Requirements](#requirements).
 
 ## Quick start
 
-On the CI box.
-
-### Install from a GitHub Release
-
-Two builds are published: `x86_64-linux` (glibc 2.39+, Ubuntu 24.04 / Debian 13 or newer) and `x86_64-linux-musl` (fully static, any x86_64 Linux).
+On the CI box, install the latest release:
 
 ```sh
 flavor=x86_64-linux          # or x86_64-linux-musl
@@ -74,29 +47,9 @@ openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in "$f" -sigf
 
 </details>
 
-After that, kiln updates itself from the dashboard (Settings › Updates), installing only releases signed with that key.
+`x86_64-linux` needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); `x86_64-linux-musl` is fully static and runs on any x86_64 Linux. You can also install [from crates.io or source](#other-ways-to-install).
 
-### Or install from crates.io
-
-The crate is `kiln-ci` (`kiln` is taken there); the binary is still `kiln`. `--root ~/.local` puts it where the service unit expects it.
-
-```sh
-cargo install kiln-ci --locked --root ~/.local
-v=$(kiln --version | awk '{print $2}')
-curl -fsSL "https://raw.githubusercontent.com/Bunty9/kiln/v$v/deploy/kiln.service" \
-  | install -Dm644 /dev/stdin ~/.config/systemd/user/kiln.service
-```
-
-### Or build from source
-
-```sh
-git clone https://github.com/Bunty9/kiln && cd kiln
-cargo build --release
-install -Dm755 target/release/kiln ~/.local/bin/kiln
-install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service
-```
-
-### Bake the image and start the service
+Then bake the image, start the service and open `http://<box>:7878` from a device on your tailnet. A first-run stepper walks through the token, a repo and a first job.
 
 ```sh
 kiln doctor        # checks KVM, tools, disk, memory, token, mirror, Tailscale
@@ -105,11 +58,109 @@ systemctl --user daemon-reload && systemctl --user enable --now kiln
 loginctl enable-linger $USER    # keep running while logged out
 ```
 
+Point a workflow at it:
+
+```yaml
+jobs:
+  test:
+    runs-on: [self-hosted, kiln]
+```
+
+## Why
+
+- **A clean machine for every job.** Each job gets its own VM with a private copy-on-write disk. Nothing survives the job, so no state leaks between runs and there is no cleanup to forget.
+- **Your hardware, no metered minutes.** An always-on Linux box replaces hosted runner minutes, and kiln costs nothing to run per job.
+- **Fast start.** Direct kernel boot takes a fresh VM to a listening runner in seconds, and an opt-in warm pool of pre-booted VMs shortens job start-up further. See [Performance](#performance) for measured numbers.
+- **Hosted-runner feel.** Real Docker, `services:`, `sudo apt install`, nested KVM and the usual `setup-*` actions work, because it is a real VM and not a container.
+- **Warm caches that pull requests cannot poison.** A per-repo cache disk keeps Docker layers and package caches between jobs. Any job reads it; only a successful push to the default branch writes it.
+
+## Performance
+
+| Metric (kiln v0.2.4, Ryzen 7 3700X, 32 GB, NVMe, 4 vCPU job VM) | kiln | GitHub `ubuntu-latest` |
+|---|---|---|
+| kiln's CI job (fmt, clippy, test, cargo-deny), warm cache | 57 s median (p95 60, n=11) | 157 s median (p95 168, n=11) |
+| Same job, empty Rust cache | 193 s median (p95 200, n=11) | — |
+| VM created → runner listening (kiln's VM records) | 10 s median (p95 15, min 9, max 36, n=100) | — |
+| Job queued → started, VM booted for the job (cold) | 23 s median (p95 47, min 17, max 50, n=13) | 2 s median (p95 3, n=15) |
+| Job queued → started, warm pool (1 pre-booted VM) | 4 s median (p95 10, min 3, max 15, n=11) | — |
+| `docker build` (examples/docker-build), first build in job | 2.5 s median (n=10) | 2.4 s median (n=10) |
+| Same build repeated | 0.83 s | 0.20 s |
+| 100 MiB HTTPS download | 44 Mbit/s | 269 Mbit/s |
+
+Most of the CI speedup comes from the persistent cache disk (tools and build artifacts survive between jobs); with an empty cache kiln is slower than a hosted runner. Network throughput is limited by user-mode networking and the box's uplink.
+
+Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, hardware details and raw numbers: [docs/benchmarks.md](docs/benchmarks.md).
+
+## Why not X?
+
+- **`actions/runner` directly on the box.** The simplest setup and just as fast, but every job shares one long-lived machine: files, processes, Docker images and credentials persist, and a pull request that runs there can leave something behind. Fine for one trusted repo. kiln gives each job a fresh VM and a single-use runner instead.
+- **[Actions Runner Controller](https://github.com/actions/actions-runner-controller) (ARC).** GitHub's open-source Kubernetes operator for autoscaling runners. The better choice if you already run Kubernetes and want runners spread across a cluster. kiln needs no Kubernetes and runs each job in a full VM rather than a pod.
+- **[actuated](https://actuated.com/).** A Firecracker microVM per job on your own servers, managed by a closed-source hosted control plane with a paid per-server subscription. The better choice if you want a supported commercial product, Arm builds or a fleet of servers. kiln is open source and free, has no external control plane, and uses full QEMU VMs.
+- **[RunsOn](https://runs-on.com/).** Ephemeral runners in your own AWS account, deployed as one CloudFormation stack, source-available under a commercial license (free for non-commercial use). The better choice if your compute lives in AWS and you want to scale out. kiln needs no cloud account and runs on hardware you already have.
+- **[Ubicloud](https://www.ubicloud.com/).** An open-source (AGPL) cloud that sells managed GitHub runners, x64 and arm64, billed per minute. The better choice if you want cheaper hosted runners and no machine to look after. With kiln, code and secrets stay on your own box.
+- **GitHub-hosted runners.** A fresh VM per job with zero maintenance, plus macOS, Windows and arm64, billed per minute on private repos. The better choice if you have no always-on box, need those platforms, or need more capacity than one host. kiln gives the same fresh-VM model on your own hardware, with persistent per-repo caches and no per-minute bill.
+
+## Features
+
+- One VM per job, QEMU/KVM with direct kernel boot, on a qcow2 overlay of a frozen base image. Deleting the overlay erases the job.
+- Rootless: needs only `/dev/kvm` and QEMU. Runs as a systemd user service. Each VM's QEMU runs under seccomp and, where the kernel supports it, Landlock.
+- JIT runners (single-use, auto-deregistering) so no long-lived registration token sits on disk.
+- VM sizes chosen by label: `kiln`, `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu`, `kiln-16cpu`.
+- Demand-based scheduling by queued-job count, with memory, vCPU and disk gates and per-repo failure backoff.
+- Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch (or a configured cache branch such as `dev`) writes it. Tag and release builds run without it.
+- Built-in Docker Hub pull-through mirror, so fresh VMs do not hit Docker Hub rate limits.
+- Optional filtered egress: job VMs reach the internet and the mirror only, not your LAN or tailnet.
+- Debug hold: a failed job's VM stays up for SSH for a while.
+- Optional warm pool of pre-booted idle VMs per repo.
+- Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
+- Installable as an app (PWA) over Tailscale HTTPS, with its own window, icon and shortcuts. See [Install as an app](docs/configuration.md#install-as-an-app).
+- Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
+- Fork pull requests refused by kiln itself, before any of their code runs.
+- Signed self-updates that roll back if the new version fails to start.
+- Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.
+- **Alerts anywhere.** Job failures, chosen workflows, box health and security changes go to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints get Standard Webhooks signatures).
+
+## Requirements
+
+- Linux x86_64 with read/write access to `/dev/kvm` (the user must be in the `kvm` group).
+- `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale` on `PATH` (`kiln doctor` checks them).
+- The box on a Tailscale tailnet. The dashboard answers only tailnet devices of the box's owner (or users in `allowed_users`), and the box itself with a dashboard key.
+- About 15 GB of free disk at a minimum (kiln refuses to launch VMs below that), plus room for the base image, caches and the Docker mirror.
+- A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
+- The `x86_64-linux` release binary needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the `x86_64-linux-musl` build does not. To build from source you need Rust 1.89 or newer.
+- For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
+
+## Installing and running
+
+### Other ways to install
+
+From crates.io: the crate is `kiln-ci` (`kiln` is taken there); the binary is still `kiln`. `--root ~/.local` puts it where the service unit expects it.
+
+```sh
+cargo install kiln-ci --locked --root ~/.local
+v=$(kiln --version | awk '{print $2}')
+curl -fsSL "https://raw.githubusercontent.com/Bunty9/kiln/v$v/deploy/kiln.service" \
+  | install -Dm644 /dev/stdin ~/.config/systemd/user/kiln.service
+```
+
+From source:
+
+```sh
+git clone https://github.com/Bunty9/kiln && cd kiln
+cargo build --release
+install -Dm755 target/release/kiln ~/.local/bin/kiln
+install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service
+```
+
+Then bake and start the service as in [Quick start](#quick-start).
+
+### The service
+
 The unit ([`deploy/kiln.service`](deploy/kiln.service)) runs `~/.local/bin/kiln serve` with `Restart=on-failure` and `KillMode=mixed`. On stop, kiln stops launching, gives running jobs up to `stop_grace_secs` (default 25) to finish, then kills its VMs and deregisters runners that never got a job; leftovers are swept at the next start. You can also bake from the dashboard instead of the CLI.
 
-### Open the dashboard
+### The dashboard
 
-Open `http://<box>:7878` from your own devices on the tailnet (or users in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve from Settings > Network, which publishes it at `https://<box>.<tailnet>.ts.net:8443`. The tailnet must have HTTPS certificates enabled (Tailscale admin console › DNS › HTTPS Certificates); without them kiln refuses and says so.
+Open `http://<box>:7878` from your own devices on the tailnet (or as a user listed in `allowed_users`). On first run a stepper walks through the token, the base image, a repo and a first job. To get HTTPS (needed for browser notifications), turn on Serve in Settings › Network, which publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443`. The tailnet must have HTTPS certificates enabled (Tailscale admin console › DNS › HTTPS Certificates); without them kiln refuses and says so.
 
 ### Setup
 
@@ -119,13 +170,7 @@ Open `http://<box>:7878` from your own devices on the tailnet (or users in `allo
 
 ## Using kiln in workflows
 
-```yaml
-jobs:
-  test:
-    runs-on: [self-hosted, kiln]
-```
-
-The label picks the VM size. Plain `kiln` gets the default size (`vm_cpus` / `vm_mem_mb`, 4 vCPU and 8 GB unless changed). Add exactly one size label to choose another:
+Jobs opt in with `runs-on: [self-hosted, kiln]`. The label picks the VM size. Plain `kiln` gets the default size (`vm_cpus` / `vm_mem_mb`, 4 vCPU and 8 GB unless changed). Add exactly one size label to choose another:
 
 | `runs-on` | vCPU | RAM |
 |---|---|---|
@@ -161,7 +206,7 @@ A job is root inside its own VM, and the dashboard holds a GitHub token, so kiln
 - **The dashboard** answers only tailnet peers whose Tailscale identity is the owner of the box (or is listed in `allowed_users`), and the box itself with a secret dashboard key. It checks the `Host` header and requires a custom `x-kiln` header on writes. Job VMs reach the host through QEMU's NAT and look like local traffic, which is why local access needs the key.
 - **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror. **Switch to filtered before running untrusted pull requests, such as ones from forks.**
 
-The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
+The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook, before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
 
 ## Configuration
 
@@ -179,6 +224,7 @@ Settings live in `~/.local/share/kiln/config.json` (override the directory with 
 | `warm` | `{}` | pre-booted idle VMs per repo |
 | `debug_hold_mins` | `0` | keep failed jobs for SSH |
 | `auto_update` | `false` | install new signed releases when idle |
+| `usage_stats` / `crash_reports` | unset (off) | opt-in anonymous reports, asked once on the dashboard |
 
 The full reference (every field, range, live-versus-restart behaviour, environment variables, the data directory layout and CLI commands) is in [docs/configuration.md](docs/configuration.md).
 
