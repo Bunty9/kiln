@@ -606,6 +606,58 @@ fn classify(status: u16, retry_after: Option<&str>) -> Outcome {
     }
 }
 
+/// The dashboard's own address for links: an https `.ts.net` URL, else none (a LAN or loopback
+/// address in a chat message is useless and leaks topology).
+fn dashboard_base() -> Option<String> {
+    // ponytail: no link until web.rs caches the serve URL; never shell out to tailscale from the send path
+    None::<String>.filter(|b| link_base_ok(b))
+}
+
+/// Only `https://<host>.ts.net[/...]` with nothing that could break out of a chat link.
+fn link_base_ok(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("https://") else { return false };
+    let host = rest.split('/').next().unwrap_or("");
+    host.ends_with(".ts.net") && !s.chars().any(|c| c.is_whitespace() || matches!(c, '|' | '<' | '>' | '"' | '\'' | '\\'))
+}
+
+/// Writes worth a security alert. Destination changes are announced by their own handlers
+/// (before the change, so a removed destination hears it), so they are not here.
+fn action_for(path: &str) -> Option<&'static str> {
+    match path {
+        "/api/config" => Some("settings changed"),
+        "/api/token" => Some("GitHub token replaced"),
+        p if p == "/api/app" || p.starts_with("/api/app/") => Some("GitHub App changed"),
+        _ => None,
+    }
+}
+
+/// The setting names in a `config_changes` note: `egress: "a" -> "b", repos` -> [egress, repos].
+/// Only identifier-like tokens, so a value containing ", " cannot inject text.
+fn changed_keys(note: &str) -> Vec<String> {
+    note.split(", ")
+        .filter_map(|p| p.split(':').next())
+        .map(str::trim)
+        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .take(20)
+        .map(String::from)
+        .collect()
+}
+
+/// Called by `web::admit` for every admitted, successful API write.
+pub fn security(app: &crate::App, actor: &str, path: &str, note: Option<&str>) {
+    let Some(action) = action_for(path) else { return };
+    let changed = note.map(changed_keys).unwrap_or_default();
+    emit(
+        app,
+        Event {
+            ty: "security.changed",
+            class: Class::Security,
+            to: vec![],
+            detail: Detail::Security(SecurityInfo { actor: clean(actor), action: action.into(), changed }),
+        },
+    );
+}
+
 /// One POST. Every message returned is a fixed string: never the URL, path, query or body.
 async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, open_for_tests: bool) -> Outcome {
     let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
@@ -613,8 +665,11 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, open_for_tests: boo
         return Outcome::Permanent("refused: internal address".into());
     }
     let id = format!("msg_{}", B64.encode(random::<12>()).replace(['+', '/', '='], ""));
-    let link = None; // Task 8 fills the kiln job link for `d.link` destinations.
-    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, &id, crate::now(), link) {
+    let link = match (&e.detail, d.link) {
+        (Detail::Job(j), true) => dashboard_base().map(|b| format!("{b}/#/jobs/{}", j.vm_id)),
+        _ => None,
+    };
+    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, &id, crate::now(), link.as_deref()) {
         Ok(r) => r,
         Err(m) => return Outcome::Permanent(m),
     };
@@ -1171,6 +1226,30 @@ pub fn routes() -> axum::Router<Arc<crate::App>> {
 mod tests {
     use super::*;
     use crate::vm::Vm;
+
+    #[test]
+    fn security_actions_and_keys() {
+        assert_eq!(action_for("/api/config"), Some("settings changed"));
+        assert_eq!(action_for("/api/token"), Some("GitHub token replaced"));
+        assert_eq!(action_for("/api/app/manifest"), Some("GitHub App changed"));
+        assert_eq!(action_for("/api/app"), Some("GitHub App changed"));
+        assert_eq!(action_for("/api/notify/a1b2c3d4"), None, "announced by the notify handlers themselves");
+        assert_eq!(action_for("/api/vms/kiln-1-0/kill"), None);
+        assert_eq!(changed_keys(r#"egress: "filtered" -> "open", repos, allowed_users"#), vec!["egress", "repos", "allowed_users"]);
+        assert!(changed_keys("").is_empty());
+        assert_eq!(changed_keys("a b: x, <b>, ok"), vec!["ok"]);
+    }
+
+    #[test]
+    fn link_base_is_https_tailnet_only() {
+        assert!(link_base_ok("https://box.tail1234.ts.net"));
+        assert!(!link_base_ok("http://box.tail1234.ts.net"));
+        assert!(!link_base_ok("https://evil.example"));
+        assert!(!link_base_ok("https://box.ts.net.evil.example"));
+        assert!(!link_base_ok("https://box.ts.net|x"));
+        assert!(!link_base_ok("https://box.ts.net/ a"));
+        assert!(!link_base_ok("https://box.ts.net\""));
+    }
 
     #[test]
     fn health_needs_two_ticks_and_a_minute() {

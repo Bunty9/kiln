@@ -629,12 +629,15 @@ async fn admit(app: Arc<App>, via: Via, req: Request, next: Next) -> Response {
         Err(denied) => denied,
     };
     if audited(&method, &path, admitted_ok) {
-        let mut e =
-            json!({ "actor": who.actor, "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
+        let mut e = json!({ "actor": who.actor.clone(), "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
         if let Some(n) = resp.extensions().get::<crate::audit::Note>() {
             e["note"] = n.0.clone().into();
         }
         crate::audit::record(&app.data, e);
+        if resp.status().is_success() {
+            let note = resp.extensions().get::<crate::audit::Note>().map(|n| n.0.clone());
+            crate::notify::security(&app, &who.actor, &path, note.as_deref());
+        }
     } else if audited(&method, &path, true) {
         tracing::info!(target: "audit", "audit: refused {method} {path} from {} ({}): {}", who.from, who.actor, resp.status());
     }
