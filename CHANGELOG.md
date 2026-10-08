@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- On a phone, swiping right to left between the bottom tabs no longer makes the tab bar jump or the page scroll glitch. The slide-in moved the whole page 32px past the right edge for a moment, which widened the page; it now moves only the page's content, which stays clipped.
+
 ## [0.2.5] - 2026-10-08
 
 ### Added
