@@ -80,7 +80,17 @@ jobs:
 
 ## Performance
 
-<!-- BENCHMARKS: table from docs/benchmarks.md (agent B) -->
+| Metric (kiln v0.2.4, Ryzen 7 3700X, 4 vCPU job VM) | kiln | GitHub `ubuntu-latest` |
+|---|---|---|
+| kiln's CI job (fmt, clippy, test, cargo-deny), warm cache | 57 s median (p95 60, n=11) | 157 s median (p95 168, n=11) |
+| Same job, empty Rust cache | 193 s median (p95 200, n=11) | — |
+| Guest kernel start → runner "Listening for Jobs" | 9 s median (p95 10, n=15) | — |
+| Job queued → started (idle box, no warm pool) | 22 s median (p95 32, n=15) | 2 s median (p95 3, n=15) |
+| `docker build` (examples/docker-build), first build in job | 2.5 s median (n=10) | 2.4 s median (n=10) |
+| Same build repeated | 0.83 s | 0.20 s |
+| 100 MiB HTTPS download | 44 Mbit/s | 269 Mbit/s |
+
+Most of the CI speedup comes from the persistent cache disk (tools and build artifacts survive between jobs); with an empty cache kiln is slower than a hosted runner. Network throughput is limited by user-mode networking and the box's uplink. The warm pool was not measured yet.
 
 Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, hardware details and raw numbers: [docs/benchmarks.md](docs/benchmarks.md).
 
