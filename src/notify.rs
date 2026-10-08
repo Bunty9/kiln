@@ -110,6 +110,10 @@ pub fn check_url(kind: Kind, url: &str, tailnet: bool) -> Result<reqwest::Url, S
         return Err("the URL is longer than 2048 characters".into());
     }
     let u = reqwest::Url::parse(url).map_err(|e| format!("not a URL: {e}"))?;
+    // What is stored is the normalised form, which percent-encoding can make longer.
+    if u.as_str().len() > 2048 {
+        return Err("the URL is longer than 2048 characters".into());
+    }
     if u.scheme() != "https" {
         return Err("the URL must start with https://".into());
     }
@@ -1667,6 +1671,10 @@ mod tests {
         assert!(!ok(Kind::Generic, &format!("https://example.com/{}", "a".repeat(2100))));
         assert!(check_url(Kind::Ntfy, "https://100.64.0.7/alerts", true).is_ok(), "tailnet opt-in");
         assert!(check_url(Kind::Ntfy, "https://100.64.0.7/alerts", false).is_err());
+        // Under 2048 as typed, over it once percent-encoded (each space becomes %20): refused at save.
+        let long = format!("https://ntfy.sh/a{}b", " ".repeat(1000));
+        assert!(long.len() < 2048);
+        assert_eq!(check_url(Kind::Ntfy, &long, false).unwrap_err(), "the URL is longer than 2048 characters");
     }
 
     fn job(repo: &str, job: &str, branch: &str) -> Event {

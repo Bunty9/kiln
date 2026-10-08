@@ -214,7 +214,7 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 | `job.failed` | A job failed, was cancelled, was killed after it started, timed out, or was lost when kiln restarted. Once per VM. Runner-registration failures are not jobs and are never sent, and neither are fork pull request jobs that kiln refuses. |
 | `job.finished` | A job succeeded and a workflow rule (below) matches it. |
 | `health.raised`, `health.cleared` | A launch blocker (old image, GitHub registration outage, egress filtering broken, low memory or disk), a poll error, Landlock missing, or a failing destination. Sent only after the state has held for 2 scheduler ticks and 60 s. "Draining" is not announced. |
-| `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed (created, converted or removed). A save that changes nothing is not announced. Destination changes (added, changed with the names of the changed fields, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
+| `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed (created, converted or removed). A settings save that changes nothing is not announced; saving a destination always is. Destination changes (added, changed with the names of the changed fields, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
 | `more` | Rate-limit summary: "+N more events" in place of events beyond 30 a minute. |
 | `test` | The **Send test** button, at most once per destination every 10 s. |
 
