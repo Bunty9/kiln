@@ -7,6 +7,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Added
 
 - A `check` workflow runs format, clippy, tests and the dashboard and service worker syntax checks on a GitHub-hosted runner for every push to main and every pull request, forks included (read-only token, no secrets).
+- **Settings › Analytics.** Jobs, success rate, median and p95 job time, time to start, job minutes and savings for the last 24 hours, 7 or 30 days, filtered by repo and VM size; stacked charts of jobs by outcome and minutes by VM size, the median queue/boot/wait/job split, a per-repo table and the slowest jobs. Each chart's numbers are also a table under "Show numbers". A last chart reads the usage ledger, so it includes jobs older than the newest 100 VMs (last 30 UTC days, by the day each job finished).
+- **Swipe between tabs on phones.** A quick sideways swipe on the page moves to the next or previous bottom tab; it is ignored on form fields, the host graphs, anything that scrolls sideways, and at the screen edges (the browser's back gesture).
 
 ### Changed
 
