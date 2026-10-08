@@ -10,7 +10,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
-- README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, and drops the cover image.
+- README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, replaces the generated cover image with a recorded demo of the real dashboard (`docs/media/`), and links measured benchmarks with their method (`docs/benchmarks.md`).
 - `docs/stacks.md` drops planned or nonexistent items (`kiln status`, forking kiln) and links GitHub's official pricing docs for the hosted runner prices it quotes. `CONTRIBUTING.md` describes the current `src/` layout.
 
 ## [0.2.4] - 2026-10-08
