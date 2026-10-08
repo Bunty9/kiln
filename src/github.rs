@@ -425,14 +425,14 @@ impl Gh {
     /// Queued jobs per VM size (see `job_size`), counted once per job id.
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
-    /// runner name -> (job page, queued-at unix time, from a fork), and the
+    /// runner name -> (job page, queued-at unix time, from a fork, its run), and the
     /// number of queued fork jobs refused (never counted as demand).
     pub async fn queued_jobs(
         &self,
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool)>, usize)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool, crate::vm::Run)>, usize)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -460,7 +460,7 @@ impl Gh {
                         && let Some(url) = j["html_url"].as_str()
                         && let Some(at) = j["created_at"].as_str().and_then(parse_rfc3339)
                     {
-                        ours.insert(name.to_string(), (url.to_string(), at, fork));
+                        ours.insert(name.to_string(), (url.to_string(), at, fork, run_info(run)));
                     }
                 }
             }
@@ -818,6 +818,19 @@ fn unsafe_branch(branch: &str) -> Option<String> {
 
 /// Did this run's code come from another repository (a fork PR)? Fails closed:
 /// a run whose head repository is gone (deleted fork) counts as a fork.
+fn run_info(run: &Value) -> crate::vm::Run {
+    let s = |k: &str| run[k].as_str().unwrap_or("").chars().take(200).collect::<String>();
+    crate::vm::Run {
+        branch: s("head_branch"),
+        sha: s("head_sha"),
+        pr: run["pull_requests"].as_array().and_then(|p| p.first()).and_then(|p| p["number"].as_u64()),
+        event: s("event"),
+        title: s("display_title"),
+        workflow: s("name"),
+        number: run["run_number"].as_u64().unwrap_or_default(),
+    }
+}
+
 fn is_fork_run(run: &Value) -> bool {
     match (run["head_repository"]["full_name"].as_str(), run["repository"]["full_name"].as_str()) {
         (Some(head), Some(base)) => !head.eq_ignore_ascii_case(base),
@@ -930,6 +943,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn run_info_reads_branch_pr_and_commit() {
+        let run = serde_json::json!({"head_branch": "fix", "head_sha": "abcdef1234", "event": "pull_request",
+            "display_title": "Fix it", "name": "CI", "run_number": 12, "pull_requests": [{"number": 42}]});
+        let r = run_info(&run);
+        assert_eq!((r.branch.as_str(), r.sha.as_str(), r.pr, r.event.as_str()), ("fix", "abcdef1234", Some(42), "pull_request"));
+        assert_eq!((r.title.as_str(), r.workflow.as_str(), r.number), ("Fix it", "CI", 12));
+        assert_eq!(run_info(&serde_json::json!({})), crate::vm::Run::default());
+    }
 
     #[test]
     fn mint_errors() {

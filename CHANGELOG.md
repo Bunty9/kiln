@@ -4,6 +4,14 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Job rows show where the code came from: branch, PR number, short commit and the run's title (commit message or PR title), plus the trigger when it is not a push or PR (manual, scheduled, ...). The job page shows the same, with the PR and commit linked to GitHub, and the workflow name with its run number. kiln records this on the VM when its runner picks up a job, so jobs from before the upgrade show none.
+
+### Changed
+
+- The Overview's Recent failures section shows only jobs that failed in the last 15 minutes (it was 7 days), and is hidden when there are none.
+
 ## [0.2.4] - 2026-10-08
 
 ### Security

@@ -221,12 +221,14 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .row[aria-current]{box-shadow:inset 3px 0 var(--accent);background:color-mix(in srgb,var(--accent) 7%,var(--s1))}
 .row .tt{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .row .tt .r{color:var(--fg-2);font-weight:400}.row .id{display:block;font:12px var(--mono);color:var(--fg-2)}
+.row .g{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;color:var(--fg-2);white-space:nowrap}.row .g .i{width:12px;height:12px;flex:none}.row .g>span{flex:none}.row .g .gt{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .row .w{color:var(--fg-2)}.row .d{text-align:right}.row .m{display:none}
 :root[data-density=compact] .row{padding-top:4px;padding-bottom:4px}
 @media(max-width:719px){
  .row{grid-template-columns:96px minmax(0,1fr);grid-template-areas:"b t" "b m";gap:2px 12px;min-height:56px}
  .row .bd{grid-area:b;align-self:start;padding-top:2px}.row .t{grid-area:t}.row .m{grid-area:m;display:block;font-size:12px;color:var(--fg-2)}
  .row .w,.row .d,.row .id{display:none}
+ .row .g{flex-wrap:wrap;row-gap:0}.row .g .gt{flex-basis:100%}
 }
 .rr{grid-template-columns:minmax(0,1fr) 160px 104px 80px}
 .rr .nm{font-weight:500;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -331,7 +333,7 @@ input[role=switch]:disabled{opacity:.5;cursor:not-allowed}
 .empty .acts{display:flex;flex-wrap:wrap;gap:8px}
 .empty.card{padding:24px var(--pad);border:0}
 /* job page and the firing log (timeline) */
-.jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:13px;color:var(--fg-2)}
+.jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:13px;color:var(--fg-2)}.jm .i{width:14px;height:14px;vertical-align:-2px;margin-right:4px}.jm a{color:inherit}
 .tl{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--muted)}
 .tl i{display:block;min-width:4px;background:var(--queued);outline-offset:-2px}
 .tl i:first-child{border-radius:5px 0 0 5px}.tl i:last-child{border-radius:0 5px 5px 0}
@@ -486,6 +488,7 @@ dialog input{width:100%;margin-top:16px}
 <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 6v4l2.75 1.75"/></symbol>
 <symbol id="i-copy" viewBox="0 0 20 20"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4.5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v.5"/></symbol>
 <symbol id="i-dl" viewBox="0 0 20 20"><path d="M10 3v10m-4-4 4 4 4-4M3.5 16.5h13"/></symbol>
+<symbol id="i-branch" viewBox="0 0 20 20"><circle cx="6" cy="4.5" r="1.8"/><circle cx="6" cy="15.5" r="1.8"/><circle cx="14" cy="5.5" r="1.8"/><path d="M6 6.3v7.4M14 7.3c0 4-8 2.5-8 6.4"/></symbol>
 <symbol id="i-ext" viewBox="0 0 20 20"><path d="M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5V15a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V7.5A1.5 1.5 0 0 1 5 6h3.5"/></symbol>
 <symbol id="i-refresh" viewBox="0 0 20 20"><path d="M16.25 10A6.25 6.25 0 1 1 14 5.2M14.5 2.5v3h-3"/></symbol>
 <symbol id="i-kill" viewBox="0 0 20 20"><path d="M7 2.75h6L17.25 7v6L13 17.25H7L2.75 13V7Z"/><path d="m7.75 7.75 4.5 4.5m0-4.5-4.5 4.5"/></symbol>
@@ -932,9 +935,22 @@ addEventListener('hashchange', async () => {
 const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !S.vms.length;
 
 /* ---------- overview ---------- */
+// Job page: the same, linked to GitHub.
+function runMeta(v) {
+  const r = v.run; if (!r) return '';
+  const gh = `https://github.com/${v.repo}`;
+  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? `<a href="${ghUrl(`${gh}/pull/${+r.pr}`)}" target="_blank" rel="noopener"${kt('Pull request')}>PR #${+r.pr}</a>` : ''}${r.sha ? `<a class="mono" href="${ghUrl(`${gh}/commit/${encodeURIComponent(r.sha)}`)}" target="_blank" rel="noopener"${kt('Commit')}>${esc(r.sha.slice(0, 7))}</a>` : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
+}
+// Where the job's code came from: branch, PR, commit, and the run's title.
+const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', schedule: 'scheduled' };
+function gitLine(v) {
+  const r = v.run; if (!r) return '';
+  const ev = r.event in EV ? EV[r.event] : r.event;
+  return `<span class="g">${ic('branch')}<span>${esc(r.branch)}</span>${r.pr ? `<span>#${+r.pr}</span>` : ''}${r.sha ? `<span class="mono">${esc(r.sha.slice(0, 7))}</span>` : ''}${ev ? `<span>${esc(ev)}</span>` : ''}${r.title ? `<span class="gt">${esc(r.title)}</span>` : ''}</span>`;
+}
 function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
-  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>`;
+  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>${gitLine(v)}`;
   return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}${tip([STATE[status(v)]?.[1], 'Started ' + when(v.started)].filter(Boolean).join('\n'))}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
     <span class="w"${tip('Started ' + when(v.started))}>${relH(v.started)}</span><span class="d"${tip(ACTIVE(v) ? 'Running for' : 'Job time: from the job starting to the VM ending')}>${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
@@ -1188,7 +1204,7 @@ pages.overview = {
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
     setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
-    const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
+    const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 15 * 60).slice(0, 3);
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
     setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400;margin-left:auto">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
     hostCard();
@@ -1252,7 +1268,7 @@ pages.job = {
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v)}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
