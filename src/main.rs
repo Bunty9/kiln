@@ -38,6 +38,8 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// Which finished jobs notify which destinations (see notify.rs).
+    pub notify_rules: Vec<notify::Rule>,
     /// GitHub App mode: accounts (user or org logins) whose installations are served,
     /// besides the App owner's. Empty = the owner's only.
     pub app_accounts: Vec<String>,
@@ -95,6 +97,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            notify_rules: vec![],
             app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
@@ -556,6 +559,7 @@ async fn run() -> Result<()> {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
+            notify::start(&app);
             let (ok, d) = confine::probe();
             confine::ENFORCED.store(ok, std::sync::atomic::Ordering::Relaxed);
             match ok {
@@ -750,6 +754,7 @@ async fn shutdown(app: &Arc<App>) {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    notify::flush(app).await;
 }
 
 /// Seconds between App discoveries: 30 while it serves no repo or has never discovered

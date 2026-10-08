@@ -773,6 +773,250 @@ pub fn start(app: &Arc<crate::App>) {
     }
 }
 
+use axum::extract::{Path as UrlPath, State};
+use axum::http::StatusCode;
+use axum::{Extension, Json};
+
+/// A notification rule (matching comes with the rules task): which finished jobs go to which destinations.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Rule {
+    pub repo: String,
+    pub workflow: String,
+    pub outcome: String,
+    pub to: Vec<String>,
+}
+
+/// Who made an admitted request, set by `web::admit` for handlers that announce changes.
+#[derive(Clone)]
+pub struct Actor(pub String);
+
+type ApiResult<T> = Result<T, (StatusCode, String)>;
+type Noted = ApiResult<(Extension<crate::audit::Note>, Json<Value>)>;
+
+fn bad(m: impl Into<String>) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, m.into())
+}
+
+fn missing() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such destination".to_string())
+}
+
+#[derive(Deserialize)]
+pub struct DestBody {
+    name: String,
+    kind: Kind,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    tailnet: bool,
+    #[serde(default)]
+    link: bool,
+    #[serde(default)]
+    events: Option<Events>,
+}
+
+fn new_id() -> String {
+    random::<4>().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Validate `b` into `d` (an existing destination for edits, or a fresh one).
+fn apply(b: DestBody, mut d: Dest, others: &[Dest]) -> ApiResult<Dest> {
+    let name = b.name.trim();
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err(bad("name: 1 to 40 characters"));
+    }
+    if others.iter().any(|o| o.id != d.id && o.name.eq_ignore_ascii_case(name)) {
+        return Err(bad("another destination already has that name"));
+    }
+    if b.kind != d.kind && b.url.as_deref().is_none_or(|u| u.trim().is_empty()) {
+        return Err(bad("changing the kind needs the URL again"));
+    }
+    d.name = name.to_string();
+    d.kind = b.kind;
+    d.tailnet = b.tailnet;
+    d.link = b.link;
+    if let Some(ev) = b.events {
+        d.events = ev;
+    }
+    if let Some(u) = b.url.filter(|u| !u.trim().is_empty()) {
+        d.url = check_url(d.kind, &u, d.tailnet).map_err(bad)?.to_string();
+    } else {
+        // Re-check the stored URL: `tailnet` may have just been switched off.
+        check_url(d.kind, &d.url, d.tailnet).map_err(bad)?;
+    }
+    match b.token.map(|t| t.trim().to_string()) {
+        Some(t) if d.kind == Kind::Ntfy && !t.is_empty() => {
+            if t.len() > 200 || !t.chars().all(|c| c.is_ascii_graphic()) {
+                return Err(bad("ntfy token: up to 200 visible ASCII characters"));
+            }
+            d.token = Some(t);
+        }
+        _ if d.kind != Kind::Ntfy => d.token = None,
+        _ => {}
+    }
+    if d.kind == Kind::Generic && d.secret.is_none() {
+        d.secret = Some(new_secret());
+    }
+    if d.kind != Kind::Generic {
+        d.secret = None;
+    }
+    Ok(d)
+}
+
+fn announce(app: &crate::App, actor: &str, action: String) {
+    emit(
+        app,
+        Event {
+            ty: "security.changed",
+            class: Class::Security,
+            to: vec![],
+            detail: Detail::Security(SecurityInfo { actor: clean(actor), action, changed: vec![] }),
+        },
+    );
+}
+
+fn persist(app: &crate::App, ds: &[Dest]) -> ApiResult<()> {
+    // The io error names the path, never a destination's contents.
+    save(&app.data, ds).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("saving notify.json: {e:#}")))
+}
+
+/// Stop a destination's worker after it drains what is queued (the announcement included).
+fn retire(app: &crate::App, id: &str) {
+    if let Some(q) = app.notify.queues.lock().unwrap().remove(id) {
+        q.retired.store(true, std::sync::atomic::Ordering::SeqCst);
+        q.wake.notify_one();
+    }
+}
+
+async fn list(State(app): State<Arc<crate::App>>) -> Json<Value> {
+    Json(state_json(&app))
+}
+
+/// The redacted destination list plus `load_error`: no URL, secret or token.
+pub fn state_json(app: &crate::App) -> Value {
+    let st = app.notify.status.lock().unwrap();
+    let ds: Vec<Value> = app.notify.dests.lock().unwrap().iter().map(|d| public(d, &st.get(&d.id).cloned().unwrap_or_default())).collect();
+    json!({ "dests": ds, "load_error": *app.notify.load_error.lock().unwrap() })
+}
+
+async fn create(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, Json(b): Json<DestBody>) -> Noted {
+    if app.notify.load_error.lock().unwrap().is_some() {
+        return Err(bad("notify.json is unreadable: fix or remove it first"));
+    }
+    if b.url.as_deref().is_none_or(|u| u.trim().is_empty()) {
+        return Err(bad("url is required"));
+    }
+    let mut ds = app.notify.dests.lock().unwrap().clone();
+    if ds.len() >= 20 {
+        return Err(bad("at most 20 destinations"));
+    }
+    let blank = Dest {
+        id: new_id(),
+        name: String::new(),
+        kind: b.kind,
+        url: String::new(),
+        secret: None,
+        token: None,
+        tailnet: false,
+        link: false,
+        events: Events::default(),
+    };
+    let d = apply(b, blank, &ds)?;
+    ds.push(d.clone());
+    persist(&app, &ds)?;
+    *app.notify.dests.lock().unwrap() = ds;
+    spawn_worker(&app, d.clone());
+    let what = format!("added notification destination {} ({:?})", d.label(), d.kind);
+    announce(&app, &actor.0, what.clone());
+    let shown = public(&d, &Status::default());
+    Ok((Extension(crate::audit::Note(what)), Json(json!({ "dest": shown, "secret": d.secret }))))
+}
+
+async fn update(
+    State(app): State<Arc<crate::App>>,
+    Extension(actor): Extension<Actor>,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<DestBody>,
+) -> Noted {
+    let mut ds = app.notify.dests.lock().unwrap().clone();
+    let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
+    let url_changed = b.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+    let new = apply(b, ds[i].clone(), &ds)?;
+    let what = format!("changed notification destination {}{}", new.label(), if url_changed { " (new URL)" } else { "" });
+    // Announced before the change, so the old target hears it too.
+    announce(&app, &actor.0, what.clone());
+    ds[i] = new.clone();
+    persist(&app, &ds)?;
+    *app.notify.dests.lock().unwrap() = ds;
+    retire(&app, &id);
+    spawn_worker(&app, new.clone());
+    let st = app.notify.status.lock().unwrap().get(&id).cloned().unwrap_or_default();
+    Ok((Extension(crate::audit::Note(what)), Json(json!({ "dest": public(&new, &st) }))))
+}
+
+async fn rotate(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, UrlPath(id): UrlPath<String>) -> Noted {
+    let mut ds = app.notify.dests.lock().unwrap().clone();
+    let d = ds.iter_mut().find(|d| d.id == id).ok_or_else(missing)?;
+    if d.kind != Kind::Generic {
+        return Err(bad("only generic destinations have a signing secret"));
+    }
+    let secret = new_secret();
+    d.secret = Some(secret.clone());
+    let (what, d2) = (format!("rotated the signing secret of {}", d.label()), d.clone());
+    persist(&app, &ds)?;
+    *app.notify.dests.lock().unwrap() = ds;
+    retire(&app, &id);
+    spawn_worker(&app, d2);
+    announce(&app, &actor.0, what.clone());
+    Ok((Extension(crate::audit::Note(what)), Json(json!({ "secret": secret }))))
+}
+
+async fn remove(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, UrlPath(id): UrlPath<String>) -> Noted {
+    let mut ds = app.notify.dests.lock().unwrap().clone();
+    let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
+    let what = format!("removed notification destination {}", ds[i].label());
+    announce(&app, &actor.0, what.clone());
+    ds.remove(i);
+    persist(&app, &ds)?;
+    *app.notify.dests.lock().unwrap() = ds;
+    retire(&app, &id);
+    app.notify.status.lock().unwrap().remove(&id);
+    // Rules naming it lose that target; a rule left with none is dropped.
+    let mut c = app.cfg();
+    c.notify_rules.iter_mut().for_each(|r| r.to.retain(|t| t != &id));
+    c.notify_rules.retain(|r| !r.to.is_empty());
+    if c.notify_rules != app.cfg().notify_rules {
+        app.save_cfg(c).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    }
+    Ok((Extension(crate::audit::Note(what)), Json(json!({ "ok": true }))))
+}
+
+async fn test(State(app): State<Arc<crate::App>>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
+    if !app.notify.dests.lock().unwrap().iter().any(|d| d.id == id) {
+        return Err(missing());
+    }
+    {
+        let mut lt = app.notify.last_test.lock().unwrap();
+        if lt.get(&id).is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "one test every 10 seconds".into()));
+        }
+        lt.insert(id.clone(), std::time::Instant::now());
+    }
+    emit(&app, Event { ty: "test", class: Class::Direct, detail: Detail::Test, to: vec![id] });
+    Ok(Json(json!({ "queued": true })))
+}
+
+pub fn routes() -> axum::Router<Arc<crate::App>> {
+    use axum::routing::{get, post, put};
+    axum::Router::new()
+        .route("/api/notify", get(list).post(create))
+        .route("/api/notify/{id}", put(update).delete(remove))
+        .route("/api/notify/{id}/rotate", post(rotate))
+        .route("/api/notify/{id}/test", post(test))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,5 +1427,89 @@ mod tests {
         let t = std::time::Instant::now();
         flush(&app).await;
         assert!(t.elapsed() >= Duration::from_millis(1900), "busy waits for the cap");
+    }
+
+    // Handlers are called directly (no router): a handler error maps to its status code.
+    fn out(r: ApiResult<Json<Value>>) -> (u16, Value) {
+        match r {
+            Ok(Json(v)) => (200, v),
+            Err((c, m)) => (c.as_u16(), Value::String(m)),
+        }
+    }
+    fn noted(r: Noted) -> (u16, Value) {
+        out(r.map(|(_, j)| j))
+    }
+    fn me() -> Extension<Actor> {
+        Extension(Actor("me@example.com".into()))
+    }
+    fn dbody(v: Value) -> Json<DestBody> {
+        Json(serde_json::from_value(v).unwrap())
+    }
+    async fn add(app: &Arc<crate::App>, v: Value) -> (u16, Value) {
+        noted(create(State(app.clone()), me(), dbody(v)).await)
+    }
+    fn test_app() -> Arc<crate::App> {
+        let app = crate::App::for_tests();
+        let _ = std::fs::create_dir_all(&app.data);
+        app
+    }
+
+    #[tokio::test]
+    async fn api_never_returns_secrets() {
+        let app = test_app();
+        let url = "https://hooks.example.com/kiln/MARKER_URL_7c1";
+        let (st, created) = add(&app, json!({ "name": "ops", "kind": "generic", "url": url })).await;
+        assert_eq!(st, 200, "{created}");
+        let secret = created["secret"].as_str().unwrap().to_string();
+        let id = created["dest"]["id"].as_str().unwrap().to_string();
+        let (_, list) = out(Ok(list(State(app.clone())).await));
+        let state = state_json(&app).to_string();
+        for blob in [list.to_string(), state] {
+            assert!(!blob.contains("MARKER_URL_7c1") && !blob.contains(&secret), "{blob}");
+        }
+        let (st, edited) =
+            noted(update(State(app.clone()), me(), UrlPath(id.clone()), dbody(json!({ "name": "ops2", "kind": "generic" }))).await);
+        assert_eq!(st, 200, "{edited}");
+        assert_eq!(load(&app.data).unwrap()[0].url, url, "an omitted URL keeps the stored one");
+        let (_, rot) = noted(rotate(State(app.clone()), me(), UrlPath(id)).await);
+        assert_ne!(rot["secret"].as_str().unwrap(), secret);
+        let (st, msg) = add(&app, json!({ "name": "bad", "kind": "generic", "url": "https://10.0.0.1/x" })).await;
+        assert_eq!(st, 400, "{msg}");
+        assert!(!msg.to_string().contains("10.0.0.1/x"), "errors never echo the URL: {msg}");
+    }
+
+    #[tokio::test]
+    async fn removed_destination_gets_announcement_then_stops() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let q = app.notify.queues.lock().unwrap()[&id].clone();
+        let (st, _) = noted(remove(State(app.clone()), me(), UrlPath(id)).await);
+        assert_eq!(st, 200);
+        let queued: Vec<&'static str> = q.q.lock().unwrap().iter().map(|e| e.ty).collect();
+        assert!(queued.contains(&"security.changed"), "the removed destination hears about its removal: {queued:?}");
+        assert!(q.retired.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app.notify.dests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_destination_prunes_rules() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let mut c = app.cfg();
+        c.notify_rules = vec![Rule { repo: "*".into(), workflow: "release.yml".into(), outcome: "any".into(), to: vec![id.clone()] }];
+        app.save_cfg(c).unwrap();
+        noted(remove(State(app.clone()), me(), UrlPath(id)).await);
+        assert!(app.cfg().notify_rules.is_empty(), "a rule left with no destination is dropped");
+    }
+
+    #[tokio::test]
+    async fn test_sends_are_rate_limited() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        assert_eq!(out(test(State(app.clone()), UrlPath(id.clone())).await).0, 200);
+        assert_eq!(out(test(State(app.clone()), UrlPath(id)).await).0, 429);
     }
 }

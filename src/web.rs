@@ -141,6 +141,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/tailscale/ping", post(ts_ping))
         .route("/api/tailscale/serve", post(ts_serve))
         .route("/api/gh/{*path}", any(gh_proxy))
+        .merge(crate::notify::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
     let (listener, addr) = bind_listen(&app.data, &app.cfg().listen).await?;
@@ -621,7 +622,10 @@ async fn admit(app: Arc<App>, via: Via, req: Request, next: Next) -> Response {
     let (admitted, who) = admission(&app, via, req).await;
     let admitted_ok = admitted.is_ok();
     let resp = match admitted {
-        Ok(req) => next.run(req).await,
+        Ok(mut req) => {
+            req.extensions_mut().insert(crate::notify::Actor(who.actor.clone()));
+            next.run(req).await
+        }
         Err(denied) => denied,
     };
     if audited(&method, &path, admitted_ok) {
@@ -766,6 +770,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
+        "notify": crate::notify::state_json(&app),
         // 32 days covers the current month in any timezone.
         "usage": vm::usage_since(&app.data, now() / 86400 - 32),
         "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
