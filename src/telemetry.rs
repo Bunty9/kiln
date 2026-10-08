@@ -16,9 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-/// Where reports go: kiln's own Cloudflare Worker (deploy/telemetry). None = send nothing.
-/// `KILN_TELEMETRY_URL` overrides it, e.g. to test a Worker; set but not https, nothing is sent.
-const ENDPOINT: Option<&str> = None;
+/// Where reports go: the maintainers' receiver (Vercel + Postgres, private repo
+/// Bunty9/kiln-telemetry-api). `KILN_TELEMETRY_URL` overrides it, e.g. to test a receiver;
+/// set but not https, nothing is sent.
+const ENDPOINT: Option<&str> = Some("https://kiln-telemetry-api.vercel.app/v1");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD: &str = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
 /// Crash files kept while unsent; a panic loop must not fill the disk.
@@ -142,8 +143,8 @@ fn install_id(data: &Path) -> Option<String> {
 }
 
 /// The daily usage report: counts and settings, never names. Job counts come from the VM
-/// records kiln keeps (the last 200), so a busier box reports at most those. The Worker
-/// (deploy/telemetry/worker.js) accepts exactly these fields: change both together.
+/// records kiln keeps (the last 200), so a busier box reports at most those. The receiver
+/// accepts exactly these fields (its lib/validate.js): change it first, then kiln.
 fn usage(app: &App, id: &str) -> Value {
     let c = app.cfg();
     let since = now().saturating_sub(86_400);
@@ -329,9 +330,9 @@ mod tests {
         assert!(!app.data.join("telemetry_id").exists(), "looking at the preview must not create the id");
     }
 
-    /// worker.js refuses a report whose fields differ: every report would be dropped.
+    /// The receiver refuses a report whose fields differ: every report would be dropped.
     #[test]
-    fn usage_fields_match_the_worker() {
+    fn usage_fields_match_the_receiver() {
         let u = usage(&crate::test_app("telemetry-shape"), "0");
         let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         assert_eq!(
