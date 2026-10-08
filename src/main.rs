@@ -214,6 +214,30 @@ impl Config {
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
         }
+        if self.notify_rules.len() > 50 {
+            bail!("notify_rules: at most 50");
+        }
+        let wf_ok = |w: &str| {
+            w == "*"
+                || (w.len() <= 100
+                    && (w.ends_with(".yml") || w.ends_with(".yaml"))
+                    && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+        };
+        for r in &self.notify_rules {
+            // Membership in the served repos is checked in web::set_config (App mode learns them at runtime).
+            if r.repo != "*" && !valid_repo(&r.repo) {
+                bail!("notify_rules: repo must be \"*\" or look like owner/name: {:?}", r.repo);
+            }
+            if !wf_ok(&r.workflow) {
+                bail!("notify_rules: workflow must be \"*\" or a file name like release.yml: {:?}", r.workflow);
+            }
+            if !["success", "failure", "any"].contains(&r.outcome.as_str()) {
+                bail!("notify_rules: outcome must be success, failure or any");
+            }
+            if r.to.is_empty() || r.to.len() > 20 || !r.to.iter().all(|t| t.len() == 8 && t.bytes().all(|b| b.is_ascii_hexdigit())) {
+                bail!("notify_rules: each rule needs 1 to 20 destinations");
+            }
+        }
         if self.debug_hold_mins > 120 {
             bail!("debug_hold_mins must be 0..=120 (0 = off)");
         }
@@ -560,6 +584,9 @@ async fn run() -> Result<()> {
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
             notify::start(&app);
+            for v in vm::take_newly_lost() {
+                notify::job_ended(&app, &v);
+            }
             let (ok, d) = confine::probe();
             confine::ENFORCED.store(ok, std::sync::atomic::Ordering::Relaxed);
             match ok {
@@ -1041,8 +1068,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
-    for (id, _) in runners.iter().filter(|(_, r)| r.2) {
+fn attach_jobs(app: &App, runners: &HashMap<String, github::JobRef>) {
+    for (id, _) in runners.iter().filter(|(_, r)| r.fork) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
             v.note = Some("refused: pull request from a fork".into());
         });
@@ -1058,12 +1085,13 @@ fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at, _) = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) {
+            let r = runners.get(&v.id)?;
+            if v.job_url.as_deref() == Some(&r.url) && v.queued_at == Some(r.queued_at) && v.run.as_ref() == Some(&r.run) {
                 return None;
             }
-            v.job_url = Some(url.clone());
-            v.queued_at = Some(*at);
+            v.job_url = Some(r.url.clone());
+            v.queued_at = Some(r.queued_at);
+            v.run = Some(r.run.clone());
             Some(v.clone())
         })
         .collect();
@@ -1085,6 +1113,32 @@ pub fn test_app(name: &str) -> Arc<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_rules_validate() {
+        let mut c = Config { repos: vec!["acme/kiln".into()], ..Default::default() };
+        let rule = |repo: &str, wf: &str, oc: &str, to: Vec<&str>| notify::Rule {
+            repo: repo.into(),
+            workflow: wf.into(),
+            outcome: oc.into(),
+            to: to.into_iter().map(String::from).collect(),
+        };
+        c.notify_rules = vec![rule("acme/kiln", "release.yml", "any", vec!["a1b2c3d4"]), rule("*", "*", "failure", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_ok());
+        for bad in [
+            rule("not a repo", "*", "any", vec!["a1b2c3d4"]),
+            rule("*", "../x.yml", "any", vec!["a1b2c3d4"]),
+            rule("*", "release.txt", "any", vec!["a1b2c3d4"]),
+            rule("*", "*", "sometimes", vec!["a1b2c3d4"]),
+            rule("*", "*", "any", vec![]),
+            rule("*", "*", "any", vec!["NOT-HEX!"]),
+        ] {
+            c.notify_rules = vec![bad.clone()];
+            assert!(c.validate_for(8).is_err(), "{bad:?}");
+        }
+        c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
+        assert!(c.validate_for(8).is_err(), "at most 50");
+    }
 
     #[test]
     fn config_load_fails_closed() {

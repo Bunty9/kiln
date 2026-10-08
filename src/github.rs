@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode, header};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
@@ -93,6 +94,40 @@ pub struct Resp {
     pub status: u16,
     pub content_type: String,
     pub body: bytes::Bytes,
+}
+
+/// What a workflow run says about itself, kept on the VM for notification rules and text.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RunFacts {
+    pub run_id: u64,
+    /// File name of the workflow, e.g. "release.yml".
+    pub workflow: String,
+    pub workflow_name: String,
+    pub branch: String,
+    pub event: String,
+}
+
+impl RunFacts {
+    fn of(run: &Value) -> Self {
+        // `path` is ".github/workflows/release.yml", sometimes with "@refs/..." after it.
+        let path = run["path"].as_str().unwrap_or_default();
+        let file = path.split('@').next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+        RunFacts {
+            run_id: run["id"].as_u64().unwrap_or_default(),
+            workflow: file.to_string(),
+            workflow_name: run["name"].as_str().unwrap_or_default().to_string(),
+            branch: run["head_branch"].as_str().unwrap_or_default().to_string(),
+            event: run["event"].as_str().unwrap_or_default().to_string(),
+        }
+    }
+}
+
+/// A job a kiln runner picked up, as seen in the queued/in-progress scan.
+pub struct JobRef {
+    pub url: String,
+    pub queued_at: u64,
+    pub fork: bool,
+    pub run: RunFacts,
 }
 
 impl Gh {
@@ -425,14 +460,14 @@ impl Gh {
     /// Queued jobs per VM size (see `job_size`), counted once per job id.
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
-    /// runner name -> (job page, queued-at unix time, from a fork), and the
+    /// runner name -> `JobRef` (job page, queue time, fork, run facts), and the
     /// number of queued fork jobs refused (never counted as demand).
     pub async fn queued_jobs(
         &self,
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool)>, usize)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobRef>, usize)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -444,6 +479,7 @@ impl Gh {
             for run in runs["workflow_runs"].as_array().into_iter().flatten() {
                 let id = run["id"].as_u64().context("run id")?;
                 let fork = is_fork_run(run);
+                let facts = RunFacts::of(run);
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
@@ -460,7 +496,7 @@ impl Gh {
                         && let Some(url) = j["html_url"].as_str()
                         && let Some(at) = j["created_at"].as_str().and_then(parse_rfc3339)
                     {
-                        ours.insert(name.to_string(), (url.to_string(), at, fork));
+                        ours.insert(name.to_string(), JobRef { url: url.to_string(), queued_at: at, fork, run: facts.clone() });
                     }
                 }
             }

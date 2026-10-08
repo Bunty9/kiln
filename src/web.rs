@@ -817,6 +817,13 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
+    let unknown = crate::notify::unknown_targets(&app, &c.notify_rules);
+    if !unknown.is_empty() {
+        bail_r(&format!("notify_rules: unknown destination {}", unknown.join(", ")))?;
+    }
+    if let Some(r) = c.notify_rules.iter().find(|r| r.repo != "*" && !app.repos().iter().any(|x| x.eq_ignore_ascii_case(&r.repo))) {
+        bail_r(&format!("notify_rules: {:?} is not one of your repos (or \"*\")", r.repo))?;
+    }
     app.save_cfg(c)?;
     if to_filtered {
         // Probe now so the dashboard shows the result and the scheduler has it cached.

@@ -71,6 +71,13 @@ pub enum CacheUse {
     Discarded,
 }
 
+/// VMs `load_history` found still active (kiln died under them): alerted once notify starts.
+static NEWLY_LOST: std::sync::Mutex<Vec<Vm>> = std::sync::Mutex::new(Vec::new());
+
+pub fn take_newly_lost() -> Vec<Vm> {
+    std::mem::take(&mut NEWLY_LOST.lock().unwrap())
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Vm {
     pub id: String,
@@ -127,6 +134,9 @@ pub struct Vm {
     /// (no directory) and not counted as a job failure on the dashboard.
     #[serde(default)]
     pub mint_failed: bool,
+    /// The workflow run of the job this VM ran, from the queued scan.
+    #[serde(default)]
+    pub run: Option<crate::github::RunFacts>,
 }
 
 impl Vm {
@@ -201,6 +211,7 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
             // The crash skipped the normal cleanup: don't leave a disk or a credential behind.
             scrub_vm_dir(&data.join("vms").join(&v.id));
             write_meta(data, v);
+            NEWLY_LOST.lock().unwrap().push(v.clone());
             // It never reached the end of `launch`, where finished jobs are counted.
             if !seed {
                 record_usage(data, v);
@@ -320,6 +331,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         policy: policy_id(&app.cfg()),
         warm,
         mint_failed: false,
+        run: None,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -389,6 +401,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 persist(&app, &v);
             }
             record_usage(&app.data, &v);
+            crate::notify::job_ended(&app, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
         app.releases.lock().unwrap().remove(&id);
@@ -2395,6 +2408,7 @@ mod tests {
             policy: String::new(),
             warm: false,
             mint_failed: false,
+            run: None,
         }
     }
 

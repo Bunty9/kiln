@@ -786,6 +786,85 @@ pub struct Rule {
     pub to: Vec<String>,
 }
 
+pub fn rule_matches(r: &Rule, repo: &str, workflow: Option<&str>, succeeded: bool) -> bool {
+    (r.repo == "*" || r.repo.eq_ignore_ascii_case(repo))
+        && (r.workflow == "*" || workflow == Some(r.workflow.as_str()))
+        && match r.outcome.as_str() {
+            "success" => succeeded,
+            "failure" => !succeeded,
+            _ => true,
+        }
+}
+
+/// A finished VM's job outcome; None when no job ran on it (or it was a registration failure).
+pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
+    use crate::vm::State;
+    if v.mint_failed || v.busy_since.is_none() {
+        return None;
+    }
+    Some(match v.state {
+        State::Done => match v.result.as_deref() {
+            Some("Succeeded") => "succeeded",
+            Some(r) if r.to_ascii_lowercase().contains("cancel") => "cancelled",
+            _ => "failed",
+        },
+        State::Failed => "failed",
+        State::Killed => "killed",
+        State::Lost => "lost",
+        _ => return None,
+    })
+}
+
+/// Alert for a VM that just ended: `job.failed` for any non-success, `job.finished` for a
+/// success matching a rule. At most once per VM id.
+pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
+    let Some(oc) = outcome(v) else { return };
+    let ok = oc == "succeeded";
+    let wf = v.run.as_ref().map(|r| r.workflow.as_str()).filter(|w| !w.is_empty());
+    let mut to: Vec<String> =
+        app.cfg().notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
+    if ok && to.is_empty() {
+        return;
+    }
+    {
+        let mut seen = app.notify.alerted.lock().unwrap();
+        // ponytail: forget everything past 2000 ids; a VM id carries its start time, so it cannot recur
+        // within 2000 later VMs. Upgrade to an LRU only if a repeat alert is ever seen.
+        if seen.len() > 2000 {
+            seen.clear();
+        }
+        if !seen.insert(v.id.clone()) {
+            return;
+        }
+    }
+    let run = v.run.clone().unwrap_or_default();
+    let opt = |s: &str| (!s.is_empty()).then(|| clean(s));
+    let info = JobInfo {
+        repo: clean(&v.repo),
+        workflow: opt(&run.workflow),
+        workflow_name: opt(&run.workflow_name),
+        job: clean(v.job.as_deref().unwrap_or("job")),
+        branch: opt(&run.branch),
+        event: opt(&run.event),
+        outcome: oc.to_string(),
+        duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)),
+        url: v.job_url.clone(),
+        vm_id: v.id.clone(),
+    };
+    let (ty, class) = if ok { ("job.finished", Class::Direct) } else { ("job.failed", Class::Job) };
+    to.sort();
+    to.dedup();
+    emit(app, Event { ty, class, detail: Detail::Job(info), to });
+}
+
+pub fn unknown_targets(app: &crate::App, rules: &[Rule]) -> Vec<String> {
+    let ds = app.notify.dests.lock().unwrap();
+    let mut u: Vec<String> = rules.iter().flat_map(|r| r.to.iter()).filter(|t| !ds.iter().any(|d| &d.id == *t)).cloned().collect();
+    u.sort();
+    u.dedup();
+    u
+}
+
 /// Who made an admitted request, set by `web::admit` for handlers that announce changes.
 #[derive(Clone)]
 pub struct Actor(pub String);
@@ -1045,6 +1124,96 @@ pub fn routes() -> axum::Router<Arc<crate::App>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::Vm;
+
+    fn vm_end(state: crate::vm::State, result: Option<&str>) -> Vm {
+        let mut v: Vm = serde_json::from_value(json!({
+            "id": "kiln-9-0", "repo": "acme/kiln", "runner_id": 1, "state": "booting", "job": "test", "result": null,
+            "started": 100, "busy_since": 110, "ended": 422, "note": null
+        }))
+        .unwrap();
+        v.state = state;
+        v.result = result.map(String::from);
+        v.run = Some(crate::github::RunFacts {
+            run_id: 1,
+            workflow: "release.yml".into(),
+            workflow_name: "release".into(),
+            branch: "main".into(),
+            event: "push".into(),
+        });
+        v
+    }
+
+    #[test]
+    fn outcomes() {
+        use crate::vm::State::*;
+        assert_eq!(outcome(&vm_end(Done, Some("Succeeded"))), Some("succeeded"));
+        assert_eq!(outcome(&vm_end(Done, Some("Failed"))), Some("failed"));
+        assert_eq!(outcome(&vm_end(Done, Some("Canceled"))), Some("cancelled"));
+        assert_eq!(outcome(&vm_end(Killed, None)), Some("killed"));
+        assert_eq!(outcome(&vm_end(Lost, None)), Some("lost"));
+        let mut never_ran = vm_end(Failed, None);
+        never_ran.busy_since = None;
+        assert_eq!(outcome(&never_ran), None, "a VM that never ran a job is not a job outcome");
+        let mut mint = vm_end(Failed, None);
+        mint.mint_failed = true;
+        assert_eq!(outcome(&mint), None);
+    }
+
+    #[test]
+    fn rules_match_repo_workflow_outcome() {
+        let r = |repo: &str, wf: &str, oc: &str| Rule {
+            repo: repo.into(),
+            workflow: wf.into(),
+            outcome: oc.into(),
+            to: vec!["a1b2c3d4".into()],
+        };
+        assert!(rule_matches(&r("acme/kiln", "release.yml", "any"), "Acme/Kiln", Some("release.yml"), true));
+        assert!(rule_matches(&r("*", "*", "success"), "x/y", None, true));
+        assert!(!rule_matches(&r("*", "*", "success"), "x/y", None, false));
+        assert!(rule_matches(&r("*", "release.yml", "failure"), "x/y", Some("release.yml"), false));
+        assert!(!rule_matches(&r("*", "release.yml", "any"), "x/y", None, true), "unknown workflow matches only \"*\"");
+        assert!(!rule_matches(&r("acme/other", "*", "any"), "acme/kiln", Some("ci.yml"), true));
+    }
+
+    #[test]
+    fn unknown_targets_lists_missing_ids() {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        let r = |to: Vec<String>| Rule { repo: "*".into(), workflow: "*".into(), outcome: "any".into(), to };
+        assert!(unknown_targets(&app, &[r(vec![d.id.clone()])]).is_empty());
+        assert_eq!(unknown_targets(&app, &[r(vec!["ffffffff".into(), d.id.clone(), "ffffffff".into()])]), vec!["ffffffff".to_string()]);
+    }
+
+    #[test]
+    fn job_alerts_once_per_vm() {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        let q = std::sync::Arc::new(Queue::default());
+        app.notify.queues.lock().unwrap().insert(d.id.clone(), q.clone());
+        let v = vm_end(crate::vm::State::Done, Some("Failed"));
+        job_ended(&app, &v);
+        job_ended(&app, &v);
+        assert_eq!(q.q.lock().unwrap().len(), 1);
+        let e = q.q.lock().unwrap()[0].clone();
+        assert_eq!(e.ty, "job.failed");
+        match e.detail {
+            Detail::Job(j) => assert_eq!((j.workflow.as_deref(), j.duration_s), (Some("release.yml"), Some(312))),
+            _ => panic!(),
+        }
+        // A success alerts only through a rule.
+        let ok = Vm { id: "kiln-9-1".into(), ..vm_end(crate::vm::State::Done, Some("Succeeded")) };
+        job_ended(&app, &ok);
+        assert_eq!(q.q.lock().unwrap().len(), 1);
+        let mut c = app.cfg();
+        c.notify_rules = vec![Rule { repo: "*".into(), workflow: "release.yml".into(), outcome: "success".into(), to: vec![d.id.clone()] }];
+        *app.cfg.write().unwrap() = c;
+        let ok2 = Vm { id: "kiln-9-2".into(), ..vm_end(crate::vm::State::Done, Some("Succeeded")) };
+        job_ended(&app, &ok2);
+        assert_eq!(q.q.lock().unwrap().back().unwrap().ty, "job.finished");
+    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
