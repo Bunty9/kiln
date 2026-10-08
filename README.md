@@ -205,7 +205,7 @@ A job is root inside its own VM, and the dashboard holds a GitHub token, so kiln
 - **The dashboard** answers only tailnet peers whose Tailscale identity is the owner of the box (or is listed in `allowed_users`), and the box itself with a secret dashboard key. It checks the `Host` header and requires a custom `x-kiln` header on writes. Job VMs reach the host through QEMU's NAT and look like local traffic, which is why local access needs the key.
 - **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror. **Switch to filtered before running untrusted pull requests, such as ones from forks.**
 
-The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook, before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
+The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook, before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
 
 ## Configuration
 
@@ -223,6 +223,7 @@ Settings live in `~/.local/share/kiln/config.json` (override the directory with 
 | `warm` | `{}` | pre-booted idle VMs per repo |
 | `debug_hold_mins` | `0` | keep failed jobs for SSH |
 | `auto_update` | `false` | install new signed releases when idle |
+| `usage_stats` / `crash_reports` | unset (off) | opt-in anonymous reports, asked once on the dashboard |
 
 The full reference (every field, range, live-versus-restart behaviour, environment variables, the data directory layout and CLI commands) is in [docs/configuration.md](docs/configuration.md).
 

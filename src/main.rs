@@ -4,6 +4,7 @@ mod confine;
 mod github;
 mod host;
 mod mirror;
+mod telemetry;
 mod update;
 mod vm;
 mod web;
@@ -74,6 +75,10 @@ pub struct Config {
     pub auto_update: bool,
     /// "owner/name" whose GitHub releases kiln updates from.
     pub update_repo: String,
+    /// Opt-in daily usage report (see telemetry.rs). None = not asked yet: the dashboard asks.
+    pub usage_stats: Option<bool>,
+    /// Opt-in crash reports (no panic message; see telemetry.rs). None = not asked yet.
+    pub crash_reports: Option<bool>,
     /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
     /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
     pub stop_grace_secs: u64,
@@ -111,6 +116,8 @@ impl Default for Config {
             warm_recycle_mins: 30,
             auto_update: false,
             update_repo: "Bunty9/kiln".into(),
+            usage_stats: None,
+            crash_reports: None,
             stop_grace_secs: 25,
         }
     }
@@ -412,6 +419,7 @@ impl App {
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
+        telemetry::apply(&self.data, &c);
         *w = c;
         Ok(())
     }
@@ -512,6 +520,8 @@ async fn run() -> Result<()> {
             .with_context(|| format!("chmod 0700 {}", data.display()))?;
     }
     let cfg = load_config(&data)?;
+    telemetry::apply(&data, &cfg);
+    telemetry::install_hook(&data);
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
     *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
@@ -565,6 +575,7 @@ async fn run() -> Result<()> {
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
+            tokio::spawn(telemetry::supervise(app.clone()));
             // In its own task: the dashboard keeps serving while a stop drains.
             let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
