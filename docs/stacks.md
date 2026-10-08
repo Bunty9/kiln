@@ -1,23 +1,23 @@
-# Kiln: Self-Hosted CI for Heavy Builds
+# Stacks and migration
 
-Kiln is a self-hosted GitHub Actions runner that boots fresh Ubuntu 24.04 VMs for each job, perfect for teams building on hardware you own.
+kiln runs each GitHub Actions job in a fresh Ubuntu 24.04 VM on a Linux box you own. This page covers when it fits, how to move a workflow onto it, and which toolchains work.
 
-## When to Use Kiln
+## When to use kiln
 
-**Kiln is right for:**
-- Heavy builds on 4–16 core machines (faster and cheaper than GitHub's hosted runners)
+**Good fit:**
+- Heavy builds on a 4 to 16 core box you already have
 - Reproducing flaky tests in a controlled environment
 - Private code that stays on your hardware
 - Homelab or on-premises setups
 
-GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-core $0.022/min, 16-core $0.042/min. A 10k min/month 4-core job load costs ~$120/month on GitHub; kiln minutes are free (GitHub postponed the announced $0.002/min self-hosted fee).
+Cost context: GitHub bills hosted Linux x64 runners per minute (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042), so 10,000 minutes a month on a 4-core runner is $120. Self-hosted runner minutes are free. See GitHub's [runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing) and [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions) for current numbers.
 
-**Kiln is not right for:**
+**Not a fit:**
 - macOS or Windows builds (only Ubuntu 24.04)
 - High-availability requirements (single-host design)
 - Untrusted fork PRs unless you set `egress` to `filtered` (Settings > Network): then jobs reach only the internet and the Docker mirror, not your LAN or tailnet. It needs `rootlesskit slirp4netns nftables uidmap`; see [architecture](architecture.md#egress) and [SECURITY.md](../SECURITY.md)
 
-## Migration in 3 Steps
+## Migration in three steps
 
 1. Change `runs-on:` from `ubuntu-latest` to `[self-hosted, kiln]`
 2. Pick the size: plain `kiln` is the default (4 vCPU / 8 GB RAM unless configured). Ask for another with exactly one size label:
@@ -30,9 +30,9 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
    | `[self-hosted, kiln-16cpu]` | 16 | 24 GB |
 
    Sizes above the host's CPU count are never picked up, and don't combine `kiln` with a size label.
-3. Keep everything else — your actions, scripts, and services work unchanged
+3. Keep everything else. Actions, scripts and services work unchanged.
 
-## Compatibility Matrix
+## Compatibility
 
 | Stack | Status | Notes |
 |-------|--------|-------|
@@ -44,7 +44,7 @@ GitHub-hosted pricing context (2026): 2-core $0.006/min, 4-core $0.012/min, 8-co
 | setup-dotnet | ✓ Works | Install dir `/usr/share/dotnet` writable by runner |
 | ruby / setup-ruby + Rails | ✓ Works | libyaml, libpq included; gems compile cleanly |
 | setup-php | ✓ Works | Set `env: runner: self-hosted` per setup-php wiki |
-| erlef/setup-beam (Erlang/OTP) | ✓ Works | ImageOS=ubuntu24 required; now set |
+| erlef/setup-beam (Erlang/OTP) | ✓ Works | ImageOS=ubuntu24 required; set in the image |
 | Docker buildx / build-push / services | ✓ Works | Real Docker in VM; Docker Hub pulls cached by kiln's built-in mirror at 10.0.2.2:5000 (on by default) |
 | container: jobs | ✓ Works | Image pulls go through local mirror. The job runs inside the container, which does not see the VM's cache mounts: `~/.npm` and friends start cold every time unless you mount them. The runner sets `HOME=/github/home` in the container, so e.g. `options: -v /home/runner/.npm:/github/home/.npm`. Jobs work either way; they are just never warm. |
 | Playwright | ✓ Works | `install --with-deps` adds 1–2 min; xvfb pre-installed |
@@ -77,10 +77,10 @@ jobs:
 - **Caching:** each repo has a persistent cache disk, so Docker layers (`/var/lib/docker`), `~/.cache`, `~/.npm`, the whole `~/.cargo` and `~/.rustup` (so the Rust toolchain is already there), Go modules, Gradle caches, `~/.m2/repository` and apt's downloaded packages are warm without any workflow change. Every job reads it; only a successful push to the default branch or a configured cache branch writes it (PRs never poison it). Clear it from Settings > Cache. `actions/cache` and `cache-to: type=gha` still work but route over the internet.
 - **Debugging:** set `debug_hold_mins` and `debug_ssh_keys` in Settings > Debugging and a failed job's VM stays up for SSH (see [architecture](architecture.md#debug-hold-and-the-control-channel)).
 - **Image pulls:** Docker Hub limits 100 pulls/6h per IP; kiln's built-in pull-through mirror (live, `docker_mirror` in settings; 10.0.2.2:5000 from the VM) avoids this, with a fallback to Docker Hub if it is down.
-- **Parallelism:** Use `concurrency:` groups to avoid overwhelming your host.
-- **Pin runner labels:** Always use `[self-hosted, kiln]` (or a size label) to avoid accidents with other self-hosted runners.
+- **Parallelism:** use `concurrency:` groups to avoid overwhelming your host.
+- **Runner labels:** always use `[self-hosted, kiln]` (or a size label) to avoid accidents with other self-hosted runners.
 
-## Examples and Smoke Tests
+## Examples
 
 See [`examples/`](../examples) for minimal, working projects:
 - **node-postgres:** Node + pg driver, tests against a live Postgres 16 service
@@ -89,11 +89,11 @@ See [`examples/`](../examples) for minimal, working projects:
 - **docker-build:** Docker build and run with buildx
 - **playwright:** Chromium-only browser automation tests
 
-Run all stacks: `.github/workflows/stacks.yml` (workflow_dispatch or push to `examples/`).
+`.github/workflows/stacks.yml` runs them all, plus a Rust build of kiln itself, when `examples/` changes or from the Actions tab.
 
-## Next Steps
+## Next steps
 
-- Fork or mirror kiln to your organization
+- Install kiln and run `kiln doctor` (see the [README](../README.md))
 - `kiln bake` to build the base image
-- Add `runs-on: [self-hosted, kiln]` to your workflows
-- Monitor job logs via `kiln status` (planned)
+- Change `runs-on:` in a workflow to `[self-hosted, kiln]`
+- Watch jobs on the dashboard

@@ -205,7 +205,7 @@ a.stat:hover{background:var(--s2)}
 .hx figure{margin:0}.hx figcaption{display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px}
 .hx .cv{position:relative;height:112px}.hx canvas{display:block;width:100%;height:100%;border-radius:4px;touch-action:pan-y}
 .hx canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.hx .ax{display:flex;justify-content:space-between;font-size:11px;color:var(--fg-3);margin-top:4px;font-variant-numeric:tabular-nums}
+.hx .ax,.an .ax{display:flex;justify-content:space-between;font-size:11px;color:var(--fg-3);margin-top:4px;font-variant-numeric:tabular-nums}
 .lg{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:12px}
 .vk{flex:none;width:8px;height:8px;border-radius:2px;background:var(--c)}
 .lg li{display:flex;align-items:center;gap:8px;min-width:0}.lg .k{flex:none;width:10px;height:10px;border-radius:2px;background:var(--c)}
@@ -428,6 +428,16 @@ dialog input{width:100%;margin-top:16px}
 #tip{position:fixed;z-index:70;left:0;top:0;max-width:min(280px,calc(100vw - 16px));padding:6px 10px;border-radius:var(--r1);background:var(--fg);color:var(--bg);font-size:12px;line-height:1.45;white-space:pre-line;box-shadow:0 6px 18px -4px rgb(0 0 0/.5);pointer-events:none;opacity:0;transition:opacity 100ms}
 #tip.on{opacity:1;pointer-events:auto}
 #tip code{background:color-mix(in srgb,var(--bg) 18%,transparent);box-shadow:none;color:inherit}
+/* analytics: stacked columns (HTML, so the tip system and themes just work) */
+.an .stats{margin-bottom:var(--gap)}.an .an-n{text-align:right}.an td .lnk{max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.bc{position:relative;display:flex;align-items:flex-end;gap:2px;height:140px;padding-top:16px;border-bottom:1px solid var(--line)}
+.bc>i{flex:1;min-width:0;height:100%;display:flex;flex-direction:column-reverse;border-radius:3px 3px 0 0;overflow:hidden;transition:background var(--ease)}
+.bc>i:hover{background:var(--muted)}.bc b{flex:none;display:block;background:var(--c);min-height:1px}
+.bc .mx{position:absolute;top:0;left:0;font-size:11px;color:var(--fg-3);font-variant-numeric:tabular-nums}
+.bc>i.x{background:repeating-linear-gradient(-45deg,var(--line) 0 1px,transparent 1px 6px)}
+.dt{margin-top:10px;font-size:13px}.dt summary{cursor:pointer;color:var(--fg-2);width:max-content}.dt .tw{margin-top:8px;max-height:280px;overflow:auto;box-shadow:inset 0 0 0 1px var(--line)}
+main{overflow-x:clip} /* the swipe slide-in starts 32px off to the side */
+.lgd{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--fg-2);margin-bottom:10px}.lgd span{display:inline-flex;align-items:center;gap:6px}.lgd i{width:10px;height:10px;border-radius:2px;background:var(--c)}
 .tabs{display:none}
 @media(max-width:719px){
  .nav{display:none}main{padding-bottom:calc(var(--tabh) + 24px)}
@@ -461,7 +471,7 @@ dialog input{width:100%;margin-top:16px}
 .hlp{margin-left:auto;padding:0 10px;gap:6px}
 .hlp+.cdot{margin-left:0}
 .gd{max-width:68ch;line-height:1.65}.gd h2{font-size:20px;font-weight:600;letter-spacing:-.015em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
-.gd .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
+.gd .tw,.an .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table,.an table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td,.an th,.an td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th,.an tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
 .gnav{display:flex;justify-content:space-between;gap:16px;margin-top:40px;font-size:14px}
 .gnav a{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px;border-radius:var(--rc);background:var(--s1);box-shadow:var(--e1);text-decoration:none}.gnav a:hover{box-shadow:var(--e2);background-image:linear-gradient(var(--hover),var(--hover))}
 @media(max-width:719px){.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
@@ -522,6 +532,7 @@ dialog input{width:100%;margin-top:16px}
 <symbol id="i-network" viewBox="0 0 20 20"><path d="M10 2.75 16 5v4.5c0 3.7-2.6 6.6-6 7.75-3.4-1.15-6-4.05-6-7.75V5Z"/></symbol>
 <symbol id="i-bell" viewBox="0 0 20 20"><path d="M5 13.75V9a5 5 0 0 1 10 0v4.75l1.25 1.5H3.75ZM8.25 17.25h3.5"/></symbol>
 <symbol id="i-pulse" viewBox="0 0 20 20"><path d="M2.5 10.5h3.25l2-5 3.5 9 2-4h4.25"/></symbol>
+<symbol id="i-chart" viewBox="0 0 20 20"><path d="M3 16.5h14M5.5 13.5v-4M10 13.5v-9M14.5 13.5v-6"/></symbol>
 <symbol id="i-palette" viewBox="0 0 20 20"><path d="M10 2.75a7.25 7.25 0 0 0 0 14.5c1.1 0 1.5-.8 1.2-1.6-.4-1-.1-2.15 1.3-2.15h1.75a3 3 0 0 0 3-3c0-4.3-3.25-7.75-7.25-7.75Z"/><circle cx="6.5" cy="9" r=".9"/><circle cx="9" cy="6" r=".9"/><circle cx="12.75" cy="6.75" r=".9"/></symbol>
 <symbol id="i-sun" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.25"/><path d="M10 2.5v1.5M10 16v1.5M2.5 10H4M16 10h1.5M4.7 4.7l1 1M14.3 14.3l1 1M4.7 15.3l1-1M14.3 5.7l1-1"/></symbol>
 <symbol id="i-moon" viewBox="0 0 20 20"><path d="M16.5 12.25A7 7 0 0 1 7.75 3.5a7 7 0 1 0 8.75 8.75Z"/></symbol>
@@ -860,7 +871,7 @@ const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
 /* ---------- router ---------- */
 const pages = {};
-let cur = null, mounted = false;
+let cur = null, mounted = false, swipeDir = 0;
 const NAV = [['overview', '#/', 'Overview', 'VM slots, health and recent jobs (g o)'], ['jobs', '#/jobs', 'Jobs', 'Every VM kiln ran, newest first (g j)'],
   ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, GitHub, image, cache, network and more (g s)']];
 $('#nav').innerHTML = NAV.map(([k, h, l, t]) => `<a href="${h}" data-p="${k}"${tip(t)}>${ic(k)}${l}</a>`).join('');
@@ -889,12 +900,14 @@ async function appCallback() {
 function route() {
   if (new URLSearchParams(location.search).get('code') && !appConv) return void appCallback();
   cur?.unmount?.(); closePop();
+  const sd = swipeDir; swipeDir = 0;
   const r = parse(), pg = pages[r.page] || pages.overview;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   cur = pg; scrollTo(0, 0);
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
   pg.mount(r);
+  if (sd && !still()) $('#app').animate([{ transform: `translateX(${sd * 32}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 180, easing: 'cubic-bezier(.2,0,0,1)' });
   const pk = Object.keys(pages).find(k => pages[k] === pg), tk = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'repos' && r.seg.length ? null : pk;
   if (pk === 'setup' || pk === 'repos' || !S.vms.length) loadHello();
   pg.update?.(); notifyState();
@@ -926,7 +939,7 @@ addEventListener('hashchange', async () => {
   if (guard) { guard = false; return; }
   const to = location.hash;
   if (cur === pages.settings && parse().page !== 'settings' && isDirty()) {
-    guard = true; location.hash = lastHash;
+    guard = true; swipeDir = 0; location.hash = lastHash;
     if (await ask({ title: 'Discard changes?', body: 'You have unsaved settings.', action: 'Discard', danger: 1 })) { draft = JSON.parse(JSON.stringify(S.config)); location.hash = to; }
     return;
   }
@@ -1487,10 +1500,10 @@ async function loadLast(r) {
 }
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', updates: 'Updates', appearance: 'Appearance' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', appearance: 'Appearance' };
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
-const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', updates: 'update', appearance: 'palette' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', appearance: 'palette' };
 let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
 let draft = null, cfgJ = '', TS = null, tokRes = null;
 const pings = new Map();
@@ -1643,6 +1656,89 @@ const G = {
         <p class="fg2 sm" style="margin-top:16px">Saved in this browser only.</p></div>`;
     },
   },
+};
+/* ---------- analytics (Settings › Analytics) ---------- */
+// Every card but the last uses the VMs /api/state sends (the newest 100, web.rs state()). The last reads the
+// usage ledger: /api/state sends 32 days of it (all repos) and the card shows 30.
+const AN = { r: 7, repo: '', cpus: 0, open: {} };
+const pctl = (a, p) => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
+const jobEnd = v => v.done_at || v.ended;
+// Matches vm.rs record_usage: start to result, rounded up to the minute (how GitHub bills).
+const jobMins = v => Math.max(1, Math.ceil((jobEnd(v) - v.busy_since) / 60));
+// A lost job's end is when kiln noticed it at startup, not when it finished: kept out of durations.
+const timed = v => !!v.done_at || status(v) !== 'lost';
+// Success rate is passed / (passed + failed); everything else (cancelled, ended in a state this kiln doesn't know) counts as neither.
+const outcome = v => status(v) === 'passed' ? 0 : isFail(v) ? 1 : 2;
+const OUT = [['passed', 'Passed', 'var(--ok)'], ['failed', 'Failed', 'var(--fail)'], ['other', 'Cancelled or other', 'var(--fg-3)']];
+// Column start times (unix s) and labels: the last 24 hours by hour (current hour last), or local calendar days.
+function anBuckets(r) {
+  const d = new Date(), o = [];
+  if (r === 1) { d.setMinutes(0, 0, 0); for (let i = 23; i >= 0; i--) { const t = d / 1000 - i * 3600; o.push([t, hhmm(t)]); } }
+  else for (let i = r - 1; i >= 0; i--) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate() - i); o.push([x / 1000, x.toLocaleDateString([], { month: 'short', day: 'numeric' })]); }
+  return o;
+}
+// Stacked columns, each with a tip listing its parts, and the same numbers as a table under "Show numbers".
+// cols: [{ l, v: [n per series], x: true if outside the data }], ser: [[key, name, colour]], fmt: number to text,
+// label: the table caption, k: remembers whether the table is open across re-renders.
+function bars(cols, ser, fmt, label, k) {
+  const tot = c => c.v.reduce((a, b) => a + b, 0), max = Math.max(...cols.map(tot)) || 1, n = cols.length;
+  return `<div class="lgd">${ser.map(s => `<span><i style="--c:${s[2]}"></i>${esc(s[1])}</span>`).join('')}</div>
+    <div class="bc" aria-hidden="true"><span class="mx">${fmt(max)}</span>${cols.map(c => `<i${c.x ? ' class="x"' : ''}${tip(c.l + '\n' + (c.x ? 'Older than the newest 100 VMs: not counted' : tot(c) ? ser.map((s, j) => c.v[j] ? `${s[1]}: ${fmt(c.v[j])}` : '').filter(Boolean).join('\n') : 'None'))}>${ser.map((s, j) => c.v[j] ? `<b style="--c:${s[2]};height:${(c.v[j] / max * 100).toFixed(2)}%"></b>` : '').join('')}</i>`).join('')}</div>
+    <div class="ax" aria-hidden="true"><span>${esc(cols[0].l)}</span><span>${esc(cols[n >> 1].l)}</span><span>${esc(cols[n - 1].l)}</span></div>
+    <details class="dt" data-k="${k}"${AN.open[k] ? ' open' : ''}><summary>Show numbers</summary><div class="tw"><table><caption class="sr">${esc(label)}</caption><tr><th>Period</th>${ser.map(s => `<th class="an-n">${esc(s[1])}</th>`).join('')}</tr>${cols.filter(c => !c.x && tot(c)).map(c => `<tr><td>${esc(c.l)}</td>${c.v.map(x => `<td class="an-n">${fmt(x)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
+}
+// One colour per VM size on every chart: by its place among all sizes kiln has seen.
+const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
+const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', vcol(all.indexOf(c) % 8)]); };
+function anHTML() {
+  const B = anBuckets(AN.r), t0 = B[0][0], st = (l, v, t, x = '') => `<div class="stat"${kt(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
+  const jobs = S.vms.filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
+  const oldest = Math.min(...S.vms.map(v => v.started)), cut = S.vms.length >= 100 && oldest > t0;
+  const note = cut ? `<div class="cal neu" style="margin-top:0">The dashboard gets the newest 100 VMs, which reach back to ${esc(when(oldest))}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched; the minutes chart at the bottom isn't limited to these VMs.</div>` : '';
+  const ld = Math.floor(Date.now() / 86400000), use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
+  const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
+    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
+    : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
+  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}.</p></div>` + ledger;
+  const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };
+  const x = i => cut && (B[i + 1]?.[0] ?? Infinity) <= oldest;
+  const n = [0, 0, 0]; jobs.forEach(v => n[outcome(v)]++);
+  const tj = jobs.filter(timed), jd = tj.map(v => jobEnd(v) - v.busy_since), q = jobs.filter(v => v.queued_at), on = jobs.filter(v => v.online_at);
+  const sr = n[0] + n[1] ? n[0] / (n[0] + n[1]) : null, mins = jobs.reduce((a, v) => a + jobMins(v), 0), saved = jobs.reduce((a, v) => a + jobMins(v) * rate(v.cpus), 0), ms = median(q.map(v => v.busy_since - v.queued_at));
+  const oc = B.map(([, l], i) => ({ l, x: x(i), v: [0, 0, 0] })); jobs.forEach(v => oc[at(v.busy_since)].v[outcome(v)]++);
+  const js = sizeSer([...new Set(jobs.map(v => v.cpus))]), mc = B.map(([, l], i) => ({ l, x: x(i), v: js.map(() => 0) }));
+  jobs.forEach(v => mc[at(v.busy_since)].v[js.findIndex(s => s[0] === v.cpus)] += jobMins(v));
+  // Each job's phases, cut to its own queued → running span: a warm VM booted before its job was queued,
+  // and its idle time in the pool is not time the job waited.
+  const ph = [['Queue', q.map(v => Math.max(0, v.started - v.queued_at)), 'q'], ['Boot', on.map(v => Math.max(0, v.online_at - Math.max(v.started, v.queued_at || 0))), 'b'],
+    ['Wait', on.map(v => Math.max(0, v.busy_since - Math.max(v.online_at, v.queued_at || 0))), 'w'], ['Job', jd, 'j-ok']].filter(p => p[1].length).map(p => [p[0], median(p[1]), p[2]]);
+  const by = jobs.reduce((m, v) => m.set(v.repo, [...(m.get(v.repo) || []), v]), new Map());
+  const rp = [...by].map(([r, l]) => { const k = [0, 0, 0]; l.forEach(v => k[outcome(v)]++); const d = l.filter(timed).map(v => jobEnd(v) - v.busy_since); return { r, n: l.length, sr: k[0] + k[1] ? k[0] / (k[0] + k[1]) : null, md: median(d), p: pctl(d, .95), m: l.reduce((a, v) => a + jobMins(v), 0) }; }).sort((a, b) => b.m - a.m);
+  const pc = x => x == null ? '—' : Math.round(x * 100) + '%', dd = s => s == null ? '—' : dur(s), unit = AN.r === 1 ? 'hour' : 'day', lost = jobs.length - tj.length;
+  return `${note}
+    <div class="stats">${st('Jobs', jobs.length, `Finished jobs that started in this range: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`)}${st('Success rate', pc(sr), 'Passed out of passed and failed. Cancelled jobs count as neither.', sr != null && sr < .8 ? 'fail' : '')}
+    ${st('Median job time', dd(median(jd)), 'From a job starting to its result' + (lost ? `. Leaves out ${lost} lost job${lost > 1 ? 's' : ''}: kiln stopped while ${lost > 1 ? 'they' : 'it'} ran.` : ''))}${st('p95 job time', dd(pctl(jd, .95)), '95% of jobs took this long or less')}
+    ${st('Median time to start', dd(ms), 'From GitHub queueing the job to it starting in a kiln VM: queue, boot and wait')}${st('Failed', n[1], 'Failed, lost, or killed mid-job', n[1] ? 'fail' : '')}
+    ${st('Job minutes', mins, 'Each job rounded up to the minute, as GitHub bills it')}${st('Saved', '≈ $' + saved.toFixed(2), `${mins} job minutes at ${myRate() ? '$' + myRate() + '/min' : 'the GitHub-hosted rate for each VM size'}`)}</div>
+    <div class="card"><h2>Jobs per ${unit}</h2>${bars(oc, OUT, String, `Jobs per ${unit}: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`, 'jobs')}</div>
+    <div class="card"><h2>Job minutes per ${unit}</h2>${bars(mc, js, x => x + ' min', `${mins} job minutes per ${unit} by VM size`, 'mins')}</div>
+    <div class="card"><h2>Where the time goes <span class="fg2 sm" style="font-weight:400">median per phase</span>${hq('timeline')}</h2>${timeline(ph)}</div>
+    <div class="card"><h2>By repository</h2><div class="tw"><table><tr><th>Repository</th><th class="an-n">Jobs</th><th class="an-n">Success</th><th class="an-n">Median</th><th class="an-n">p95</th><th class="an-n">Minutes</th></tr>
+    ${rp.map(x => `<tr><td><button class="lnk" data-act="anpick" data-id="${esc(x.r)}"${tip('Show only ' + x.r)}>${esc(x.r)}</button></td><td class="an-n">${x.n}</td><td class="an-n ${x.sr != null && x.sr < .8 ? 'fail' : ''}">${pc(x.sr)}</td><td class="an-n">${dd(x.md)}</td><td class="an-n">${dd(x.p)}</td><td class="an-n">${x.m}</td></tr>`).join('')}</table></div></div>
+    <div class="card"><h2>Slowest jobs</h2>${jobList([...tj].sort((a, b) => (jobEnd(b) - b.busy_since) - (jobEnd(a) - a.busy_since)).slice(0, 5))}</div>${ledger}`;
+}
+addEventListener('toggle', e => { if (e.target.matches?.('.dt')) AN.open[e.target.dataset.k] = e.target.open; }, true);
+G.analytics = {
+  html() {
+    const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo)])].sort(), sizes = allSizes().filter(Boolean);
+    // A filter whose repo or size has aged out would filter while the menu shows "All".
+    if (!repos.includes(AN.repo)) AN.repo = ''; if (!sizes.includes(AN.cpus)) AN.cpus = 0;
+    return `<div class="an"><div class="bar"><div class="seg" role="radiogroup" aria-label="Range">${[[1, '24 hours'], [7, '7 days'], [30, '30 days']].map(([v, l]) => `<button role="radio" aria-checked="${v === AN.r}" data-act="anr" data-v="${v}">${l}</button>`).join('')}</div>
+      <label class="sr" for="an-repo">Repository</label><select id="an-repo" data-act="anrepo"><option value="">All repos</option>${repos.map(r => `<option ${r === AN.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
+      <label class="sr" for="an-cpu">VM size</label><select id="an-cpu" data-act="ancpu"><option value="0">All sizes</option>${sizes.map(c => `<option value="${c}" ${c === AN.cpus ? 'selected' : ''}>${c} cpu</option>`).join('')}</select></div><div id="an"></div></div>`;
+  },
+  // Runs inside the poll: a drawing bug must not read as "kiln unreachable".
+  live() { try { setHTML($('#an'), anHTML()); } catch (e) { console.error('analytics', e); setHTML($('#an'), `<div class="cal">Analytics could not be drawn: ${esc(e.message)}</div>`); } },
 };
 // GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
 let UP = null, upBusy = false;
@@ -1996,6 +2092,10 @@ const ACT = {
   skip() { lsSet('kiln-skip-setup', '1'); location.hash = '#/'; },
   finish() { lsSet('kiln-skip-setup', '1'); },
   stepopen(b) { setupOpen = +b.dataset.id; pages.setup.update(); },
+  anr(b) { AN.r = +b.dataset.v; $$('[data-act=anr]').forEach(x => x.setAttribute('aria-checked', x === b)); rove(); G.analytics.live(); },
+  anrepo: s => { AN.repo = s.value; G.analytics.live(); },
+  ancpu: s => { AN.cpus = +s.value; G.analytics.live(); },
+  anpick(b) { AN.repo = $('#an-repo').value = b.dataset.id; G.analytics.live(); $('#an-repo').focus(); },
 };
 document.addEventListener('click', async e => {
   if (popEl && !popEl.contains(e.target) && !e.target.closest('[data-act=rate],[data-act=runwf],[data-act=help]')) closePop();
@@ -2005,7 +2105,7 @@ document.addEventListener('click', async e => {
   if (b.tagName === 'BUTTON' && !b.classList.contains('hq')) b.disabled = true;
   try { await fn(b); } catch (err) { fail(err); if (b.type === 'checkbox') b.checked = !b.checked; } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
 });
-document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) ACT[e.target.dataset.act](e.target); });
+document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) try { ACT[e.target.dataset.act](e.target); } catch (err) { fail(err); } });
 document.addEventListener('input', e => {
   const t = e.target, k = t.dataset.k; if (!k || !draft) return;
   if (k === 'adduser') { $('#dbar').hidden = false; return; }
@@ -2127,6 +2227,23 @@ document.addEventListener('pointerdown', e => {
 });
 addEventListener('scroll', hideTip, true);
 addEventListener('keydown', e => { if (e.key === 'Escape') hideTip(); });
+
+/* ---------- phones: swipe sideways to move between the bottom tabs ---------- */
+// Not from the screen edges (the browser's back gesture), form fields, the canvas host graphs, or anything that scrolls sideways itself.
+const noSwipe = el => { for (; el && el !== document.body; el = el.parentElement) if (el.matches('input,textarea,select,canvas') || (el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(el).overflowX))) return true; return false; };
+let sw = null;
+addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  sw = e.touches.length === 1 && matchMedia('(max-width:719px)').matches && !popEl && !$('dialog[open]') && t.clientX > 24 && t.clientX < innerWidth - 24 && !noSwipe(e.target) ? { x: t.clientX, y: t.clientY, t: e.timeStamp } : null;
+}, { passive: true });
+addEventListener('touchcancel', () => { sw = null; });
+addEventListener('touchend', e => {
+  if (!sw) return; const t = e.changedTouches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y, ok = e.timeStamp - sw.t < 600; sw = null;
+  if (!ok || Math.abs(dx) < 60 || Math.abs(dx) < 2 * Math.abs(dy) || getSelection().toString()) return;
+  const i = NAV.findIndex(n => n[0] === $('#tabs [aria-current]')?.dataset.p), to = NAV[i + (dx < 0 ? 1 : -1)];
+  if (i < 0 || !to) return;
+  swipeDir = dx < 0 ? 1 : -1; location.hash = to[1];
+}, { passive: true });
 
 /* ---------- installable app: service worker + install button ---------- */
 // Service workers need a secure context (HTTPS via tailscale serve, or localhost); over plain http, skip.
