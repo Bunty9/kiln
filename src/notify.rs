@@ -9,9 +9,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
@@ -500,6 +501,253 @@ pub struct Hub {
 #[derive(Default)]
 pub struct HealthTrack;
 
+/// DNS for alert requests: system resolution, then only addresses `allowed` may pass. The
+/// connection uses exactly these, so there is no gap for a rebind between check and connect.
+struct Guard {
+    tailnet: bool,
+}
+
+impl reqwest::dns::Resolve for Guard {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let tailnet = self.tailnet;
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| allowed(a.ip(), tailnet)).collect();
+            if addrs.is_empty() {
+                return Err(format!("{host} resolves only to internal addresses").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The client for one destination. `open_for_tests` (tests only) allows plain HTTP to the
+/// loopback receiver; production callers always pass false.
+fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
+    let b = reqwest::Client::builder()
+        .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10));
+    let b = if open_for_tests { b } else { b.https_only(true).dns_resolver(Arc::new(Guard { tailnet: d.tailnet })) };
+    b.build().expect("notify http client")
+}
+
+#[derive(Debug)]
+pub enum Outcome {
+    Ok,
+    Retry(String, Option<Duration>),
+    Permanent(String),
+}
+
+fn classify(status: u16, retry_after: Option<&str>) -> Outcome {
+    match status {
+        200..=299 => Outcome::Ok,
+        429 => Outcome::Retry(
+            "HTTP 429".into(),
+            Some(Duration::from_secs(retry_after.and_then(|s| s.trim().parse().ok()).unwrap_or(30).min(300))),
+        ),
+        408 | 500..=599 => Outcome::Retry(format!("HTTP {status}"), None),
+        _ => Outcome::Permanent(format!("HTTP {status}")),
+    }
+}
+
+/// One POST. Every message returned is a fixed string: never the URL, path, query or body.
+async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, open_for_tests: bool) -> Outcome {
+    let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
+    if !open_for_tests && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
+        return Outcome::Permanent("refused: internal address".into());
+    }
+    let id = format!("msg_{}", B64.encode(random::<12>()).replace(['+', '/', '='], ""));
+    let link = None; // Task 8 fills the kiln job link for `d.link` destinations.
+    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, &id, crate::now(), link) {
+        Ok(r) => r,
+        Err(m) => return Outcome::Permanent(m),
+    };
+    let mut req = c.post(u).body(r.body);
+    for (k, v) in r.headers {
+        req = req.header(k, v);
+    }
+    match req.send().await {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let ra = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_string);
+            // Read (and discard) at most 4 KiB; the body never matters beyond the status.
+            let mut seen = 0;
+            while seen < 4096 {
+                match resp.chunk().await {
+                    Ok(Some(b)) => seen += b.len(),
+                    _ => break,
+                }
+            }
+            classify(status, ra.as_deref())
+        }
+        Err(err) if err.is_timeout() => Outcome::Retry("timed out".into(), None),
+        Err(err) if err.is_connect() => {
+            // The error's Display carries the URL: inspect it, never store it.
+            if format!("{err:#}").contains("internal addresses") {
+                Outcome::Permanent("refused: resolves only to internal addresses".into())
+            } else {
+                Outcome::Retry("could not connect".into(), None)
+            }
+        }
+        Err(err) => Outcome::Permanent(if err.is_builder() || err.is_request() {
+            "request refused (TLS or URL)".into()
+        } else {
+            "request failed".into()
+        }),
+    }
+}
+
+/// Queue `e` for every destination that wants it. Never blocks; a full queue drops its oldest.
+pub fn emit(app: &crate::App, e: Event) {
+    let h = &app.notify;
+    let skip = failing_ids(app, &e);
+    let ids: Vec<String> = h.dests.lock().unwrap().iter().filter(|d| d.wants(&e) && !skip.contains(&d.id)).map(|d| d.id.clone()).collect();
+    for id in ids {
+        let Some(q) = h.queues.lock().unwrap().get(&id).cloned() else { continue };
+        let mut g = q.q.lock().unwrap();
+        if g.len() >= 256 {
+            g.pop_front();
+            h.status.lock().unwrap().entry(id.clone()).or_default().dropped += 1;
+        }
+        g.push_back(e.clone());
+        drop(g);
+        q.wake.notify_one();
+    }
+}
+
+/// A notify_failing health event goes only to destinations that are not themselves failing.
+fn failing_ids(app: &crate::App, e: &Event) -> Vec<String> {
+    match &e.detail {
+        Detail::Health(hi) if hi.kind == "notify_failing" => failing(app).into_iter().map(|(id, _)| id).collect(),
+        _ => vec![],
+    }
+}
+
+/// Destinations failing for an hour, or with 3 permanent failures in a row: (id, message).
+pub fn failing(app: &crate::App) -> Vec<(String, String)> {
+    let now = crate::now();
+    let dests = app.notify.dests.lock().unwrap();
+    let st = app.notify.status.lock().unwrap();
+    dests
+        .iter()
+        .filter_map(|d| {
+            let s = st.get(&d.id)?;
+            let bad = s.permanent_streak >= 3 || s.failing_since.is_some_and(|f| now.saturating_sub(f) >= 3600);
+            bad.then(|| (d.id.clone(), format!("{}: {}", d.label(), s.last_error.as_ref().map_or("failing", |e| e.1.as_str()))))
+        })
+        .collect()
+}
+
+fn jitter(d: Duration) -> Duration {
+    let r = u16::from_le_bytes(random::<2>()) as f64 / u16::MAX as f64; // 0..1
+    d.mul_f64(0.8 + 0.4 * r)
+}
+
+/// Deliver one event with the retry schedule, recording the outcome.
+async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
+    let waits = [5u64, 30, 120];
+    for attempt in 0..=waits.len() {
+        let out = send_once(c, d, e, false).await;
+        let now = crate::now();
+        // Record under the lock in its own scope: a guard must not live across the sleep.
+        let (m, after) = {
+            let mut st = app.notify.status.lock().unwrap();
+            let s = st.entry(d.id.clone()).or_default();
+            match out {
+                Outcome::Ok => {
+                    *s = Status { last_ok: Some(now), dropped: s.dropped, ..Default::default() };
+                    return;
+                }
+                Outcome::Permanent(m) => {
+                    s.last_error = Some((now, m.chars().take(200).collect()));
+                    s.failing_since.get_or_insert(now);
+                    s.permanent_streak += 1;
+                    tracing::warn!("notify {}: {m}", d.label());
+                    return;
+                }
+                Outcome::Retry(m, after) => {
+                    s.last_error = Some((now, m.chars().take(200).collect()));
+                    s.failing_since.get_or_insert(now);
+                    (m, after)
+                }
+            }
+        };
+        let Some(w) = waits.get(attempt) else {
+            tracing::warn!("notify {}: {m}, giving up after {} attempts", d.label(), attempt + 1);
+            return;
+        };
+        tokio::time::sleep(after.unwrap_or_else(|| jitter(Duration::from_secs(*w)))).await;
+    }
+}
+
+pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
+    let q = Arc::new(Queue::default());
+    app.notify.queues.lock().unwrap().insert(d.id.clone(), q.clone());
+    // Unit tests inspect the queue and must never reach the network: no delivery task.
+    if cfg!(test) {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        let c = client(&d, false);
+        let mut sent: VecDeque<std::time::Instant> = VecDeque::new();
+        let mut folded = 0u64;
+        loop {
+            let next = q.q.lock().unwrap().pop_front();
+            let Some(e) = next else {
+                if q.retired.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                // Wake on new events, or after a minute to flush folded overflow.
+                let _ = tokio::time::timeout(Duration::from_secs(60), q.wake.notified()).await;
+                if folded > 0 && sent.front().is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                    let more = Event { ty: "more", class: Class::Direct, detail: Detail::More(folded), to: vec![d.id.clone()] };
+                    folded = 0;
+                    deliver(&app, &c, &d, &more).await;
+                }
+                continue;
+            };
+            while sent.front().is_some_and(|t| t.elapsed() >= Duration::from_secs(60)) {
+                sent.pop_front();
+            }
+            if sent.len() >= 30 {
+                folded += 1;
+                continue;
+            }
+            sent.push_back(std::time::Instant::now());
+            deliver(&app, &c, &d, &e).await;
+        }
+    });
+}
+
+/// On shutdown: give queued alerts up to 2 s to go out (the spec's flush window).
+pub async fn flush(app: &crate::App) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && app.notify.queues.lock().unwrap().values().any(|q| !q.q.lock().unwrap().is_empty()) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Load destinations and start one worker each. An unreadable notify.json leaves
+/// notifications off and is reported, never rewritten.
+pub fn start(app: &Arc<crate::App>) {
+    match load(&app.data) {
+        Ok(ds) => {
+            for d in &ds {
+                spawn_worker(app, d.clone());
+            }
+            *app.notify.dests.lock().unwrap() = ds;
+        }
+        Err(m) => {
+            tracing::error!("{m}");
+            *app.notify.load_error.lock().unwrap() = Some(m);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +1032,99 @@ mod tests {
         assert!(x.wants(&ev(Class::Job, vec!["a1b2c3d4"])), "a rule naming it wins over the switch");
         assert!(!x.wants(&ev(Class::Direct, vec!["ffffffff"])));
         assert!(x.wants(&ev(Class::Direct, vec!["a1b2c3d4"])));
+    }
+
+    #[tokio::test]
+    async fn resolver_drops_internal_answers() {
+        use reqwest::dns::Resolve;
+        let g = Guard { tailnet: false };
+        let r = g.resolve("localhost".parse().unwrap()).await;
+        assert!(r.err().unwrap().to_string().contains("internal"), "localhost only resolves inward");
+    }
+
+    #[test]
+    fn retry_classification() {
+        assert!(matches!(classify(200, None), Outcome::Ok));
+        assert!(matches!(classify(204, None), Outcome::Ok));
+        assert!(matches!(classify(429, Some("12")), Outcome::Retry(_, Some(d)) if d == Duration::from_secs(12)));
+        assert!(matches!(classify(429, Some("99999")), Outcome::Retry(_, Some(d)) if d == Duration::from_secs(300)), "capped");
+        assert!(matches!(classify(503, None), Outcome::Retry(_, None)));
+        assert!(matches!(classify(408, None), Outcome::Retry(_, None)));
+        assert!(matches!(classify(404, None), Outcome::Permanent(_)));
+        assert!(matches!(classify(302, None), Outcome::Permanent(_)), "redirects are never followed");
+    }
+
+    type Seen = std::sync::Arc<Mutex<Vec<(axum::http::HeaderMap, Vec<u8>)>>>;
+
+    /// A local receiver that records requests and answers with `status`.
+    async fn receiver(status: u16) -> (String, Seen) {
+        use axum::{Router, routing::post};
+        let got: Seen = Default::default();
+        let g = got.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move |h: axum::http::HeaderMap, b: axum::body::Bytes| {
+                let g = g.clone();
+                async move {
+                    g.lock().unwrap().push((h, b.to_vec()));
+                    let mut r = axum::response::Response::new(axum::body::Body::from("x".repeat(10_000)));
+                    *r.status_mut() = axum::http::StatusCode::from_u16(status).unwrap();
+                    r.headers_mut().insert("location", "http://127.0.0.1:1/elsewhere".parse().unwrap());
+                    r
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, got)
+    }
+
+    #[tokio::test]
+    async fn delivers_signed_and_never_follows_redirects() {
+        let (url, got) = receiver(204).await;
+        let mut d = dest(Kind::Generic, &url);
+        let c = client(&d, true);
+        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Ok));
+        let (h, b) = got.lock().unwrap()[0].clone();
+        let (id, ts) = (h["webhook-id"].to_str().unwrap(), h["webhook-timestamp"].to_str().unwrap().parse().unwrap());
+        assert_eq!(h["webhook-signature"].to_str().unwrap(), sign(d.secret.as_deref().unwrap(), id, ts, &b).unwrap());
+        assert!(h["user-agent"].to_str().unwrap().starts_with("kiln/"));
+        let (url, got) = receiver(302).await;
+        d.url = url;
+        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Permanent(_)));
+        assert_eq!(got.lock().unwrap().len(), 1, "the redirect target was not requested");
+    }
+
+    #[tokio::test]
+    async fn bad_secret_is_permanent_and_sends_nothing() {
+        let (url, got) = receiver(204).await;
+        let mut d = dest(Kind::Generic, &url);
+        d.secret = Some("whsec_!!bad".into());
+        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Permanent(_)));
+        assert!(got.lock().unwrap().is_empty(), "nothing is sent unsigned");
+    }
+
+    #[tokio::test]
+    async fn refuses_literal_internal_address_before_connecting() {
+        let d = dest(Kind::Generic, "https://169.254.169.254/latest");
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), false).await {
+            Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
+            _ => panic!("must be refused"),
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_drops_oldest_and_counts() {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Generic, "https://hooks.example.com/k");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        spawn_worker(&app, d.clone());
+        let q = app.notify.queues.lock().unwrap()[&d.id].clone();
+        for _ in 0..300 {
+            emit(&app, Event { ty: "test", class: Class::Direct, detail: Detail::Test, to: vec![d.id.clone()] });
+        }
+        assert_eq!(q.q.lock().unwrap().len(), 256);
+        assert_eq!(app.notify.status.lock().unwrap()[&d.id].dropped, 44);
     }
 }

@@ -383,6 +383,17 @@ pub struct App {
 }
 
 impl App {
+    /// An App on a unique temp data dir (parallel tests each get their own).
+    #[cfg(test)]
+    pub fn for_tests() -> Arc<App> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("kiln-test-app-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Arc::new(App::new(d, Config::default(), github::Gh::new(String::new(), "none")))
+    }
+
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
         App {
             gh,
