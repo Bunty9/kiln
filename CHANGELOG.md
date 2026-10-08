@@ -4,6 +4,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+- README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, and drops the cover image.
+
 ## [0.2.4] - 2026-10-08
 
 ### Security
