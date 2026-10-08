@@ -613,11 +613,21 @@ fn dashboard_base() -> Option<String> {
     None::<String>.filter(|b| link_base_ok(b))
 }
 
-/// Only `https://<host>.ts.net[/...]` with nothing that could break out of a chat link.
+/// Only `https://<lowercase host>.ts.net[:port][/path]`: no userinfo, query or fragment, and nothing
+/// that could break out of a chat link.
 fn link_base_ok(s: &str) -> bool {
-    let Some(rest) = s.strip_prefix("https://") else { return false };
-    let host = rest.split('/').next().unwrap_or("");
-    host.ends_with(".ts.net") && !s.chars().any(|c| c.is_whitespace() || matches!(c, '|' | '<' | '>' | '"' | '\'' | '\\'))
+    if s.chars().any(|c| c.is_whitespace() || matches!(c, '|' | '<' | '>' | '"' | '\'')) {
+        return false;
+    }
+    let Ok(u) = reqwest::Url::parse(s) else { return false };
+    let host = u.host_str().unwrap_or("");
+    u.scheme() == "https"
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
+        && u.fragment().is_none()
+        && s.split("://").nth(1).and_then(|r| r.split(['/', ':']).next()) == Some(host) // Url lowercases; the original must already be
+        && host.strip_suffix(".ts.net").is_some_and(|l| !l.is_empty())
 }
 
 /// Writes worth a security alert. Destination changes are announced by their own handlers
@@ -632,21 +642,52 @@ fn action_for(path: &str) -> Option<&'static str> {
 }
 
 /// The setting names in a `config_changes` note: `egress: "a" -> "b", repos` -> [egress, repos].
-/// Only identifier-like tokens, so a value containing ", " cannot inject text.
+/// Quote-aware (values are JSON strings), and only identifier-like keys survive, so a value
+/// containing ", " or ":" cannot inject text.
 fn changed_keys(note: &str) -> Vec<String> {
-    note.split(", ")
-        .filter_map(|p| p.split(':').next())
-        .map(str::trim)
-        .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .take(20)
-        .map(String::from)
-        .collect()
+    let mut out = vec![];
+    let (mut key, mut key_done, mut quoted, mut esc) = (String::new(), false, false, false);
+    let flush = |key: &mut String, key_done: &mut bool, out: &mut Vec<String>| {
+        let k = key.trim();
+        if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && out.len() < 20 {
+            out.push(k.to_string());
+        }
+        key.clear();
+        *key_done = false;
+    };
+    let mut it = note.chars().peekable();
+    while let Some(c) = it.next() {
+        if quoted {
+            match (esc, c) {
+                (true, _) => esc = false,
+                (false, '\\') => esc = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            quoted = true;
+        } else if c == ',' && it.peek() == Some(&' ') {
+            it.next();
+            flush(&mut key, &mut key_done, &mut out);
+            continue;
+        } else if c == ':' {
+            key_done = true;
+        }
+        if !key_done {
+            key.push(c);
+        }
+    }
+    flush(&mut key, &mut key_done, &mut out);
+    out
 }
 
 /// Called by `web::admit` for every admitted, successful API write.
 pub fn security(app: &crate::App, actor: &str, path: &str, note: Option<&str>) {
     let Some(action) = action_for(path) else { return };
     let changed = note.map(changed_keys).unwrap_or_default();
+    if path == "/api/config" && changed.is_empty() {
+        return; // a save that changed nothing
+    }
     emit(
         app,
         Event {
@@ -1241,14 +1282,50 @@ mod tests {
     }
 
     #[test]
+    fn changed_keys_are_quote_aware() {
+        assert_eq!(changed_keys(r#"egress: "a, evil: x" -> "b", repos"#), vec!["egress", "repos"]);
+        assert_eq!(changed_keys(r#"label: "x, y" -> "z""#), vec!["label"]);
+        assert_eq!(changed_keys(r#"listen: "0.0.0.0:7878" -> "127.0.0.1:7878""#), vec!["listen"]);
+        assert_eq!(changed_keys(r#"label: "a\", evil" -> "b""#), vec!["label"]);
+    }
+
+    #[test]
     fn link_base_is_https_tailnet_only() {
-        assert!(link_base_ok("https://box.tail1234.ts.net"));
-        assert!(!link_base_ok("http://box.tail1234.ts.net"));
-        assert!(!link_base_ok("https://evil.example"));
-        assert!(!link_base_ok("https://box.ts.net.evil.example"));
-        assert!(!link_base_ok("https://box.ts.net|x"));
-        assert!(!link_base_ok("https://box.ts.net/ a"));
-        assert!(!link_base_ok("https://box.ts.net\""));
+        for ok in ["https://box.example.ts.net:8443", "https://box.example.ts.net", "https://box.tail1234.ts.net"] {
+            assert!(link_base_ok(ok), "{ok}");
+        }
+        for bad in [
+            "https://evil.example?.ts.net",
+            "https://evil.example#.ts.net",
+            "https://user@x.ts.net",
+            "https://evil.example@x.ts.net",
+            "https://X.TS.NET",
+            "http://x.ts.net",
+            "https://ts.net",
+            "https://x.ts.net.evil.example",
+            "https://evil.example",
+            "https://box.ts.net|x",
+            "https://box.ts.net/ a",
+            "https://box.ts.net\"",
+            "https://box.ts.net/'",
+        ] {
+            assert!(!link_base_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn noop_config_save_alerts_nobody() {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        let q = Arc::new(Queue::default());
+        app.notify.queues.lock().unwrap().insert(d.id.clone(), q.clone());
+        security(&app, "me", "/api/config", Some(""));
+        assert!(q.q.lock().unwrap().is_empty());
+        security(&app, "me", "/api/config", Some("repos"));
+        assert_eq!(q.q.lock().unwrap().len(), 1);
+        security(&app, "me", "/api/token", None);
+        assert_eq!(q.q.lock().unwrap().len(), 2, "token has no keys but still alerts");
     }
 
     #[test]
