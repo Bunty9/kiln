@@ -4,6 +4,7 @@ mod confine;
 mod github;
 mod host;
 mod mirror;
+mod notify;
 mod update;
 mod vm;
 mod web;
