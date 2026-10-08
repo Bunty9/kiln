@@ -481,6 +481,8 @@ pub struct Queue {
     pub wake: tokio::sync::Notify,
     /// Set when the destination was removed or replaced: the worker drains, then exits.
     pub retired: std::sync::atomic::AtomicBool,
+    /// True while the worker is sending (so `flush` waits for in-flight alerts).
+    pub busy: std::sync::atomic::AtomicBool,
 }
 
 /// All notification state, on `App`.
@@ -512,13 +514,18 @@ impl reqwest::dns::Resolve for Guard {
         let tailnet = self.tailnet;
         Box::pin(async move {
             let host = name.as_str().to_string();
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.filter(|a| allowed(a.ip(), tailnet)).collect();
+            let addrs = keep_allowed(tokio::net::lookup_host((host.as_str(), 0)).await?, tailnet);
             if addrs.is_empty() {
                 return Err(format!("{host} resolves only to internal addresses").into());
             }
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
+}
+
+/// Only the addresses an alert may connect to.
+fn keep_allowed(addrs: impl Iterator<Item = SocketAddr>, tailnet: bool) -> Vec<SocketAddr> {
+    addrs.filter(|a| allowed(a.ip(), tailnet)).collect()
 }
 
 /// The client for one destination. `open_for_tests` (tests only) allows plain HTTP to the
@@ -546,7 +553,7 @@ fn classify(status: u16, retry_after: Option<&str>) -> Outcome {
         200..=299 => Outcome::Ok,
         429 => Outcome::Retry(
             "HTTP 429".into(),
-            Some(Duration::from_secs(retry_after.and_then(|s| s.trim().parse().ok()).unwrap_or(30).min(300))),
+            Some(Duration::from_secs(retry_after.and_then(|s| s.trim().parse().ok()).unwrap_or(30).clamp(1, 300))),
         ),
         408 | 500..=599 => Outcome::Retry(format!("HTTP {status}"), None),
         _ => Outcome::Permanent(format!("HTTP {status}")),
@@ -586,17 +593,16 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, open_for_tests: boo
         Err(err) if err.is_timeout() => Outcome::Retry("timed out".into(), None),
         Err(err) if err.is_connect() => {
             // The error's Display carries the URL: inspect it, never store it.
-            if format!("{err:#}").contains("internal addresses") {
+            let inward = std::iter::successors(std::error::Error::source(&err), |e| e.source())
+                .any(|e| e.to_string().contains("internal addresses"));
+            if inward {
                 Outcome::Permanent("refused: resolves only to internal addresses".into())
             } else {
                 Outcome::Retry("could not connect".into(), None)
             }
         }
-        Err(err) => Outcome::Permanent(if err.is_builder() || err.is_request() {
-            "request refused (TLS or URL)".into()
-        } else {
-            "request failed".into()
-        }),
+        Err(err) if err.is_builder() => Outcome::Permanent("request refused (URL)".into()),
+        Err(_) => Outcome::Retry("request failed".into(), None),
     }
 }
 
@@ -683,6 +689,13 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     }
 }
 
+async fn send_more(app: &crate::App, q: &Queue, c: &reqwest::Client, d: &Dest, n: u64) {
+    let more = Event { ty: "more", class: Class::Direct, detail: Detail::More(n), to: vec![d.id.clone()] };
+    q.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+    deliver(app, c, d, &more).await;
+    q.busy.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
     let q = Arc::new(Queue::default());
     app.notify.queues.lock().unwrap().insert(d.id.clone(), q.clone());
@@ -699,14 +712,16 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
             let next = q.q.lock().unwrap().pop_front();
             let Some(e) = next else {
                 if q.retired.load(std::sync::atomic::Ordering::SeqCst) {
+                    if folded > 0 {
+                        send_more(&app, &q, &c, &d, folded).await;
+                    }
                     return;
                 }
                 // Wake on new events, or after a minute to flush folded overflow.
                 let _ = tokio::time::timeout(Duration::from_secs(60), q.wake.notified()).await;
                 if folded > 0 && sent.front().is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
-                    let more = Event { ty: "more", class: Class::Direct, detail: Detail::More(folded), to: vec![d.id.clone()] };
+                    send_more(&app, &q, &c, &d, folded).await;
                     folded = 0;
-                    deliver(&app, &c, &d, &more).await;
                 }
                 continue;
             };
@@ -718,7 +733,9 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
                 continue;
             }
             sent.push_back(std::time::Instant::now());
+            q.busy.store(true, std::sync::atomic::Ordering::SeqCst);
             deliver(&app, &c, &d, &e).await;
+            q.busy.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     });
 }
@@ -726,7 +743,15 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
 /// On shutdown: give queued alerts up to 2 s to go out (the spec's flush window).
 pub async fn flush(app: &crate::App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while std::time::Instant::now() < deadline && app.notify.queues.lock().unwrap().values().any(|q| !q.q.lock().unwrap().is_empty()) {
+    while std::time::Instant::now() < deadline
+        && app
+            .notify
+            .queues
+            .lock()
+            .unwrap()
+            .values()
+            .any(|q| !q.q.lock().unwrap().is_empty() || q.busy.load(std::sync::atomic::Ordering::SeqCst))
+    {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -1050,6 +1075,7 @@ mod tests {
         assert!(matches!(classify(429, Some("99999")), Outcome::Retry(_, Some(d)) if d == Duration::from_secs(300)), "capped");
         assert!(matches!(classify(503, None), Outcome::Retry(_, None)));
         assert!(matches!(classify(408, None), Outcome::Retry(_, None)));
+        assert!(matches!(classify(429, Some("0")), Outcome::Retry(_, Some(d)) if d == Duration::from_secs(1)), "floored");
         assert!(matches!(classify(404, None), Outcome::Permanent(_)));
         assert!(matches!(classify(302, None), Outcome::Permanent(_)), "redirects are never followed");
     }
@@ -1126,5 +1152,36 @@ mod tests {
         }
         assert_eq!(q.q.lock().unwrap().len(), 256);
         assert_eq!(app.notify.status.lock().unwrap()[&d.id].dropped, 44);
+    }
+
+    #[tokio::test]
+    async fn name_resolving_inward_is_refused_not_retried() {
+        let d = dest(Kind::Generic, "https://localhost/hook");
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), false).await {
+            Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
+            o => panic!("must be refused, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn resolver_keeps_only_allowed_answers() {
+        let a = |s: &str| SocketAddr::new(ip(s), 0);
+        let all = ["93.184.215.14", "127.0.0.1", "10.0.0.1", "2606:4700::1111", "100.64.0.7"].map(a);
+        assert_eq!(keep_allowed(all.into_iter(), false), vec![a("93.184.215.14"), a("2606:4700::1111")]);
+        assert!(keep_allowed(all.into_iter(), true).contains(&a("100.64.0.7")));
+    }
+
+    #[tokio::test]
+    async fn flush_waits_for_in_flight_sends() {
+        let app = crate::App::for_tests();
+        let q = Arc::new(Queue::default());
+        app.notify.queues.lock().unwrap().insert("x".into(), q.clone());
+        let t = std::time::Instant::now();
+        flush(&app).await;
+        assert!(t.elapsed() < Duration::from_millis(200), "idle returns at once");
+        q.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+        let t = std::time::Instant::now();
+        flush(&app).await;
+        assert!(t.elapsed() >= Duration::from_millis(1900), "busy waits for the cap");
     }
 }
