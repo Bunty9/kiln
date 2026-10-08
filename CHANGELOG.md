@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- **The HTTPS socket trusts only tailscaled.** kiln checks the uid of whatever connects to `serve.sock` and reads the `Tailscale-User-Login` and `X-Forwarded-For` headers only from root (tailscaled). Before, any process running as the kiln user could connect and claim to be a tailnet user. That includes a job VM's QEMU after a VM escape on kernels without Landlock socket scoping, and it bypassed the dashboard key. `kiln doctor` flags a tailscaled that does not run as root, because HTTPS then needs the key.
+
 ### Added
 
 - **Opt-in usage statistics and crash reports.** Both are off until you choose: the dashboard asks once (the Setup page, or an Overview banner on existing installs), and the new Settings › Privacy page changes the choice and shows the usage report exactly as it would be sent, plus an example crash report. Usage is a daily report of counts and settings; a crash report carries the version and the panic's location in kiln's code, never the message. Neither ever includes repo, account or host names, IPs, file paths on this box, tokens or logs. kiln sends them itself (the dashboard stays offline); `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off. New config keys `usage_stats` and `crash_reports`, and `GET /api/telemetry`. Reports go to `kiln-telemetry-api.vercel.app`, which stores them for 400 days without IPs. See SECURITY.md › Telemetry.
