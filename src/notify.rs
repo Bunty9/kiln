@@ -485,7 +485,7 @@ pub struct Queue {
     pub busy: std::sync::atomic::AtomicBool,
 }
 
-/// All notification state, on `App`.
+/// All notification state, on `App`. Lock order: dests, then queues, then status; never take an earlier one while holding a later one.
 #[derive(Default)]
 pub struct Hub {
     pub dests: Mutex<Vec<Dest>>,
@@ -824,7 +824,7 @@ fn new_id() -> String {
 /// Validate `b` into `d` (an existing destination for edits, or a fresh one).
 fn apply(b: DestBody, mut d: Dest, others: &[Dest]) -> ApiResult<Dest> {
     let name = b.name.trim();
-    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(|c| c.is_control() || invisible(c)) {
         return Err(bad("name: 1 to 40 characters"));
     }
     if others.iter().any(|o| o.id != d.id && o.name.eq_ignore_ascii_case(name)) {
@@ -865,16 +865,25 @@ fn apply(b: DestBody, mut d: Dest, others: &[Dest]) -> ApiResult<Dest> {
     Ok(d)
 }
 
+/// Tell every current destination (whatever its event switches say) about a change.
 fn announce(app: &crate::App, actor: &str, action: String) {
+    let to: Vec<String> = app.notify.dests.lock().unwrap().iter().map(|d| d.id.clone()).collect();
     emit(
         app,
         Event {
             ty: "security.changed",
-            class: Class::Security,
-            to: vec![],
+            class: Class::Direct,
+            to,
             detail: Detail::Security(SecurityInfo { actor: clean(actor), action, changed: vec![] }),
         },
     );
+}
+
+/// One edit at a time: no lost updates, no getting past the destination cap.
+static EDIT: Mutex<()> = Mutex::new(());
+
+fn edit_lock() -> std::sync::MutexGuard<'static, ()> {
+    EDIT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn persist(app: &crate::App, ds: &[Dest]) -> ApiResult<()> {
@@ -896,12 +905,15 @@ async fn list(State(app): State<Arc<crate::App>>) -> Json<Value> {
 
 /// The redacted destination list plus `load_error`: no URL, secret or token.
 pub fn state_json(app: &crate::App) -> Value {
+    let dests = app.notify.dests.lock().unwrap().clone();
     let st = app.notify.status.lock().unwrap();
-    let ds: Vec<Value> = app.notify.dests.lock().unwrap().iter().map(|d| public(d, &st.get(&d.id).cloned().unwrap_or_default())).collect();
+    let ds: Vec<Value> = dests.iter().map(|d| public(d, &st.get(&d.id).cloned().unwrap_or_default())).collect();
+    drop(st);
     json!({ "dests": ds, "load_error": *app.notify.load_error.lock().unwrap() })
 }
 
 async fn create(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, Json(b): Json<DestBody>) -> Noted {
+    let _edit = edit_lock();
     if app.notify.load_error.lock().unwrap().is_some() {
         return Err(bad("notify.json is unreadable: fix or remove it first"));
     }
@@ -940,23 +952,34 @@ async fn update(
     UrlPath(id): UrlPath<String>,
     Json(b): Json<DestBody>,
 ) -> Noted {
+    let _edit = edit_lock();
     let mut ds = app.notify.dests.lock().unwrap().clone();
     let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
     let url_changed = b.url.as_deref().is_some_and(|u| !u.trim().is_empty());
     let new = apply(b, ds[i].clone(), &ds)?;
+    // A secret only appears here when the kind just became generic: shown once.
+    let fresh = if ds[i].secret.is_none() { new.secret.clone() } else { None };
     let what = format!("changed notification destination {}{}", new.label(), if url_changed { " (new URL)" } else { "" });
-    // Announced before the change, so the old target hears it too.
-    announce(&app, &actor.0, what.clone());
     ds[i] = new.clone();
     persist(&app, &ds)?;
+    // Queued to the current (old) worker first, so the old target hears it.
+    announce(&app, &actor.0, what.clone());
     *app.notify.dests.lock().unwrap() = ds;
     retire(&app, &id);
     spawn_worker(&app, new.clone());
-    let st = app.notify.status.lock().unwrap().get(&id).cloned().unwrap_or_default();
-    Ok((Extension(crate::audit::Note(what)), Json(json!({ "dest": public(&new, &st) }))))
+    let st = {
+        let mut sts = app.notify.status.lock().unwrap();
+        if url_changed {
+            let dropped = sts.get(&id).map_or(0, |s| s.dropped);
+            sts.insert(id.clone(), Status { dropped, ..Default::default() });
+        }
+        sts.get(&id).cloned().unwrap_or_default()
+    };
+    Ok((Extension(crate::audit::Note(what)), Json(json!({ "dest": public(&new, &st), "secret": fresh }))))
 }
 
 async fn rotate(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, UrlPath(id): UrlPath<String>) -> Noted {
+    let _edit = edit_lock();
     let mut ds = app.notify.dests.lock().unwrap().clone();
     let d = ds.iter_mut().find(|d| d.id == id).ok_or_else(missing)?;
     if d.kind != Kind::Generic {
@@ -966,20 +989,22 @@ async fn rotate(State(app): State<Arc<crate::App>>, Extension(actor): Extension<
     d.secret = Some(secret.clone());
     let (what, d2) = (format!("rotated the signing secret of {}", d.label()), d.clone());
     persist(&app, &ds)?;
+    // Queued to the old worker, which signs it with the old secret the receiver still knows.
+    announce(&app, &actor.0, what.clone());
     *app.notify.dests.lock().unwrap() = ds;
     retire(&app, &id);
     spawn_worker(&app, d2);
-    announce(&app, &actor.0, what.clone());
     Ok((Extension(crate::audit::Note(what)), Json(json!({ "secret": secret }))))
 }
 
 async fn remove(State(app): State<Arc<crate::App>>, Extension(actor): Extension<Actor>, UrlPath(id): UrlPath<String>) -> Noted {
+    let _edit = edit_lock();
     let mut ds = app.notify.dests.lock().unwrap().clone();
     let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
     let what = format!("removed notification destination {}", ds[i].label());
-    announce(&app, &actor.0, what.clone());
     ds.remove(i);
     persist(&app, &ds)?;
+    announce(&app, &actor.0, what.clone());
     *app.notify.dests.lock().unwrap() = ds;
     retire(&app, &id);
     app.notify.status.lock().unwrap().remove(&id);
@@ -1476,6 +1501,31 @@ mod tests {
         let (st, msg) = add(&app, json!({ "name": "bad", "kind": "generic", "url": "https://10.0.0.1/x" })).await;
         assert_eq!(st, 400, "{msg}");
         assert!(!msg.to_string().contains("10.0.0.1/x"), "errors never echo the URL: {msg}");
+    }
+
+    #[tokio::test]
+    async fn announcements_reach_every_destination_and_secrets_show_once() {
+        let app = test_app();
+        let (_, a) =
+            add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a", "events": { "security": false } })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let q = app.notify.queues.lock().unwrap()[&id].clone();
+        let (st, u) = noted(
+            update(
+                State(app.clone()),
+                me(),
+                UrlPath(id.clone()),
+                dbody(json!({ "name": "a", "kind": "generic", "url": "https://hooks.example.com/x" })),
+            )
+            .await,
+        );
+        assert_eq!(st, 200, "{u}");
+        assert!(u["secret"].as_str().unwrap().starts_with("whsec_"), "{u}");
+        assert!(q.q.lock().unwrap().iter().any(|e| e.ty == "security.changed"), "security switch off still hears it");
+        let (_, u) = noted(update(State(app.clone()), me(), UrlPath(id), dbody(json!({ "name": "a2", "kind": "generic" }))).await);
+        assert!(u["secret"].is_null(), "{u}");
+        let (st, _) = add(&app, json!({ "name": "ops\u{202E}x", "kind": "ntfy", "url": "https://ntfy.sh/acme-b" })).await;
+        assert_eq!(st, 400);
     }
 
     #[tokio::test]
