@@ -313,6 +313,8 @@ pub struct PollStatus {
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
+    /// Every launch blocker active this tick, (kind, message), in priority order.
+    pub health: Vec<(String, String)>,
 }
 
 /// Pause after the n-th consecutive GitHub-wide registration failure: 1, 2, 5, then 10 min.
@@ -839,6 +841,27 @@ async fn scheduler(app: Arc<App>) {
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
+        let mut problems = {
+            let p = app.poll.lock().unwrap();
+            match &p.error {
+                Some(e) => vec![("poll".to_string(), e.clone())],
+                None => p.health.clone(),
+            }
+        };
+        if !confine::ENFORCED.load(Ordering::Relaxed) {
+            problems.push(("landlock".into(), "job VMs' QEMU runs unconfined: this kernel has no Landlock".into()));
+        }
+        if let Some(e) = app.notify.load_error.lock().unwrap().clone() {
+            problems.push(("notify_failing".into(), e));
+        }
+        let failing = notify::failing(&app);
+        if !failing.is_empty() {
+            problems.push((
+                "notify_failing".into(),
+                format!("notifications failing: {}", failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ")),
+            ));
+        }
+        notify::health(&app, problems, now());
         let rate = app.gh.rate();
         tokio::time::sleep(Duration::from_secs(poll_sleep(cfg.poll_secs, rate))).await;
     }
@@ -945,12 +968,23 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut probing = api.fails > 0 && app.vms.lock().unwrap().iter().any(|v| v.state == vm::State::Booting && v.runner_id.is_none());
     let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
-    let mut blocked = draining
-        .then(|| ("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()))
-        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
-        .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
-        .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
-        .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
+    let mut problems: Vec<(&str, String)> = vec![];
+    if draining {
+        problems.push(("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()));
+    }
+    if old_image {
+        problems.push(("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string()));
+    }
+    if let Some(m) = api.banner(now()).filter(|_| api.held(now())) {
+        problems.push(("github_api", m));
+    }
+    if let Some(e) = egress_err.as_ref() {
+        problems.push(("egress", format!("egress filtering unavailable: {e}")));
+    }
+    if let Some(g) = gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)) {
+        problems.push(g);
+    }
+    let mut blocked = problems.first().cloned();
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
@@ -1055,6 +1089,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         let mut p = app.poll.lock().unwrap();
         p.repo_errors = repo_errors;
         p.refused_forks = refused_forks;
+        p.health = problems.iter().map(|(k, m)| (k.to_string(), m.clone())).collect();
         p.blocked_kind = blocked.as_ref().map(|b| b.0.to_string());
         p.blocked = blocked.map(|b| b.1);
     }

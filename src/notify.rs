@@ -499,9 +499,55 @@ pub struct Hub {
     pub last_test: Mutex<HashMap<String, std::time::Instant>>,
 }
 
-/// Placeholder until the health tracker lands.
+/// Which problem kinds are announced as active, and candidates for a change.
 #[derive(Default)]
-pub struct HealthTrack;
+pub struct HealthTrack {
+    /// kind -> message as last announced.
+    active: HashMap<String, String>,
+    /// kind -> (wants to be active, first seen in that state, consecutive ticks).
+    pending: HashMap<String, (bool, u64, u32)>,
+}
+
+/// Stable changes since the last call: a kind must hold its new state for 2 ticks and 60 s.
+pub fn transitions(t: &mut HealthTrack, now_list: &[(String, String)], now: u64) -> Vec<HealthInfo> {
+    let mut kinds: Vec<String> = t.active.keys().chain(t.pending.keys()).cloned().collect();
+    kinds.extend(now_list.iter().map(|(k, _)| k.clone()));
+    kinds.sort();
+    kinds.dedup();
+    let mut out = vec![];
+    for k in kinds {
+        let msg = now_list.iter().find(|(x, _)| *x == k).map(|(_, m)| m.clone());
+        let want = msg.is_some();
+        if want == t.active.contains_key(&k) {
+            t.pending.remove(&k);
+            continue;
+        }
+        let p = t.pending.entry(k.clone()).or_insert((want, now, 0));
+        if p.0 != want {
+            *p = (want, now, 0);
+        }
+        p.2 += 1;
+        if p.2 >= 2 && now.saturating_sub(p.1) >= 60 {
+            t.pending.remove(&k);
+            if let Some(m) = msg {
+                t.active.insert(k.clone(), m.clone());
+                out.push(HealthInfo { kind: k, message: clean(&m), state: "raised" });
+            } else if let Some(m) = t.active.remove(&k) {
+                out.push(HealthInfo { kind: k, message: clean(&m), state: "cleared" });
+            }
+        }
+    }
+    out
+}
+
+/// Feed this tick's problems; emit raised/cleared alerts.
+pub fn health(app: &crate::App, now_list: Vec<(String, String)>, now: u64) {
+    let changes = transitions(&mut app.notify.health.lock().unwrap(), &now_list, now);
+    for h in changes {
+        let ty = if h.state == "raised" { "health.raised" } else { "health.cleared" };
+        emit(app, Event { ty, class: Class::Health, detail: Detail::Health(h), to: vec![] });
+    }
+}
 
 /// DNS for alert requests: system resolution, then only addresses `allowed` may pass. The
 /// connection uses exactly these, so there is no gap for a rebind between check and connect.
@@ -1125,6 +1171,31 @@ pub fn routes() -> axum::Router<Arc<crate::App>> {
 mod tests {
     use super::*;
     use crate::vm::Vm;
+
+    #[test]
+    fn health_needs_two_ticks_and_a_minute() {
+        let mut t = HealthTrack::default();
+        let disk = vec![("disk".to_string(), "low disk".to_string())];
+        assert!(transitions(&mut t, &disk, 0).is_empty(), "first sight");
+        assert!(transitions(&mut t, &disk, 30).is_empty(), "two ticks but under a minute");
+        let r = transitions(&mut t, &disk, 61);
+        assert_eq!((r.len(), r[0].kind.as_str(), r[0].state), (1, "disk", "raised"));
+        assert!(transitions(&mut t, &disk, 120).is_empty(), "still active: nothing new");
+        assert!(transitions(&mut t, &[], 130).is_empty());
+        assert!(transitions(&mut t, &[], 140).is_empty());
+        let c = transitions(&mut t, &[], 200);
+        assert_eq!((c.len(), c[0].state), (1, "cleared"));
+    }
+
+    #[test]
+    fn flapping_condition_never_alerts() {
+        let mut t = HealthTrack::default();
+        let mem = vec![("memory".to_string(), "low memory".to_string())];
+        for i in 0..40 {
+            let list = if i % 2 == 0 { mem.clone() } else { vec![] };
+            assert!(transitions(&mut t, &list, i * 10).is_empty(), "tick {i}");
+        }
+    }
 
     fn vm_end(state: crate::vm::State, result: Option<&str>) -> Vm {
         let mut v: Vm = serde_json::from_value(json!({
