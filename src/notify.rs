@@ -117,13 +117,17 @@ pub fn check_url(kind: Kind, url: &str, tailnet: bool) -> Result<reqwest::Url, S
 
 /// Text that came from a repo, made inert: no control or bidi characters, one line, ≤ 100 chars.
 pub fn clean(s: &str) -> String {
-    let t: String = s
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .filter(|c| !c.is_control() && !matches!(*c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'))
-        .collect();
+    let t: String = s.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|c| !c.is_control() && !invisible(*c)).collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.chars().count() > 100 { t.chars().take(99).chain(std::iter::once('…')).collect() } else { t }
+}
+
+/// Format characters that render as nothing but can split or disguise text.
+fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E0000}'..='\u{E007F}')
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -233,14 +237,21 @@ fn summary(e: &Event, esc: &dyn Fn(&str) -> String) -> String {
     }
 }
 
+/// Breaks auto-linking of repo text (`evil.example`, `https://…`) by putting a zero-width space
+/// after every dot and colon. Only repo text is delinked; kiln's own links are added after.
+fn delink(s: &str) -> String {
+    s.replace('.', ".\u{200B}").replace(':', ":\u{200B}")
+}
+
 fn slack_esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    delink(s).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 fn discord_esc(s: &str) -> String {
+    let s = delink(s);
     let mut o = String::with_capacity(s.len() + 8);
     for c in s.chars() {
-        if "\\*_~`|>#-[]()".contains(c) {
+        if "\\*_~`|>#-[]()<".contains(c) {
             o.push('\\');
         }
         o.push(c);
@@ -277,7 +288,16 @@ fn generic_body(e: &Event, id: &str, at: u64, link: Option<&str>) -> Value {
 
 /// The request for one event to one destination. Repo text was `clean`ed when the event was
 /// built; here it is escaped for the target, and kept out of headers entirely.
-pub fn render(kind: Kind, secret: Option<&str>, token: Option<&str>, e: &Event, msg_id: &str, at: u64, link: Option<&str>) -> Rendered {
+/// Errors only for Generic with no valid signing secret: it fails closed rather than send unsigned.
+pub fn render(
+    kind: Kind,
+    secret: Option<&str>,
+    token: Option<&str>,
+    e: &Event,
+    msg_id: &str,
+    at: u64,
+    link: Option<&str>,
+) -> Result<Rendered, String> {
     let job_url = match &e.detail {
         Detail::Job(j) => j.url.as_deref().and_then(github_link),
         _ => None,
@@ -286,11 +306,10 @@ pub fn render(kind: Kind, secret: Option<&str>, token: Option<&str>, e: &Event, 
     match kind {
         Kind::Generic => {
             let body = serde_json::to_vec(&generic_body(e, msg_id, at, link)).unwrap_or_default();
-            let mut headers = vec![json_h, ("webhook-id", msg_id.to_string()), ("webhook-timestamp", at.to_string())];
-            if let Some(sig) = secret.and_then(|s| sign(s, msg_id, at, &body)) {
-                headers.push(("webhook-signature", sig));
-            }
-            Rendered { headers, body }
+            let sig = secret.and_then(|s| sign(s, msg_id, at, &body)).ok_or("signing secret is invalid")?;
+            let headers =
+                vec![json_h, ("webhook-id", msg_id.to_string()), ("webhook-timestamp", at.to_string()), ("webhook-signature", sig)];
+            Ok(Rendered { headers, body })
         }
         Kind::Slack => {
             let mut t = summary(e, &slack_esc);
@@ -299,8 +318,8 @@ pub fn render(kind: Kind, secret: Option<&str>, token: Option<&str>, e: &Event, 
                     t += &format!(" <{u}|{label}>");
                 }
             }
-            let v = json!({ "text": t, "unfurl_links": false, "unfurl_media": false });
-            Rendered { headers: vec![json_h], body: serde_json::to_vec(&v).unwrap_or_default() }
+            let v = json!({ "text": t, "unfurl_links": false, "unfurl_media": false, "mrkdwn": false });
+            Ok(Rendered { headers: vec![json_h], body: serde_json::to_vec(&v).unwrap_or_default() })
         }
         Kind::Discord => {
             let mut t = summary(e, &discord_esc);
@@ -308,10 +327,10 @@ pub fn render(kind: Kind, secret: Option<&str>, token: Option<&str>, e: &Event, 
                 t += &format!("\n<{u}>");
             }
             let v = json!({ "content": t, "username": "kiln", "allowed_mentions": { "parse": [] } });
-            Rendered { headers: vec![json_h], body: serde_json::to_vec(&v).unwrap_or_default() }
+            Ok(Rendered { headers: vec![json_h], body: serde_json::to_vec(&v).unwrap_or_default() })
         }
         Kind::Ntfy => {
-            let mut t = summary(e, &|s: &str| s.to_string());
+            let mut t = summary(e, &delink);
             for u in [job_url, link].into_iter().flatten() {
                 t += &format!("\n{u}");
             }
@@ -325,7 +344,7 @@ pub fn render(kind: Kind, secret: Option<&str>, token: Option<&str>, e: &Event, 
             if let Some(tk) = token {
                 headers.push(("Authorization", format!("Bearer {tk}")));
             }
-            Rendered { headers, body: t.into_bytes() }
+            Ok(Rendered { headers, body: t.into_bytes() })
         }
     }
 }
@@ -458,6 +477,7 @@ mod tests {
         assert_eq!(clean("a\r\nb\tc"), "a b c");
         assert_eq!(clean("x\u{202E}gnp.exe\u{2066}y\u{200F}"), "xgnp.exey");
         assert_eq!(clean("\u{7}bell\u{1b}[31m"), "bell[31m");
+        assert_eq!(clean("a\u{200B}b\u{061C}c\u{FEFF}d\u{E0041}e\u{00AD}f"), "abcdef");
         let long = clean(&"é".repeat(500));
         assert_eq!(long.chars().count(), 100);
         assert!(long.ends_with('…'));
@@ -466,12 +486,13 @@ mod tests {
     #[test]
     fn slack_cannot_mention_or_link() {
         let e = job("acme/kiln", "<!channel> <@U123> <https://evil.example|click>", "main & co");
-        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None);
+        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
         let t = body(&r)["text"].as_str().unwrap().to_string();
         assert!(!t.contains("<!channel>") && !t.contains("<@U123>") && !t.contains("<https://evil"), "{t}");
         assert!(t.contains("&lt;!channel&gt;") && t.contains("main &amp; co"), "{t}");
         assert_eq!(body(&r)["unfurl_links"], false);
         assert_eq!(body(&r)["unfurl_media"], false);
+        assert_eq!(body(&r)["mrkdwn"], false);
         // kiln's own link is the only real link
         assert!(t.contains("<https://github.com/acme/kiln/actions/runs/1/job/2|details>"), "{t}");
     }
@@ -479,25 +500,62 @@ mod tests {
     #[test]
     fn discord_cannot_ping_or_format() {
         let e = job("acme/kiln", "@everyone **bold** [x](https://evil.example)", "@here");
-        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None);
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
         let v = body(&r);
         let c = v["content"].as_str().unwrap();
         assert!(!c.contains("@everyone") && !c.contains("@here"), "{c}");
         assert!(c.contains("\\*\\*bold\\*\\*") && c.contains("\\[x\\]"), "{c}");
+        assert!(c.contains("\\(https") && !c.replace("\\(https", "").contains("(https"), "{c}");
         assert_eq!(v["allowed_mentions"], serde_json::json!({ "parse": [] }));
         assert_eq!(v["username"], "kiln");
     }
 
     #[test]
+    fn discord_escapes_angle_brackets_in_repo_text() {
+        let e = job("acme/kiln", "<t:1:R> </cmd:1> <:x:1>", "main");
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let c = body(&r)["content"].as_str().unwrap().to_string();
+        // The first line is the summary; the kiln link follows on its own line.
+        let summary = c.lines().next().unwrap();
+        assert!(summary.contains('<'), "{c}");
+        for (i, _) in summary.match_indices('<') {
+            assert_eq!(summary[..i].chars().last(), Some('\\'), "unescaped < in {summary}");
+        }
+    }
+
+    #[test]
+    fn chat_targets_do_not_autolink_repo_text() {
+        let e = job("acme/kiln", "evil.example", "https://evil.example/login");
+        let s = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
+        let d = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let n = render(Kind::Ntfy, None, None, &e, "msg_1", 1, None).unwrap();
+        let slack = body(&s)["text"].as_str().unwrap().to_string();
+        let discord = body(&d)["content"].as_str().unwrap().to_string();
+        let ntfy = String::from_utf8(n.body.clone()).unwrap();
+        for t in [&slack, &discord, &ntfy] {
+            assert!(!t.contains("https://evil") && !t.contains("evil.example"), "{t}");
+            assert!(t.contains("https://github.com/acme/kiln/actions/runs/1/job/2"), "{t}");
+        }
+    }
+
+    #[test]
     fn ntfy_keeps_untrusted_text_out_of_headers() {
         let e = job("acme/kiln", "evil\r\nX-Injected: 1", "main");
-        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None);
+        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None).unwrap();
         for (k, v) in &r.headers {
             assert!(v.is_ascii() && !v.contains('\n') && !v.contains("evil"), "{k}: {v}");
         }
         assert!(r.headers.contains(&("Title", "kiln: job failed".into())));
         assert!(r.headers.contains(&("Authorization", "Bearer tk_secret".into())));
-        assert!(String::from_utf8(r.body.clone()).unwrap().contains("evil X-Injected: 1"));
+        assert!(String::from_utf8(r.body.clone()).unwrap().contains("evil X-Injected:\u{200B} 1"));
+    }
+
+    #[test]
+    fn generic_fails_closed_without_a_valid_secret() {
+        let e = job("acme/kiln", "test", "main");
+        assert!(render(Kind::Generic, Some("whsec_!!notbase64"), None, &e, "msg_1", 1, None).is_err());
+        assert!(render(Kind::Generic, None, None, &e, "msg_1", 1, None).is_err());
+        assert!(render(Kind::Slack, None, None, &e, "msg_1", 1, None).is_ok());
     }
 
     #[test]
@@ -505,7 +563,7 @@ mod tests {
         let e = job("acme/kiln", "test", "main");
         let s = new_secret();
         assert!(s.starts_with("whsec_") && s.len() > 40);
-        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None);
+        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None).unwrap();
         let v = body(&r);
         assert_eq!((v["type"].as_str(), v["id"].as_str(), v["at"].as_u64()), (Some("job.failed"), Some("msg_1"), Some(1791402114)));
         assert_eq!(v["job"]["workflow"], "ci.yml");
