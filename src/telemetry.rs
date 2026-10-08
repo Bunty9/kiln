@@ -97,20 +97,25 @@ fn crash(location: &str, thread: Option<&str>) -> Value {
     })
 }
 
-/// A panic location without the build machine's paths. kiln's own files are relative
-/// (`src/vm.rs`). Absolute ones keep only what names no one: from the crate directory in
-/// cargo's registry (`.../registry/src/<index>/tokio-1.47.1/src/...`) or from the standard
-/// library (`/rustc/<hash>/library/core/...`); anything else (generated code under a target
-/// dir, a vendored or path dependency in someone's home) is reduced to its file name.
+/// A panic location that names no one. Kept: kiln's own files (`src/vm.rs`), a crate in
+/// cargo's registry (`.../registry/src/index.crates.io-<16 hex>/tokio-1.47.1/src/...`, kept
+/// from the crate directory) and the standard library (`/rustc/<hash>/library/core/...`, kept
+/// from `core`). Anything else, such as generated code under a target dir or a path or vendored
+/// dependency of a self-built binary, is sent as `other`: even its file name could name a project.
 fn short_path(f: &str) -> String {
-    if !f.starts_with('/') && !f.split('/').any(|p| p == "..") {
+    let parts: Vec<&str> = f.split('/').collect();
+    if parts.contains(&"..") {
+        return "other".into();
+    }
+    if parts.first() == Some(&"src") {
         return f.to_string();
     }
-    let parts: Vec<&str> = f.split('/').collect();
     let from = |i: usize| (i < parts.len()).then(|| parts[i..].join("/"));
-    let registry = parts.windows(2).position(|w| w == ["registry", "src"]).and_then(|i| from(i + 3));
+    // cargo names each registry index directory `<name>-<16 hex digits>`.
+    let index = |p: &str| p.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let registry = parts.windows(3).position(|w| w[0] == "registry" && w[1] == "src" && index(w[2])).and_then(|i| from(i + 3));
     let std = (parts.get(1) == Some(&"rustc")).then(|| parts.iter().position(|p| *p == "library")).flatten().and_then(|i| from(i + 1));
-    registry.or(std).unwrap_or_else(|| parts.last().unwrap_or(&"").to_string())
+    registry.or(std).unwrap_or_else(|| "other".into())
 }
 
 fn record(dir: &Path, report: &Value) -> std::io::Result<()> {
@@ -318,10 +323,18 @@ mod tests {
             short_path("/home/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.0.15+zstd.1.5.7/src/lib.rs"),
             "zstd-sys-2.0.15+zstd.1.5.7/src/lib.rs"
         );
-        // A self-built binary: generated code, a vendored or path dependency, a parent-relative path.
-        assert_eq!(short_path("/home/alice/src/kiln/target/release/build/foo-1a2b/out/gen.rs"), "gen.rs");
-        assert_eq!(short_path("/home/alice/src/acme-secret/vendor/bar/src/lib.rs"), "lib.rs");
-        assert_eq!(short_path("../acme-secret/src/lib.rs"), "lib.rs");
+        // A self-built binary: generated code, vendored, path and workspace dependencies,
+        // a directory that only looks like cargo's registry.
+        for p in [
+            "/home/alice/src/kiln/target/release/build/foo-1a2b/out/gen.rs",
+            "/home/alice/src/acme-secret/vendor/bar/src/lib.rs",
+            "../acme-secret/src/lib.rs",
+            "acme-secret/src/lib.rs",
+            "/home/alice/registry/src/acme/secret-proj/src/x.rs",
+            "src/../../acme/x.rs",
+        ] {
+            assert_eq!(short_path(p), "other", "{p}");
+        }
     }
 
     #[test]
