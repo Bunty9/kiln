@@ -118,6 +118,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - Fork pull requests refused by kiln itself, before any of their code runs.
 - Signed self-updates that roll back if the new version fails to start.
 - Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.
+- **Alerts anywhere.** Job failures, chosen workflows, box health and security changes go to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints get Standard Webhooks signatures).
 
 ## Requirements
 

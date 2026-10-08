@@ -142,6 +142,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/tailscale/ping", post(ts_ping))
         .route("/api/tailscale/serve", post(ts_serve))
         .route("/api/gh/{*path}", any(gh_proxy))
+        .merge(crate::notify::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
     let (listener, addr) = bind_listen(&app.data, &app.cfg().listen).await?;
@@ -647,16 +648,22 @@ async fn admit(app: Arc<App>, via: Via, req: Request, next: Next) -> Response {
     let (admitted, who) = admission(&app, via, req).await;
     let admitted_ok = admitted.is_ok();
     let resp = match admitted {
-        Ok(req) => next.run(req).await,
+        Ok(mut req) => {
+            req.extensions_mut().insert(crate::notify::Actor(who.actor.clone()));
+            next.run(req).await
+        }
         Err(denied) => denied,
     };
     if audited(&method, &path, admitted_ok) {
-        let mut e =
-            json!({ "actor": who.actor, "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
+        let mut e = json!({ "actor": who.actor.clone(), "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
         if let Some(n) = resp.extensions().get::<crate::audit::Note>() {
             e["note"] = n.0.clone().into();
         }
         crate::audit::record(&app.data, e);
+        if resp.status().is_success() {
+            let note = resp.extensions().get::<crate::audit::Note>().map(|n| n.0.clone());
+            crate::notify::security(&app, &who.actor, &path, note.as_deref());
+        }
     } else if audited(&method, &path, true) {
         tracing::info!(target: "audit", "audit: refused {method} {path} from {} ({}): {}", who.from, who.actor, resp.status());
     }
@@ -792,6 +799,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
+        "notify": crate::notify::state_json(&app),
         // 32 days covers the current month in any timezone.
         "usage": vm::usage_since(&app.data, now() / 86400 - 32),
         "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
@@ -838,6 +846,15 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
+    // Only new or changed rules are checked: an unrelated save never fails on an old rule.
+    // With notify.json unreadable the destination list is unknown, so ids are not checked.
+    let unreadable = app.notify.load_error.lock().unwrap().is_some();
+    let ids: Option<Vec<String>> = (!unreadable).then(|| app.notify.dests.lock().unwrap().iter().map(|d| d.id.clone()).collect());
+    let repos: Vec<String> = app.repos().into_iter().chain(c.repos.iter().cloned()).collect();
+    let errs = crate::notify::rule_errors(&app.cfg().notify_rules, &c.notify_rules, ids.as_deref(), &repos);
+    if !errs.is_empty() {
+        bail_r(&errs.join("; "))?;
+    }
     app.save_cfg(c)?;
     if to_filtered {
         // Probe now so the dashboard shows the result and the scheduler has it cached.

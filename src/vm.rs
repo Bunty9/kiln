@@ -71,6 +71,13 @@ pub enum CacheUse {
     Discarded,
 }
 
+/// VMs `load_history` found still active (kiln died under them): alerted once notify starts.
+static NEWLY_LOST: std::sync::Mutex<Vec<Vm>> = std::sync::Mutex::new(Vec::new());
+
+pub fn take_newly_lost() -> Vec<Vm> {
+    std::mem::take(&mut NEWLY_LOST.lock().unwrap())
+}
+
 /// The workflow run behind a VM's job, for the dashboard: where the code came from.
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct Run {
@@ -84,6 +91,9 @@ pub struct Run {
     pub title: String,
     pub workflow: String,
     pub number: u64,
+    /// Workflow file name (e.g. `release.yml`), what `notify_rules` match on; empty if unknown.
+    #[serde(default)]
+    pub file: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -145,6 +155,9 @@ pub struct Vm {
     /// Set once the runner picks up a job (see `attach_jobs`).
     #[serde(default)]
     pub run: Option<Run>,
+    /// The job came from a fork pull request, which kiln refuses to run.
+    #[serde(default)]
+    pub fork: bool,
 }
 
 impl Vm {
@@ -219,6 +232,7 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
             // The crash skipped the normal cleanup: don't leave a disk or a credential behind.
             scrub_vm_dir(&data.join("vms").join(&v.id));
             write_meta(data, v);
+            NEWLY_LOST.lock().unwrap().push(v.clone());
             // It never reached the end of `launch`, where finished jobs are counted.
             if !seed {
                 record_usage(data, v);
@@ -339,6 +353,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         warm,
         mint_failed: false,
         run: None,
+        fork: false,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -408,6 +423,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 persist(&app, &v);
             }
             record_usage(&app.data, &v);
+            crate::notify::job_ended(&app, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
         app.releases.lock().unwrap().remove(&id);
@@ -2415,6 +2431,7 @@ mod tests {
             warm: false,
             mint_failed: false,
             run: None,
+            fork: false,
         }
     }
 

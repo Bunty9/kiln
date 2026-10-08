@@ -816,10 +816,12 @@ fn unsafe_branch(branch: &str) -> Option<String> {
     (!crate::valid_branch(branch)).then(|| format!("{branch} (not a plain branch name)"))
 }
 
-/// Did this run's code come from another repository (a fork PR)? Fails closed:
-/// a run whose head repository is gone (deleted fork) counts as a fork.
+/// The dashboard's and alerts' view of a workflow run (see `vm::Run`).
 fn run_info(run: &Value) -> crate::vm::Run {
     let s = |k: &str| run[k].as_str().unwrap_or("").chars().take(200).collect::<String>();
+    // `path` is ".github/workflows/release.yml", sometimes with "@refs/..." after it.
+    let path = run["path"].as_str().unwrap_or("");
+    let file = path.split('@').next().unwrap_or("").rsplit('/').next().unwrap_or("");
     crate::vm::Run {
         branch: s("head_branch"),
         sha: s("head_sha"),
@@ -828,9 +830,12 @@ fn run_info(run: &Value) -> crate::vm::Run {
         title: s("display_title"),
         workflow: s("name"),
         number: run["run_number"].as_u64().unwrap_or_default(),
+        file: file.chars().take(200).collect(),
     }
 }
 
+/// Did this run's code come from another repository (a fork PR)? Fails closed:
+/// a run whose head repository is gone (deleted fork) counts as a fork.
 fn is_fork_run(run: &Value) -> bool {
     match (run["head_repository"]["full_name"].as_str(), run["repository"]["full_name"].as_str()) {
         (Some(head), Some(base)) => !head.eq_ignore_ascii_case(base),
@@ -952,6 +957,10 @@ mod tests {
         assert_eq!((r.branch.as_str(), r.sha.as_str(), r.pr, r.event.as_str()), ("fix", "abcdef1234", Some(42), "pull_request"));
         assert_eq!((r.title.as_str(), r.workflow.as_str(), r.number), ("Fix it", "CI", 12));
         assert_eq!(run_info(&serde_json::json!({})), crate::vm::Run::default());
+        let file = |p: &str| run_info(&serde_json::json!({ "path": p })).file;
+        assert_eq!(file(".github/workflows/x.yml@refs/heads/main"), "x.yml");
+        assert_eq!(file(".github/workflows/ci.yml"), "ci.yml");
+        assert_eq!(file("dynamic/github-code-scanning/codeql"), "codeql");
     }
 
     #[test]

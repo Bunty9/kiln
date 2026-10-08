@@ -10,6 +10,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs and ntfy tokens are write-only; a signing secret is returned once (on create, rotate, or a kind or origin change) and never again; moving a URL to another host drops its token and issues a new secret. Repo text is escaped per target. See docs/configuration.md.
 - **Opt-in usage statistics and crash reports.** Both are off until you choose: the dashboard asks once (the Setup page, or an Overview banner on existing installs), and the new Settings › Privacy page changes the choice and shows the usage report exactly as it would be sent, plus an example crash report. Usage is a daily report of counts and settings; a crash report carries the version and the panic's location in kiln's code, never the message. Neither ever includes repo, account or host names, IPs, file paths on this box, tokens or logs. kiln sends them itself (the dashboard stays offline); `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off. New config keys `usage_stats` and `crash_reports`, and `GET /api/telemetry`. Reports go to `kiln-telemetry-api.vercel.app`, which stores them for 400 days without IPs. See SECURITY.md › Telemetry.
 - A `check` workflow runs format, clippy, tests and the dashboard and service worker syntax checks on a GitHub-hosted runner for every push to main and every pull request, forks included (read-only token, no secrets).
 - **Settings › Analytics.** Jobs, success rate, median and p95 job time, time to start, job minutes and savings for the last 24 hours, 7 or 30 days, filtered by repo and VM size; stacked charts of jobs by outcome and minutes by VM size, the median queue/boot/wait/job split, a per-repo table and the slowest jobs. Each chart's numbers are also a table under "Show numbers". A last chart reads the usage ledger, so it includes jobs older than the newest 100 VMs (last 30 UTC days, by the day each job finished).
@@ -21,6 +22,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, replaces the generated cover image with a recorded demo of the real dashboard (`docs/media/`), and links measured benchmarks with their method (`docs/benchmarks.md`).
 - `docs/stacks.md` drops planned or nonexistent items (`kiln status`, forking kiln) and links GitHub's official pricing docs for the hosted runner prices it quotes. `CONTRIBUTING.md` describes the current `src/` layout.
 - The Overview's Recent failures section shows only jobs that failed in the last 15 minutes (it was 7 days), and is hidden when there are none.
+
+### Security
+
+- Notification delivery uses an SSRF-safe client (public addresses only, checked in the resolver, no redirects, no proxies, tailnet ranges only by opt-in), stored URLs are re-checked on every send, and destination URLs and tokens are write-only, signing secrets shown once, all stored mode 0600.
 
 ## [0.2.4] - 2026-10-08
 
