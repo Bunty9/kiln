@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping with kiln. It is a small codebase on purpose: five Rust files and one HTML file.
+Thanks for helping with kiln. It is a small codebase on purpose: nine Rust files under `src/` and one HTML file for the dashboard.
 
 ## Development setup
 
@@ -21,8 +21,14 @@ cargo build
 | `src/vm.rs` | VM lifecycle (`launch`, `run`), QEMU command line, console parsing, repo cache, reaper and warm pool, egress ruleset and probe, debug hold, `bake`, `doctor` |
 | `src/web.rs` | axum server, access guard (tailnet identity, dashboard key, Host and CSRF checks), JSON API, GitHub proxy allow-list |
 | `src/github.rs` | GitHub REST client (ETag cache, rate limits), queued-job counting, JIT config, cache trust lookup, hello PR |
+| `src/app_auth.rs` | GitHub App authentication: keys, JWTs, installation tokens, the App manifest |
 | `src/mirror.rs` | Docker Hub pull-through registry supervisor |
+| `src/update.rs` | Over-the-air updates from signed releases: verify, drain, swap, roll back |
+| `src/confine.rs` | `kiln __confine`: the Landlock ruleset a job VM's QEMU runs under |
+| `src/audit.rs` | Audit log of API writes (`<data>/audit.log`) |
+| `src/testdata/` | Test-only keys (see its README) |
 | `src/dashboard.html` | The whole dashboard: HTML, CSS and JavaScript in one file, embedded with `include_str!` |
+| `assets/` | Dashboard icons and the service worker (`sw.js`) |
 | `guest/user-data.yaml` | Cloud-init recipe and guest scripts (`kiln-job`, `kiln-steps`, `kiln-cache`) baked into the VM image |
 | `deploy/kiln.service` | systemd user unit |
 | `examples/` | Small projects used by the stacks workflow |
@@ -32,11 +38,11 @@ Read [docs/architecture.md](docs/architecture.md) first; it explains how these f
 
 ## Checks
 
-Run all of these before sending a change. CI runs them on kiln itself, in a kiln VM:
+Run all of these before sending a change. The `check` workflow runs them on a GitHub-hosted runner for every pull request, and `ci` runs them on kiln itself, in a kiln VM:
 
 ```sh
 cargo fmt --check
-cargo clippy --locked --tests -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
@@ -46,10 +52,12 @@ cargo test --locked
 
 `src/dashboard.html` has no build step, no framework and no dependencies. Edit it and rebuild; the file is embedded in the binary, so a redeploy shows up on reload (the page is served with `no-cache`).
 
-Check its JavaScript parses:
+Check its JavaScript parses (every inline `<script>` block, the same check CI runs), and the service worker:
 
 ```sh
-sed -n '/<script>/,/<\/script>/p' src/dashboard.html | sed '1d;$d' > /tmp/dashboard.js && node --check /tmp/dashboard.js
+node -e 'const s = require("fs").readFileSync("src/dashboard.html", "utf8");
+  require("fs").writeFileSync("/tmp/dashboard.js", [...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n;\n"))'
+node --check /tmp/dashboard.js && node --check assets/sw.js
 ```
 
 For UI work you do not need a live kiln. Write a throwaway mock server (not committed) that serves `src/dashboard.html` at `/` and returns canned JSON for `/api/state` (the shape is built in `state()` in `src/web.rs`), `/api/doctor`, `/api/log` and the other `/api/` routes the page calls. Requests from a browser on the same machine need the `x-kiln-key` header, so the mock can simply ignore it. Vary the fixtures (no token, no image, backoff, failed job, held VM) to see each state.

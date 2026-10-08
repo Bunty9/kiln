@@ -1,0 +1,35 @@
+# The same checks as ci.yml on a GitHub-hosted runner, so every pull request
+# (forks included) gets a result even when the kiln box is down. No secrets.
+name: check
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal -c clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Dashboard script
+        # Every inline <script> block (the pre-paint theme script and the app), checked together.
+        run: |
+          node -e 'const fs = require("fs"); const s = fs.readFileSync("src/dashboard.html", "utf8");
+            fs.writeFileSync(process.argv[1], [...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n;\n"))' "$RUNNER_TEMP/dashboard.js"
+          node --check "$RUNNER_TEMP/dashboard.js"
+      - name: Service worker
+        run: node --check assets/sw.js
