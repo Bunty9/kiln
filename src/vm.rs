@@ -71,6 +71,21 @@ pub enum CacheUse {
     Discarded,
 }
 
+/// The workflow run behind a VM's job, for the dashboard: where the code came from.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct Run {
+    pub branch: String,
+    pub sha: String,
+    /// Pull request number (same-repo PRs only: GitHub lists none for forks).
+    pub pr: Option<u64>,
+    /// `push`, `pull_request`, `workflow_dispatch`, ...
+    pub event: String,
+    /// Commit message head or PR title, as GitHub shows the run.
+    pub title: String,
+    pub workflow: String,
+    pub number: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Vm {
     pub id: String,
@@ -127,6 +142,9 @@ pub struct Vm {
     /// (no directory) and not counted as a job failure on the dashboard.
     #[serde(default)]
     pub mint_failed: bool,
+    /// Set once the runner picks up a job (see `attach_jobs`).
+    #[serde(default)]
+    pub run: Option<Run>,
 }
 
 impl Vm {
@@ -320,6 +338,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         policy: policy_id(&app.cfg()),
         warm,
         mint_failed: false,
+        run: None,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -2395,6 +2414,7 @@ mod tests {
             policy: String::new(),
             warm: false,
             mint_failed: false,
+            run: None,
         }
     }
 
