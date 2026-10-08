@@ -1643,7 +1643,7 @@ const G = {
       return `<div class="card"><h2>Notifications</h2><label class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></label>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
-        <div class="card"><h2>Webhooks</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
+        <div class="card"><h2>Webhooks${hq('webhooks')}</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
           <div id="nlist" style="margin-top:12px"></div><div id="nsecret">${nSecretHTML()}</div><div id="nform" style="margin-top:12px">${nFormHTML()}</div></div>
         <div class="card"><h2>Workflow rules</h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Rules save with the other settings.</p>
           <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div></div>
