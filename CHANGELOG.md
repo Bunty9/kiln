@@ -6,11 +6,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
-- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint, (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs, signing secrets and tokens are write-only and repo text is escaped per target. See docs/configuration.md.
+- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs and ntfy tokens are write-only; a signing secret is returned once (on create, rotate, or a kind or origin change) and never again; moving a URL to another host drops its token and issues a new secret. Repo text is escaped per target. See docs/configuration.md.
 
 ### Security
 
-- Notification delivery uses an SSRF-safe client (public addresses only, checked in the resolver, no redirects, no proxies, tailnet ranges only by opt-in), and destination URLs, secrets and tokens are write-only and stored mode 0600.
+- Notification delivery uses an SSRF-safe client (public addresses only, checked in the resolver, no redirects, no proxies, tailnet ranges only by opt-in), stored URLs are re-checked on every send, and destination URLs and tokens are write-only, signing secrets shown once, all stored mode 0600.
 
 ## [0.2.4] - 2026-10-08
 

@@ -25,7 +25,8 @@ pub enum Kind {
 
 /// May an alert connect to `ip`? Public unicast only; with `tailnet`, also the tailnet ranges
 /// (100.64.0.0/10 and fd7a:115c:a1e0::/48). The same private ranges job egress filtering drops,
-/// plus the IPv6 translation prefixes (local-use NAT64, SIIT, Teredo) and discard (100::/64).
+/// plus the IPv6 translation prefixes (local-use NAT64, SIIT, Teredo), discard (100::/64),
+/// the deprecated site-local fec0::/10 and the documentation prefixes 2001:db8::/32 and 3fff::/20.
 pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => allowed_v4(v4, tailnet),
@@ -49,7 +50,11 @@ pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
             if s[0] & 0xfe00 == 0xfc00 {
                 return tailnet && s[..3] == [0xfd7a, 0x115c, 0xa1e0];
             }
-            !(s[0] & 0xffc0 == 0xfe80 || s[0] & 0xff00 == 0xff00 || s[..2] == [0x2001, 0x0db8])
+            !(s[0] & 0xffc0 == 0xfe80 // link-local
+                || s[0] & 0xffc0 == 0xfec0 // site-local
+                || s[0] & 0xff00 == 0xff00 // multicast
+                || s[..2] == [0x2001, 0x0db8] // documentation
+                || (s[0] == 0x3fff && s[1] & 0xf000 == 0)) // documentation, 3fff::/20
         }
     }
 }
@@ -409,7 +414,8 @@ impl Default for Events {
 }
 
 /// One destination as stored in `<data>/notify.json` (0600). `url`, `secret` and `token` are
-/// secrets: they leave this module only towards the destination itself.
+/// secrets: they leave this module only towards the destination itself, except a new signing
+/// secret, returned once to the admin who caused it (create, rotate, kind or origin change).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Dest {
     pub id: String,
@@ -722,6 +728,10 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_
     if !open && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
         return Outcome::Permanent("refused: internal address".into());
     }
+    // The URL rules again, on every send: a hand-edited notify.json must not get past them.
+    if !open && check_url(d.kind, &d.url, d.tailnet).is_err() {
+        return Outcome::Permanent("refused: stored URL no longer allowed".into());
+    }
     let link = match (&e.detail, d.link) {
         (Detail::Job(j), true) => dashboard_base().map(|b| format!("{b}/#/jobs/{}", j.vm_id)),
         _ => None,
@@ -790,16 +800,17 @@ fn failing_ids(app: &crate::App, e: &Event) -> Vec<String> {
     }
 }
 
-/// Destinations failing for an hour, or with 3 permanent failures in a row: (id, message).
+/// Destinations whose failures have gone on for an hour (an Ok resets the status), or with 3
+/// permanent failures in a row: (id, message).
 pub fn failing(app: &crate::App) -> Vec<(String, String)> {
-    let now = crate::now();
     let dests = app.notify.dests.lock().unwrap();
     let st = app.notify.status.lock().unwrap();
     dests
         .iter()
         .filter_map(|d| {
             let s = st.get(&d.id)?;
-            let bad = s.permanent_streak >= 3 || s.failing_since.is_some_and(|f| now.saturating_sub(f) >= 3600);
+            let hour = s.failing_since.zip(s.last_error.as_ref()).is_some_and(|(f, (t, _))| t.saturating_sub(f) >= 3600);
+            let bad = s.permanent_streak >= 3 || hour;
             bad.then(|| (d.id.clone(), format!("{}: {}", d.label(), s.last_error.as_ref().map_or("failing", |e| e.1.as_str()))))
         })
         .collect()
@@ -904,7 +915,7 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
     });
 }
 
-/// On shutdown: give queued alerts up to 2 s to go out (the spec's flush window).
+/// On shutdown: give queued alerts up to 2 s to go out.
 pub async fn flush(app: &crate::App) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline
@@ -941,7 +952,8 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 
-/// A notification rule (matching comes with the rules task): which finished jobs go to which destinations.
+/// A workflow rule, saved in config.json: a finished job whose repo, workflow and outcome match
+/// (see `rule_matches`) goes to the destinations in `to`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Rule {
     pub repo: String,
@@ -1099,11 +1111,19 @@ fn apply(b: DestBody, mut d: Dest, others: &[Dest]) -> ApiResult<Dest> {
     if let Some(ev) = b.events {
         d.events = ev;
     }
+    let origin = |u: &str| reqwest::Url::parse(u).ok().map(|u| u.origin());
+    let was = origin(&d.url);
     if let Some(u) = b.url.filter(|u| !u.trim().is_empty()) {
         d.url = check_url(d.kind, &u, d.tailnet).map_err(bad)?.to_string();
     } else {
         // Re-check the stored URL: `tailnet` may have just been switched off.
         check_url(d.kind, &d.url, d.tailnet).map_err(bad)?;
+    }
+    // A new scheme, host or port is a new party: it never inherits the old one's credentials.
+    // The token is dropped unless a new one comes with this edit; a generic secret is replaced.
+    if origin(&d.url) != was {
+        d.token = None;
+        d.secret = None;
     }
     match b.token.map(|t| t.trim().to_string()) {
         Some(t) if d.kind == Kind::Ntfy && !t.is_empty() => {
@@ -1234,8 +1254,8 @@ async fn update(
     let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
     let new = apply(b, ds[i].clone(), &ds)?;
     let url_changed = new.url != ds[i].url;
-    // A secret only appears here when the kind just became generic: shown once.
-    let fresh = if ds[i].secret.is_none() { new.secret.clone() } else { None };
+    // A new secret (the kind just became generic, or the URL moved to another origin): shown once.
+    let fresh = if new.secret != ds[i].secret { new.secret.clone() } else { None };
     let fields = changed_fields(&ds[i], &new);
     let what = if fields.is_empty() {
         format!("saved notification destination {} unchanged", new.label())
@@ -1285,18 +1305,26 @@ async fn remove(State(app): State<Arc<crate::App>>, Extension(actor): Extension<
     let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
     let what = format!("removed notification destination {}", ds[i].label());
     ds.remove(i);
-    persist(&app, &ds)?;
+    // Rules first: rules naming it lose that target, and a rule left with none is dropped. If
+    // this fails nothing has changed; the other order could leave rules naming a dead id.
+    let mut c = app.cfg();
+    c.notify_rules.iter_mut().for_each(|r| r.to.retain(|t| t != &id));
+    c.notify_rules.retain(|r| !r.to.is_empty());
+    let rules_saved = c.notify_rules != app.cfg().notify_rules;
+    if rules_saved {
+        app.save_cfg(c).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    }
+    if let Err((code, e)) = persist(&app, &ds) {
+        if !rules_saved {
+            return Err((code, e));
+        }
+        tracing::error!("removing notification destination {id}: rules updated, but {e}");
+        return Err((code, format!("rules updated, but the destination could not be removed: {e}")));
+    }
     announce(&app, &actor.0, what.clone());
     *app.notify.dests.lock().unwrap() = ds;
     retire(&app, &id);
     app.notify.status.lock().unwrap().remove(&id);
-    // Rules naming it lose that target; a rule left with none is dropped.
-    let mut c = app.cfg();
-    c.notify_rules.iter_mut().for_each(|r| r.to.retain(|t| t != &id));
-    c.notify_rules.retain(|r| !r.to.is_empty());
-    if c.notify_rules != app.cfg().notify_rules {
-        app.save_cfg(c).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
-    }
     Ok((Extension(crate::audit::Note(what)), Json(json!({ "ok": true }))))
 }
 
@@ -2207,5 +2235,173 @@ mod tests {
         let id = a["dest"]["id"].as_str().unwrap().to_string();
         assert_eq!(out(test(State(app.clone()), UrlPath(id.clone())).await).0, 200);
         assert_eq!(out(test(State(app.clone()), UrlPath(id)).await).0, 429);
+    }
+
+    // --- PR #38 review fixes
+
+    fn stored(app: &crate::App, id: &str) -> Dest {
+        app.notify.dests.lock().unwrap().iter().find(|d| d.id == id).unwrap().clone()
+    }
+
+    async fn put(app: &Arc<crate::App>, id: &str, v: Value) -> (u16, Value) {
+        noted(update(State(app.clone()), me(), UrlPath(id.to_string()), dbody(v)).await)
+    }
+
+    #[tokio::test]
+    async fn origin_change_drops_the_ntfy_token() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/acme", "token": "tk_old" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let (st, r) = put(&app, &id, json!({ "name": "n", "kind": "ntfy", "url": "https://attacker.example/x" })).await;
+        assert_eq!(st, 200, "{r}");
+        let d = stored(&app, &id);
+        assert_eq!(d.token, None, "a new host never inherits the token");
+        assert_eq!(load(&app.data).unwrap()[0].token, None);
+        let e = job("acme/kiln", "t", "main");
+        let h = render(d.kind, d.secret.as_deref(), d.token.as_deref(), &e, "msg_1", 1, None).unwrap().headers;
+        assert!(!h.iter().any(|(k, _)| *k == "Authorization"), "{:?}", h);
+    }
+
+    #[tokio::test]
+    async fn origin_change_with_a_new_token_keeps_it() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/acme", "token": "tk_old" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let (st, _) = put(&app, &id, json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.example.com/x", "token": "tk_new" })).await;
+        assert_eq!(st, 200);
+        assert_eq!(stored(&app, &id).token.as_deref(), Some("tk_new"));
+    }
+
+    #[tokio::test]
+    async fn generic_origin_change_issues_a_new_secret() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "g", "kind": "generic", "url": "https://hooks.example.com/a" })).await;
+        let (id, old) = (a["dest"]["id"].as_str().unwrap().to_string(), a["secret"].as_str().unwrap().to_string());
+        for url in ["https://other.example.com/a", "https://other.example.com:8443/a"] {
+            let before = stored(&app, &id).secret.unwrap();
+            let (st, r) = put(&app, &id, json!({ "name": "g", "kind": "generic", "url": url })).await;
+            assert_eq!(st, 200, "{r}");
+            let now = stored(&app, &id).secret.unwrap();
+            assert!(now != before && now != old, "{url}: the secret is replaced");
+            assert_eq!(r["secret"].as_str(), Some(now.as_str()), "{url}: and returned once");
+        }
+    }
+
+    #[tokio::test]
+    async fn same_origin_path_change_keeps_secret_and_token() {
+        let app = test_app();
+        let (_, g) = add(&app, json!({ "name": "g", "kind": "generic", "url": "https://hooks.example.com/a" })).await;
+        let gid = g["dest"]["id"].as_str().unwrap().to_string();
+        let secret = stored(&app, &gid).secret;
+        let (st, r) = put(&app, &gid, json!({ "name": "g", "kind": "generic", "url": "https://hooks.example.com/b?x=1" })).await;
+        assert_eq!(st, 200);
+        assert!(r["secret"].is_null(), "{r}");
+        assert_eq!(stored(&app, &gid).secret, secret);
+        let (_, n) = add(&app, json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/acme", "token": "tk_old" })).await;
+        let nid = n["dest"]["id"].as_str().unwrap().to_string();
+        let (st, _) = put(&app, &nid, json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/other" })).await;
+        assert_eq!(st, 200);
+        assert_eq!(stored(&app, &nid).token.as_deref(), Some("tk_old"));
+    }
+
+    #[test]
+    fn site_local_and_documentation_v6_are_refused() {
+        for s in ["fec0::1", "feff::1", "3fff::1", "3fff:fff:ffff::1"] {
+            assert!(!allowed(ip(s), false), "{s}");
+            assert!(!allowed(ip(s), true), "{s} even on a tailnet");
+        }
+        for s in ["3ffe::1", "3fff:1000::1"] {
+            assert!(allowed(ip(s), false), "{s} is just outside 3fff::/20");
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_url_is_rechecked_on_send() {
+        let d = dest(Kind::Slack, "https://evil.example/x");
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+            Outcome::Permanent(m) => assert_eq!(m, "refused: stored URL no longer allowed"),
+            o => panic!("must be refused, got {o:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn production_client_refuses_plain_http() {
+        let (url, got) = receiver(204).await;
+        let d = dest(Kind::Generic, &url);
+        assert!(matches!(send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await, Outcome::Permanent(_)));
+        assert!(got.lock().unwrap().is_empty(), "nothing reached the receiver");
+    }
+
+    fn failing_with(st: Status) -> bool {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        app.notify.status.lock().unwrap().insert(d.id.clone(), st);
+        !failing(&app).is_empty()
+    }
+
+    #[test]
+    fn failing_means_failures_kept_coming_for_an_hour() {
+        let t = crate::now() - 3600;
+        let one = Status { last_error: Some((t, "HTTP 503".into())), failing_since: Some(t), ..Default::default() };
+        assert!(!failing_with(one), "one failure an hour ago is not an hour of failing");
+        let hour = Status { last_error: Some((t + 3600, "HTTP 503".into())), failing_since: Some(t), ..Default::default() };
+        assert!(failing_with(hour));
+        let perm = Status { last_error: Some((t, "HTTP 404".into())), failing_since: Some(t), permanent_streak: 3, ..Default::default() };
+        assert!(failing_with(perm));
+    }
+
+    #[tokio::test]
+    async fn update_rechecks_the_stored_url() {
+        let app = test_app();
+        let (st, a) = add(&app, json!({ "name": "t", "kind": "ntfy", "url": "https://100.64.0.7/x", "tailnet": true })).await;
+        assert_eq!(st, 200, "{a}");
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        assert_eq!(put(&app, &id, json!({ "name": "t", "kind": "ntfy", "tailnet": false })).await.0, 400);
+        let (_, g) = add(&app, json!({ "name": "g", "kind": "generic", "url": "https://hooks.example.com/x" })).await;
+        let gid = g["dest"]["id"].as_str().unwrap().to_string();
+        assert_eq!(put(&app, &gid, json!({ "name": "g", "kind": "slack", "url": "https://hooks.example.com/x" })).await.0, 400);
+    }
+
+    fn rule_to(id: &str) -> Rule {
+        Rule { repo: "*".into(), workflow: "*".into(), outcome: "any".into(), to: vec![id.into()] }
+    }
+
+    #[tokio::test]
+    async fn remove_saves_rules_first_and_changes_nothing_if_that_fails() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let mut c = app.cfg();
+        c.notify_rules = vec![rule_to(&id)];
+        app.save_cfg(c).unwrap();
+        std::fs::remove_file(app.data.join("config.json")).unwrap();
+        std::fs::create_dir(app.data.join("config.json")).unwrap(); // the config save now fails
+        let q = app.notify.queues.lock().unwrap()[&id].clone();
+        let queued = q.q.lock().unwrap().len();
+        let (st, _) = noted(remove(State(app.clone()), me(), UrlPath(id.clone())).await);
+        assert_eq!(st, 500);
+        assert_eq!(app.notify.dests.lock().unwrap().len(), 1, "still there");
+        assert_eq!(load(&app.data).unwrap().len(), 1, "still stored");
+        assert_eq!(app.cfg().notify_rules.len(), 1);
+        assert!(!q.retired.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(q.q.lock().unwrap().len(), queued, "nothing announced");
+    }
+
+    #[tokio::test]
+    async fn remove_reports_rules_saved_but_destination_kept() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let mut c = app.cfg();
+        c.notify_rules = vec![rule_to(&id)];
+        app.save_cfg(c).unwrap();
+        std::fs::remove_file(app.data.join("notify.json")).unwrap();
+        std::fs::create_dir(app.data.join("notify.json")).unwrap(); // the notify.json save now fails
+        let (st, m) = noted(remove(State(app.clone()), me(), UrlPath(id)).await);
+        assert_eq!(st, 500);
+        assert!(m.as_str().unwrap().starts_with("rules updated, but the destination could not be removed: "), "{m}");
+        assert!(app.cfg().notify_rules.is_empty(), "the rules were saved");
+        assert_eq!(app.notify.dests.lock().unwrap().len(), 1);
     }
 }

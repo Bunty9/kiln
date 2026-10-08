@@ -989,7 +989,7 @@ function banners() {
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
-  const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && now() - d.status.failing_since > 3600) || d.status?.permanent_streak >= 3);
+  const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && d.status.last_error && d.status.last_error[0] - d.status.failing_since >= 3600) || d.status?.permanent_streak >= 3);
   if (nbad.length) B('fail', 'Notifications failing: ' + nbad.map(d => esc(d.name)).join(', '), A('Fix', '#/settings/notifications'));
   if (S.notify?.load_error) B('fail', 'Notification destinations: ' + esc(S.notify.load_error), A('Fix', '#/settings/notifications'));
   if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
@@ -1602,8 +1602,13 @@ const G = {
           <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div></div>
         <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
     },
-    open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) { $('#set-body').innerHTML = this.html(); this.live(); } }); },
-    live() { setHTML($('#nlist'), nListHTML()); },
+    // Re-rendered once Tailscale's name is known, unless a form is open: that would wipe what was typed.
+    open() { if (!TS) loadTs().then(() => { if (!$('#f-notify')) return; if (nf) return this.live(); $('#set-body').innerHTML = this.html(); this.live(); rove($('#set-body')); }); },
+    live() {
+      setHTML($('#nlist'), nListHTML());
+      // Destinations added, removed or renamed elsewhere: the rules card names them, so redraw it from the draft.
+      const r = $('#nrules'); if (r && nKey() !== nRulesKey) r.innerHTML = nRulesHTML();
+    },
   },
   diagnostics: {
     html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">${ic('refresh')}Run checks</button></h2><div id="doc"></div></div>`,
@@ -1640,7 +1645,13 @@ const G = {
 };
 /* ---------- webhooks (Settings › Notifications) ---------- */
 // nf: the open add/edit form; nsecret: a signing secret shown once. Neither keeps a URL: URL and token live only in password fields, cleared on save.
-let nf = null, nsecret = null;
+// nbusy: destinations with an event switch change in flight; nRulesKey: the destinations the rules card was drawn with.
+let nf = null, nsecret = null, nRulesKey = '';
+const nbusy = new Set();
+const onN = () => cur === pages.settings && pages.settings.g === 'notifications';
+const nKey = () => nDests().map(d => d.id + ':' + d.name).join();
+// After the form closes or a secret is shown: focus the secret, else "Add destination".
+const nfocus = () => { if (onN()) ($('#nsec-t') || $('#nform [data-act=nadd]'))?.focus(); };
 const NK = { generic: 'Generic', slack: 'Slack', discord: 'Discord', ntfy: 'ntfy' };
 const NPH = { slack: 'https://hooks.slack.com/services/…', discord: 'https://discord.com/api/webhooks/…', ntfy: 'https://ntfy.sh/your-topic', generic: 'https://…' };
 const NEV = [['job', 'Jobs'], ['health', 'Health'], ['security', 'Security']];
@@ -1649,12 +1660,14 @@ function nListHTML() {
   const n = S.notify || {}, ds = nDests();
   const st = d => { const s = d.status || {}; return s.last_error && (!s.last_ok || s.last_error[0] > s.last_ok) ? `<span class="fail">failing · ${esc(s.last_error[1])}</span>` : s.last_ok ? `<span class="ok">ok · ${relH(s.last_ok)}</span>` : '<span class="fg2">not used yet</span>'; };
   return (n.load_error ? `<div class="cal w" style="margin-top:0">${esc(n.load_error)}</div>` : '') + (ds.length ? `<ul class="list">${ds.map(d => `<li><div class="nd"><span class="t"><span class="tt">${esc(d.name)} <span class="bdg">${esc(NK[d.kind] || d.kind)}</span></span><span class="id" style="font-family:var(--sans)">${esc(d.host)} · ${st(d)}${d.status?.dropped ? ` · ${+d.status.dropped} dropped` : ''}</span></span>
-    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''}><span class="sm">${l}</span></label>`).join('')}</span>
+    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''} ${nbusy.has(d.id) ? 'disabled' : ''}><span class="sm">${l}</span></label>`).join('')}</span>
     <span class="nb"><button class="btn sm" data-act="ntest" data-id="${esc(d.id)}"${tip('Send a test message. One every 10 seconds.')}>Send test</button><button class="btn sm" data-act="nedit" data-id="${esc(d.id)}">Edit</button>${d.kind === 'generic' ? `<button class="btn sm" data-act="nrot" data-id="${esc(d.id)}"${tip('Make a new signing secret. The old one stops working.')}>Rotate secret</button>` : ''}<button class="btn sm dng" data-act="ndel" data-id="${esc(d.id)}">${ic('trash')}Remove</button></span></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No destinations yet.</p>');
 }
 function nSecretHTML() {
-  return !nsecret ? '' : `<div class="cal o"><b>Signing secret for ${esc(nsecret.name)}</b>
-    <div class="cb"><pre class="snip" id="nsec-t">${esc(nsecret.text)}</pre><button class="btn" data-act="ncopy" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>
+  if (!nsecret) return '';
+  nsecret.seen = 1; // only drawn on this page: leaving it now wipes the secret
+  return `<div class="cal o" role="alert"><b>Signing secret for ${esc(nsecret.name)}</b>
+    <div class="cb"><pre class="snip" id="nsec-t" tabindex="-1">${esc(nsecret.text)}</pre><button class="btn" data-act="ncopy" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>
     <p class="sm" style="margin-top:8px;max-width:none">Shown once. kiln signs each request with Standard Webhooks headers (webhook-id, webhook-timestamp, webhook-signature); verify the HMAC-SHA256 and reject timestamps more than 5 minutes old.</p>
     <div class="bar" style="margin:12px 0 0"><button class="btn pri" data-act="ndone">Done</button></div></div>`;
 }
@@ -1670,7 +1683,7 @@ function nFormHTML() {
       <label class="sw"${tip('Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.')}><input type="checkbox" id="nf-ts" ${nf.tailnet ? 'checked' : ''}><span>On my tailnet</span></label><p class="fg2 sm" style="margin:0 0 8px 0">Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.</p>
       <label class="sw"${tip('Needs Serve over HTTPS; coming in a later version')}><input type="checkbox" id="nf-link" disabled><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS; coming in a later version.</p></div></div>
     <p class="ferr" id="nf-err" role="alert"></p>
-    <div class="bar" style="margin:12px 0 0"><button class="btn pri">${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel">Cancel</button></div></form>`;
+    <div class="bar" style="margin:12px 0 0"><button class="btn pri" ${nf.busy ? 'disabled' : ''}>${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel" ${nf.busy ? 'disabled' : ''}>Cancel</button></div></form>`;
 }
 function nRulesHTML() {
   const ds = nDests(), ids = new Set(ds.map(d => d.id)), repos = REPOS();
@@ -1678,17 +1691,22 @@ function nRulesHTML() {
   // Only against a known, loaded list: with notify.json unreadable the list is empty and pruning would wipe every rule.
   const prune = S.notify && !S.notify.load_error;
   const rs = draft.notify_rules = (draft.notify_rules || []).map(r => !prune || r.to.every(t => ids.has(t)) ? r : { ...r, to: r.to.filter(t => ids.has(t)) });
-  const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f === 'repo' ? 'Repository' : 'Outcome'}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  nRulesKey = nKey();
+  const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f === 'repo' ? 'Repository' : 'Outcome'}, rule ${i + 1}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   return (rs.length ? `<ul class="list">${rs.map((r, i) => `<li><div class="nd"><span class="nb">${sel(i, 'repo', r.repo, [['*', 'Any repo'], ...[...new Set([...repos, ...(r.repo === '*' ? [] : [r.repo])])].map(x => [x, x])])}
-    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>
+    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file, rule ${i + 1}" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>
     ${sel(i, 'outcome', r.outcome, [['success', 'On success'], ['failure', 'On failure'], ['any', 'Any outcome']])}</span>
-    <span class="nsw">${ds.map(d => `<label class="sw"><input type="checkbox" data-act="nrule" data-i="${i}" data-f="to" data-d="${esc(d.id)}" ${r.to.includes(d.id) ? 'checked' : ''}><span class="sm">${esc(d.name)}</span></label>`).join('')}${r.to.length ? '' : '<span class="fail sm">pick at least one destination</span>'}</span>
-    <button class="btn sm ic" data-act="nruledel" data-i="${i}" aria-label="Remove rule"${tip('Remove this rule')}>${ic('x')}</button></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No rules.</p>')
+    <span class="nsw">${ds.map(d => `<label class="sw"><input type="checkbox" data-act="nrule" data-i="${i}" data-f="to" data-d="${esc(d.id)}" aria-label="Send to ${esc(d.name)}, rule ${i + 1}" ${r.to.includes(d.id) ? 'checked' : ''}><span class="sm">${esc(d.name)}</span></label>`).join('')}${r.to.length ? '' : '<span class="fail sm">pick at least one destination</span>'}</span>
+    <button class="btn sm ic" data-act="nruledel" data-i="${i}" aria-label="Remove rule ${i + 1}"${tip('Remove this rule')}>${ic('x')}</button></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No rules.</p>')
     + `<div class="bar" style="margin:12px 0 0"><button class="btn" data-act="nruleadd" ${ds.length && rs.length < 50 ? '' : 'disabled'}${tip(ds.length ? 'At most 50 rules' : 'Add a destination first')}>${ic('plus')}Add rule</button>${ds.length ? '' : '<span class="fg2 sm">Add a destination first.</span>'}</div>`;
 }
-// A signing secret must not outlive the page it was shown on.
-addEventListener('hashchange', () => { if (nsecret) { nsecret = null; const e = $('#nsec-t'); if (e) e.textContent = ''; } });
-document.addEventListener('input', e => { const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t); });
+// A signing secret must not outlive the page it was shown on. One that arrived while elsewhere waits until it has been shown.
+addEventListener('hashchange', () => { if (nsecret?.seen && !onN()) { nsecret = null; const e = $('#nsec-t'); if (e) e.textContent = ''; } });
+document.addEventListener('input', e => {
+  const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t);
+  // Keep what was typed in nf, so a form rebuild (kind change) keeps it. Never the URL or token.
+  if (nf && t.id === 'nf-name') nf.name = t.value; if (nf && t.id === 'nf-ts') nf.tailnet = t.checked;
+});
 
 // GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
 let UP = null, upBusy = false;
@@ -2040,54 +2058,81 @@ const ACT = {
     } catch (e) { $('#nc').textContent = e.message; } finally { b.disabled = false; }
   },
   // --- webhooks: Settings › Notifications
-  nrender() { if (cur === pages.settings && pages.settings.g === 'notifications') { $('#nform').innerHTML = nFormHTML(); $('#nsecret').innerHTML = nSecretHTML(); $('#nrules').innerHTML = nRulesHTML(); rove($('#nform')); pages.settings.live(); } },
+  // form: the form opened or closed, so #nform is rebuilt; otherwise it is left alone so nothing typed is lost.
+  nrender(form) {
+    if (!onN()) return;
+    if (form) { $('#nform').innerHTML = nFormHTML(); rove($('#nform')); }
+    $('#nsecret').innerHTML = nSecretHTML(); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live();
+  },
   async nev(b) {
     const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
-    // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
-    await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
-    await poll();
+    if (nbusy.has(d.id)) { b.checked = !b.checked; return; }
+    // One change per destination at a time: the next PUT must start from what this one saved.
+    const sw = on => $$('[data-act=nev]').filter(x => x.dataset.id === d.id).forEach(x => (x.disabled = on));
+    nbusy.add(d.id); sw(true);
+    try {
+      // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
+      await poll();
+    } finally { nbusy.delete(d.id); sw(false); }
   },
   async ntest(b) { await post('/api/notify/' + encodeURIComponent(b.dataset.id) + '/test'); toast('Test queued'); },
-  nadd() { nf = { id: null, kind: 'generic', name: '', tailnet: false, events: { job: true, health: true, security: true } }; ACT.nrender(); $('#nf-name').focus(); },
+  nadd() { nf = { id: null, kind: 'generic', name: '', tailnet: false, events: { job: true, health: true, security: true } }; ACT.nrender(1); $('#nf-name').focus(); },
   nedit(b) {
     const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
-    nf = { id: d.id, kind: d.kind, name: d.name, name0: d.name, host: d.host, tailnet: d.tailnet, events: { ...d.events } }; ACT.nrender(); $('#nf-name').focus();
+    nf = { id: d.id, kind: d.kind, name: d.name, name0: d.name, host: d.host, tailnet: d.tailnet, events: { ...d.events } }; ACT.nrender(1); $('#nf-name').focus();
   },
-  ncancel() { for (const i of ['#nf-url', '#nf-token']) if ($(i)) $(i).value = ''; nf = null; ACT.nrender(); },
+  ncancel() { if (nf?.busy) return; for (const i of ['#nf-url', '#nf-token']) if ($(i)) $(i).value = ''; nf = null; ACT.nrender(1); nfocus(); },
   nkind(b) {
     nf.kind = b.dataset.v; $$('#nform [data-act=nkind]').forEach(x => x.setAttribute('aria-checked', x === b)); rove($('#nform'));
     if (!nf.id) $('#nf-url').placeholder = NPH[nf.kind]; $('#nf-tokf').hidden = nf.kind !== 'ntfy';
   },
   async nsave() {
-    if (!nf || nf.busy) return;
+    // f, not nf: the user may leave the page while the request is out; the answer still belongs to this form.
+    const f = nf; if (!f || f.busy) return;
     const name = $('#nf-name').value.trim(), url = $('#nf-url').value.trim(), token = $('#nf-token').value.trim(), err = $('#nf-err');
     err.textContent = '';
     if (!name) { err.textContent = 'Give the destination a name.'; return $('#nf-name').focus(); }
-    if (!nf.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
-    const body = { name, kind: nf.kind, tailnet: $('#nf-ts').checked, link: false, events: nf.events };
-    if (url) body.url = url; if (nf.kind === 'ntfy' && token) body.token = token;
-    let r; nf.busy = 1;
-    try { r = await (nf.id ? api('/api/notify/' + encodeURIComponent(nf.id), { method: 'PUT', body }) : post('/api/notify', body)); }
-    catch (e) { err.textContent = e.message; nf.busy = 0; return; }
-    for (const i of ['#nf-url', '#nf-token']) $(i).value = '';
-    nf = null; if (r.secret) nsecret = { text: r.secret, name: r.dest?.name || name };
-    await poll(); toast('Destination saved'); ACT.nrender();
+    if (!f.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
+    // An edit sends the event switches as they are now (they may have changed since the form opened).
+    const events = f.id ? { ...(nDests().find(x => x.id === f.id)?.events || f.events) } : f.events;
+    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: false, events };
+    if (url) body.url = url; if (f.kind === 'ntfy' && token) body.token = token;
+    const cancel = $('#nform [data-act=ncancel]'); if (cancel) cancel.disabled = true;
+    let r; f.busy = 1;
+    try { r = await (f.id ? api('/api/notify/' + encodeURIComponent(f.id), { method: 'PUT', body }) : post('/api/notify', body)); }
+    catch (e) {
+      f.busy = 0; $$('#nform .bar button').forEach(x => (x.disabled = false)); // the form may have been redrawn while busy
+      const er = $('#nf-err'); if (er && nf === f) er.textContent = e.message; else fail(e);
+      return;
+    }
+    // The secret first: it is shown once, whatever happened to the page meanwhile.
+    if (r.secret) nsecret = { text: r.secret, name: r.dest?.name || name };
+    f.busy = 0;
+    for (const i of ['#nf-url', '#nf-token']) { const el = $(i); if (el) el.value = ''; }
+    if (nf === f) nf = null;
+    toast(r.secret && !onN() ? 'Destination saved — open Notifications to copy its signing secret' : 'Destination saved');
+    await poll(); ACT.nrender(1); nfocus();
   },
   async nrot(b) {
     const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
     if (!await ask({ title: `Rotate the secret for ${d.name}?`, body: 'The old secret stops working at once. Update the receiver with the new one.', action: 'Rotate', danger: 1 })) return;
-    const r = await post('/api/notify/' + encodeURIComponent(d.id) + '/rotate'); nsecret = { text: r.secret, name: d.name }; ACT.nrender();
+    const r = await post('/api/notify/' + encodeURIComponent(d.id) + '/rotate'); nsecret = { text: r.secret, name: d.name };
+    if (!onN()) toast('Secret rotated — open Notifications to copy the new signing secret');
+    ACT.nrender(); nfocus();
   },
   async ndel(b) {
     const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
     if (!await ask({ title: `Remove ${d.name}?`, body: 'It stops receiving messages, and is dropped from any workflow rule that names it. A rule left with no destination is removed.', action: 'Remove', danger: 1 })) return;
-    await api('/api/notify/' + encodeURIComponent(d.id), { method: 'DELETE' });
-    // The server drops it from saved rules; do the same in the draft so Save does not name a dead id.
-    draft.notify_rules = (draft.notify_rules || []).map(r => ({ ...r, to: r.to.filter(t => t !== d.id) })).filter(r => r.to.length);
-    toast('Removed ' + d.name); await poll(); ACT.nrender();
+    try {
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'DELETE' });
+      // The server drops it from saved rules; do the same in the draft so Save does not name a dead id.
+      draft.notify_rules = (draft.notify_rules || []).map(r => ({ ...r, to: r.to.filter(t => t !== d.id) })).filter(r => r.to.length);
+      toast('Removed ' + d.name);
+    } finally { await poll(); ACT.nrender(); } // a failure may still have changed the rules: show what the server has
   },
   async ncopy(b) { if (nsecret) { await copy(nsecret.text, 'Secret copied'); copied(b); } },
-  ndone() { const e = $('#nsec-t'); if (e) e.textContent = ''; nsecret = null; ACT.nrender(); },
+  ndone() { const e = $('#nsec-t'); if (e) e.textContent = ''; nsecret = null; ACT.nrender(); nfocus(); },
   nrule(el) {
     const r = draft.notify_rules[+el.dataset.i], f = el.dataset.f; if (!r) return;
     if (f === 'to') r.to = el.checked ? [...new Set([...r.to, el.dataset.d])] : r.to.filter(t => t !== el.dataset.d);
