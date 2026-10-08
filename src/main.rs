@@ -1126,6 +1126,7 @@ fn attach_jobs(app: &App, runners: &HashMap<String, github::JobRef>) {
     for (id, _) in runners.iter().filter(|(_, r)| r.fork) {
         let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
             v.note = Some("refused: pull request from a fork".into());
+            v.fork = true;
         });
         if hit.is_some()
             && let Some(k) = app.kills.lock().unwrap().get(id)
@@ -1140,9 +1141,14 @@ fn attach_jobs(app: &App, runners: &HashMap<String, github::JobRef>) {
         .iter_mut()
         .filter_map(|v| {
             let r = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(&r.url) && v.queued_at == Some(r.queued_at) && v.run.as_ref() == Some(&r.run) {
+            if v.job_url.as_deref() == Some(&r.url)
+                && v.queued_at == Some(r.queued_at)
+                && v.run.as_ref() == Some(&r.run)
+                && v.fork == r.fork
+            {
                 return None;
             }
+            v.fork = r.fork;
             v.job_url = Some(r.url.clone());
             v.queued_at = Some(r.queued_at);
             v.run = Some(r.run.clone());
@@ -1167,6 +1173,29 @@ pub fn test_app(name: &str) -> Arc<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_jobs_marks_fork_vms() {
+        let app = test_app("attach-fork");
+        let mut v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v.clone());
+        v.id = "kiln-5-1".into();
+        app.vms.lock().unwrap().push(v);
+        let r = |fork| github::JobRef {
+            url: "https://github.com/acme/kiln/actions/runs/1/job/2".into(),
+            queued_at: 1,
+            fork,
+            run: Default::default(),
+        };
+        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
+        let vms = app.vms.lock().unwrap();
+        assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
+        assert!(!vms[1].fork && vms[1].note.is_none());
+    }
 
     #[test]
     fn notify_rules_validate() {

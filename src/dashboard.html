@@ -1675,7 +1675,9 @@ function nFormHTML() {
 function nRulesHTML() {
   const ds = nDests(), ids = new Set(ds.map(d => d.id)), repos = REPOS();
   // A destination that no longer exists must not stay in a rule: Save would be refused. The draft then differs, so Save shows.
-  const rs = draft.notify_rules = (draft.notify_rules || []).map(r => r.to.every(t => ids.has(t)) ? r : { ...r, to: r.to.filter(t => ids.has(t)) });
+  // Only against a known, loaded list: with notify.json unreadable the list is empty and pruning would wipe every rule.
+  const prune = S.notify && !S.notify.load_error;
+  const rs = draft.notify_rules = (draft.notify_rules || []).map(r => !prune || r.to.every(t => ids.has(t)) ? r : { ...r, to: r.to.filter(t => ids.has(t)) });
   const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f === 'repo' ? 'Repository' : 'Outcome'}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   return (rs.length ? `<ul class="list">${rs.map((r, i) => `<li><div class="nd"><span class="nb">${sel(i, 'repo', r.repo, [['*', 'Any repo'], ...[...new Set([...repos, ...(r.repo === '*' ? [] : [r.repo])])].map(x => [x, x])])}
     <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>

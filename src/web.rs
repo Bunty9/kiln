@@ -820,12 +820,14 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
-    let unknown = crate::notify::unknown_targets(&app, &c.notify_rules);
-    if !unknown.is_empty() {
-        bail_r(&format!("notify_rules: unknown destination {}", unknown.join(", ")))?;
-    }
-    if let Some(r) = c.notify_rules.iter().find(|r| r.repo != "*" && !app.repos().iter().any(|x| x.eq_ignore_ascii_case(&r.repo))) {
-        bail_r(&format!("notify_rules: {:?} is not one of your repos (or \"*\")", r.repo))?;
+    // Only new or changed rules are checked: an unrelated save never fails on an old rule.
+    // With notify.json unreadable the destination list is unknown, so ids are not checked.
+    let unreadable = app.notify.load_error.lock().unwrap().is_some();
+    let ids: Option<Vec<String>> = (!unreadable).then(|| app.notify.dests.lock().unwrap().iter().map(|d| d.id.clone()).collect());
+    let repos: Vec<String> = app.repos().into_iter().chain(c.repos.iter().cloned()).collect();
+    let errs = crate::notify::rule_errors(&app.cfg().notify_rules, &c.notify_rules, ids.as_deref(), &repos);
+    if !errs.is_empty() {
+        bail_r(&errs.join("; "))?;
     }
     app.save_cfg(c)?;
     if to_filtered {

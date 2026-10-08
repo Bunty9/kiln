@@ -24,7 +24,8 @@ pub enum Kind {
 }
 
 /// May an alert connect to `ip`? Public unicast only; with `tailnet`, also the tailnet ranges
-/// (100.64.0.0/10 and fd7a:115c:a1e0::/48). The same private ranges job egress filtering drops.
+/// (100.64.0.0/10 and fd7a:115c:a1e0::/48). The same private ranges job egress filtering drops,
+/// plus the IPv6 translation prefixes (local-use NAT64, SIIT, Teredo) and discard (100::/64).
 pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => allowed_v4(v4, tailnet),
@@ -34,6 +35,15 @@ pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
             }
             let s = v6.segments();
             if v6.is_unspecified() || v6.is_loopback() {
+                return false;
+            }
+            // Translation and discard prefixes whose target kiln cannot judge: refused outright.
+            if s[..3] == [0x64, 0xff9b, 1] // 64:ff9b:1::/48, local-use NAT64
+                || s[..6] == [0, 0, 0, 0, 0xffff, 0] // ::ffff:0:0:0/96, SIIT
+                || s[..2] == [0x2001, 0] // 2001::/32, Teredo
+                || s[..4] == [0x100, 0, 0, 0]
+            // 100::/64, discard
+            {
                 return false;
             }
             if s[0] & 0xfe00 == 0xfc00 {
@@ -572,8 +582,8 @@ fn keep_allowed(addrs: impl Iterator<Item = SocketAddr>, tailnet: bool) -> Vec<S
     addrs.filter(|a| allowed(a.ip(), tailnet)).collect()
 }
 
-/// The client for one destination. `open_for_tests` (tests only) allows plain HTTP to the
-/// loopback receiver; production callers always pass false.
+/// The client for one destination. `open_for_tests` allows plain HTTP to the loopback
+/// receiver, and only in test builds: a release build ignores it.
 fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
     let b = reqwest::Client::builder()
         .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
@@ -581,7 +591,8 @@ fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
         .no_proxy()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10));
-    let b = if open_for_tests { b } else { b.https_only(true).dns_resolver(Arc::new(Guard { tailnet: d.tailnet })) };
+    let open = open_for_tests && cfg!(test);
+    let b = if open { b } else { b.https_only(true).dns_resolver(Arc::new(Guard { tailnet: d.tailnet })) };
     b.build().expect("notify http client")
 }
 
@@ -634,7 +645,8 @@ fn action_for(path: &str) -> Option<&'static str> {
     match path {
         "/api/config" => Some("settings changed"),
         "/api/token" => Some("GitHub token replaced"),
-        p if p == "/api/app" || p.starts_with("/api/app/") => Some("GitHub App changed"),
+        // Every write to /api/app is a real change (create or remove); refresh and manifest are not.
+        "/api/app" | "/api/app/convert" => Some("GitHub App changed"),
         _ => None,
     }
 }
@@ -697,18 +709,24 @@ pub fn security(app: &crate::App, actor: &str, path: &str, note: Option<&str>) {
     );
 }
 
+/// A fresh Standard Webhooks message id.
+fn new_msg_id() -> String {
+    format!("msg_{}", B64.encode(random::<12>()).replace(['+', '/', '='], ""))
+}
+
 /// One POST. Every message returned is a fixed string: never the URL, path, query or body.
-async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, open_for_tests: bool) -> Outcome {
+/// `msg_id` is the event's: the same on every retry, so a receiver can de-duplicate.
+async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool) -> Outcome {
     let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
-    if !open_for_tests && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
+    let open = open_for_tests && cfg!(test);
+    if !open && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
         return Outcome::Permanent("refused: internal address".into());
     }
-    let id = format!("msg_{}", B64.encode(random::<12>()).replace(['+', '/', '='], ""));
     let link = match (&e.detail, d.link) {
         (Detail::Job(j), true) => dashboard_base().map(|b| format!("{b}/#/jobs/{}", j.vm_id)),
         _ => None,
     };
-    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, &id, crate::now(), link.as_deref()) {
+    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, msg_id, crate::now(), link.as_deref()) {
         Ok(r) => r,
         Err(m) => return Outcome::Permanent(m),
     };
@@ -795,8 +813,9 @@ fn jitter(d: Duration) -> Duration {
 /// Deliver one event with the retry schedule, recording the outcome.
 async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     let waits = [5u64, 30, 120];
+    let id = new_msg_id();
     for attempt in 0..=waits.len() {
-        let out = send_once(c, d, e, false).await;
+        let out = send_once(c, d, e, &id, false).await;
         let now = crate::now();
         // Record under the lock in its own scope: a guard must not live across the sleep.
         let (m, after) = {
@@ -827,6 +846,11 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
         };
         tokio::time::sleep(after.unwrap_or_else(|| jitter(Duration::from_secs(*w)))).await;
     }
+}
+
+/// Fold `e` into "+N more"? Over 30 sends a minute, except security changes: always sent.
+fn folds(e: &Event, recent: usize) -> bool {
+    recent >= 30 && e.ty != "security.changed"
 }
 
 async fn send_more(app: &crate::App, q: &Queue, c: &reqwest::Client, d: &Dest, n: u64) {
@@ -868,7 +892,7 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
             while sent.front().is_some_and(|t| t.elapsed() >= Duration::from_secs(60)) {
                 sent.pop_front();
             }
-            if sent.len() >= 30 {
+            if folds(&e, sent.len()) {
                 folded += 1;
                 continue;
             }
@@ -958,6 +982,10 @@ pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
 /// Alert for a VM that just ended: `job.failed` for any non-success, `job.finished` for a
 /// success matching a rule. At most once per VM id.
 pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
+    // A fork PR job kiln refused itself is policy, not a failure.
+    if v.fork || v.note.as_deref().is_some_and(|n| n.starts_with("refused: pull request from a fork")) {
+        return;
+    }
     let Some(oc) = outcome(v) else { return };
     let ok = oc == "succeeded";
     let wf = v.run.as_ref().map(|r| r.workflow.as_str()).filter(|w| !w.is_empty());
@@ -987,7 +1015,8 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         branch: opt(&run.branch),
         event: opt(&run.event),
         outcome: oc.to_string(),
-        duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)),
+        // A lost VM with no measurable run has no duration worth stating.
+        duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
         url: v.job_url.clone(),
         vm_id: v.id.clone(),
     };
@@ -997,12 +1026,23 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     emit(app, Event { ty, class, detail: Detail::Job(info), to });
 }
 
-pub fn unknown_targets(app: &crate::App, rules: &[Rule]) -> Vec<String> {
-    let ds = app.notify.dests.lock().unwrap();
-    let mut u: Vec<String> = rules.iter().flat_map(|r| r.to.iter()).filter(|t| !ds.iter().any(|d| &d.id == *t)).cloned().collect();
-    u.sort();
-    u.dedup();
-    u
+/// Rule problems a config save must refuse, for the rules in `new` that are not in `old` (by
+/// value): an unknown destination id (`dest_ids` None: destinations unknown, not checked) or a
+/// repo that is neither "*" nor in `repos`. Existing rules are never re-checked, so a broken
+/// notify.json or a removed repo never blocks an unrelated save.
+pub fn rule_errors(old: &[Rule], new: &[Rule], dest_ids: Option<&[String]>, repos: &[String]) -> Vec<String> {
+    let mut errs = vec![];
+    for r in new.iter().filter(|r| !old.contains(r)) {
+        if let Some(ids) = dest_ids {
+            errs.extend(r.to.iter().filter(|t| !ids.contains(t)).map(|t| format!("notify_rules: unknown destination {t}")));
+        }
+        if r.repo != "*" && !repos.iter().any(|x| x.eq_ignore_ascii_case(&r.repo)) {
+            errs.push(format!("notify_rules: {:?} is not one of your repos (or \"*\")", r.repo));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    errs.retain(|e| seen.insert(e.clone()));
+    errs
 }
 
 /// Who made an admitted request, set by `web::admit` for handlers that announce changes.
@@ -1082,6 +1122,24 @@ fn apply(b: DestBody, mut d: Dest, others: &[Dest]) -> ApiResult<Dest> {
         d.secret = None;
     }
     Ok(d)
+}
+
+/// Which settings differ, by name only: never a URL or token value.
+fn changed_fields(a: &Dest, b: &Dest) -> Vec<&'static str> {
+    [
+        ("name", a.name != b.name),
+        ("kind", a.kind != b.kind),
+        ("url", a.url != b.url),
+        ("token", a.token != b.token),
+        ("tailnet", a.tailnet != b.tailnet),
+        ("link", a.link != b.link),
+        ("events.job", a.events.job != b.events.job),
+        ("events.health", a.events.health != b.events.health),
+        ("events.security", a.events.security != b.events.security),
+    ]
+    .into_iter()
+    .filter_map(|(f, c)| c.then_some(f))
+    .collect()
 }
 
 /// Tell every current destination (whatever its event switches say) about a change.
@@ -1174,11 +1232,16 @@ async fn update(
     let _edit = edit_lock();
     let mut ds = app.notify.dests.lock().unwrap().clone();
     let i = ds.iter().position(|d| d.id == id).ok_or_else(missing)?;
-    let url_changed = b.url.as_deref().is_some_and(|u| !u.trim().is_empty());
     let new = apply(b, ds[i].clone(), &ds)?;
+    let url_changed = new.url != ds[i].url;
     // A secret only appears here when the kind just became generic: shown once.
     let fresh = if ds[i].secret.is_none() { new.secret.clone() } else { None };
-    let what = format!("changed notification destination {}{}", new.label(), if url_changed { " (new URL)" } else { "" });
+    let fields = changed_fields(&ds[i], &new);
+    let what = if fields.is_empty() {
+        format!("saved notification destination {} unchanged", new.label())
+    } else {
+        format!("changed notification destination {}: {}", new.label(), fields.join(", "))
+    };
     ds[i] = new.clone();
     persist(&app, &ds)?;
     // Queued to the current (old) worker first, so the old target hears it.
@@ -1270,8 +1333,10 @@ mod tests {
     fn security_actions_and_keys() {
         assert_eq!(action_for("/api/config"), Some("settings changed"));
         assert_eq!(action_for("/api/token"), Some("GitHub token replaced"));
-        assert_eq!(action_for("/api/app/manifest"), Some("GitHub App changed"));
         assert_eq!(action_for("/api/app"), Some("GitHub App changed"));
+        assert_eq!(action_for("/api/app/convert"), Some("GitHub App changed"));
+        assert_eq!(action_for("/api/app/manifest"), None, "starting the manifest flow changes nothing");
+        assert_eq!(action_for("/api/app/refresh"), None, "refreshing the installation list changes nothing");
         assert_eq!(action_for("/api/notify/a1b2c3d4"), None, "announced by the notify handlers themselves");
         assert_eq!(action_for("/api/vms/kiln-1-0/kill"), None);
         assert_eq!(changed_keys(r#"egress: "filtered" -> "open", repos, allowed_users"#), vec!["egress", "repos", "allowed_users"]);
@@ -1402,16 +1467,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_targets_lists_missing_ids() {
-        let app = crate::App::for_tests();
-        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
-        app.notify.dests.lock().unwrap().push(d.clone());
-        let r = |to: Vec<String>| Rule { repo: "*".into(), workflow: "*".into(), outcome: "any".into(), to };
-        assert!(unknown_targets(&app, &[r(vec![d.id.clone()])]).is_empty());
-        assert_eq!(unknown_targets(&app, &[r(vec!["ffffffff".into(), d.id.clone(), "ffffffff".into()])]), vec!["ffffffff".to_string()]);
-    }
-
-    #[test]
     fn job_alerts_once_per_vm() {
         let app = crate::App::for_tests();
         let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
@@ -1438,6 +1493,65 @@ mod tests {
         let ok2 = Vm { id: "kiln-9-2".into(), ..vm_end(crate::vm::State::Done, Some("Succeeded")) };
         job_ended(&app, &ok2);
         assert_eq!(q.q.lock().unwrap().back().unwrap().ty, "job.finished");
+    }
+
+    fn job_app() -> (Arc<crate::App>, Arc<Queue>) {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Ntfy, "https://ntfy.sh/acme-a");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        let q = Arc::new(Queue::default());
+        app.notify.queues.lock().unwrap().insert(d.id.clone(), q.clone());
+        (app, q)
+    }
+
+    #[test]
+    fn refused_fork_jobs_never_alert() {
+        let (app, q) = job_app();
+        let fork = Vm { fork: true, ..vm_end(crate::vm::State::Killed, None) };
+        job_ended(&app, &fork);
+        let noted =
+            Vm { id: "kiln-9-3".into(), note: Some("refused: pull request from a fork".into()), ..vm_end(crate::vm::State::Killed, None) };
+        job_ended(&app, &noted);
+        assert!(q.q.lock().unwrap().is_empty(), "kiln refused these jobs itself");
+        job_ended(&app, &Vm { id: "kiln-9-4".into(), ..vm_end(crate::vm::State::Killed, None) });
+        assert_eq!(q.q.lock().unwrap().len(), 1, "a plain kill still alerts");
+    }
+
+    #[test]
+    fn lost_vm_without_duration_omits_it() {
+        let (app, q) = job_app();
+        let lost = Vm { ended: Some(110), ..vm_end(crate::vm::State::Lost, None) };
+        job_ended(&app, &lost);
+        match &q.q.lock().unwrap()[0].detail {
+            Detail::Job(j) => assert_eq!((j.outcome.as_str(), j.duration_s), ("lost", None)),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn security_events_are_never_folded() {
+        let ev = |ty| Event { ty, class: Class::Direct, detail: Detail::Test, to: vec![] };
+        assert!(!folds(&ev("job.failed"), 29));
+        assert!(folds(&ev("job.failed"), 30));
+        assert!(!folds(&ev("security.changed"), 30));
+        assert!(!folds(&ev("security.changed"), 500));
+    }
+
+    #[test]
+    fn rule_checks_cover_only_new_or_changed_rules() {
+        let r = |repo: &str, to: &str| Rule { repo: repo.into(), workflow: "*".into(), outcome: "any".into(), to: vec![to.into()] };
+        let ids = vec!["a1b2c3d4".to_string()];
+        let repos = vec!["acme/kiln".to_string()];
+        let old = vec![r("acme/kiln", "ffffffff")];
+        assert!(rule_errors(&old, &old, Some(&ids), &repos).is_empty(), "an unchanged rule is never re-checked");
+        let new = vec![old[0].clone(), r("*", "eeeeeeee")];
+        let e = rule_errors(&old, &new, Some(&ids), &repos);
+        assert!(e.len() == 1 && e[0].contains("eeeeeeee") && !e[0].contains("ffffffff"), "{e:?}");
+        assert!(rule_errors(&old, &[r("acme/new", "a1b2c3d4")], Some(&ids), &repos).len() == 1, "unknown repo");
+        let with_new = vec!["acme/kiln".to_string(), "acme/new".to_string()];
+        assert!(rule_errors(&old, &[r("acme/new", "a1b2c3d4")], Some(&ids), &with_new).is_empty(), "repo added in the same save");
+        assert!(rule_errors(&old, &[r("*", "eeeeeeee")], None, &repos).is_empty(), "destinations unknown: not checked");
+        assert!(rule_errors(&[], &[r("Acme/Kiln", "a1b2c3d4")], Some(&ids), &repos).is_empty(), "repo case does not matter");
     }
 
     fn ip(s: &str) -> IpAddr {
@@ -1478,9 +1592,25 @@ mod tests {
             "::127.0.0.1",
             "64:ff9b::a9fe:a9fe",
             "2002:c0a8:0101::1",
+            "64:ff9b:1::a9fe:a9fe",
+            "::ffff:0:a9fe:a9fe",
+            "::ffff:0:101:101",
+            "2001:0:4136:e378::1",
+            "100::1",
         ] {
             assert!(!allowed(ip(s), false), "{s} is internal");
         }
+        // Translation prefixes are refused outright, tailnet or not.
+        for s in ["64:ff9b:1::a9fe:a9fe", "64:ff9b:1::101:101", "::ffff:0:a9fe:a9fe", "2001:0:4136:e378::1", "100::1"] {
+            assert!(!allowed(ip(s), true), "{s} is refused even on a tailnet");
+        }
+        // Just outside each private range: public.
+        for s in ["172.15.255.255", "172.32.0.1", "100.63.255.255", "100.128.0.1", "198.17.255.255", "198.20.0.1", "223.255.255.255"] {
+            assert!(allowed(ip(s), false), "{s} is public");
+        }
+        // The embedded-IPv4 forms are still judged by their IPv4 address.
+        assert!(allowed(ip("64:ff9b::101:101"), false), "NAT64 of a public address");
+        assert!(allowed(ip("2001:4860::1"), false), "2001::/32 is only Teredo, not all of 2001::/16");
         // The tailnet opt-in opens exactly the tailnet ranges, nothing else private.
         assert!(allowed(ip("100.64.0.7"), true) && allowed(ip("fd7a:115c:a1e0::7"), true));
         assert!(!allowed(ip("10.0.0.1"), true) && !allowed(ip("fd12::1"), true) && !allowed(ip("127.0.0.1"), true));
@@ -1502,6 +1632,9 @@ mod tests {
         assert!(!ok(Kind::Generic, "https://127.0.0.1/"), "literal loopback");
         assert!(!ok(Kind::Generic, "https://[::1]/"), "literal v6 loopback");
         assert!(!ok(Kind::Generic, "https://169.254.169.254/latest/meta-data/"), "metadata");
+        for alt in ["https://2130706433/", "https://0x7f.1/", "https://127.1/", "https://[::ffff:7f00:1]/"] {
+            assert!(!ok(Kind::Generic, alt), "alternate spelling of loopback: {alt}");
+        }
         assert!(!ok(Kind::Generic, "ftp://example.com/"));
         assert!(!ok(Kind::Generic, &format!("https://example.com/{}", "a".repeat(2100))));
         assert!(check_url(Kind::Ntfy, "https://100.64.0.7/alerts", true).is_ok(), "tailnet opt-in");
@@ -1774,15 +1907,31 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         let c = client(&d, true);
-        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Ok));
+        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Ok));
         let (h, b) = got.lock().unwrap()[0].clone();
         let (id, ts) = (h["webhook-id"].to_str().unwrap(), h["webhook-timestamp"].to_str().unwrap().parse().unwrap());
         assert_eq!(h["webhook-signature"].to_str().unwrap(), sign(d.secret.as_deref().unwrap(), id, ts, &b).unwrap());
         assert!(h["user-agent"].to_str().unwrap().starts_with("kiln/"));
         let (url, got) = receiver(302).await;
         d.url = url;
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Permanent(_)));
+        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
         assert_eq!(got.lock().unwrap().len(), 1, "the redirect target was not requested");
+    }
+
+    #[tokio::test]
+    async fn retries_keep_the_webhook_id() {
+        let (url, got) = receiver(503).await;
+        let d = dest(Kind::Generic, &url);
+        let c = client(&d, true);
+        let e = job("acme/kiln", "t", "main");
+        let id = new_msg_id();
+        for _ in 0..2 {
+            assert!(matches!(send_once(&c, &d, &e, &id, true).await, Outcome::Retry(..)));
+        }
+        let got = got.lock().unwrap();
+        let ids: Vec<&str> = got.iter().map(|(h, _)| h["webhook-id"].to_str().unwrap()).collect();
+        assert_eq!(ids, vec![id.as_str(), id.as_str()], "a retry is the same message to the receiver");
+        assert_ne!(new_msg_id(), id);
     }
 
     #[tokio::test]
@@ -1790,14 +1939,14 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         d.secret = Some("whsec_!!bad".into());
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), true).await, Outcome::Permanent(_)));
+        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
         assert!(got.lock().unwrap().is_empty(), "nothing is sent unsigned");
     }
 
     #[tokio::test]
     async fn refuses_literal_internal_address_before_connecting() {
         let d = dest(Kind::Generic, "https://169.254.169.254/latest");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             _ => panic!("must be refused"),
         }
@@ -1820,7 +1969,7 @@ mod tests {
     #[tokio::test]
     async fn name_resolving_inward_is_refused_not_retried() {
         let d = dest(Kind::Generic, "https://localhost/hook");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -1898,6 +2047,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_secret_reaches_config_notes_state_or_list() {
+        let app = test_app();
+        let note = |r: Noted| r.map(|(Extension(n), Json(v))| (n.0, v)).unwrap();
+        let mut notes = vec![];
+        let (n, g) = note(
+            create(
+                State(app.clone()),
+                me(),
+                dbody(json!({ "name": "g", "kind": "generic", "url": "https://hooks.example.com/MARKER_URL_g1" })),
+            )
+            .await,
+        );
+        notes.push(n);
+        let (gid, mut secrets) = (g["dest"]["id"].as_str().unwrap().to_string(), vec![g["secret"].as_str().unwrap().to_string()]);
+        let (n, t) = note(
+            create(
+                State(app.clone()),
+                me(),
+                dbody(json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/MARKER_URL_n1", "token": "tk_MARKER_TOKEN_1" })),
+            )
+            .await,
+        );
+        notes.push(n);
+        let nid = t["dest"]["id"].as_str().unwrap().to_string();
+        let mut c = app.cfg();
+        c.notify_rules = vec![Rule { repo: "*".into(), workflow: "*".into(), outcome: "any".into(), to: vec![gid.clone(), nid.clone()] }];
+        app.save_cfg(c).unwrap();
+        notes.push(
+            note(
+                update(
+                    State(app.clone()),
+                    me(),
+                    UrlPath(nid.clone()),
+                    dbody(json!({ "name": "n", "kind": "ntfy", "url": "https://ntfy.sh/MARKER_URL_n2", "token": "tk_MARKER_TOKEN_2" })),
+                )
+                .await,
+            )
+            .0,
+        );
+        notes.push(
+            note(
+                update(
+                    State(app.clone()),
+                    me(),
+                    UrlPath(gid.clone()),
+                    dbody(json!({ "name": "g2", "kind": "generic", "url": "https://hooks.example.com/MARKER_URL_g2" })),
+                )
+                .await,
+            )
+            .0,
+        );
+        let (n, r) = note(rotate(State(app.clone()), me(), UrlPath(gid.clone())).await);
+        notes.push(n);
+        secrets.push(r["secret"].as_str().unwrap().to_string());
+        let (_, listed) = out(Ok(list(State(app.clone())).await));
+        let state = state_json(&app).to_string();
+        notes.push(note(remove(State(app.clone()), me(), UrlPath(nid)).await).0);
+        let config = std::fs::read_to_string(app.data.join("config.json")).unwrap();
+        assert!(config.contains(&gid), "config.json holds the rule: {config}");
+        let mut markers = vec!["MARKER_URL".to_string(), "MARKER_TOKEN".to_string()];
+        markers.extend(secrets);
+        for (what, blob) in [("config.json", config), ("list", listed.to_string()), ("state", state), ("notes", notes.join("\n"))] {
+            for m in &markers {
+                assert!(!blob.contains(m.as_str()), "{what} leaked {m}: {blob}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn announcements_reach_every_destination_and_secrets_show_once() {
         let app = test_app();
         let (_, a) =
@@ -1920,6 +2138,40 @@ mod tests {
         assert!(u["secret"].is_null(), "{u}");
         let (st, _) = add(&app, json!({ "name": "ops\u{202E}x", "kind": "ntfy", "url": "https://ntfy.sh/acme-b" })).await;
         assert_eq!(st, 400);
+    }
+
+    #[tokio::test]
+    async fn change_announcements_name_the_fields() {
+        let app = test_app();
+        let (_, a) = add(&app, json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-a" })).await;
+        let id = a["dest"]["id"].as_str().unwrap().to_string();
+        let q = app.notify.queues.lock().unwrap()[&id].clone();
+        let last = |q: &Queue| match &q.q.lock().unwrap().back().unwrap().detail {
+            Detail::Security(s) => s.action.clone(),
+            _ => panic!(),
+        };
+        let r = update(
+            State(app.clone()),
+            me(),
+            UrlPath(id.clone()),
+            dbody(json!({ "name": "a", "kind": "ntfy", "events": { "job": true, "health": true, "security": false } })),
+        )
+        .await;
+        let Ok((Extension(note), _)) = r else { panic!() };
+        let what = last(&q);
+        assert!(what.ends_with(": events.security"), "{what}");
+        assert_eq!(note.0, what, "the audit note says the same");
+        let q = app.notify.queues.lock().unwrap()[&id].clone();
+        let r = update(
+            State(app.clone()),
+            me(),
+            UrlPath(id.clone()),
+            dbody(json!({ "name": "a", "kind": "ntfy", "url": "https://ntfy.sh/acme-SECRETPATH" })),
+        )
+        .await;
+        assert!(r.is_ok());
+        let what = last(&q);
+        assert!(what.contains(": url") && !what.contains("SECRETPATH") && !what.contains("acme-"), "{what}");
     }
 
     #[tokio::test]

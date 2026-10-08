@@ -137,6 +137,9 @@ pub struct Vm {
     /// The workflow run of the job this VM ran, from the queued scan.
     #[serde(default)]
     pub run: Option<crate::github::RunFacts>,
+    /// The job came from a fork pull request, which kiln refuses to run.
+    #[serde(default)]
+    pub fork: bool,
 }
 
 impl Vm {
@@ -332,6 +335,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         warm,
         mint_failed: false,
         run: None,
+        fork: false,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -2409,6 +2413,7 @@ mod tests {
             warm: false,
             mint_failed: false,
             run: None,
+            fork: false,
         }
     }
 
