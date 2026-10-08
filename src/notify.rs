@@ -1,7 +1,7 @@
 //! Outbound webhook notifications: generic signed JSON (Standard Webhooks), Slack, Discord
 //! and ntfy. Nothing here may let a destination reach inward (SSRF), leak its secret, or let
-//! text from a repo format, mention or inject into the target. See
-//! docs/superpowers/specs/2026-10-08-webhook-notifications-design.md.
+//! text from a repo format, mention or inject into the target. See the Notifications section
+//! of docs/configuration.md and SECURITY.md.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};

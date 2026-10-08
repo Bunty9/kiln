@@ -187,6 +187,77 @@ A GitHub App is the recommended way to authenticate. kiln holds only the App's p
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
 
+## Notifications
+
+kiln can send alerts to up to 20 destinations (Settings › Notifications). They are stored in `<data>/notify.json` (mode 0600, written atomically). If that file cannot be read, notifications are off, the Overview says so, and kiln never rewrites the file.
+
+**Kinds:** `generic` (signed JSON, below), `slack` (incoming webhook), `discord` (webhook) and `ntfy` (optional access token). The URL, the signing secret and the token are write-only: the API never returns them, and they are kept out of logs, the audit log and job VMs.
+
+**URL rules:** https only, no `user:password`, at most 2048 characters. Slack must be on `hooks.slack.com`; Discord on `discord.com` or `discordapp.com` under `/api/webhooks/`. Only public addresses are allowed. The "on my tailnet" option for a destination also allows `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, for a receiver on your tailnet such as `https://100.64.0.7/hook`. LAN, loopback, link-local, cloud metadata (`169.254.0.0/16`), other CGNAT, documentation, multicast and reserved ranges are always refused. IPv6 mapped, compatible, NAT64 and 6to4 addresses are judged by the IPv4 address inside them.
+
+**Events** (each destination picks job, health and security alerts):
+
+| Type | When |
+|---|---|
+| `job.failed` | A job failed, was cancelled, was killed after it started, timed out, or was lost when kiln restarted. Once per VM. Runner-registration failures are not jobs and are never sent. |
+| `job.finished` | A job succeeded and a workflow rule (below) matches it. |
+| `health.raised`, `health.cleared` | A launch blocker (old image, GitHub registration outage, egress filtering broken, low memory or disk), a poll error, Landlock missing, or a failing destination. Sent only after the state has held for 2 scheduler ticks and 60 s. "Draining" is not announced. |
+| `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed. A save that changes nothing is not announced. Destination changes (added, changed, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
+| `test` | The **Send test** button, at most once per destination every 10 s. |
+
+**Delivery:** each destination has its own queue (256 events; the oldest are dropped and counted) and is limited to 30 messages a minute, with the overflow folded into one "+N more events" message. A failed send is retried up to 3 times after about 5 s, 30 s and 2 min (±20 %). A 429 honours `Retry-After` (1–300 s); other 4xx responses and refused addresses are permanent. The client follows no redirects (a 3xx is a failure), ignores proxy environment variables, and uses a 5 s connect and 10 s total timeout. A destination that has failed for an hour, or permanently 3 times in a row, is "failing": the Overview shows a banner and the other destinations are told (never itself). On shutdown, alerts get up to 2 s to go out.
+
+**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped with `mrkdwn` and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In chat targets a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are kiln's own GitHub job URLs on `https://github.com/`. The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
+
+### Workflow rules
+
+`notify_rules` in `config.json` (also the table under Settings › Notifications; at most 50) send chosen workflows to chosen destinations:
+
+```json
+"notify_rules": [
+  { "repo": "acme/kiln", "workflow": "release.yml", "outcome": "any", "to": ["a1b2c3d4"] }
+]
+```
+
+`repo` is `owner/name` or `*`; `workflow` is `*` or a file name such as `release.yml`; `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
+
+### The generic payload
+
+The body is JSON with typed fields and never the actor's IP, logs or secrets:
+
+```json
+{
+  "type": "job.failed",
+  "id": "msg_01",
+  "at": 1791402114,
+  "kiln": { "version": "0.2.4", "link": null },
+  "job": {
+    "repo": "acme/kiln", "workflow": "release.yml", "workflow_name": "Release",
+    "job": "build", "branch": "main", "event": "push", "outcome": "failed",
+    "duration_s": 212, "url": "https://github.com/acme/kiln/actions/runs/1/job/2"
+  }
+}
+```
+
+`health.raised`/`health.cleared` carry `health: {kind, message, state}` instead of `job`, `security.changed` carries `security`, and a rate-limit summary carries `more: N`.
+
+The headers are `webhook-id`, `webhook-timestamp` (Unix seconds) and `webhook-signature` (`v1,<base64>`), as in [Standard Webhooks](https://www.standardwebhooks.com/). The signing secret (`whsec_…`, 32 random bytes) is shown once: when you create the destination, rotate it, or edit it into the generic kind. To verify, compute HMAC-SHA256 over `id.timestamp.body` with the base64-decoded part after `whsec_`, compare it with the `v1` signature in constant time, and reject timestamps more than 5 minutes from your clock:
+
+```python
+import base64, hashlib, hmac, time
+
+def verify(secret, headers, body: bytes) -> bool:
+    id_, ts = headers["webhook-id"], headers["webhook-timestamp"]
+    if abs(time.time() - int(ts)) > 300:
+        return False
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    mac = hmac.new(key, f"{id_}.{ts}.".encode() + body, hashlib.sha256).digest()
+    want = "v1," + base64.b64encode(mac).decode()
+    return any(hmac.compare_digest(want, s) for s in headers["webhook-signature"].split())
+```
+
+Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub webhooks are a separate, future feature.
+
 ## Data directory
 
 ```
@@ -198,6 +269,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
+  notify.json                    notification destinations and their secrets, mode 0600
   audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

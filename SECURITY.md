@@ -91,6 +91,12 @@ kiln installs only releases signed with its release key. Release CI signs each t
 
 The mirror listens on host loopback only and is a pull-only proxy of public Docker Hub images. It holds no credentials and cannot be pushed to. The registry binary it runs is pinned by version and SHA-256, and a different download is refused.
 
+### Notifications
+
+Outbound alerts must not become a way to reach into the box's network. Destination URLs must be https, without credentials, and Slack and Discord are pinned to their own hosts. The address check runs inside the DNS resolver, so the connection goes to exactly the addresses that were checked (there is no rebinding gap); IP-literal URLs are checked when saved and again when sent. Loopback, LAN, link-local, cloud metadata, CGNAT, documentation, multicast and reserved ranges are always refused, with IPv6 mapped, NAT64 and 6to4 forms judged by the IPv4 inside; only the per-destination "on my tailnet" opt-in adds the tailnet ranges. The client follows no redirects, ignores proxy environment variables, has a 5 s connect and 10 s total timeout, and reads at most 4 KiB of any response.
+
+URLs, signing secrets and tokens are write-only: `notify.json` is mode 0600, and they never appear in API responses, logs, audit notes or job VMs. Text from repos (names of repos, jobs, branches, workflows, actors) is cleaned of control and invisible characters, capped, and escaped per target: Slack `<!channel>` and `<@…>` become inert text with link previews off, Discord sends `allowed_mentions: {parse: []}`, and ntfy gets repo text only in the body, never in headers. Chat targets break auto-linking, so only kiln's own `https://github.com/` job links are clickable. Generic payloads are signed with [Standard Webhooks](https://www.standardwebhooks.com/) HMAC-SHA256 signatures; receivers should reject timestamps more than 5 minutes old. Each destination is limited to 30 messages a minute, and adding, changing, removing or re-keying a destination is announced to every destination, including the one removed, before it applies. See [Notifications](docs/configuration.md#notifications).
+
 ### Debug SSH
 
 sshd does not run during jobs. Held VMs accept keys from `debug_ssh_keys` only (no passwords, no root login), on a port bound to the box's tailnet address or loopback, with host key fingerprints printed for you to compare.
