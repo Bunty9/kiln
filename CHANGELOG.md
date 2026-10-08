@@ -4,6 +4,14 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- A `check` workflow runs format, clippy, tests and the dashboard and service worker syntax checks on a GitHub-hosted runner for every push to main and every pull request, forks included (read-only token, no secrets).
+
+### Changed
+
+- `docs/stacks.md` drops planned or nonexistent items (`kiln status`, forking kiln) and links GitHub's official pricing docs for the hosted runner prices it quotes. `CONTRIBUTING.md` describes the current `src/` layout.
+
 ## [0.2.4] - 2026-10-08
 
 ### Security
