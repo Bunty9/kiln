@@ -2,11 +2,7 @@
 
 [![check](https://github.com/Bunty9/kiln/actions/workflows/check.yml/badge.svg)](https://github.com/Bunty9/kiln/actions/workflows/check.yml)
 
-<!-- MEDIA: docs/media/demo.gif + docs/media/overview.png (agent C)
 ![kiln dashboard: a GitHub Actions job is queued, a VM boots in its slot, live step logs stream, and the VM is deleted when the job finishes](docs/media/demo.gif)
-
-![kiln dashboard overview showing VM slots, a running job and host resource graphs](docs/media/overview.png)
--->
 
 Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions job.
 
