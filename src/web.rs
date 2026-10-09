@@ -1456,7 +1456,9 @@ mod tests {
             std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
             let t = std::time::Instant::now();
-            let r = bounded(f.to_str().unwrap(), &["serve"], Duration::from_millis(300)).await;
+            // Run through sh rather than exec'ing the file just written: a test forking on
+            // another thread can briefly hold its write handle, and exec then fails with ETXTBSY.
+            let r = bounded("sh", &[f.to_str().unwrap(), "serve"], Duration::from_millis(300)).await;
             assert!(r.unwrap_err().to_string().contains("did not finish"), "{name}");
             assert!(t.elapsed() < Duration::from_secs(2), "{name} took {:?}", t.elapsed());
         }

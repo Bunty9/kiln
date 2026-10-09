@@ -1951,6 +1951,17 @@ pub fn mem_avail_mb() -> u64 {
     meminfo_kb("MemAvailable:") / 1024
 }
 
+/// Doctor's memory line. MemAvailable already excludes what kiln's running VMs hold
+/// (`held`), so that is added back: otherwise every busy slot counts twice and a full
+/// box always looks short.
+fn memory_check(avail: u64, held: u64, max_vms: usize, vm_mem: u32) -> (bool, String) {
+    let total = avail + held;
+    let want = max_vms as u64 * vm_mem as u64;
+    let note = if total < want { "; not enough for all slots at once" } else { "" };
+    let running = if held > 0 { format!(" (+{held} MB in running VMs)") } else { String::new() };
+    (total >= vm_mem as u64, format!("{avail} MB available{running}, {max_vms} x {vm_mem} MB wanted{note}"))
+}
+
 /// Available KB column of `df -Pk` (header line, then one data line).
 fn parse_df_kb(out: &str) -> Option<u64> {
     out.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()
@@ -2124,14 +2135,8 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         None => check("disk", false, "df failed"),
     });
 
-    let avail = mem_avail_mb();
-    let want = cfg.max_vms as u64 * cfg.vm_mem_mb as u64;
-    let note = if avail < want { "; not enough for all slots at once" } else { "" };
-    out.push(check(
-        "memory",
-        avail >= cfg.vm_mem_mb as u64,
-        format!("{avail} MB available, {} x {} MB wanted{note}", cfg.max_vms, cfg.vm_mem_mb),
-    ));
+    let (ok, detail) = memory_check(mem_avail_mb(), crate::host::vms_mb(), cfg.max_vms, cfg.vm_mem_mb);
+    out.push(check("memory", ok, detail));
 
     app.gh.refresh_latest().await;
     let info = image_info(&app.data, app.gh.latest_cached(), &cfg);
@@ -2295,6 +2300,19 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn memory_check_counts_running_vms_once() {
+        // Both slots busy on a 32 GB box: 8 GB free plus 16 GB in the two VMs is enough.
+        let (ok, d) = super::memory_check(7941, 16_850, 2, 8192);
+        assert!(ok && !d.contains("not enough"), "{d}");
+        assert!(d.contains("+16850 MB in running VMs"), "{d}");
+        // Idle box that can't fit every slot: warned, still ok while one VM fits.
+        let (ok, d) = super::memory_check(12_000, 0, 2, 8192);
+        assert!(ok && d.ends_with("not enough for all slots at once"), "{d}");
+        // Not even one VM fits.
+        assert!(!super::memory_check(4000, 0, 2, 8192).0);
+    }
+
     use super::*;
 
     #[test]
