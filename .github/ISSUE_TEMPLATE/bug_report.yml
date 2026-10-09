@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in kiln does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Issues here are public: before pasting logs, replace hostnames, tailnet names and addresses, private repo names, logins and home paths with placeholders (for example `box.example.ts.net`, `100.64.0.7`, `acme/app`). Never paste tokens, the dashboard key or the GitHub App key. Security problems go to **Security › Report a vulnerability** instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what kiln did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest workflow or settings change that shows the problem, if you have one.
+  - type: input
+    id: version
+    attributes:
+      label: kiln version
+      description: Output of `kiln --version`.
+      placeholder: kiln 0.2.5
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: Distribution, kernel (`uname -r`) and CPU.
+      placeholder: Ubuntu 24.04, 6.8.0-45-generic, Ryzen 7 3700X
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: kiln doctor
+      description: Output of `kiln doctor` (redacted).
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant part of `journalctl --user -u kiln`, or the job's console log from its dashboard page (redacted).
+      render: text

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping with kiln. It is a small codebase on purpose: nine Rust files under `src/` and one HTML file for the dashboard.
+Thanks for helping with kiln. Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md). It is a small codebase on purpose: nine Rust files under `src/` and one HTML file for the dashboard.
 
 ## Development setup
 
