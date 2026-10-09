@@ -844,7 +844,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
         bail_r(&why)?;
     }
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
-    let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
+    let reprobe = vm::egress_reprobe(&app.cfg(), &c);
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
     // Only new or changed rules are checked: an unrelated save never fails on an old rule.
     // With notify.json unreadable the destination list is unknown, so ids are not checked.
@@ -856,7 +856,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
         bail_r(&errs.join("; "))?;
     }
     app.save_cfg(c)?;
-    if to_filtered {
+    if reprobe {
         // Probe now so the dashboard shows the result and the scheduler has it cached.
         let a = app.clone();
         tokio::spawn(async move {
