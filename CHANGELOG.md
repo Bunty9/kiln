@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- `kiln doctor` no longer reports "not enough for all slots at once" (and a failed memory check) whenever every slot is busy: it counted the memory held by kiln's own running VMs twice. It now adds that back to the available memory and shows it, for example `7941 MB available (+16850 MB in running VMs), 2 x 8192 MB wanted`.
+
 ## [0.2.5] - 2026-10-08
 
 ### Added

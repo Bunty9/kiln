@@ -26,6 +26,11 @@ pub struct Sample {
 
 static HIST: Mutex<VecDeque<Sample>> = Mutex::new(VecDeque::new());
 
+/// Resident MB of kiln's running VMs in the latest sample.
+pub fn vms_mb() -> u64 {
+    HIST.lock().unwrap().back().map_or(0, |s| s.vms.iter().map(|v| v.3).sum())
+}
+
 /// The last `n` samples, oldest first.
 pub fn recent(n: usize) -> Vec<Sample> {
     let h = HIST.lock().unwrap();
