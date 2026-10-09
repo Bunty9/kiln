@@ -1528,25 +1528,48 @@ fn egress_script(mirror: bool, tailnet: bool) -> String {
     s + &step("! curl -sf -m8 -o /dev/null https://api.github.com/", "internet unreachable") + "exit 0\n"
 }
 
-/// Last probe: (unix time, result). Held across the probe so callers share one run.
-static EGRESS: tokio::sync::Mutex<Option<(u64, Result<(), String>)>> = tokio::sync::Mutex::const_new(None);
+/// A probe: (unix time, consecutive failures, result).
+type Probe = (u64, u32, Result<(), String>);
+/// The last probe. Held across the probe so callers share one run.
+static EGRESS: tokio::sync::Mutex<Option<Probe>> = tokio::sync::Mutex::const_new(None);
 const EGRESS_TTL: u64 = 600;
 
-fn fresh(at: u64, t: u64) -> bool {
-    t < at + EGRESS_TTL
+/// A pass stands `EGRESS_TTL`. A failure is retried after 5 s, doubling per consecutive
+/// failure up to 2 minutes, so a probe that ran before the network was up passes soon after.
+fn fresh(at: u64, fails: u32, t: u64) -> bool {
+    let wait = match fails {
+        0 => EGRESS_TTL,
+        n => (5u64 << (n - 1).min(5)).min(120),
+    };
+    t < at + wait
 }
 
-/// Result of the filtered-egress probe, cached 10 minutes unless `force`.
+/// Consecutive failures after a probe; a forced one (settings change, doctor) restarts the backoff.
+fn next_fails(ok: bool, prev: Option<u32>, force: bool) -> u32 {
+    match (ok, prev) {
+        (true, _) => 0,
+        (false, Some(f)) if !force => f + 1,
+        _ => 1,
+    }
+}
+
+/// Whether a config save can change the probe's result, so it must run again now.
+pub fn egress_reprobe(old: &crate::Config, new: &crate::Config) -> bool {
+    new.egress == "filtered" && (old.egress != new.egress || old.listen != new.listen || old.docker_mirror != new.docker_mirror)
+}
+
+/// Result of the filtered-egress probe, cached (see `fresh`) unless `force`.
 pub async fn egress_ready(app: &App, force: bool) -> Result<(), String> {
     let mut g = EGRESS.lock().await;
-    if let Some((at, r)) = &*g
+    if let Some((at, fails, r)) = &*g
         && !force
-        && fresh(*at, now())
+        && fresh(*at, *fails, now())
     {
         return r.clone();
     }
     let r = egress_probe(app).await.map_err(|e| format!("{e:#}"));
-    *g = Some((now(), r.clone()));
+    let fails = next_fails(r.is_ok(), g.as_ref().map(|p| p.1), force);
+    *g = Some((now(), fails, r.clone()));
     r
 }
 
@@ -2495,7 +2518,25 @@ mod tests {
         assert!(s.contains("mirror") && s.contains("tailnet") && s.contains("internet unreachable"));
         let s = egress_script(false, false);
         assert!(!s.contains("mirror") && !s.contains("$3") && s.contains("dashboard port"));
-        assert!(fresh(100, 699) && !fresh(100, 700));
+        assert!(fresh(100, 0, 699) && !fresh(100, 0, 700));
+    }
+
+    #[test]
+    fn egress_retry_backoff() {
+        // A failure retries after 5, 10, 20, 40, 80 s, then every 120 s.
+        let waits: Vec<u64> = (1..=8).map(|f| (100..).find(|&t| !fresh(100, f, t)).unwrap() - 100).collect();
+        assert_eq!(waits, [5, 10, 20, 40, 80, 120, 120, 120]);
+        assert_eq!(next_fails(false, None, false), 1);
+        assert_eq!(next_fails(false, Some(3), false), 4);
+        assert_eq!(next_fails(false, Some(3), true), 1, "a forced probe restarts the backoff");
+        assert_eq!(next_fails(true, Some(3), false), 0);
+        let open = crate::Config::default();
+        let filtered = crate::Config { egress: "filtered".into(), ..Default::default() };
+        assert!(egress_reprobe(&open, &filtered));
+        assert!(!egress_reprobe(&filtered, &open) && !egress_reprobe(&filtered, &filtered));
+        assert!(egress_reprobe(&filtered, &crate::Config { docker_mirror: !filtered.docker_mirror, ..filtered.clone() }));
+        assert!(egress_reprobe(&filtered, &crate::Config { listen: "127.0.0.1:1".into(), ..filtered.clone() }));
+        assert!(!egress_reprobe(&filtered, &crate::Config { max_vms: filtered.max_vms + 1, ..filtered.clone() }));
     }
 
     /// Runs the real probe script with stubbed tools: a correctly filtered

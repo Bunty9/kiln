@@ -72,7 +72,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Switching to `filtered` triggers a probe at once; if it fails no jobs launch (never a fallback to open). Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
+| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Switching to `filtered` triggers a probe at once; while it fails no jobs launch (never a fallback to open), and kiln retries it after 5 s, doubling up to every 2 minutes, so a probe that ran before the network was up (for example at boot) passes on its own once it is. Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
 
 ### Debugging
 
