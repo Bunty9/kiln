@@ -458,7 +458,7 @@ impl Gh {
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
-                        && let Some(n) = job_size(&j["labels"], label, default_cpus).filter(|&n| n <= host)
+                        && let Some(n) = crate::forge::job_size(&j["labels"], label, default_cpus).filter(|&n| n <= host)
                     {
                         let jid = j["id"].as_u64().unwrap_or_default();
                         if fork {
@@ -813,14 +813,6 @@ fn conversion_error(status: u16) -> String {
     }
 }
 
-/// Allowed `<label>-<N>cpu` sizes.
-pub const SIZES: [u32; 4] = [2, 4, 8, 16];
-
-/// RAM for a size label; the default size uses the configured memory instead.
-pub fn size_mem_mb(cpus: u32) -> u32 {
-    (cpus * 2048).min(24576)
-}
-
 /// `branch` marked up (so no writer matches it) when it is not a plain branch name
 /// that is safe to put in an API path unencoded ([A-Za-z0-9._/-], no ".."); None if it is.
 fn unsafe_branch(branch: &str) -> Option<String> {
@@ -852,31 +844,6 @@ fn is_fork_run(run: &Value) -> bool {
         (Some(head), Some(base)) => !head.eq_ignore_ascii_case(base),
         _ => true,
     }
-}
-
-/// The VM size a job asks for, if it is ours: every label must be implicit
-/// (GitHub adds `self-hosted`, `linux`, `x64` to self-hosted runners) or one
-/// of ours, and exactly one of ours must be present. `<label>` is the default
-/// size, `<label>-Ncpu` size N. A plain `self-hosted` job is someone else's.
-fn job_size(job_labels: &Value, label: &str, default_cpus: u32) -> Option<u32> {
-    let label = label.to_ascii_lowercase();
-    let mut size = None;
-    let mut found = 0;
-    for l in job_labels.as_array()? {
-        let l = l.as_str()?.to_ascii_lowercase();
-        if ["self-hosted", "linux", "x64"].contains(&l.as_str()) {
-            continue;
-        }
-        found += 1;
-        size = Some(if l == label {
-            default_cpus
-        } else {
-            // Round-trip so `kiln-04cpu` (which no runner label matches) is not ours.
-            let digits = l.strip_prefix(&label)?.strip_prefix('-')?.strip_suffix("cpu")?;
-            digits.parse::<u32>().ok().filter(|n| SIZES.contains(n) && n.to_string() == digits)?
-        });
-    }
-    if found == 1 { size } else { None }
 }
 
 /// When to stop calling GitHub after a 403/429: until the rate-limit reset if
@@ -1112,32 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn label_matching() {
-        let size = |v: Value| job_size(&v, "kiln", 4);
-        assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));
-        assert_eq!(size(json!(["kiln"])), Some(4));
-        assert_eq!(size(json!(["Self-Hosted", "Linux", "KILN"])), Some(4));
-        assert_eq!(size(json!(["self-hosted", "linux", "x64", "kiln-16cpu"])), Some(16));
-        assert_eq!(size(json!(["kiln-8cpu"])), Some(8));
-        assert_eq!(size(json!(["self-hosted", "Kiln-2CPU"])), Some(2));
-        assert_eq!(size(json!(["kiln-4cpu"])), Some(4));
-        assert_eq!(job_size(&json!(["kiln"]), "kiln", 6), Some(6));
-        assert_eq!(size(json!(["ubuntu-latest"])), None);
-        assert_eq!(size(json!(["self-hosted"])), None);
-        assert_eq!(size(json!(["self-hosted", "linux"])), None);
-        assert_eq!(size(json!(["self-hosted", "kiln", "gpu"])), None);
-        assert_eq!(size(json!(["kiln", "kiln-8cpu"])), None);
-        assert_eq!(size(json!(["kiln-8cpu", "kiln-8cpu"])), None);
-        assert_eq!(size(json!(["kiln-3cpu"])), None);
-        assert_eq!(size(json!(["kiln-04cpu"])), None);
-        assert_eq!(size(json!(["kiln-32cpu"])), None);
-        assert_eq!(size(json!(["kiln-"])), None);
-        assert_eq!(size(json!(["kilnx-8cpu"])), None);
-        assert_eq!(size(json!([])), None);
-        assert_eq!(size(json!(null)), None);
-    }
-
-    #[test]
     fn hello() {
         let w = hello_workflow("kiln");
         assert!(
@@ -1160,13 +1101,6 @@ mod tests {
         }
         let e = conversion_error(502);
         assert!(e.contains("try again") && !e.contains("existing App"), "{e}");
-    }
-
-    #[test]
-    fn size_memory() {
-        assert_eq!(size_mem_mb(2), 4096);
-        assert_eq!(size_mem_mb(8), 16384);
-        assert_eq!(size_mem_mb(16), 24576);
     }
 }
 

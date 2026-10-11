@@ -164,11 +164,7 @@ impl Config {
     }
 
     pub fn mem_mb(&self, cpus: u32) -> u32 {
-        if cpus == self.vm_cpus {
-            self.vm_mem_mb
-        } else {
-            self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| github::size_mem_mb(cpus))
-        }
+        if cpus == self.vm_cpus { self.vm_mem_mb } else { self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| forge::size_mem_mb(cpus)) }
     }
 
     /// Cache disk size of `repo`: its `repo_cache_gb` entry, else `cache_gb`.

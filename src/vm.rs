@@ -1355,41 +1355,49 @@ fn start_cap(cfg: &crate::Config, warm: bool) -> u64 {
 /// step is accepted once and only forward: the job (root in the guest) can echo
 /// these lines itself, and must not rewind the state or restart its timeout.
 fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
-    let line = line.trim_end();
-    // The guest's journal prefixes console lines ("[ 32.2] kiln-job[1395]: kiln: hostkey ...").
-    if let Some((_, k)) = line.split_once("kiln: hostkey ") {
-        if v.state != State::Held || v.ssh_hostkeys.len() >= 4 {
-            return false;
+    use crate::forge::{
+        Kind,
+        console::{Line, parse_line},
+    };
+    // ponytail: GitHub's console until the VM knows its forge (P0-6).
+    match parse_line(Kind::GitHub, line) {
+        Some(Line::Hostkey(k)) => {
+            if v.state != State::Held || v.ssh_hostkeys.len() >= 4 {
+                return false;
+            }
+            v.ssh_hostkeys.push(k);
+            true
         }
-        v.ssh_hostkeys.push(k.chars().filter(|c| !c.is_control()).take(200).collect());
-        true
-    } else if line.contains("Listening for Jobs") {
-        if v.state != State::Booting {
-            return false;
+        Some(Line::Listening) => {
+            if v.state != State::Booting {
+                return false;
+            }
+            v.state = State::Idle;
+            v.online_at.get_or_insert(t);
+            true
         }
-        v.state = State::Idle;
-        v.online_at.get_or_insert(t);
-        true
-    } else if let Some((_, job)) = line.split_once("Running job: ") {
-        if v.busy_since.is_some() || !matches!(v.state, State::Booting | State::Idle) {
-            return false;
+        Some(Line::Running(job)) => {
+            if v.busy_since.is_some() || !matches!(v.state, State::Booting | State::Idle) {
+                return false;
+            }
+            v.state = State::Busy;
+            v.warm = false;
+            v.job = Some(job);
+            v.busy_since = Some(t);
+            true
         }
-        v.state = State::Busy;
-        v.warm = false;
-        v.job = Some(job.trim().to_string());
-        v.busy_since = Some(t);
-        true
-    } else if let Some((_, result)) = line.split_once("completed with result: ") {
-        if v.result.is_none() && v.state == State::Busy {
-            v.result = Some(result.trim().to_string());
-            v.done_at = Some(t);
+        Some(Line::Completed(result)) => {
+            if v.result.is_none() && v.state == State::Busy {
+                v.result = Some(result);
+                v.done_at = Some(t);
+            }
+            false
         }
-        false
-    } else if line.contains("Runner update") {
-        v.note = Some("runner self-updating (rebake to avoid)".into());
-        false
-    } else {
-        false
+        Some(Line::RunnerUpdate) => {
+            v.note = Some("runner self-updating (rebake to avoid)".into());
+            false
+        }
+        None => false,
     }
 }
 

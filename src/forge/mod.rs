@@ -4,8 +4,11 @@
 
 #![allow(dead_code)] // the call sites arrive with the later forge tasks
 
+pub mod console;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -13,6 +16,60 @@ pub enum Kind {
     GitHub,
     Gitea,
     GitLab,
+}
+
+/// What triggered a run, normalised across forges.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    Push,
+    PullRequest,
+    Tag,
+    Release,
+    Manual,
+    Schedule,
+    #[default]
+    Other,
+}
+
+/// A job's result, normalised across forges. `as_str` is what the runner console prints, so
+/// persisted history, notifications and telemetry keep their strings.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    Succeeded,
+    SucceededWithIssues,
+    Failed,
+    Abandoned,
+    Canceled,
+    Skipped,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "Succeeded",
+            Self::SucceededWithIssues => "SucceededWithIssues",
+            Self::Failed => "Failed",
+            Self::Abandoned => "Abandoned",
+            Self::Canceled => "Canceled",
+            Self::Skipped => "Skipped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        use Outcome::*;
+        [Succeeded, SucceededWithIssues, Failed, Abandoned, Canceled, Skipped].into_iter().find(|o| o.as_str() == s)
+    }
+}
+
+/// Same-origin links a forge builds for a run; absent ones stay `None`.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, Debug)]
+pub struct Links {
+    pub run: Option<String>,
+    pub job: Option<String>,
+    pub commit: Option<String>,
+    pub pr: Option<String>,
+    pub branch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -205,9 +262,43 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// Allowed `<label>-<N>cpu` sizes.
+pub const SIZES: [u32; 4] = [2, 4, 8, 16];
+
+/// RAM for a size label; the default size uses the configured memory instead.
+pub fn size_mem_mb(cpus: u32) -> u32 {
+    (cpus * 2048).min(24576)
+}
+
+/// The VM size a job asks for, if it is ours: every label must be implicit
+/// (GitHub adds `self-hosted`, `linux`, `x64` to self-hosted runners) or one
+/// of ours, and exactly one of ours must be present. `<label>` is the default
+/// size, `<label>-Ncpu` size N. A plain `self-hosted` job is someone else's.
+pub fn job_size(job_labels: &Value, label: &str, default_cpus: u32) -> Option<u32> {
+    let label = label.to_ascii_lowercase();
+    let mut size = None;
+    let mut found = 0;
+    for l in job_labels.as_array()? {
+        let l = l.as_str()?.to_ascii_lowercase();
+        if ["self-hosted", "linux", "x64"].contains(&l.as_str()) {
+            continue;
+        }
+        found += 1;
+        size = Some(if l == label {
+            default_cpus
+        } else {
+            // Round-trip so `kiln-04cpu` (which no runner label matches) is not ours.
+            let digits = l.strip_prefix(&label)?.strip_prefix('-')?.strip_suffix("cpu")?;
+            digits.parse::<u32>().ok().filter(|n| SIZES.contains(n) && n.to_string() == digits)?
+        });
+    }
+    if found == 1 { size } else { None }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn r(s: &str) -> RepoRef {
         RepoRef::parse(s).unwrap()
@@ -244,6 +335,21 @@ mod tests {
         assert!(r("gl:a").check_kind(Kind::GitLab).is_err());
         let deep = vec!["s"; 21].join("/");
         assert!(r(&format!("gl:{deep}")).check_kind(Kind::GitLab).is_err());
+    }
+
+    #[test]
+    fn outcome_strings() {
+        for (o, s) in [
+            (Outcome::Succeeded, "Succeeded"),
+            (Outcome::Failed, "Failed"),
+            (Outcome::Abandoned, "Abandoned"),
+            (Outcome::Canceled, "Canceled"),
+            (Outcome::Skipped, "Skipped"),
+            (Outcome::SucceededWithIssues, "SucceededWithIssues"),
+        ] {
+            assert_eq!((o.as_str(), Outcome::parse(s)), (s, Some(o)));
+        }
+        assert_eq!(Outcome::parse("Cancelled"), None);
     }
 
     #[test]
@@ -314,5 +420,38 @@ mod tests {
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
         assert!(cfg(r#"[{"id":"gl","kind":"gitlab","typo":1}]"#).is_err());
+    }
+
+    #[test]
+    fn label_matching() {
+        let size = |v: Value| job_size(&v, "kiln", 4);
+        assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));
+        assert_eq!(size(json!(["kiln"])), Some(4));
+        assert_eq!(size(json!(["Self-Hosted", "Linux", "KILN"])), Some(4));
+        assert_eq!(size(json!(["self-hosted", "linux", "x64", "kiln-16cpu"])), Some(16));
+        assert_eq!(size(json!(["kiln-8cpu"])), Some(8));
+        assert_eq!(size(json!(["self-hosted", "Kiln-2CPU"])), Some(2));
+        assert_eq!(size(json!(["kiln-4cpu"])), Some(4));
+        assert_eq!(job_size(&json!(["kiln"]), "kiln", 6), Some(6));
+        assert_eq!(size(json!(["ubuntu-latest"])), None);
+        assert_eq!(size(json!(["self-hosted"])), None);
+        assert_eq!(size(json!(["self-hosted", "linux"])), None);
+        assert_eq!(size(json!(["self-hosted", "kiln", "gpu"])), None);
+        assert_eq!(size(json!(["kiln", "kiln-8cpu"])), None);
+        assert_eq!(size(json!(["kiln-8cpu", "kiln-8cpu"])), None);
+        assert_eq!(size(json!(["kiln-3cpu"])), None);
+        assert_eq!(size(json!(["kiln-04cpu"])), None);
+        assert_eq!(size(json!(["kiln-32cpu"])), None);
+        assert_eq!(size(json!(["kiln-"])), None);
+        assert_eq!(size(json!(["kilnx-8cpu"])), None);
+        assert_eq!(size(json!([])), None);
+        assert_eq!(size(json!(null)), None);
+    }
+
+    #[test]
+    fn size_memory() {
+        assert_eq!(size_mem_mb(2), 4096);
+        assert_eq!(size_mem_mb(8), 16384);
+        assert_eq!(size_mem_mb(16), 24576);
     }
 }
