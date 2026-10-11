@@ -1,6 +1,7 @@
 mod app_auth;
 mod audit;
 mod confine;
+mod forge;
 #[cfg(test)]
 mod forge_test_mock;
 mod github;
@@ -88,6 +89,9 @@ pub struct Config {
     /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
     /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
     pub stop_grace_secs: u64,
+    /// Extra forges (GitLab, Gitea) and their repos. Absent = GitHub only, from `repos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forges: Option<Vec<forge::ForgeCfg>>,
     /// Top-level keys this version does not know (a newer kiln's, e.g. `forges`). Kept on load
     /// and written back on save, so a rollback followed by a settings save does not drop them.
     #[serde(flatten)]
@@ -130,6 +134,7 @@ impl Default for Config {
             usage_stats: None,
             crash_reports: None,
             stop_grace_secs: 25,
+            forges: None,
             extra: Default::default(),
         }
     }
@@ -186,6 +191,7 @@ impl Config {
                 bail!("repo must look like owner/name: {r:?}");
             }
         }
+        forge::validate(&self.forges, &self.repos)?;
         if !valid_repo(&self.update_repo) {
             bail!("update_repo must look like owner/name: {:?}", self.update_repo);
         }
@@ -1297,13 +1303,13 @@ mod tests {
         // A newer kiln's keys (rollback safety) survive a load and a settings save; integer map keys still parse.
         let app = App::for_tests();
         let path = app.data.join("config.json");
-        let src = r#"{"egress":"filtered","size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab"}],"future":true}"#;
+        let src = r#"{"egress":"filtered","size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}],"future":true}"#;
         std::fs::write(&path, src).unwrap();
         let c = load_config(&app.data).unwrap();
         assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), ("filtered", Some(&4096)));
         app.save_cfg(c).unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab"}]));
+        assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.com"}]));
         assert_eq!(saved["future"], true);
         assert_eq!(saved["size_mem_mb"], serde_json::json!({"2": 4096}));
         assert_eq!(Config::default().extra.len(), 0);
