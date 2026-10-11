@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 
 pub struct Gh {
     http: reqwest::Client,
+    /// REST API root, without a trailing slash. Tests point it at a local server.
+    api_base: String,
     token: std::sync::RwLock<String>,
     /// Where the token came from: "env" | "file" | "gh" | "none".
     source: std::sync::RwLock<&'static str>,
@@ -101,6 +103,7 @@ impl Gh {
             reqwest::Client::builder().user_agent("kiln-ci").timeout(std::time::Duration::from_secs(60)).build().expect("http client");
         Self {
             http,
+            api_base: "https://api.github.com".into(),
             token: std::sync::RwLock::new(token),
             source: std::sync::RwLock::new(source),
             rates: Default::default(),
@@ -247,7 +250,7 @@ impl Gh {
     }
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("https://api.github.com/{}", path.trim_start_matches('/'));
+        let url = format!("{}/{}", self.api_base, path.trim_start_matches('/'));
         let rb = self
             .http
             .request(method, url)
@@ -476,7 +479,7 @@ impl Gh {
     pub async fn manifest_conversion(&self, code: &str) -> Result<Value> {
         let r = self
             .http
-            .post(format!("https://api.github.com/app-manifests/{code}/conversions"))
+            .post(format!("{}/app-manifests/{code}/conversions", self.api_base))
             .header(header::ACCEPT, "application/vnd.github+json")
             .send()
             .await
@@ -930,6 +933,37 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn get_goes_to_api_base() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // One-shot local server: checks the request line, answers a small JSON body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            while !buf.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0u8; 512];
+                let n = sock.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "client closed before sending headers");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let body = r#"{"id":7}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            head.lines().next().unwrap().to_string()
+        });
+        let mut gh = super::Gh::new("tok".into(), "test");
+        gh.api_base = format!("http://{addr}");
+        let v = gh.get("repos/o/n").await.unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(server.await.unwrap(), "GET /repos/o/n HTTP/1.1");
+    }
+
     #[test]
     fn anonymous_budget_is_not_ours() {
         // GitHub's unauthenticated budget is 60/h per IP; any token's is 5000+.
