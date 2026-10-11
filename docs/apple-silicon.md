@@ -20,6 +20,7 @@ The guest always has the host's architecture (`std::env::consts::ARCH`), so an a
 | Guest clock at boot | RTC (`rtc_cmos`, built into the kernel) | host time on the kernel command line (`systemd.clock_usec`) |
 | Hypervisor check | `/dev/kvm` read/write, `kvm` group | `sysctl -n kern.hv_support` = 1 |
 | Memory, load | `/proc/meminfo`, `/proc/loadavg` | `sysctl hw.memsize`, `vm_stat` (free + inactive pages), `sysctl vm.loadavg` |
+| Host graphs (CPU and memory by VM) | `/proc/stat`, `/proc/<pid>/stat` and `statm` | one `ps -axww -o pid=,time=,rss=,command=` per sample: host busy is the sum of every process's CPU time increase |
 | Stray QEMU scan | `/proc/*/cmdline` | `ps -axww -o pid=,command=` |
 | Service | systemd user unit (`deploy/kiln.service`) | launchd LaunchAgent (`deploy/kiln.plist`) |
 | Networking | user-mode (slirp); `egress: "filtered"` available | user-mode (slirp) only |

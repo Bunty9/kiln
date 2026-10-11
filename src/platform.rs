@@ -131,6 +131,43 @@ fn parse_ps(out: &str) -> Vec<String> {
     out.lines().filter_map(|l| Some(l.trim_start().split_once(' ')?.1.trim_start().to_string())).collect()
 }
 
+/// A process as `ps` sees it: CPU time (user + system) in centiseconds, resident MB, command line.
+pub struct Usage {
+    pub pid: u32,
+    pub cs: u64,
+    pub mb: u64,
+    pub cmd: String,
+}
+
+/// Every process's CPU time, resident size and command line (macOS: Linux reads /proc).
+pub fn process_usage() -> Vec<Usage> {
+    parse_usage(&run("ps", &["-axww", "-o", "pid=,time=,rss=,command="]))
+}
+
+/// `ps -axww -o pid=,time=,rss=,command=` lines ("53256 1009:01.21 1294208 /opt/homebrew/bin/qemu-system-aarch64 ...").
+fn parse_usage(out: &str) -> Vec<Usage> {
+    let word = |s: &str| -> Option<(String, String)> {
+        let (w, rest) = s.trim_start().split_once(' ')?;
+        Some((w.to_string(), rest.to_string()))
+    };
+    out.lines()
+        .filter_map(|l| {
+            let (pid, rest) = word(l)?;
+            let (time, rest) = word(&rest)?;
+            let (rss, cmd) = word(&rest)?;
+            let cmd = cmd.trim_start().to_string();
+            Some(Usage { pid: pid.parse().ok()?, cs: cputime_cs(&time)?, mb: rss.parse::<u64>().ok()? / 1024, cmd })
+        })
+        .collect()
+}
+
+/// macOS `ps` CPU time, minutes:seconds.hundredths with unbounded minutes ("1009:01.21"), in centiseconds.
+fn cputime_cs(s: &str) -> Option<u64> {
+    let (min, rest) = s.split_once(':')?;
+    let (sec, cs) = rest.split_once('.')?;
+    Some((min.parse::<u64>().ok()? * 60 + sec.parse::<u64>().ok()?) * 100 + cs.parse::<u64>().ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +204,10 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
         assert!(seen, "long command line cut short");
+        if MACOS {
+            let u = process_usage();
+            assert!(u.iter().any(|p| p.pid == std::process::id() && p.mb > 0 && p.cmd.contains(&name)), "this test process in ps usage");
+        }
         eprintln!("hypervisor: {:?}; memory {avail}/{total} MB; load {load:?}", hypervisor());
     }
 
@@ -184,5 +225,15 @@ mod tests {
         assert_eq!(parse_load("{ 1.62 1.85 1.93 }\n"), ["1.62", "1.85", "1.93"]);
         let ps = "    1 /sbin/launchd\n  412 /opt/homebrew/bin/qemu-system-aarch64 -machine virt -drive file=/x/vms/a/disk.qcow2\n";
         assert_eq!(parse_ps(ps), ["/sbin/launchd", "/opt/homebrew/bin/qemu-system-aarch64 -machine virt -drive file=/x/vms/a/disk.qcow2"]);
+        // CPU time is minutes:seconds.hundredths, the minutes unbounded; rss is KiB.
+        let ps = "  403 178:22.79 142592 /System/Library/WindowServer -daemon\n\
+            53256 1009:01.21 1294208 /opt/homebrew/bin/qemu-system-aarch64 -machine virt\n\
+            junk line\n    7   0:00.05   2048 sh\n";
+        let u = parse_usage(ps);
+        assert_eq!(u.len(), 3, "junk skipped");
+        assert_eq!((u[0].pid, u[0].cs, u[0].mb, u[0].cmd.as_str()), (403, 1_070_279, 139, "/System/Library/WindowServer -daemon"));
+        assert_eq!((u[1].cs, u[1].mb), (6_054_121, 1263));
+        assert_eq!((u[2].pid, u[2].cs, u[2].mb, u[2].cmd.as_str()), (7, 5, 2, "sh"));
+        assert_eq!(cputime_cs("1:02:03"), None, "not macOS's format");
     }
 }
