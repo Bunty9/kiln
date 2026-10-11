@@ -1236,15 +1236,15 @@ mod tests {
         // A newer kiln's keys (rollback safety) survive a load and a settings save; integer map keys still parse.
         let app = App::for_tests();
         let path = app.data.join("config.json");
-        let src = r#"{"egress":"filtered","size_mem_mb":{"8":12288},"forges":[{"id":"gl","kind":"gitlab"}],"future":true}"#;
+        let src = r#"{"egress":"filtered","size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab"}],"future":true}"#;
         std::fs::write(&path, src).unwrap();
         let c = load_config(&app.data).unwrap();
-        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&8)), ("filtered", Some(&12288)));
+        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), ("filtered", Some(&4096)));
         app.save_cfg(c).unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab"}]));
         assert_eq!(saved["future"], true);
-        assert_eq!(saved["size_mem_mb"], serde_json::json!({"8": 12288}));
+        assert_eq!(saved["size_mem_mb"], serde_json::json!({"2": 4096}));
         assert_eq!(Config::default().extra.len(), 0);
     }
 
