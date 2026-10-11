@@ -1,0 +1,10 @@
+{
+  "ref": "refs/heads/main",
+  "node_id": "REF_kwDOPLACEHOLDER",
+  "url": "https://api.github.com/repos/acme/demo/git/refs/heads/main",
+  "object": {
+    "type": "commit",
+    "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "url": "https://api.github.com/repos/acme/demo/git/commits/a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+  }
+}

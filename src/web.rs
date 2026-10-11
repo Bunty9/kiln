@@ -1342,6 +1342,67 @@ fn proxy_post_ok(path: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn api_state_shape() {
+        let app = App::for_tests();
+        let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/golden/vm.json");
+        app.vms.lock().unwrap().push(serde_json::from_slice(&std::fs::read(golden).unwrap()).unwrap());
+        let Ok(Json(v)) = state(State(app.clone())).await else { panic!("state failed") };
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        // A GitHub-only install: the exact top-level keys (serde_json sorts them) the dashboard reads.
+        assert_eq!(
+            keys(&v),
+            [
+                "app",
+                "baking",
+                "caches",
+                "config",
+                "host",
+                "image",
+                "image_ready",
+                "listen_fallback",
+                "mirror",
+                "notify",
+                "poll",
+                "restart",
+                "serve_socket",
+                "token_expires",
+                "token_saved",
+                "token_set",
+                "token_source",
+                "update",
+                "usage",
+                "version",
+                "vms"
+            ]
+        );
+        // Section contents: config is Config verbatim; a VM is its meta.json shape; poll has these keys.
+        assert_eq!(v["config"], serde_json::to_value(Config::default()).unwrap());
+        let vm: Value = serde_json::from_str(include_str!("testdata/forge/golden/vm.json")).unwrap();
+        assert_eq!(v["vms"][0], vm);
+        assert_eq!(
+            keys(&v["poll"]),
+            [
+                "backoff",
+                "blocked",
+                "blocked_kind",
+                "error",
+                "health",
+                "last_ok",
+                "paused_until",
+                "queued",
+                "queued_by_size",
+                "rate",
+                "refused_forks",
+                "repo_errors"
+            ]
+        );
+        assert_eq!(
+            (&v["token_set"], &v["token_source"], &v["app"], &v["image"]),
+            (&false.into(), &"none".into(), &Value::Null, &Value::Null)
+        );
+    }
+
     #[test]
     fn listen_bind_decisions() {
         use std::io::{Error, ErrorKind::*};

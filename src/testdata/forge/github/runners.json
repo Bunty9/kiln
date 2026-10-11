@@ -1,0 +1,100 @@
+{
+  "total_count": 5,
+  "runners": [
+    {
+      "id": 11,
+      "name": "kiln-1-0",
+      "os": "Linux",
+      "status": "offline",
+      "busy": false,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "kiln",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "kiln-1-1",
+      "os": "Linux",
+      "status": "offline",
+      "busy": true,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "kiln",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "kiln-2-0",
+      "os": "Linux",
+      "status": "online",
+      "busy": false,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "kiln",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "ci-box-3",
+      "os": "Linux",
+      "status": "offline",
+      "busy": false,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "kiln",
+          "type": "custom"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "name": "kiln-3-0",
+      "os": "Linux",
+      "status": "offline",
+      "busy": false,
+      "labels": [
+        {
+          "id": 1,
+          "name": "self-hosted",
+          "type": "read-only"
+        },
+        {
+          "id": 2,
+          "name": "kiln",
+          "type": "custom"
+        }
+      ]
+    }
+  ]
+}

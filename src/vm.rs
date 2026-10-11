@@ -2596,6 +2596,9 @@ mod tests {
         assert!(!run(Some(wr(serde_json::json!({ "full_name": "evil/kiln" })))), "workflow_run from a fork");
         assert!(run(Some(wr(serde_json::json!({ "full_name": "Acme/kiln" })))), "workflow_run same repo");
         assert!(!run(Some(serde_json::json!({ "workflow_run": {} }))), "workflow_run, head repo missing");
+        // The same events as GitHub sends them (fixtures of the forge characterization tests).
+        let ev = |f: &str| Some(serde_json::from_str(&crate::forge_test_mock::fixture(f)).unwrap());
+        assert!(!run(ev("event_workflow_run_fork.json")), "recorded workflow_run from a fork");
         assert!(!run(None), "missing payload");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3037,5 +3040,243 @@ mod tests {
         assert!(image_age(0, "2.1", Some("2.2"), day).1);
         assert!(image_age(0, "2.1", None, 26 * day).1);
         assert!(!image_age(0, "2.1", None, 25 * day).1);
+    }
+
+    // ---- Characterization of the GitHub-facing VM path (see github::characterization). ----
+
+    use crate::forge_test_mock::{self as mock, Mock};
+
+    /// A VM record with every field set to a non-default value.
+    fn full_vm() -> Vm {
+        Vm {
+            id: "kiln-7-0".into(),
+            repo: "acme/demo".into(),
+            runner_id: Some(4242),
+            state: State::Done,
+            job: Some("build".into()),
+            result: Some("Succeeded".into()),
+            job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
+            queued_at: Some(1_790_000_000),
+            started: 1_790_000_010,
+            online_at: Some(1_790_000_020),
+            busy_since: Some(1_790_000_030),
+            done_at: Some(1_790_000_090),
+            ended: Some(1_790_000_095),
+            note: Some("done".into()),
+            cpus: 4,
+            mem_mb: 8192,
+            cache: CacheUse::Discarded,
+            cache_note: Some("cache not saved: pull_request event".into()),
+            ssh: Some("ssh -p 2201 runner@box.example.ts.net".into()),
+            ssh_port: Some(2201),
+            hold_until: Some(1_790_000_900),
+            ssh_hostkeys: vec!["SHA256:placeholder".into()],
+            egress: "filtered".into(),
+            policy: "0123456789abcdef".into(),
+            warm: true,
+            mint_failed: false,
+            run: Some(Run {
+                branch: "fix-login".into(),
+                sha: "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2".into(),
+                pr: Some(7),
+                event: "pull_request".into(),
+                title: "Fix login".into(),
+                workflow: "Release".into(),
+                number: 43,
+                file: "release.yml".into(),
+            }),
+            fork: false,
+        }
+    }
+
+    #[test]
+    fn meta_json_golden() {
+        let d = std::env::temp_dir().join(format!("kiln-test-golden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("vms/kiln-7-0")).unwrap();
+        write_meta(&d, &full_vm());
+        let written = std::fs::read_to_string(d.join("vms/kiln-7-0/meta.json")).unwrap();
+        mock::golden("meta.json", &written);
+        // Round trip: reading the record back and writing it again changes nothing.
+        let back: Vm = serde_json::from_str(&written).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&back).unwrap(), written);
+        // /api/state sends the same fields compactly.
+        mock::golden("vm.json", &serde_json::to_string(&full_vm()).unwrap());
+        // A record from before size labels, runs and forks loads with defaults and is upgraded on rewrite.
+        let old = r#"{"id":"kiln-5-0","repo":"acme/demo","runner_id":1,"state":"busy","job":"t","result":null,"started":1,"busy_since":2,"ended":null,"note":null}"#;
+        mock::golden("meta_legacy_rewritten.json", &serde_json::to_string_pretty(&serde_json::from_str::<Vm>(old).unwrap()).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn usage_json_golden() {
+        let d = std::env::temp_dir().join(format!("kiln-test-usage-golden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let day = 20_000 * 86400;
+        let at = |cpus, from, to| Vm { cpus, busy_since: Some(day + from), done_at: Some(day + to), ..vm("x", State::Done, None) };
+        record_usage(&d, &at(4, 0, 61));
+        record_usage(&d, &at(4, 10, 20));
+        record_usage(&d, &at(2, 0, 600));
+        record_usage(&d, &Vm { busy_since: Some(day + 86400), ended: Some(day + 86460), ..vm("y", State::Killed, None) });
+        mock::golden("usage.json", &std::fs::read_to_string(d.join("usage.json")).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn base_json_golden() {
+        // image_info adds runner_latest, age_days, stale and rebake to what the bake wrote.
+        let d = std::env::temp_dir().join(format!("kiln-test-base-golden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(images(&d)).unwrap();
+        let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/golden/base.json");
+        std::fs::copy(golden, images(&d).join("base.json")).unwrap();
+        let v = image_info(&d, Some("2.330.0".into()), &crate::Config::default());
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "age_days",
+                "apt_wanted",
+                "baked_at",
+                "node_versions",
+                "node_wanted",
+                "rebake",
+                "recipe",
+                "runner_latest",
+                "runner_version",
+                "stale"
+            ]
+        );
+        assert_eq!(
+            (v["runner_version"].as_str(), v["runner_latest"].as_str(), v["stale"].as_bool()),
+            (Some("2.329.0"), Some("2.330.0"), Some(true))
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An idle waiting VM with runner `rid`, registered with `app`.
+    fn waiting(app: &App, id: &str, rid: u64) -> Arc<tokio::sync::Notify> {
+        app.vms.lock().unwrap().push(Vm { runner_id: Some(rid), ..vm(id, State::Idle, Some(1)) });
+        let k = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert(id.into(), k.clone());
+        k
+    }
+
+    async fn killed(k: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(Duration::from_millis(50), k.notified()).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn reaping_goes_through_runner_deregistration() {
+        let m = Mock::github().await;
+        let app = mock::app("reap", &m, crate::Config::default());
+        let (a, b) = (waiting(&app, "kiln-1-0", 11), waiting(&app, "kiln-1-1", 12));
+        // 11 deregisters (204): its VM is killed. 12 got a job meanwhile (422): it lives.
+        m.fail("DELETE", "/repos/acme/demo/actions/runners/12", 422, "Runner is busy");
+        drop_idle(&app, "acme/demo", vec![("kiln-1-0".into(), 11), ("kiln-1-1".into(), 12)], "no job left for this runner").await;
+        assert!(killed(&a).await && !killed(&b).await);
+        let vms = app.vms.lock().unwrap();
+        assert_eq!(vms[0].note.as_deref(), Some("no job left for this runner"));
+        assert_eq!(vms[1].note, None);
+        assert_eq!(m.requests(), ["DELETE /repos/acme/demo/actions/runners/11", "DELETE /repos/acme/demo/actions/runners/12"]);
+    }
+
+    #[tokio::test]
+    async fn run_mints_before_anything_else() {
+        let m = Mock::github().await;
+        let cfg = crate::Config { vm_cpus: 4, ..Default::default() };
+        let app = mock::app("run-mint", &m, cfg.clone());
+        let dir = app.data.join("vms/kiln-5-0");
+        app.vms.lock().unwrap().push(Vm { runner_id: None, ..vm("kiln-5-0", State::Booting, None) });
+        let (kill, release) = (tokio::sync::Notify::new(), tokio::sync::Notify::new());
+        // The mint succeeds; the VM then fails at `qemu-img` (not installed here, or no base image).
+        let e = run(&app, "kiln-5-0", "acme/demo", &dir, &kill, &release).await.unwrap_err();
+        assert!(e.downcast_ref::<crate::github::MintError>().is_none(), "{e:#}");
+        let req = m.log().remove(0);
+        assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/repos/acme/demo/actions/runners/generate-jitconfig"));
+        let body = req.body.unwrap();
+        assert_eq!((body["name"].as_str(), body["runner_group_id"].as_u64()), (Some("kiln-5-0"), Some(1)));
+        assert_eq!(body["labels"], serde_json::json!(cfg.runner_labels(4)));
+        // Recorded first, so cleanup deregisters it; the secret holds exactly the JIT config, owner-only.
+        assert_eq!(app.vms.lock().unwrap()[0].runner_id, Some(4242));
+        let secret = dir.join("q/jit");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "kiln.jit=eyJydW5uZXIiOiJwbGFjZWhvbGRlciJ9");
+        assert_eq!(std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&secret).unwrap()) & 0o777, 0o600);
+        assert!(dir.join("meta.json").exists(), "persisted right after the mint");
+        // A refused registration is a MintError, leaves no VM directory and no runner id.
+        let app = mock::app("run-refused", &m, cfg);
+        let dir = app.data.join("vms/kiln-6-0");
+        app.vms.lock().unwrap().push(Vm { runner_id: None, ..vm("kiln-6-0", State::Booting, None) });
+        m.fail("POST", "/repos/acme/demo/actions/runners/generate-jitconfig", 422, "Validation Failed");
+        let e = run(&app, "kiln-6-0", "acme/demo", &dir, &kill, &release).await.unwrap_err();
+        let e = e.downcast::<crate::github::MintError>().unwrap();
+        assert_eq!((e.status, e.message.as_str()), (Some(422), "Validation Failed"));
+        assert!(!dir.exists() && app.vms.lock().unwrap()[0].runner_id.is_none());
+    }
+
+    /// A VM that ran job `jid` of run `rid` and now has its cache overlay to settle.
+    fn cache_vm(app: &App, id: &str, jid: u64, rid: u64) {
+        let url = format!("https://github.com/acme/demo/actions/runs/{rid}/job/{jid}");
+        app.vms.lock().unwrap().push(Vm {
+            job: Some("build".into()),
+            result: Some("Succeeded".into()),
+            job_url: Some(url),
+            cache: CacheUse::Read,
+            ..vm(id, State::Done, None)
+        });
+    }
+
+    #[tokio::test]
+    async fn finish_cache_asks_github_and_decides() {
+        let m = Mock::github().await;
+        let app = mock::app("finish-cache", &m, crate::Config::default());
+        let r = "/repos/acme/demo";
+        let settle = |id: &'static str, done: bool| {
+            let (app, dir) = (app.clone(), app.data.join("vms").join(id));
+            async move {
+                finish_cache(&app, id, "acme/demo", &dir, done).await;
+                let v = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap();
+                (v.cache, v.cache_note.unwrap_or_default())
+            }
+        };
+        for (id, jid, rid) in [("c1", 6001, 2001), ("c2", 6002, 2002), ("c3", 6003, 2003), ("c4", 6004, 2004)] {
+            cache_vm(&app, id, jid, rid);
+        }
+        // Trusted (push to the default branch, GitHub says success): the verdict passes, and the
+        // overlay (not created in this test) is what stops the commit.
+        let (c, n) = settle("c1", true).await;
+        assert_eq!((c, n.as_str()), (CacheUse::Discarded, "cache not saved: overlay is not a regular file"));
+        assert_eq!(
+            m.requests(),
+            [
+                format!("GET {r}/actions/jobs/6001"),
+                format!("GET {r}/actions/runs/2001"),
+                format!("GET {r}"),
+                format!("GET {r}/git/ref/heads/main"),
+                format!("GET {r}/compare/a1b2c3d4e5f60718293a4b5c6d7e8f9012345678...a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"),
+            ]
+        );
+        assert_eq!(settle("c2", true).await.1, "cache not saved: pull_request event");
+        assert_eq!(settle("c3", true).await.1, "cache not saved: branch v1.0 is not the default (main)");
+        assert_eq!(settle("c4", true).await.1, "cache not saved: branch main (commit c3d4e5f not on main) is not the default (main)");
+        // The console said the job did not finish: GitHub is not even asked.
+        m.clear_log();
+        cache_vm(&app, "c5", 6001, 2001);
+        assert_eq!(settle("c5", false).await.1, "cache not saved: job did not succeed");
+        assert!(m.log().is_empty());
+        // No job page recorded.
+        cache_vm(&app, "c6", 6001, 2001);
+        app.vms.lock().unwrap().last_mut().unwrap().job_url = None;
+        assert_eq!(settle("c6", true).await.1, "cache not saved: could not verify the trigger (no job page)");
+        // GitHub failing: fail closed.
+        m.fail("GET", &format!("{r}/actions/jobs/6001"), 500, "oops");
+        cache_vm(&app, "c7", 6001, 2001);
+        let (c, n) = settle("c7", true).await;
+        assert!(
+            c == CacheUse::Discarded
+                && n.starts_with("cache not saved: could not verify the trigger (GET repos/acme/demo/actions/jobs/6001: 500"),
+            "{n}"
+        );
     }
 }
