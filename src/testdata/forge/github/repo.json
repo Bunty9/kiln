@@ -1,0 +1,16 @@
+{
+  "id": 1,
+  "name": "demo",
+  "full_name": "acme/demo",
+  "private": true,
+  "owner": {
+    "login": "acme",
+    "type": "Organization"
+  },
+  "default_branch": "main",
+  "description": "Demo repository",
+  "fork": false,
+  "url": "https://api.github.com/repos/acme/demo",
+  "html_url": "https://github.com/acme/demo",
+  "visibility": "private"
+}

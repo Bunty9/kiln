@@ -119,6 +119,14 @@ impl Gh {
         }
     }
 
+    /// A client for the mock forge (forge_test_mock.rs).
+    #[cfg(test)]
+    pub fn for_mock(base: &str) -> Self {
+        let mut gh = Self::new("tok".into(), "test");
+        gh.api_base = base.into();
+        gh
+    }
+
     pub fn set_token(&self, t: String, source: &'static str) {
         *self.token.write().unwrap() = t;
         *self.source.write().unwrap() = source;
@@ -1159,5 +1167,187 @@ mod tests {
         assert_eq!(size_mem_mb(2), 4096);
         assert_eq!(size_mem_mb(8), 16384);
         assert_eq!(size_mem_mb(16), 24576);
+    }
+}
+
+/// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
+/// the forge refactor (P0-4..P0-11) must keep every assertion here unchanged.
+#[cfg(test)]
+mod characterization {
+    use super::*;
+    use crate::forge_test_mock::Mock;
+
+    const RUNS: &str = "/repos/acme/demo/actions/runs";
+    const S1: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    #[tokio::test]
+    async fn queued_jobs_sizes_forks_and_runner_map() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // Default size 1 (host_threads is at least 1), so `kiln` and `kiln-2cpu` are different sizes.
+        let (by_size, ours, forks) = gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        // 5001 (kiln) + 5002 (kiln-2cpu) + 5203 (kiln-2cpu, in a running run); 5003 is someone else's
+        // self-hosted job, 5004 GitHub-hosted, 5101 a queued fork job (refused, never demand).
+        // Run 1001 is listed as queued and as in_progress, so its jobs are read twice but counted once.
+        assert_eq!(by_size, HashMap::from([(1, 1), (2, 2)]));
+        assert_eq!(forks, 1);
+        assert_eq!(
+            m.requests(),
+            [
+                format!("GET {RUNS}?status=queued&per_page=30"),
+                format!("GET {RUNS}/1001/jobs?per_page=100"),
+                format!("GET {RUNS}/1002/jobs?per_page=100"),
+                format!("GET {RUNS}?status=in_progress&per_page=30"),
+                format!("GET {RUNS}/1004/jobs?per_page=100"),
+                format!("GET {RUNS}/1001/jobs?per_page=100"),
+            ]
+        );
+        let first = m.log().remove(0);
+        assert_eq!(first.auth.as_deref(), Some("Bearer tok"));
+        // Only `kiln-*` runners, keyed by runner name: (job page, queued-at, from a fork, run).
+        let mut names: Vec<_> = ours.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["kiln-7-0", "kiln-9-0"]);
+        let (url, at, fork, run) = &ours["kiln-7-0"];
+        assert_eq!(url, "https://github.com/acme/demo/actions/runs/1004/job/5201");
+        assert_eq!((*at, *fork), (parse_rfc3339("2026-10-11T09:00:00Z").unwrap(), false));
+        let want = crate::vm::Run {
+            branch: "fix-login".into(),
+            sha: "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2".into(),
+            pr: Some(7),
+            event: "pull_request".into(),
+            title: "Fix login".into(),
+            workflow: "Release".into(),
+            number: 43,
+            file: "release.yml".into(),
+        };
+        assert_eq!(run, &want);
+        // A fork PR run: null head_branch is an empty branch, no PR number, and the fork flag is set.
+        let (_, _, fork, run) = &ours["kiln-9-0"];
+        assert!(*fork);
+        assert_eq!(
+            (run.branch.as_str(), run.pr, run.event.as_str(), run.number, run.file.as_str()),
+            ("", None, "pull_request", 42, "ci.yml")
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_errors_surface() {
+        let m = Mock::github().await;
+        m.fail("GET", &format!("{RUNS}/1002/jobs?per_page=100"), 502, "Bad Gateway");
+        let e = Gh::for_mock(&m.base).queued_jobs("acme/demo", "kiln", 1).await.unwrap_err();
+        assert!(e.to_string().starts_with("GET repos/acme/demo/actions/runs/1002/jobs?per_page=100: 502 Bad Gateway"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn jit_config_request_and_response() {
+        let m = Mock::github().await;
+        let labels: Vec<String> = ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"].map(String::from).to_vec();
+        let (id, jit) = Gh::for_mock(&m.base).jit_config("acme/demo", "kiln-5-0", &labels).await.unwrap();
+        assert_eq!((id, jit.as_str()), (4242, "eyJydW5uZXIiOiJwbGFjZWhvbGRlciJ9"));
+        let req = m.log().remove(0);
+        assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/repos/acme/demo/actions/runners/generate-jitconfig"));
+        assert_eq!(
+            req.body.unwrap().to_string(),
+            r#"{"labels":["self-hosted","linux","x64","kiln-4cpu","kiln"],"name":"kiln-5-0","runner_group_id":1,"work_folder":"_work"}"#
+        );
+    }
+
+    async fn mint(gh: &Gh) -> MintError {
+        gh.jit_config("acme/demo", "kiln-5-0", &[]).await.unwrap_err().downcast::<MintError>().unwrap()
+    }
+
+    #[tokio::test]
+    async fn jit_config_failures_are_classified() {
+        let path = "/repos/acme/demo/actions/runners/generate-jitconfig";
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // (status, message, GitHub-wide?)
+        for (status, wide) in [(404, false), (422, false), (403, false), (500, true), (503, true)] {
+            m.fail("POST", path, status, "boom");
+            let e = mint(&gh).await;
+            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.github_wide()), (Some(status), "generate-jitconfig", "boom", wide));
+        }
+        // A secondary rate limit is a 403 whose only marker is the text: it pauses polling.
+        assert_eq!(gh.paused_until(), None);
+        m.fail("POST", path, 403, "You have exceeded a secondary rate limit.");
+        assert_eq!(mint(&gh).await.status, Some(403));
+        assert!(gh.paused_until().is_some_and(|t| t > crate::now()));
+        // A 2xx without the fields is a plain error, not a MintError.
+        m.route("POST", path, 201, "{}");
+        let e = gh.jit_config("acme/demo", "x", &[]).await.unwrap_err();
+        assert!(e.downcast_ref::<MintError>().is_none() && e.to_string().contains("runner.id missing"), "{e:#}");
+        // GitHub unreachable: no status, GitHub-wide.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let down = Gh::for_mock(&format!("http://{}", dead.local_addr().unwrap()));
+        drop(dead);
+        let e = mint(&down).await;
+        assert!(e.status.is_none() && e.github_wide());
+    }
+
+    #[tokio::test]
+    async fn delete_runner_outcomes() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        let path = |id: u32| format!("/repos/acme/demo/actions/runners/{id}");
+        gh.delete_runner("acme/demo", 11).await.unwrap(); // 204
+        m.fail("DELETE", &path(12), 404, "Not Found");
+        gh.delete_runner("acme/demo", 12).await.unwrap(); // already gone: fine
+        m.fail("DELETE", &path(13), 422, "Runner is busy");
+        let e = gh.delete_runner("acme/demo", 13).await.unwrap_err();
+        assert_eq!(e.to_string(), "delete runner 13: 422 Unprocessable Entity"); // it just got a job: must live
+        m.fail("DELETE", &path(15), 500, "oops");
+        assert!(gh.delete_runner("acme/demo", 15).await.is_err());
+        assert_eq!(m.requests(), [11, 12, 13, 15].map(|id| format!("DELETE {}", path(id))));
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_only_offline_idle_kiln_runners() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // 11 and 15: offline, idle, kiln-*. Kept: 12 (busy), 13 (online), 14 (not ours).
+        assert_eq!(gh.sweep_runners("acme/demo").await.unwrap(), 2);
+        let r = "/repos/acme/demo/actions/runners";
+        assert_eq!(m.requests(), [format!("GET {r}?per_page=100"), format!("DELETE {r}/11"), format!("DELETE {r}/15")]);
+        // A refused delete (422) stops the sweep with an error.
+        m.clear_log();
+        m.fail("DELETE", &format!("{r}/11"), 422, "busy");
+        assert!(gh.sweep_runners("acme/demo").await.is_err());
+        assert_eq!(m.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_trust_facts() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        let r = "/repos/acme/demo";
+        let facts = |t: (String, String, String, String)| [t.0, t.1, t.2, t.3];
+        // Push to the default branch whose commit is the branch tip: trusted facts, in call order.
+        let t = gh.cache_trust("acme/demo", 6001, &[]).await.unwrap();
+        assert_eq!(facts(t), ["push", "main", "main", "success"]);
+        assert_eq!(
+            m.requests(),
+            [
+                format!("GET {r}/actions/jobs/6001"),
+                format!("GET {r}/actions/runs/2001"),
+                format!("GET {r}"),
+                format!("GET {r}/git/ref/heads/main"),
+                format!("GET {r}/compare/{S1}...{S1}"),
+            ]
+        );
+        // The default branch is remembered (1 h): no second GET of the repo. Other events skip the ref and compare.
+        m.clear_log();
+        let t = gh.cache_trust("acme/demo", 6002, &[]).await.unwrap();
+        assert_eq!(facts(t), ["pull_request", "feat", "main", "success"]);
+        assert_eq!(m.requests(), [format!("GET {r}/actions/jobs/6002"), format!("GET {r}/actions/runs/2002")]);
+        // A tag: event push, head_branch the tag's name, neither default nor a writer.
+        let t = gh.cache_trust("acme/demo", 6003, &["dev".into()]).await.unwrap();
+        assert_eq!(facts(t), ["push", "v1.0", "main", "success"]);
+        // A tag named like the default branch: the commit is not on the branch, so the branch is marked up.
+        let t = gh.cache_trust("acme/demo", 6004, &[]).await.unwrap();
+        assert_eq!(facts(t), ["push", "main (commit c3d4e5f not on main)", "main", "success"]);
+        // GitHub failing is an error (finish_cache turns it into "could not verify the trigger").
+        m.fail("GET", &format!("{r}/actions/jobs/6001"), 500, "oops");
+        assert!(gh.cache_trust("acme/demo", 6001, &[]).await.is_err());
     }
 }

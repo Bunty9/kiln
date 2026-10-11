@@ -1,0 +1,22 @@
+{
+  "runner": {
+    "id": 4242,
+    "name": "kiln-5-0",
+    "os": "unknown",
+    "status": "offline",
+    "busy": false,
+    "labels": [
+      {
+        "id": 0,
+        "name": "self-hosted",
+        "type": "read-only"
+      },
+      {
+        "id": 0,
+        "name": "kiln",
+        "type": "custom"
+      }
+    ]
+  },
+  "encoded_jit_config": "eyJydW5uZXIiOiJwbGFjZWhvbGRlciJ9"
+}

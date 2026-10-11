@@ -1,0 +1,42 @@
+{
+  "id": 2003,
+  "name": "CI",
+  "node_id": "WFR_kwDOPLACEHOLDER2003",
+  "head_branch": "v1.0",
+  "head_sha": "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1",
+  "path": ".github/workflows/ci.yml@refs/heads/main",
+  "display_title": "Release",
+  "run_number": 53,
+  "event": "push",
+  "status": "completed",
+  "conclusion": "success",
+  "workflow_id": 9001,
+  "url": "https://api.github.com/repos/acme/demo/actions/runs/2003",
+  "html_url": "https://github.com/acme/demo/actions/runs/2003",
+  "pull_requests": [],
+  "created_at": "2026-10-11T09:00:00Z",
+  "updated_at": "2026-10-11T09:00:05Z",
+  "run_attempt": 1,
+  "repository": {
+    "id": 1,
+    "name": "demo",
+    "full_name": "acme/demo",
+    "private": true,
+    "owner": {
+      "login": "acme",
+      "type": "Organization"
+    },
+    "default_branch": "main"
+  },
+  "head_repository": {
+    "id": 1,
+    "name": "demo",
+    "full_name": "acme/demo",
+    "private": true,
+    "owner": {
+      "login": "acme",
+      "type": "Organization"
+    },
+    "default_branch": "main"
+  }
+}

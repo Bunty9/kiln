@@ -1,6 +1,8 @@
 mod app_auth;
 mod audit;
 mod confine;
+#[cfg(test)]
+mod forge_test_mock;
 mod github;
 mod host;
 mod mirror;
@@ -1203,6 +1205,65 @@ mod tests {
         let vms = app.vms.lock().unwrap();
         assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
         assert!(!vms[1].fork && vms[1].note.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tick_of_polling_fills_vm_fields() {
+        // queued_jobs against the mock forge, then attach_jobs: what the dashboard shows per VM.
+        let m = forge_test_mock::Mock::github().await;
+        let app = forge_test_mock::app("attach-tick", &m, Config::default());
+        let rec = |id: &str| -> vm::Vm {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "repo": "acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": null, "note": null
+            }))
+            .unwrap()
+        };
+        for id in ["kiln-7-0", "kiln-9-0", "kiln-8-0"] {
+            std::fs::create_dir_all(app.data.join("vms").join(id)).unwrap();
+            app.vms.lock().unwrap().push(rec(id));
+        }
+        let (by_size, runners, forks) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        assert_eq!((by_size.len(), forks), (2, 1));
+        attach_jobs(&app, &runners);
+        let vms = app.vms.lock().unwrap().clone();
+        let by = |id: &str| vms.iter().find(|v| v.id == id).unwrap().clone();
+        let ok = by("kiln-7-0");
+        assert_eq!(ok.job_url.as_deref(), Some("https://github.com/acme/demo/actions/runs/1004/job/5201"));
+        assert_eq!(ok.queued_at, Some(github::parse_rfc3339("2026-10-11T09:00:00Z").unwrap()));
+        let run = ok.run.as_ref().unwrap();
+        assert_eq!(
+            (run.branch.as_str(), run.pr, run.event.as_str(), run.workflow.as_str(), run.number),
+            ("fix-login", Some(7), "pull_request", "Release", 43)
+        );
+        assert!(!ok.fork && ok.note.is_none());
+        // The fork PR job that reached our runner anyway is flagged (and its VM killed by the caller's kill handle).
+        let fork = by("kiln-9-0");
+        assert!(fork.fork && fork.note.as_deref() == Some("refused: pull request from a fork"));
+        assert_eq!(fork.run.as_ref().unwrap().number, 42);
+        // A runner GitHub does not list yet is untouched.
+        assert!(by("kiln-8-0").run.is_none() && by("kiln-8-0").job_url.is_none());
+        // Persisted for the next start.
+        let meta: vm::Vm = serde_json::from_slice(&std::fs::read(app.data.join("vms/kiln-7-0/meta.json")).unwrap()).unwrap();
+        assert_eq!(meta.run, ok.run);
+        // Unchanged input writes nothing new.
+        std::fs::remove_file(app.data.join("vms/kiln-7-0/meta.json")).unwrap();
+        attach_jobs(&app, &runners);
+        assert!(!app.data.join("vms/kiln-7-0/meta.json").exists());
+    }
+
+    #[test]
+    fn config_json_golden() {
+        // The defaults as saved to config.json (App::save_cfg writes pretty JSON).
+        let text = serde_json::to_string_pretty(&Config::default()).unwrap();
+        forge_test_mock::golden("config.json", &text);
+        // Loading it back changes nothing, and so does a hand-written minimal file plus a save.
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&back).unwrap(), text);
+        let min: Config = serde_json::from_str(r#"{"repos":["acme/demo"]}"#).unwrap();
+        let mut want: serde_json::Value = serde_json::from_str(&text).unwrap();
+        want["repos"] = serde_json::json!(["acme/demo"]);
+        assert_eq!(serde_json::to_value(&min).unwrap(), want);
     }
 
     #[test]
