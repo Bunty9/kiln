@@ -1053,7 +1053,8 @@ pub fn b64(data: &[u8]) -> String {
 // actions/cache, kept on a disk).
 
 pub fn cache_file(data: &Path, repo: &str) -> PathBuf {
-    data.join("cache").join(format!("{}.qcow2", repo.to_ascii_lowercase().replace('/', "__")))
+    let stem = crate::forge::RepoRef::parse(repo).map_or_else(|_| repo.to_ascii_lowercase().replace('/', "__"), |r| r.cache_stem());
+    data.join("cache").join(format!("{stem}.qcow2"))
 }
 
 /// Bytes actually allocated (like `du`), not the virtual size.
