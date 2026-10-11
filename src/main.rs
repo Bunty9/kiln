@@ -12,6 +12,7 @@ mod web;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -85,6 +86,10 @@ pub struct Config {
     /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
     /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
     pub stop_grace_secs: u64,
+    /// Top-level keys this version does not know (a newer kiln's, e.g. `forges`). Kept on load
+    /// and written back on save, so a rollback followed by a settings save does not drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl Default for Config {
@@ -123,6 +128,7 @@ impl Default for Config {
             usage_stats: None,
             crash_reports: None,
             stop_grace_secs: 25,
+            extra: Default::default(),
         }
     }
 }
@@ -1223,6 +1229,23 @@ mod tests {
         }
         c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
         assert!(c.validate_for(8).is_err(), "at most 50");
+    }
+
+    #[test]
+    fn config_unknown_keys_survive_load_and_save() {
+        // A newer kiln's keys (rollback safety) survive a load and a settings save; integer map keys still parse.
+        let app = App::for_tests();
+        let path = app.data.join("config.json");
+        let src = r#"{"egress":"filtered","size_mem_mb":{"8":12288},"forges":[{"id":"gl","kind":"gitlab"}],"future":true}"#;
+        std::fs::write(&path, src).unwrap();
+        let c = load_config(&app.data).unwrap();
+        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&8)), ("filtered", Some(&12288)));
+        app.save_cfg(c).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab"}]));
+        assert_eq!(saved["future"], true);
+        assert_eq!(saved["size_mem_mb"], serde_json::json!({"8": 12288}));
+        assert_eq!(Config::default().extra.len(), 0);
     }
 
     #[test]
