@@ -4,17 +4,17 @@
 
 ![kiln dashboard: a GitHub Actions job is queued, a VM boots in its slot, live step logs stream, and the VM is deleted when the job finishes](docs/media/demo.gif)
 
-Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions job.
+Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions or GitLab CI job.
 
-kiln is a single Rust binary with an embedded dashboard. It polls GitHub for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
+kiln is a single Rust binary with an embedded dashboard. It polls GitHub (or GitLab) for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
 
-**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub. It runs on one host with no failover; while the box is down, jobs wait in GitHub's queue.
+**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub or GitLab. It runs on one host with no failover; while the box is down, jobs wait in the forge's queue.
 
 **What you need:**
 
 - **x86_64 Linux with KVM** (`/dev/kvm`, user in the `kvm` group). Jobs run in Ubuntu 24.04 x86_64 guests only: no macOS, Windows or arm64 jobs.
 - **Tailscale.** The dashboard answers only your tailnet (and the box itself, with a key). kiln polls GitHub, so no inbound port or public IP is needed.
-- **GitHub Actions.** kiln serves GitHub repos through a GitHub App or a token. GitLab, Gitea and Forgejo are not supported.
+- **GitHub Actions or GitLab CI.** kiln serves GitHub repos through a GitHub App or a token, and GitLab projects (gitlab.com or self-managed) through a bot account's token; see [GitLab](#gitlab). Gitea support is in preview (it does not run jobs yet); Forgejo is not supported.
 
 Full list: [Requirements](#requirements).
 
@@ -73,6 +73,17 @@ jobs:
   test:
     runs-on: [self-hosted, kiln]
 ```
+
+## GitLab
+
+kiln serves GitLab projects on gitlab.com and on self-managed GitLab (16.0 or newer is accepted, 17 or newer recommended; the runner in the image is GitLab Runner 19.4.1, pinned, and the whole path was tested end to end against GitLab CE 19.4.1). The job's code runs exactly as on GitHub: one fresh VM per job, deleted afterwards.
+
+- **What works:** plain jobs, `image:`, `services:` (Docker runs inside the VM) and artifacts. A job asks for kiln with `tags: [kiln]` (or `kiln-4cpu` and the other sizes); untagged jobs and other tags are left to your other runners.
+- **Cache:** the repo cache disk (Docker layers, package and toolchain caches) works as on GitHub and follows the same trust rule: only a successful `push` pipeline on the default branch (or a protected branch listed in `cache_branches`) saves it, merge request, tag and child pipelines never do, and tag pipelines run without the cache.
+- **Setup:** a dedicated bot user as Maintainer on only the served projects, with a token that has `create_runner`, `manage_runner` and `read_api`. A Maintainer's `read_api` token can read the project's CI/CD variables, so read the [token power](SECURITY.md#gitlab) note first. Steps and every setting: [docs/configuration.md](docs/configuration.md#gitlab).
+- **Safety:** merge requests from forks, multi-project downstream pipelines and anything kiln cannot classify are refused before any job code runs; see [SECURITY.md](SECURITY.md#gitlab).
+
+Not yet covered: `docker:dind`, gitlab.com's own tier and rate-limit behaviour, and arm64 hosts. Gitea is in preview and runs no jobs yet.
 
 ## Why
 
@@ -215,7 +226,7 @@ A job is root inside its own VM, and the dashboard holds a GitHub token, so kiln
 - **The dashboard** answers only tailnet peers whose Tailscale identity is the owner of the box (or is listed in `allowed_users`), and the box itself with a secret dashboard key. It checks the `Host` header and requires a custom `x-kiln` header on writes. Job VMs reach the host through QEMU's NAT and look like local traffic, which is why local access needs the key.
 - **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror. **Switch to filtered before running untrusted pull requests, such as ones from forks.**
 
-The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook, before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
+The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook (on GitLab, by the host's verdict gate), before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
 
 ## Configuration
 
@@ -241,6 +252,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 
 - **Runner updates.** kiln pins the runner version when it bakes. GitHub stops sending jobs to runners much more than a month out of date, so kiln rebakes by itself (`auto_rebake`) once the image is stale.
 - **Network throughput.** User-mode networking (slirp) tops out well below line rate and is CPU-heavy on large `docker pull`s. A future option is `passt` (still rootless) or a one-time root setup of tap devices.
+- **GitLab and arm64.** GitLab jobs are tested on x86_64 only; `docker:dind`, gitlab.com's tier and rate limits and arm64 hosts are untested.
 - **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo; org-level runner groups are not implemented.
 - **Single host, Ubuntu 24.04 guests of the host's architecture** (x86_64; arm64 on Apple Silicon is experimental). Scheduling is a per-repo count; there are no priorities or fair-share.
 - **Filtered egress is opt-in.** It is implemented but not yet the default; DNS is not filtered.
