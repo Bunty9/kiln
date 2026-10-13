@@ -465,7 +465,9 @@ impl App {
         let d = std::env::temp_dir().join(format!("kiln-test-app-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        Arc::new(App::new(d, Config::default(), github::Gh::new(String::new(), "none")))
+        // A default config must validate on a small host (a 3-core CI Mac) too.
+        let cfg = Config { vm_cpus: host_threads().min(4), ..Config::default() };
+        Arc::new(App::new(d, cfg, github::Gh::new(String::new(), "none")))
     }
 
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
@@ -1355,7 +1357,7 @@ mod tests {
             std::fs::create_dir_all(app.data.join("vms").join(id)).unwrap();
             app.vms.lock().unwrap().push(rec(id));
         }
-        let (by_size, runners, forks) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        let (by_size, runners, forks) = app.gh.queued_jobs_for("acme/demo", "kiln", 1, false).await.unwrap();
         assert_eq!((by_size.len(), forks), (2, 1));
         attach_jobs(&app, &runners);
         let vms = app.vms.lock().unwrap().clone();
@@ -1429,10 +1431,13 @@ mod tests {
         // A newer kiln's keys (rollback safety) survive a load and a settings save; integer map keys still parse.
         let app = App::for_tests();
         let path = app.data.join("config.json");
-        let src = r#"{"egress":"filtered","size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}],"future":true}"#;
-        std::fs::write(&path, src).unwrap();
+        // Filtered egress is refused on macOS, so the round trip uses a value that loads there too.
+        let egress = if platform::MACOS { "open" } else { "filtered" };
+        let src = r#"{"egress":"EGRESS","vm_cpus":1,"size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}],"future":true}"#
+                .replace("EGRESS", egress);
+        std::fs::write(&path, &src).unwrap();
         let c = load_config(&app.data).unwrap();
-        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), ("filtered", Some(&4096)));
+        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), (egress, Some(&4096)));
         app.save_cfg(c).unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.com"}]));

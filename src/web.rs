@@ -1473,7 +1473,7 @@ mod tests {
             ]
         );
         // Section contents: config is Config verbatim; a VM is its meta.json shape; poll has these keys.
-        assert_eq!(v["config"], serde_json::to_value(Config::default()).unwrap());
+        assert_eq!(v["config"], serde_json::to_value(app.cfg()).unwrap());
         let vm: Value = serde_json::from_str(include_str!("testdata/forge/golden/vm.json")).unwrap();
         assert_eq!(v["vms"][0], vm);
         assert_eq!(
