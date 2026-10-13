@@ -1621,9 +1621,8 @@ fn now_us() -> u128 {
 }
 
 /// Job VM flags after the kernel: its command line, the secrets (JIT config, debug SSH
-/// keys) and the serial channels. Secrets go in as fw_cfg files (read by guests that have the
-/// qemu_fw_cfg module: arm64 bakes install it) and on x86 also as SMBIOS OEM strings (what x86
-/// guests read: their image lacks the module); `path=`/`file=` keep them out of `ps`.
+/// keys) and the serial channels. Secrets go in as fw_cfg files on arm64 (bakes install the
+/// qemu_fw_cfg module) and as SMBIOS OEM strings on x86 (its command line is unchanged); `path=`/`file=` keep them out of `ps`.
 /// panic=1 + -no-reboot make a kernel panic end the VM instead of hanging until the timeout.
 fn job_args(g: &Guest, dir: &Path, ssh: bool, now_us: u128) -> Vec<String> {
     let base = format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console);
@@ -1632,8 +1631,9 @@ fn job_args(g: &Guest, dir: &Path, ssh: bool, now_us: u128) -> Vec<String> {
         let f = dir.join(s).display().to_string();
         if g.smbios {
             a.extend(["-smbios".into(), format!("type=11,path={f}")]);
+        } else {
+            a.extend(["-fw_cfg".into(), format!("name=opt/kiln/{s},file={f}")]);
         }
-        a.extend(["-fw_cfg".into(), format!("name=opt/kiln/{s},file={f}")]);
     }
     // stdio is the guest's console: its input is the host->guest control channel (hold/release).
     a.extend(["-serial".into(), "stdio".into()]);
@@ -3427,12 +3427,12 @@ mod tests {
     fn guest_wiring_per_arch() {
         let has = |a: &[String], k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
         let d = Path::new("/d/vm");
-        // x86: unchanged SMBIOS path plus fw_cfg, ttyS0 console, ttyS1 steps.
+        // x86: unchanged SMBIOS path, ttyS0 console, ttyS1 steps.
         // x86 has an RTC (rtc_cmos is built in), so its command line carries no clock.
         let x = job_args(&X64, d, true, 1_791_740_492_019_978);
         assert!(has(&x, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"));
         assert!(has(&x, "-smbios", "type=11,path=/d/vm/jit") && has(&x, "-smbios", "type=11,path=/d/vm/ssh"));
-        assert!(has(&x, "-fw_cfg", "name=opt/kiln/jit,file=/d/vm/jit") && has(&x, "-fw_cfg", "name=opt/kiln/ssh,file=/d/vm/ssh"));
+        assert!(!x.iter().any(|s| s == "-fw_cfg"), "x86 command line has no fw_cfg");
         assert!(has(&x, "-serial", "stdio") && has(&x, "-chardev", "socket,id=s1,path=/d/vm/steps.sock,server=on,wait=off"));
         assert!(has(&x, "-serial", "chardev:s1"));
         // arm64: no SMBIOS without UEFI; PL011 console; steps on a virtio-serial port.
