@@ -412,7 +412,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             let step = match mint {
                 Some((true, status)) => {
                     let mut m = app.api_backoff.lock().unwrap();
-                    let a = m.entry(crate::forge::ForgeId::github()).or_default();
+                    let a = m.entry(forge_id(&v.repo)).or_default();
                     a.fail(status, now()).then(|| a.retry_at.saturating_sub(now()).div_ceil(60))
                 }
                 _ => None,
@@ -567,6 +567,11 @@ pub fn cache_busy(app: &App, repo: &str) -> bool {
     pending_file(&app.data, repo).exists() || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
 }
 
+/// The forge a VM's repo key belongs to (GitHub for anything unparsable, as before).
+fn forge_id(repo: &str) -> crate::forge::ForgeId {
+    crate::forge::RepoRef::parse(repo).map(|r| r.forge).unwrap_or_else(|_| crate::forge::ForgeId::github())
+}
+
 /// The state the VM ends in (Killed, Failed, Unneeded or Done); Err = infrastructure failure
 /// (a `github::MintError` when GitHub refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
@@ -580,7 +585,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
     let runner_id = reg.runner_id;
     {
-        let b = app.api_backoff.lock().unwrap().remove(&crate::forge::ForgeId::github());
+        let b = app.api_backoff.lock().unwrap().remove(&rr.forge);
         if let Some(b) = b.filter(|b| b.fails > 0) {
             tracing::info!("runner registration works again after {} failed attempt(s): launches resume", b.fails);
         }
@@ -1241,10 +1246,14 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         Err(String::new())
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
-    let verdict = if let Err(why) = console {
-        Err(why.to_string())
-    } else if v.job.is_none() {
+    // The plain reasons (no job, a failed job) come before the console evidence, so a reaped warm
+    // VM says "no job ran", not "the console showed no job start".
+    let verdict = if v.job.is_none() {
         Err("no job ran".to_string())
+    } else if !succeeded {
+        cache_verdict(cfg.cache, succeeded, &writers, t)
+    } else if let Err(why) = console {
+        Err(why.to_string())
     } else {
         cache_verdict(cfg.cache, succeeded, &writers, t)
     };
@@ -2406,6 +2415,12 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn registration_backoff_is_keyed_by_the_vms_forge() {
+        assert_eq!(super::forge_id("acme/demo").as_str(), "github");
+        assert_eq!(super::forge_id("gl:acme/demo").as_str(), "gl");
+    }
+
+    #[test]
     fn memory_check_counts_running_vms_once() {
         // Both slots busy on a 32 GB box: 8 GB free plus 16 GB in the two VMs is enough.
         let (ok, d) = super::memory_check(7941, 16_850, 2, 8192);
@@ -3496,7 +3511,8 @@ mod tests {
         cache_vm(&app, "c5", 6001, 2001);
         assert_eq!(settle("c5", false).await.1, "cache not saved: job did not succeed");
         assert!(m.log().is_empty());
-        // No job page recorded.
+        // No job page recorded. This used to read "no job page"; the console check (exactly one job
+        // start and a bound id) now runs before the API is asked, and says it in its own words.
         cache_vm(&app, "c6", 6001, 2001);
         app.vms.lock().unwrap().last_mut().unwrap().job_url = None;
         assert_eq!(settle("c6", true).await.1, "cache not saved: a job started but no job id is bound");

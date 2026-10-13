@@ -344,6 +344,14 @@ impl Gh {
 
     /// `raw` with the download bounded to `max` bytes: a larger body is an error, not a truncation.
     pub async fn raw_max(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<Resp> {
+        match self.raw_prefix(method, path, body, max).await? {
+            (r, false) => Ok(r),
+            _ => bail!("response larger than {max} bytes"),
+        }
+    }
+
+    /// `raw` keeping only the first `max` bytes; the flag says the body was cut.
+    pub async fn raw_prefix(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<(Resp, bool)> {
         let (mut rb, who) = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
@@ -351,9 +359,10 @@ impl Gh {
         let r = self.exec(rb, who).await?;
         let status = r.status().as_u16();
         let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-        let body = bytes::Bytes::from(crate::forge::net::read_capped(r, max).await?);
+        let (body, cut) = crate::forge::net::read_prefix(r, max).await?;
+        let body = bytes::Bytes::from(body);
         self.note_body(who, status, &String::from_utf8_lossy(&body));
-        Ok(Resp { status, content_type, body })
+        Ok((Resp { status, content_type, body }, cut))
     }
 
     pub(crate) async fn get(&self, path: &str) -> Result<Value> {

@@ -1323,6 +1323,86 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
 
+    /// The seam for tick tests (X-3 extends it): a baked image so the tick runs, `max_vms: 0` so it
+    /// never reaches QEMU. Everything else in `tick` is the real code against the mock forge.
+    fn tick_app(name: &str, m: &forge_test_mock::Mock, forges: Option<Vec<forge::ForgeCfg>>) -> (Arc<App>, Config) {
+        let cfg = Config { repos: vec!["acme/demo".into()], max_vms: 0, auto_rebake: false, forges, ..Config::default() };
+        let app = forge_test_mock::app(name, m, cfg.clone());
+        let img = app.data.join("images");
+        std::fs::create_dir_all(&img).unwrap();
+        for f in ["base.qcow2", "base.vmlinuz"] {
+            std::fs::write(img.join(f), "").unwrap();
+        }
+        std::fs::write(img.join("base.json"), r#"{"recipe":999}"#).unwrap();
+        (app, cfg)
+    }
+
+    #[tokio::test]
+    async fn a_tick_runs_the_forge_split_and_the_repo_loop() {
+        let m = forge_test_mock::Mock::github().await;
+        let (app, cfg) = tick_app("tick-ok", &m, None);
+        let queued = tick(&app, &cfg).await.unwrap();
+        // The request sequence for one repo: the runner-release lookup, then the demand reads.
+        let reqs = m.requests();
+        assert_eq!(reqs[0], "GET /repos/actions/runner/releases/latest");
+        assert!(reqs[1].starts_with("GET /repos/acme/demo/actions/runs?status=queued"), "{reqs:?}");
+        assert!(reqs.iter().all(|r| r.starts_with("GET ")), "a tick only reads (max_vms 0 launches nothing): {reqs:?}");
+        // What queued_jobs found for the fixture: two sized queues and one refused fork PR job.
+        assert_eq!(queued["acme/demo"].len(), 2);
+        let p = app.poll.lock().unwrap();
+        assert_eq!(p.refused_forks["acme/demo"], 1);
+        assert!(p.repo_errors.is_empty(), "{:?}", p.repo_errors);
+        assert!(!p.health.iter().any(|(k, _)| k == "forge" || k == "github_api"), "{:?}", p.health);
+        assert!(app.vms.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tick_reports_backoff_per_forge_and_unsupported_forges() {
+        let m = forge_test_mock::Mock::github().await;
+        let forges: Vec<forge::ForgeCfg> = serde_json::from_str(
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.org","repos":["x/y"]}]"#,
+        )
+        .unwrap();
+        let (app, cfg) = tick_app("tick-backoff", &m, Some(forges));
+        // A 5xx on GitHub's registration holds GitHub; a GitLab failure holds only GitLab.
+        {
+            let mut b = app.api_backoff.lock().unwrap();
+            b.entry(forge::ForgeId::github()).or_default().fail(Some(503), now());
+            b.entry(forge::ForgeId::new("gl").unwrap()).or_default().fail(None, now());
+        }
+        tick(&app, &cfg).await.unwrap();
+        let mut p = app.poll.lock().unwrap().clone();
+        // Host-resource entries (memory, disk) depend on the machine running the test.
+        p.health.retain(|(k, _)| k != "memory" && k != "disk");
+        let kinds: Vec<_> = p.health.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds, ["forge", "github_api", "forge_api"], "{:?}", p.health);
+        assert!(p.health[0].1.contains("gl") && p.health[0].1.contains("not yet supported"), "{:?}", p.health[0]);
+        assert_eq!(p.health[1].1.split(" — ").next().unwrap(), "GitHub is rejecting runner registration (HTTP 503)");
+        assert!(p.health[2].1.starts_with("gl is unreachable for runner registration"), "{:?}", p.health[2]);
+        // The first problem is what blocks, and the kind says whose.
+        assert_eq!(p.blocked_kind.as_deref(), Some("forge"));
+        // Clearing GitHub's entry leaves GitLab's.
+        app.api_backoff.lock().unwrap().remove(&forge::ForgeId::github());
+        tick(&app, &cfg).await.unwrap();
+        let kinds: Vec<_> =
+            app.poll.lock().unwrap().health.iter().map(|(k, _)| k.clone()).filter(|k| k != "memory" && k != "disk").collect();
+        assert_eq!(kinds, ["forge", "forge_api"]);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_forge_reports_through_health_and_fails_the_tick() {
+        let m = forge_test_mock::Mock::github().await;
+        let (app, cfg) = tick_app("tick-limit", &m, None);
+        m.fail("GET", "/repos/acme/demo/actions/runs?status=queued&per_page=30", 403, "You have exceeded a Secondary Rate Limit.");
+        let e = tick(&app, &cfg).await.unwrap_err().to_string();
+        assert!(e.contains("acme/demo"), "{e}");
+        assert!(app.poll.lock().unwrap().repo_errors.contains_key("acme/demo"));
+        // The limit paused the forge: the next tick has no live forge and says why.
+        assert!(app.forges.get(&forge::ForgeId::github()).unwrap().health().unwrap().contains("rate limit"));
+        let e = tick(&app, &cfg).await.unwrap_err().to_string();
+        assert!(e.contains("rate limit"), "{e}");
+    }
+
     #[tokio::test]
     async fn a_tick_of_polling_fills_vm_fields() {
         // queued_jobs against the mock forge, then attach_jobs: what the dashboard shows per VM.
@@ -1345,6 +1425,8 @@ mod tests {
         let vms = app.vms.lock().unwrap().clone();
         let by = |id: &str| vms.iter().find(|v| v.id == id).unwrap().clone();
         let ok = by("kiln-7-0");
+        // Cache trust keys on the job id first, so the characterization pins it too.
+        assert_eq!(ok.job_id.as_deref(), Some("5201"));
         assert_eq!(ok.job_url.as_deref(), Some("https://github.com/acme/demo/actions/runs/1004/job/5201"));
         assert_eq!(ok.queued_at, Some(github::parse_rfc3339("2026-10-11T09:00:00Z").unwrap()));
         let run = ok.run.as_ref().unwrap();

@@ -639,7 +639,7 @@ const fname = f => FN[f?.kind] || 'the forge';
 // Links only to the forge's own web UI (its url from /api/forges); anything else becomes inert.
 const forgeUrl = (f, u) => f && String(u ?? '').startsWith(f.url + '/') ? esc(u) : '#';
 let F = null;
-const loadForges = async () => { try { F = await api('/api/forges'); } catch { F ||= []; } return F; };
+const loadForges = async () => { try { F = await api('/api/forges'); } catch { /* keep the last list (null before the first load); the next state poll retries */ } return F; };
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -810,6 +810,7 @@ async function doPoll() {
       if (lsGet('kiln-updated') !== S.version) { lsSet('kiln-updated', S.version); return location.reload(); }
     } else if (S.version && lsGet('kiln-updated') === S.version) { lsSet('kiln-updated', null); toast(`kiln updated to ${S.version}`); }
     if (down) okUntil = now() + 2;
+    await loadForges(); // repos, auth and health change with the state: refresh with every poll
     fails = 0; down = false; renderConn(); onState();
   } catch (e) {
     if (e.status === 403) return full('Not allowed', e.message, 'Ask the owner to add your login under Access.');
@@ -1346,6 +1347,7 @@ async function forgeLog(v) {
   for (let i = 0; i < 20; i++) {
     const p = await api(fq(`jobs/${id}/log`, v.repo, '&from=' + from));
     text += p.text;
+    if (p.truncated) { text += '\n[kiln shows only the first 16 MiB of this log]\n'; break; }
     if (p.complete || p.next <= from) break;
     from = p.next;
   }
