@@ -767,7 +767,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     continue;
                 }
                 let text = String::from_utf8_lossy(&buf);
-                observe(app, id, &text);
+                observe(app, id, forge.kind(), &text);
                 if forge.gated()
                     && let Some(crate::forge::console::Line::JobStart(jid)) = crate::forge::console::parse_line(forge.kind(), &text)
                 {
@@ -1457,9 +1457,9 @@ fn kill_note(app: &App, id: &str) {
 /// `2026-10-06 10:00:01Z: Listening for Jobs`
 /// `2026-10-06 10:00:05Z: Running job: build`
 /// `2026-10-06 10:01:40Z: Job build completed with result: Succeeded`
-fn observe(app: &App, id: &str, line: &str) {
+fn observe(app: &App, id: &str, kind: crate::forge::Kind, line: &str) {
     let mut save = false;
-    if let Some(v) = update(app, id, |v| save = apply_line(v, line, now()))
+    if let Some(v) = update(app, id, |v| save = apply_line(kind, v, line, now()))
         && save
     {
         persist(app, &v);
@@ -1475,13 +1475,9 @@ fn start_cap(cfg: &crate::Config, warm: bool) -> u64 {
 /// Returns true when the change is worth persisting right away. Each lifecycle
 /// step is accepted once and only forward: the job (root in the guest) can echo
 /// these lines itself, and must not rewind the state or restart its timeout.
-fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
-    use crate::forge::{
-        Kind,
-        console::{Line, parse_line},
-    };
-    // ponytail: GitHub's console until the VM knows its forge (P0-6).
-    match parse_line(Kind::GitHub, line) {
+fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool {
+    use crate::forge::console::{Line, parse_line};
+    match parse_line(kind, line) {
         Some(Line::Hostkey(k)) => {
             if v.state != State::Held || v.ssh_hostkeys.len() >= 4 {
                 return false;
@@ -1497,7 +1493,8 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             v.online_at.get_or_insert(t);
             true
         }
-        Some(Line::Running(job)) => {
+        // A gated forge's job start is a running job too; the run loop binds the id and starts the verdict (`bind_job_id`).
+        Some(Line::Running(job) | Line::JobStart(job)) => {
             // Counted before the forward-only guard: an echoed or second start must be seen.
             // ponytail: a job with root can print extra lines (only ever a refusal, safe) but
             // cannot hide a start on GitHub (JIT is single-use). Later forges bind the console
@@ -1523,8 +1520,6 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             v.note = Some("runner self-updating (rebake to avoid)".into());
             false
         }
-        // Gated forges: the run loop binds the id and starts the verdict (`bind_job_id`).
-        Some(Line::JobStart(_)) => false,
         None => false,
     }
 }
@@ -2144,7 +2139,9 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 5: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
 /// 6: secrets also read from fw_cfg; console and steps devices per architecture (arm64 guests).
 /// 7: GitLab and Gitea runners (pinned below), Docker and guest checks.
-const RECIPE: u64 = 8;
+/// 8: kiln-exec, the GitLab custom executor.
+/// 9: kiln-job runs GitLab jobs (`run_gitlab`).
+const RECIPE: u64 = 9;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -3206,6 +3203,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// run_gitlab: flags and env only (no -c), the token in the environment and never in argv,
+    /// bad url or token (from the secret) fail closed without starting a runner.
+    #[test]
+    fn guest_run_gitlab() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-rgl-{}", std::process::id()));
+        let job = guest_script("/usr/local/sbin/kiln-job", &dir);
+        let tok = "glrt-t3_abc-DEF.123";
+        let run = |oem: &str| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = format!(
+                "{}\ndmidecode(){{ printf '%s\\n' \"$OEM\"; }}; start_verdict_reader(){{ echo reader >> \"$REC\"; }}\n\
+                 sudo(){{ printf '%s\\n' \"$*\" >> \"$REC\"; echo \"env=$CI_SERVER_TOKEN\" >> \"$REC\"; }}\nrun_gitlab; echo \"rc=$?\"",
+                source_line(&job, "rgl")
+            );
+            let o = std::process::Command::new("bash").args(["-c", &script]).env("OEM", oem).env("REC", dir.join("rec")).output().unwrap();
+            (String::from_utf8_lossy(&o.stdout).replace('\n', " "), std::fs::read_to_string(dir.join("rec")).unwrap_or_default())
+        };
+        let b64 = |t: &str| {
+            String::from_utf8(
+                std::process::Command::new("base64")
+                    .args(["-w0"])
+                    .stdin({
+                        let f = dir.join("t");
+                        std::fs::create_dir_all(&dir).unwrap();
+                        std::fs::write(&f, t).unwrap();
+                        std::fs::File::open(f).unwrap()
+                    })
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        let sec =
+            |url: &str, t: &str| format!("  String 1: kiln.forge=gitlab\n  String 2: kiln.url={url}\n  String 3: kiln.cred={}", b64(t));
+        let (out, rec) = run(&sec("https://gl.example.com:8443/sub", tok));
+        assert!(out.contains("rc=0") && out.contains("runner exited with"), "{out}");
+        assert!(
+            rec.starts_with(
+                "reader\n-H -u runner --preserve-env=CI_SERVER_TOKEN gitlab-runner run-single -u https://gl.example.com:8443/sub "
+            ),
+            "{rec}"
+        );
+        let argv = rec.lines().nth(1).unwrap();
+        assert!(!argv.contains(tok) && !argv.contains(" -t ") && !argv.contains(" -c "), "token or -c on argv: {argv}");
+        assert!(rec.contains(&format!("env={tok}")), "token in the environment");
+        for f in [
+            "--executor custom",
+            "--shell bash",
+            "--builds-dir /home/runner/.cache/gitlab/builds",
+            "--cache-dir /home/runner/.cache/gitlab/cache",
+            "--custom-config-exec /usr/local/bin/kiln-exec --custom-config-args config",
+            "--custom-run-args run",
+            "--custom-cleanup-args cleanup",
+            "--custom-prepare-args prepare",
+            "--max-builds 1",
+            "--wait-timeout ",
+        ] {
+            assert!(argv.contains(f), "{f} missing: {argv}");
+        }
+        // Fail closed: hostile url, wrong token shape, missing secret: no reader, no runner.
+        for oem in [
+            sec("https://gl.example.com/x\"; id", tok),
+            sec("ftp://gl.example.com", tok),
+            sec("https://gl.example.com/a b", tok),
+            sec("https://gl.example.com", "ghp_notarunnertoken"),
+            sec("https://gl.example.com", "glrt-x y"),
+            "  String 1: kiln.forge=gitlab".into(),
+        ] {
+            let (out, rec) = run(&oem);
+            assert!(out.contains("rc=1") && out.contains("powering off") && rec.is_empty(), "{oem}: {out} {rec}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn clean_exit_without_result() {
         // Online, never handed a job: GitHub gave the job to another runner or it was cancelled.
@@ -3227,21 +3303,38 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_console_lines() {
+        use crate::forge::Kind::GitLab;
+        let mut v = vm("a", State::Booting, None);
+        assert!(apply_line(GitLab, &mut v, "Starting runner for http://x with token abc ...", 100));
+        assert_eq!((v.state, v.online_at), (State::Idle, Some(100)));
+        assert!(apply_line(GitLab, &mut v, "Checking for jobs... received  correlation_id=c job=5 job_name=job=999 runner=r", 120));
+        assert_eq!((v.state, v.job.as_deref(), v.busy_since), (State::Busy, Some("5"), Some(120)));
+        // A later received line (a job echoing one) changes nothing but the start count.
+        apply_line(GitLab, &mut v, "Checking for jobs... received  correlation_id=c job=6 job_name=x", 130);
+        assert_eq!((v.job.as_deref(), v.busy_since, v.starts), (Some("5"), Some(120), 2));
+        // The run loop binds the first id once; a different one is a second job.
+        assert_eq!(bind_job_id(&mut v, "5"), Bound::First);
+        assert_eq!(bind_job_id(&mut v, "6"), Bound::Second);
+        assert_eq!(v.job_id.as_deref(), Some("5"));
+    }
+
+    #[test]
     fn console_lines() {
         let mut v = vm("a", State::Booting, None);
-        assert!(apply_line(&mut v, "2026-10-06 10:00:01Z: Listening for Jobs\n", 100));
+        assert!(apply_line(crate::forge::Kind::GitHub, &mut v, "2026-10-06 10:00:01Z: Listening for Jobs\n", 100));
         assert_eq!((v.state, v.online_at), (State::Idle, Some(100)));
-        assert!(apply_line(&mut v, "x: Running job: build\n", 120));
+        assert!(apply_line(crate::forge::Kind::GitHub, &mut v, "x: Running job: build\n", 120));
         assert_eq!((v.state, v.job.as_deref(), v.busy_since), (State::Busy, Some("build"), Some(120)));
-        assert!(!apply_line(&mut v, "x: Job build completed with result: Failed", 130));
+        assert!(!apply_line(crate::forge::Kind::GitHub, &mut v, "x: Job build completed with result: Failed", 130));
         assert_eq!((v.result.as_deref(), v.done_at), (Some("Failed"), Some(130)));
-        assert!(!apply_line(&mut v, "Runner update in progress, do not shutdown runner.", 140));
+        assert!(!apply_line(crate::forge::Kind::GitHub, &mut v, "Runner update in progress, do not shutdown runner.", 140));
         assert!(v.note.as_deref().unwrap().contains("self-updating"));
         // A job echoing lifecycle lines itself can't rewind state, restart its
         // timeout or rewrite its result.
-        assert!(!apply_line(&mut v, "Listening for Jobs", 500));
-        assert!(apply_line(&mut v, "x: Running job: again", 600), "the second start is persisted"); // ...but changes nothing else
-        apply_line(&mut v, "Job x completed with result: Succeeded", 700);
+        assert!(!apply_line(crate::forge::Kind::GitHub, &mut v, "Listening for Jobs", 500));
+        assert!(apply_line(crate::forge::Kind::GitHub, &mut v, "x: Running job: again", 600), "the second start is persisted"); // ...but changes nothing else
+        apply_line(crate::forge::Kind::GitHub, &mut v, "Job x completed with result: Succeeded", 700);
         assert_eq!((v.state, v.busy_since, v.job.as_deref(), v.result.as_deref()), (State::Busy, Some(120), Some("build"), Some("Failed")));
         assert_eq!(v.done_at, Some(130), "an echoed result line must not move the billed end");
         assert_eq!(v.starts, 2, "every start line is counted, even the ignored ones");
@@ -3311,7 +3404,7 @@ mod tests {
         assert!(recycle_candidates(&vms, "x/y", 1800, 9999, true).is_empty());
         // taking a job clears warm
         let mut v = w("j", 1, CacheUse::Read);
-        apply_line(&mut v, "x: Running job: build", 5);
+        apply_line(crate::forge::Kind::GitHub, &mut v, "x: Running job: build", 5);
         assert!(!v.warm);
     }
 
@@ -3445,10 +3538,15 @@ mod tests {
     #[test]
     fn hostkeys_and_caps() {
         let mut v = vm("a", State::Busy, None);
-        assert!(!apply_line(&mut v, "kiln: hostkey 256 SHA256:x", 1)); // only while held
+        assert!(!apply_line(crate::forge::Kind::GitHub, &mut v, "kiln: hostkey 256 SHA256:x", 1)); // only while held
         v.state = State::Held;
         for i in 0..6 {
-            apply_line(&mut v, &format!("[   32.24] kiln-job[1395]: kiln: hostkey 256 SHA256:{i} (ED25519)\n"), 1);
+            apply_line(
+                crate::forge::Kind::GitHub,
+                &mut v,
+                &format!("[   32.24] kiln-job[1395]: kiln: hostkey 256 SHA256:{i} (ED25519)\n"),
+                1,
+            );
         }
         assert_eq!(v.ssh_hostkeys.len(), 4);
         assert_eq!(v.ssh_hostkeys[0], "256 SHA256:0 (ED25519)");
@@ -3671,7 +3769,7 @@ mod tests {
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 8);
+        assert_eq!(RECIPE, 9);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));

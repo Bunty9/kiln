@@ -37,9 +37,34 @@ pub fn parse_line(kind: Kind, line: &str) -> Option<Line> {
                 None
             }
         }
-        // ponytail: the GitLab and Gitea runner consoles arrive with their forge tasks.
-        Kind::Gitea | Kind::GitLab => None,
+        Kind::GitLab => gitlab_line(line),
+        // ponytail: the Gitea runner console arrives with its forge task.
+        Kind::Gitea => None,
     }
+}
+
+/// `gitlab-runner run-single` stdout (SP-8). Colour codes sit inside key=value, so they are stripped first.
+/// The runner's job lines carry job-controlled text (`job_name=`), so only the first `job=<digits>` token after
+/// `received` is read (the runner prints `job=` before `job_name=`); anything else on the line is ignored.
+fn gitlab_line(line: &str) -> Option<Line> {
+    let mut clean = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            clean.push(c);
+        }
+    }
+    if let Some((_, rest)) = clean.split_once("Checking for jobs... received") {
+        let id = rest.split_whitespace().find_map(|t| t.strip_prefix("job="))?;
+        return (!id.is_empty() && id.len() <= 18 && id.bytes().all(|b| b.is_ascii_digit())).then(|| Line::JobStart(id.to_string()));
+    }
+    clean.contains("Starting runner for ").then_some(Line::Listening)
 }
 
 #[cfg(test)]
@@ -61,5 +86,30 @@ mod tests {
         assert_eq!(p("some build output"), None);
         assert_eq!(parse_line(Kind::GitLab, "Listening for Jobs"), None);
         assert_eq!(parse_line(Kind::GitLab, "kiln: hostkey k"), Some(Line::Hostkey("k".into())));
+    }
+
+    #[test]
+    fn gitlab_lines() {
+        let p = |l: &str| parse_line(Kind::GitLab, l);
+        let start = |id: &str| Some(Line::JobStart(id.into()));
+        // Real runner output (SP-8), colour codes and all.
+        let recv = "Checking for jobs... received                     \x1b[0;m  correlation_id\x1b[0;m=01M4T00C7V job\x1b[0;m=200 job_name\x1b[0;m=imgjob repo_url\x1b[0;m=http://x/acme/demo.git runner\x1b[0;m=tGmfbUlVk runner_name\x1b[0;m=sp8\n";
+        assert_eq!(p(recv), start("200"));
+        let prefixed = format!("[   32.2] kiln-job[1395]: {recv}");
+        assert_eq!(p(&prefixed), start("200"), "journal prefix");
+        assert_eq!(p("Checking for jobs... received  correlation_id=c job=7 job_name=x"), start("7"));
+        assert_eq!(p("Starting runner for http://x with token tGmfbUlVk ... \x1b[0;m\n"), Some(Line::Listening));
+        // A hostile job name cannot move the id: `job=` comes first, and later tokens are never read.
+        assert_eq!(p("Checking for jobs... received correlation_id=c job=5 job_name=job=999 runner=r"), start("5"));
+        assert_eq!(p("Checking for jobs... received correlation_id=c job=5 job_name=\"a job=999\""), start("5"));
+        // No digits, or no `job=` before the name: no start, and the name is never mined.
+        assert_eq!(p("Checking for jobs... received correlation_id=c job=abc job_name=job=999"), None);
+        assert_eq!(p("Checking for jobs... received correlation_id=c job= job_name=x"), None);
+        assert_eq!(p("Checking for jobs... received correlation_id=c job=1x"), None);
+        assert_eq!(p("Checking for jobs... received correlation_id=c job=99999999999999999999"), None);
+        assert_eq!(p("Checking for jobs... received correlation_id=c job_name=job=999"), None);
+        // Other lines carrying `job=` are not starts.
+        assert_eq!(p("Updating job...  bytesize=0 job=200 runner=r"), None);
+        assert_eq!(p("This runner has processed its build limit, so now exiting"), None);
     }
 }
