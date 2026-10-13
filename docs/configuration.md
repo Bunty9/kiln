@@ -285,6 +285,8 @@ jobs:
 
 `kiln-4cpu` and the other size labels work like GitHub's; jobs that do not ask for kiln are left to your other runners. Fork pull requests, `pull_request_target` from a fork and every `workflow_run` are never run by kiln (see [SECURITY.md](../SECURITY.md#fork-pull-requests)).
 
+**Caching on Gitea.** The repo cache disk (Docker layers, `~/.cargo`, `~/.npm`, ...) works as on GitHub, but Gitea's `actions/cache` does **not** persist between jobs: the runner's cache server and its work directory live on the VM's disk, not on the cache disk (a cold run must be able to unmount the cache disk), so each job starts with an empty `actions/cache`. Rely on the cache disk for package and toolchain caches instead.
+
 ## GitLab jobs
 
 Which GitLab jobs kiln runs is decided from GitLab's API (see [SECURITY.md](../SECURITY.md#fork-pull-requests)). Multi-project downstream pipelines (source `pipeline`) are refused: the upstream project chooses their variables and kiln cannot vouch for them. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request; fork merge requests are refused), and they never save the cache. Merge-train pipelines run without the cache. The cache is saved only after a `push` pipeline on the default or a protected cache branch whose job the API reports as `success`, on this VM's own runner, with exactly one job started and a recorded `ok` verdict for that job. kiln removes the runners of VMs that ended, at startup and about hourly for GitLab and Gitea. Cancelling a pipeline from the dashboard stops its VMs first, even when the token lacks the `api` scope and GitLab refuses the cancel.

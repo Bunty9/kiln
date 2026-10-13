@@ -745,11 +745,13 @@ impl Forge {
         }
     }
     /// What the API says about `job_id`, for `decide`. Never a `CI_*` value or anything the guest sent.
-    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
+    /// `runner_id` is the VM's: Gitea refuses a job that is not that runner's and running (GitLab binds
+    /// the runner through `pause` instead).
+    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
             Self::GitLab(g) => g.verdict_facts(repo, job_id).await,
-            Self::Gitea(g) => g.verdict_facts(repo, job_id).await,
+            Self::Gitea(g) => g.verdict_facts(repo, job_id, runner_id).await,
         }
     }
 }

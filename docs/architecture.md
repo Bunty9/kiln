@@ -119,7 +119,7 @@ Not busy: `idle_timeout_mins` from VM start, which covers boot as well as waitin
 
 ## Cache
 
-Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2`, created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository` and `/var/cache/apt/archives`. `/opt/hostedtoolcache` is not cached because the baked Node versions (`bake_node_versions`) live there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip.
+Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2`, created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository` and `/var/cache/apt/archives`. `/opt/hostedtoolcache` is not cached because the baked Node versions (`bake_node_versions`) live there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip. dockerd is not started at boot (the unit is disabled; `docker.socket` stays): the job's path starts it after the cache is mounted and its container records and plugins are deleted (so a planted restart-always container cannot run), and after its trust step where the forge has one.
 
 ### Trust model: trusted writer, throwaway readers
 
