@@ -849,6 +849,10 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     {
         bail_r(&why)?;
     }
+    let bad = crate::forge::unknown_keys(app.cfg().forges.as_deref().unwrap_or_default(), c.forges.as_deref().unwrap_or_default());
+    if !bad.is_empty() {
+        bail_r(&format!("unknown forge setting(s): {}", bad.join(", ")))?;
+    }
     let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
     let reprobe = vm::egress_reprobe(&app.cfg(), &c);
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
@@ -1597,6 +1601,10 @@ mod tests {
         let log = "repos/acme/demo/actions/jobs/5001/logs";
         assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 4).await.is_err());
         assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 13).await.is_ok());
+        // ...but a log over the cap is cut and says so (job_log turns that into truncated: true).
+        let (r, cut) = app.gh.raw_prefix(reqwest::Method::GET, log, None, 4).await.unwrap();
+        assert_eq!((r.body.as_ref(), cut), ("hél".as_bytes(), true));
+        assert!(!app.gh.raw_prefix(reqwest::Method::GET, log, None, 13).await.unwrap().1);
         // Filters are encoded, not spliced.
         let q = RunsParam { repo: "acme/demo".into(), status: Some("running".into()), branch: Some("a/b".into()), page: Some(1) };
         assert!(runs_list(State(app), Query(q)).await.is_ok());

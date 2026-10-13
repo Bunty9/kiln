@@ -45,7 +45,8 @@ impl Mode {
                     IpAddr::V6(v6) => embedded_v4(v6).map_or(ip, IpAddr::V4),
                     v4 => v4,
                 };
-                if own.contains(&ip) {
+                // 100.100.100.100 and fd7a:115c:a1e0::53 are tailscaled's own service: host-local.
+                if own.contains(&ip) || ip == Ipv4Addr::new(100, 100, 100, 100) || ip == "fd7a:115c:a1e0::53".parse::<IpAddr>().unwrap() {
                     return false;
                 }
                 match ip {
@@ -139,16 +140,38 @@ pub fn client(mode: Mode) -> reqwest::Client {
     builder(mode).build().expect("forge http client")
 }
 
+/// The one way to send a request on a `client(mode)`: reqwest skips the resolver for an IP-literal
+/// host, so the literal is judged here on every call (not just when the URL was saved).
+pub async fn send(c: &reqwest::Client, mode: Mode, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    let req = rb.build()?;
+    if let Some(ip) = literal_ip(req.url())
+        && !mode.permits(ip, &if mode == Mode::Internal { own_addrs()? } else { vec![] })
+    {
+        bail!("{ip} is an internal address");
+    }
+    Ok(c.execute(req).await?)
+}
+
 /// The body of `r`, refused past `max` bytes.
-pub async fn read_capped(mut r: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+pub async fn read_capped(r: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    let (body, cut) = read_prefix(r, max).await?;
+    if cut {
+        bail!("response larger than {max} bytes");
+    }
+    Ok(body)
+}
+
+/// The first `max` bytes of `r`, and whether there was more.
+pub async fn read_prefix(mut r: reqwest::Response, max: usize) -> Result<(Vec<u8>, bool)> {
     let mut body = vec![];
     while let Some(c) = r.chunk().await? {
         if body.len() + c.len() > max {
-            bail!("response larger than {max} bytes");
+            body.extend_from_slice(&c[..max - body.len()]);
+            return Ok((body, true));
         }
         body.extend_from_slice(&c);
     }
-    Ok(body)
+    Ok((body, false))
 }
 
 /// A forge `url` before it is stored, dialled or templated into guest TOML or `.runner` JSON:
@@ -291,6 +314,8 @@ mod tests {
         }
         for bad in [
             "127.0.0.1",
+            "100.100.100.100",
+            "fd7a:115c:a1e0::53",
             "::1",
             "0.0.0.0",
             "169.254.169.254",
@@ -335,6 +360,19 @@ mod tests {
         assert!(client(Mode::Public).get(format!("https://localhost:{port}/")).send().await.is_err());
         assert!(client(Mode::Public).get(format!("http://localhost:{port}/")).send().await.is_err(), "http on public");
         assert!(client(Mode::Internal).get(format!("http://localhost:{port}/")).send().await.is_err(), "loopback on internal");
+    }
+
+    #[tokio::test]
+    async fn send_refuses_ip_literals_the_resolver_never_sees() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        for (m, scheme) in [(Mode::Public, "https"), (Mode::Tailnet, "https"), (Mode::Internal, "http")] {
+            let c = client(m);
+            for host in ["127.0.0.1", "[::1]", "169.254.169.254"] {
+                let e = send(&c, m, c.get(format!("{scheme}://{host}:{port}/"))).await.unwrap_err();
+                assert!(e.to_string().contains("internal address"), "{m:?} {host}: {e}");
+            }
+        }
     }
 
     #[tokio::test]

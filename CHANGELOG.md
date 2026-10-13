@@ -12,12 +12,16 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Changed
 
 - Settings › GitHub is now Settings › Forges: one card set per forge from `/api/forges`. The GitHub token and App cards are unchanged, the setup wizard's first step is "Connect a forge", and `#/settings/github` still opens the page.
-- The dashboard's Repos and Job pages use the forge-neutral API instead of `/api/gh/*`, which is removed. The Job page's log tab is named after the forge, and controls the forge can't do (rerun, cancel, run workflow) are hidden. The forge's job-log download is capped at 16 MiB.
+- The dashboard's Repos and Job pages use the forge-neutral API instead of `/api/gh/*`, which is removed. The Job page's log tab is named after the forge, and controls the forge can't do (rerun, cancel, run workflow) are hidden. A job log over 16 MiB shows its first 16 MiB with a note, instead of an error.
 - QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
 - A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.
 
 ### Fixed
 
+- The dashboard refreshes its forge list with every state poll and retries after a failed load, so a restart or a newly installed App repo no longer leaves Rerun, Cancel and the forge links missing until a reload.
+- Notification job links are checked against the forge origins when a message is built, not only when the event is created.
+- `forges[]` entries keep fields this version does not know (a newer kiln's), so a downgrade still starts; a settings save may not add new unknown ones.
+- Branch links no longer accept `.` or `..` segments, and `network: internal` forges refuse tailscaled's local service address (100.100.100.100).
 - A cache overlay is committed only when the VM's own console showed exactly one job start and a job id is bound, whatever the next API poll sees; a second start, no start, or an unbound job discards the overlay. The verdict is also re-checked after the forge lookup.
 - `kiln doctor` no longer reports "not enough for all slots at once" (and a failed memory check) whenever every slot is busy: it counted the memory held by kiln's own running VMs twice. It now adds that back to the available memory and shows it, for example `7941 MB available (+16850 MB in running VMs), 2 x 8192 MB wanted`.
 - Filtered egress no longer stays "unavailable" after kiln starts before the network is up: a failing probe is retried after 5 s, doubling up to every 2 minutes, and a save that changes `egress`, `listen` or `docker_mirror` while filtered re-probes at once. `deploy/kiln.service` drops `After=network-online.target`, which a user unit cannot order against (#44).

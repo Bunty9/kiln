@@ -92,7 +92,6 @@ pub enum Network {
 
 /// One `forges[]` entry. Optional fields stay `None` when absent so a save writes back what was read.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
 pub struct ForgeCfg {
     pub id: ForgeId,
     pub kind: Kind,
@@ -104,6 +103,21 @@ pub struct ForgeCfg {
     pub network: Option<Network>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    /// Keys this version does not know (a newer kiln's), kept so a rollback still starts and a
+    /// save does not drop them. `unknown_keys` is how a dashboard write is held to typo protection.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Forge entry keys in `new` that this version does not know and `old` (the stored config) does
+/// not already carry: a typo in a write. Loading never refuses them.
+pub fn unknown_keys(old: &[ForgeCfg], new: &[ForgeCfg]) -> Vec<String> {
+    let mut out = vec![];
+    for f in new {
+        let had = old.iter().find(|o| o.id == f.id);
+        out.extend(f.extra.keys().filter(|k| !had.is_some_and(|o| o.extra.contains_key(*k))).map(|k| format!("{}.{k}", f.id.as_str())));
+    }
+    out
 }
 
 /// `[a-z][a-z0-9-]{0,23}`; part of cache filenames, so effectively immutable.
@@ -216,7 +230,15 @@ pub fn effective(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Vec<ForgeC
     match forges {
         Some(f) => f.clone(),
         None => {
-            vec![ForgeCfg { id: ForgeId::github(), kind: Kind::GitHub, url: None, credential: None, network: None, repos: repos.to_vec() }]
+            vec![ForgeCfg {
+                id: ForgeId::github(),
+                kind: Kind::GitHub,
+                url: None,
+                credential: None,
+                network: None,
+                repos: repos.to_vec(),
+                extra: Default::default(),
+            }]
         }
     }
 }
@@ -412,6 +434,9 @@ pub struct LogPage {
     /// The byte offset to pass as `from` for the rest.
     pub next: usize,
     pub complete: bool,
+    /// Set on the last page we can give when the log is longer than kiln reads (16 MiB).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
@@ -761,7 +786,17 @@ mod tests {
             "case-insensitive duplicate"
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
-        assert!(cfg(r#"[{"id":"gl","kind":"gitlab","typo":1}]"#).is_err());
+        // M5: a newer kiln's extra field must not stop an older one from starting (rollback), and
+        // survives a save; but a dashboard write may not introduce one (typo protection).
+        let newer = cfg(r#"[{"id":"gl","kind":"gitlab","url":"https://x.example.org","tls_ca":"/x"}]"#).unwrap();
+        assert_eq!(serde_json::to_value(&newer).unwrap()[0]["tls_ca"], "/x");
+        assert!(validate(&newer, &[]).is_ok());
+        assert!(unknown_keys(newer.as_deref().unwrap(), newer.as_deref().unwrap()).is_empty());
+        let typo = cfg(r#"[{"id":"gl","kind":"gitlab","url":"https://x.example.org","urll":"x"}]"#).unwrap();
+        assert_eq!(unknown_keys(newer.as_deref().unwrap(), typo.as_deref().unwrap()), ["gl.urll"]);
+        assert_eq!(unknown_keys(&[], newer.as_deref().unwrap()), ["gl.tls_ca"]);
+        // Still invalid is still refused.
+        assert!(cfg(r#"[{"id":"gl","kind":"nope"}]"#).is_err());
     }
 
     #[test]
