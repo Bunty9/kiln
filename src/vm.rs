@@ -2139,7 +2139,7 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 5: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
 /// 6: secrets also read from fw_cfg; console and steps devices per architecture (arm64 guests).
 /// 7: GitLab and Gitea runners (pinned below), Docker and guest checks.
-const RECIPE: u64 = 7;
+const RECIPE: u64 = 8;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -3021,6 +3021,155 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// kiln-exec, the GitLab custom executor: stages driven with a fake docker, sudo and verdict waiter.
+    #[test]
+    fn guest_kiln_exec() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-exec-{}", std::process::id()));
+        let bin = dir.join("bin");
+        let exec = guest_script("/usr/local/bin/kiln-exec", &dir)
+            .replace("/usr/local/sbin/", &format!("{}/", bin.display()))
+            .replace(&format!("{}-exec", dir.display()), &dir.join("state").to_string_lossy()); // guest_script already rewrote /run/kiln
+        let exec = dir.join("kiln-exec.sh").to_string_lossy().to_string() + "\n" + &exec; // first line: where it lives
+        let (path, body) = exec.split_once('\n').unwrap();
+        // Runs one stage. `verdict` is the fake waiter's answer (its output, and exit 1 unless ok/cold); `env` extra variables.
+        let stage = |verdict: &str, env: &[(&str, &str)], args: &[&str]| {
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(dir.join("state")).unwrap();
+            std::fs::write(path, body).unwrap();
+            let sh = |n: &str, s: &str| {
+                let f = bin.join(n);
+                std::fs::write(&f, format!("#!/bin/bash\n{s}\n")).unwrap();
+                std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            };
+            let log = dir.join("calls");
+            sh(
+                "kiln-verdict-wait",
+                &format!(
+                    "echo kiln-verdict-wait >> {l}; echo {v}; case {v} in ok|cold) ;; *) exit 1;; esac",
+                    l = log.display(),
+                    v = verdict.split(' ').next().unwrap()
+                ),
+            );
+            sh("kiln-cache", &format!("echo \"kiln-cache $*\" >> {}", log.display()));
+            sh("sudo", "exec \"$@\"");
+            sh("systemctl", &format!("echo \"systemctl $*\" >> {}", log.display()));
+            sh("docker", &format!("echo \"docker $*\" >> {}; [ \"$1\" = ps ] && [ -n \"$FAKE_UP\" ] && echo abc; exit 0", log.display()));
+            std::fs::write(dir.join("verdict"), format!("{verdict}\n")).unwrap();
+            let mut c = std::process::Command::new("bash");
+            c.arg(path).args(args).env("HOME", &dir).env("BUILD_FAILURE_EXIT_CODE", "1").env("SYSTEM_FAILURE_EXIT_CODE", "2");
+            c.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+            for (k, v) in env {
+                c.env(k, v);
+            }
+            let o = c.output().unwrap();
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            (o.status.code(), String::from_utf8_lossy(&o.stderr).to_string(), calls)
+        };
+        let fresh = || {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+        };
+        let line = |c: &str, n: usize| c.lines().nth(n).unwrap_or("").to_string();
+
+        // ok, no image: no docker, runs directly, a failing script is exit 1.
+        fresh();
+        let (rc, _, calls) = stage("ok 42", &[], &["prepare"]);
+        assert_eq!((rc, calls.contains("docker"), calls.contains("kiln-cache")), (Some(0), false, false));
+        std::fs::write(dir.join("s.sh"), format!("echo ran > {}/ran\n", dir.display())).unwrap();
+        let ran = dir.join("ran");
+        assert_eq!(stage("ok 42", &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]).0, Some(0));
+        assert!(ran.exists(), "plain job runs directly");
+        std::fs::write(dir.join("s.sh"), "exit 7\n").unwrap();
+        assert_eq!(stage("ok 42", &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]).0, Some(1), "any failure maps to 1");
+        assert_eq!(stage("ok 42", &[], &["config"]).0, Some(0));
+
+        // cold: detach, then docker restart, then the first container.
+        fresh();
+        let (rc, _, calls) = stage("cold 42", &[("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3")], &["prepare"]);
+        assert_eq!(rc, Some(0));
+        assert_eq!(line(&calls, 1), "kiln-cache detach");
+        assert_eq!(line(&calls, 2), "systemctl restart docker.service");
+        assert!(line(&calls, 3).starts_with("docker network create kiln-42"), "{calls}");
+
+        // refuse and timeout (the waiter exits 1), and a garbage verdict: exit 1, a message, no docker, no detach.
+        for v in ["refuse 42", "timeout 42", "banana 42"] {
+            fresh();
+            let (rc, err, calls) = stage(v, &[("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3")], &["prepare"]);
+            assert_eq!(rc, Some(1), "{v}: never exit 2");
+            assert!(err.contains("kiln-exec:") && err.contains("No job code was run") || err.contains("unreadable"), "{v}: {err}");
+            assert!(!calls.contains("docker") && !calls.contains("detach") && !calls.contains("systemctl"), "{v}: {calls}");
+            // and no later stage runs job code without the gate
+            std::fs::write(dir.join("s.sh"), format!("touch {}/gated\n", dir.display())).unwrap();
+            let (rc, _, _) = stage(v, &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]);
+            assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{v}");
+        }
+
+        // image job: build_script and after_script go in the container (then chown), other stages run on the VM.
+        fresh();
+        let env = [("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3")];
+        assert_eq!(stage("ok 42", &env, &["prepare"]).0, Some(0));
+        std::fs::write(dir.join("s.sh"), "echo hi\n").unwrap();
+        let s = dir.join("s.sh");
+        let (rc, _, calls) = stage("ok 42", &env, &["run", s.to_str().unwrap(), "build_script"]);
+        assert_eq!(rc, Some(0));
+        assert!(calls.contains("docker exec -i kiln-job-42 sh -c") && calls.contains("docker exec -u 0 kiln-job-42 chown -R"), "{calls}");
+        assert!(
+            calls.contains("docker run -q -d --name kiln-job-42 --network kiln-42")
+                && calls.contains("--entrypoint  -- alpine:3 tail -f /dev/null"),
+            "{calls}"
+        );
+        let before = calls.matches("docker exec").count();
+        let (_, _, calls) = stage("ok 42", &env, &["run", s.to_str().unwrap(), "get_sources"]);
+        assert_eq!(calls.matches("docker exec").count(), before, "get_sources stays on the VM");
+        // the container died: system failure
+        let (rc, _, _) = stage("ok 42", &env, &["run", dir.join("missing").to_str().unwrap(), "after_script"]);
+        assert_eq!(rc, Some(2), "failed step and a dead container is exit 2");
+        let (rc, _, _) = stage("ok 42", &[env[0], ("FAKE_UP", "1")], &["run", dir.join("missing").to_str().unwrap(), "after_script"]);
+        assert_eq!(rc, Some(1), "failed step, container alive: the job failed");
+        // cleanup removes containers, network, volume
+        let (_, _, calls) = stage("ok 42", &[("FAKE_UP", "1")], &["cleanup"]);
+        assert!(
+            calls.contains("docker rm -f abc")
+                && calls.contains("docker network rm kiln-42")
+                && calls.contains("docker volume rm kiln-certs-42"),
+            "{calls}"
+        );
+
+        // hostile CUSTOM_ENV_*: data only. Services are passed as separate quoted arguments after `--`.
+        fresh();
+        let marker = dir.join("pwned");
+        let evil = format!("x y \"q\" $(touch {m}) `touch {m}` ;touch {m};\nnl", m = marker.display());
+        let svcs =
+            serde_json::json!([{ "name": "postgres:16", "alias": "db", "entrypoint": ["sh", "-c"], "command": [evil, "--privileged"] }])
+                .to_string();
+        let env = [
+            ("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3"),
+            ("CUSTOM_ENV_CI_JOB_SERVICES", svcs.as_str()),
+            ("CUSTOM_ENV_DOCKER_TLS_CERTDIR", evil.as_str()),
+            ("CUSTOM_ENV_CI_JOB_ID", "99"),
+        ];
+        let (rc, _, calls) = stage("ok 42", &env, &["prepare"]);
+        assert_eq!(rc, Some(0));
+        assert!(!marker.exists(), "hostile value executed");
+        assert!(calls.contains("kiln-svc-42-1") && !calls.contains("99"), "job id comes from the verdict: {calls}");
+        assert!(calls.contains("-- postgres:16 -c") && calls.contains("--entrypoint sh"), "{calls}");
+        for bad in ["-v/:/h", "a b", "x$(touch pwned)", "--privileged", "a\nb"] {
+            fresh();
+            let (rc, err, calls) = stage("ok 42", &[("CUSTOM_ENV_CI_JOB_IMAGE", bad)], &["prepare"]);
+            assert_eq!(rc, Some(1), "{bad:?}");
+            assert!(err.contains("invalid image name") && !calls.contains("docker"), "{bad:?}: {err}");
+        }
+        fresh();
+        let svcs = serde_json::json!([{ "name": "--privileged" }]).to_string();
+        let (rc, err, _) =
+            stage("ok 42", &[("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3"), ("CUSTOM_ENV_CI_JOB_SERVICES", svcs.as_str())], &["prepare"]);
+        assert_eq!((rc, err.contains("invalid service name")), (Some(1), true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// kiln-job picks the runner by `kiln.forge`; no such string (an older kiln) is github.
     #[test]
     fn guest_forge_branch() {
@@ -3517,7 +3666,7 @@ mod tests {
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 7);
+        assert_eq!(RECIPE, 8);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
