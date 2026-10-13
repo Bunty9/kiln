@@ -199,6 +199,10 @@ A GitHub App is the recommended way to authenticate. kiln holds only the App's p
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
 
+## GitLab jobs
+
+Which GitLab jobs kiln runs is decided from GitLab's API (see [SECURITY.md](../SECURITY.md#fork-pull-requests)). Multi-project downstream pipelines (source `pipeline`) are refused: the upstream project chooses their variables and kiln cannot vouch for them. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request; fork merge requests are refused), and they never save the cache. Merge-train pipelines run without the cache. The cache is saved only after a `push` pipeline on the default or a protected cache branch whose job the API reports as `success`, on this VM's own runner, with exactly one job started and a recorded `ok` verdict for that job. kiln removes the runners of VMs that ended, at startup and about hourly for GitLab and Gitea. Cancelling a pipeline from the dashboard stops its VMs first, even when the token lacks the `api` scope and GitLab refuses the cancel.
+
 ## Notifications
 
 kiln can send alerts to up to 20 destinations (Settings › Notifications). They are stored in `<data>/notify.json` (mode 0600, written atomically). If that file cannot be read, notifications are off, the Overview says so, and kiln never rewrites the file.

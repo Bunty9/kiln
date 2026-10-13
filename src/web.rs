@@ -1403,10 +1403,13 @@ async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoPara
     if !f.caps().cancel {
         bail_r("this forge cannot cancel runs")?;
     }
-    f.cancel(&repo, id).await?;
+    // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel), because the
+    // runner only notices a cancel after about a minute. The job lookup also catches a job that started since the last poll.
     if f.kind() == crate::forge::Kind::GitLab {
-        vm::kill_pipeline(&app, &repo.key(), id);
+        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_default();
+        vm::kill_pipeline(&app, &repo.key(), id, &jobs);
     }
+    f.cancel(&repo, id).await?;
     Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
 }
 

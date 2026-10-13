@@ -123,6 +123,10 @@ pub struct Vm {
     /// ends before `attach_jobs` sees it still blocks the commit.
     #[serde(default, skip_serializing_if = "is_default")]
     pub starts: u32,
+    /// The host's own call on the bound job, (call, job id): `ok`, `cold` or `refuse`. A gated forge's
+    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits (R2b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<(String, String)>,
     /// When GitHub queued the job this VM's runner picked up.
     #[serde(default)]
     pub queued_at: Option<u64>,
@@ -351,6 +355,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         result: None,
         job_url: None,
         job_id: None,
+        verdict: None,
         starts: 0,
         queued_at: None,
         started: now(),
@@ -474,7 +479,8 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
 
 /// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id` (R2 L-6): the runner only
 /// notices a cancel after about a minute, so a maintainer stopping a suspicious job must stop the VM.
-pub fn kill_pipeline(app: &App, repo: &str, id: u64) -> usize {
+/// Matched by the pipeline link, or by a console-bound job id in `jobs` (the API's list for the pipeline).
+pub fn kill_pipeline(app: &App, repo: &str, id: u64, jobs: &[String]) -> usize {
     let tail = format!("/-/pipelines/{id}");
     let ids: Vec<String> = app
         .vms
@@ -482,7 +488,10 @@ pub fn kill_pipeline(app: &App, repo: &str, id: u64) -> usize {
         .unwrap()
         .iter()
         .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active())
-        .filter(|v| v.run.as_ref().and_then(|r| r.links.run.as_deref()).is_some_and(|u| u.ends_with(&tail)))
+        .filter(|v| {
+            v.run.as_ref().and_then(|r| r.links.run.as_deref()).is_some_and(|u| u.ends_with(&tail))
+                || v.job_id.as_ref().is_some_and(|j| jobs.contains(j))
+        })
         .map(|v| v.id.clone())
         .collect();
     for i in &ids {
@@ -530,6 +539,24 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
         note(app, &id, reason.note());
         if let Some(k) = app.kills.lock().unwrap().get(&id) {
             k.notify_one();
+        }
+    }
+}
+
+/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2).
+/// A failed delete at the VM's end is not retried, and a record lost in a crash never ran its delete.
+/// Only the last day is tried: older runners fall to the orphan sweep, and a 404 is as good as a delete.
+pub async fn retire_ended(app: &App) {
+    let t = now();
+    let mut by_repo: std::collections::HashMap<String, Vec<(String, u64)>> = Default::default();
+    for v in app.vms.lock().unwrap().iter().filter(|v| v.ended.is_some_and(|e| e + 86400 > t)) {
+        if let Some(rid) = v.runner_id {
+            by_repo.entry(v.repo.clone()).or_default().push((v.id.clone(), rid));
+        }
+    }
+    for (repo, c) in by_repo {
+        if forge_for(app, &repo).is_ok_and(|(f, _)| f.gated()) {
+            retire(app, &repo, c, Reason::Unused).await;
         }
     }
 }
@@ -866,7 +893,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             Some((jid, vd)) = verdict_rx.recv() => {
                 send(&mut stdin, &vd.line(&jid)).await;
                 let refuse = vd.v == crate::forge::Call::Refuse;
-                if let Some(v) = update(app, id, |v| apply_verdict(v, &vd)) {
+                if let Some(v) = update(app, id, |v| apply_verdict(v, &jid, &vd)) {
                     persist(app, &v);
                 }
                 if refuse {
@@ -909,7 +936,27 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if !status.success() {
         bail!("qemu exited with {status}; see console log");
     }
-    let v = update(app, id, |_| {}).context("vm vanished")?;
+    let mut v = update(app, id, |_| {}).context("vm vanished")?;
+    // GitLab never prints a result the host may believe: ask the job API, and only for the one job the console
+    // bound, on a runner that started exactly one, with a recorded ok or cold verdict for that id (R2b section 4).
+    if v.result.is_none()
+        && forge.gated()
+        && v.starts == 1
+        && let (Some(jid), Some(rid)) = (v.job_id.clone(), v.runner_id)
+        && v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold"))
+    {
+        match forge.job_result(&rr, &jid, rid).await {
+            Ok(Some(r)) => {
+                v = update(app, id, |v| {
+                    v.result = Some(r.into());
+                    v.done_at = Some(now());
+                })
+                .context("vm vanished")?;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("{id}: job result: {e:#}"),
+        }
+    }
     if v.result.is_none() {
         let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
         note(app, id, why);
@@ -1296,7 +1343,12 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let writers = cfg.cache_branches(repo);
     let succeeded = done && v.result.as_deref() == Some("Succeeded");
     // Fail closed on console evidence alone (no API poll): exactly one job start, and a bound id.
+    let gated = forge_for(app, repo).is_ok_and(|(f, _)| f.gated());
+    // A gated forge also needs the host's own ok for exactly the bound job: no verdict recorded (the gate never ran,
+    // a restart) means no commit, whatever the guest did.
+    let verdict_ok = v.job_id.as_ref().is_some_and(|j| v.verdict.as_ref().is_some_and(|(c, vj)| c == "ok" && vj == j));
     let console = match (v.starts, v.job_id.is_some() || v.job_url.is_some()) {
+        (1, true) if gated && !verdict_ok => Err("the host recorded no ok verdict for this job"),
         (1, true) => Ok(()),
         (0, _) => Err("the console showed no job start"),
         (1, false) => Err("a job started but no job id is bound"),
@@ -1305,7 +1357,6 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
         // A gated forge's id is the console's alone: the API-sourced job page never stands in for it (R2 L-5).
-        let gated = forge_for(app, repo).is_ok_and(|(f, _)| f.gated());
         match v.job_id.clone().or_else(|| v.job_url.as_deref().filter(|_| !gated).and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
                 Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
@@ -1553,8 +1604,11 @@ fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool 
 
 /// The host's own record of a verdict. A refused or cold job never commits the cache, whatever the
 /// guest does (R2 L-2): a tag or release job may keep a mounted overlay.
-fn apply_verdict(v: &mut Vm, vd: &crate::forge::Verdict) {
+fn apply_verdict(v: &mut Vm, jid: &str, vd: &crate::forge::Verdict) {
     use crate::forge::Call;
+    if v.job_id.as_deref() == Some(jid) {
+        v.verdict = Some((vd.v.name().to_string(), jid.to_string()));
+    }
     if vd.v == Call::Refuse {
         v.note = Some(format!("refused: {}", vd.why));
     }
@@ -2669,8 +2723,13 @@ mod tests {
         let other = Arc::new(tokio::sync::Notify::new());
         app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
         app.kills.lock().unwrap().insert("kiln-1-1".into(), other.clone());
-        app.vms.lock().unwrap().extend([vm("kiln-1-0", 127, "busy"), vm("kiln-1-1", 1270, "busy")]);
-        assert_eq!(kill_pipeline(&app, "gitlab:acme/demo", 127), 1, "127 is not 1270");
+        let late = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-2".into(), late.clone());
+        let mut started_late = vm("kiln-1-2", 0, "busy");
+        (started_late.run, started_late.job_id) = (None, Some("555".into()));
+        app.vms.lock().unwrap().extend([vm("kiln-1-0", 127, "busy"), vm("kiln-1-1", 1270, "busy"), started_late]);
+        assert_eq!(kill_pipeline(&app, "gitlab:acme/demo", 127, &["555".into()]), 2, "127 is not 1270; 555 started since the last poll");
+        assert!(tokio::time::timeout(Duration::from_millis(50), late.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
     }
@@ -2687,13 +2746,20 @@ mod tests {
         };
         let say = |v, why: &str| Verdict { v, why: why.into() };
         let mut ok = vm();
-        apply_verdict(&mut ok, &say(Call::Ok, ""));
+        ok.job_id = Some("7".into());
+        apply_verdict(&mut ok, "7", &say(Call::Ok, ""));
         assert_eq!((ok.cache, ok.note), (CacheUse::Read, None));
+        assert_eq!(ok.verdict, Some(("ok".into(), "7".into())));
+        // A verdict for another id than the bound one is not recorded.
+        let mut other = vm();
+        other.job_id = Some("8".into());
+        apply_verdict(&mut other, "7", &say(Call::Ok, ""));
+        assert_eq!(other.verdict, None);
         let mut cold = vm();
-        apply_verdict(&mut cold, &say(Call::Cold, "tag or release"));
+        apply_verdict(&mut cold, "7", &say(Call::Cold, "tag or release"));
         assert_eq!((cold.cache, cold.cache_note.as_deref(), cold.note), (CacheUse::Discarded, Some("cache not saved: cold run"), None));
         let mut no = vm();
-        apply_verdict(&mut no, &say(Call::Refuse, "unknown job source"));
+        apply_verdict(&mut no, "7", &say(Call::Refuse, "unknown job source"));
         assert_eq!((no.cache, no.note.as_deref()), (CacheUse::Discarded, Some("refused: unknown job source")));
     }
 
@@ -2883,6 +2949,7 @@ mod tests {
             result: None,
             job_url: None,
             job_id: None,
+            verdict: None,
             starts: 0,
             queued_at: None,
             started: 0,
@@ -3987,6 +4054,7 @@ mod tests {
             result: Some("Succeeded".into()),
             job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
             job_id: None,
+            verdict: None,
             starts: 0,
             queued_at: Some(1_790_000_000),
             started: 1_790_000_010,
@@ -4172,6 +4240,46 @@ mod tests {
             cache: CacheUse::Read,
             ..vm(id, State::Done, None)
         });
+    }
+
+    /// A gated forge's cache commit needs the host's own ok for exactly the bound job (R2b section 4).
+    #[tokio::test]
+    async fn a_gated_forge_commits_only_after_an_ok_verdict_for_the_bound_job() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let m = Mock::github().await;
+        let app = mock::app("gated-verdict", &m, crate::Config::default());
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        app.forges.insert(cfg.clone(), Forge::GitLab(Box::new(crate::forge::gitlab::GitLab::new(&cfg, &app.data).unwrap())));
+        let why = |id: &'static str, verdict: Option<(&'static str, &'static str)>| {
+            let app = app.clone();
+            async move {
+                app.vms.lock().unwrap().push(Vm {
+                    repo: "gl:acme/demo".into(),
+                    job: Some("build".into()),
+                    result: Some("Succeeded".into()),
+                    job_id: Some("42".into()),
+                    verdict: verdict.map(|(c, j)| (c.into(), j.into())),
+                    starts: 1,
+                    cache: CacheUse::Read,
+                    ..vm(id, State::Done, None)
+                });
+                finish_cache(&app, id, "gl:acme/demo", &app.data.join("vms").join(id), true).await;
+                app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap().cache_note.unwrap_or_default()
+            }
+        };
+        let none = "cache not saved: the host recorded no ok verdict for this job";
+        assert_eq!(why("g1", None).await, none, "the gate never ran");
+        assert_eq!(why("g2", Some(("cold", "42"))).await, none, "cold never commits");
+        assert_eq!(why("g3", Some(("ok", "41"))).await, none, "an ok for another job");
+        assert_eq!(why("g4", Some(("refuse", "42"))).await, none);
     }
 
     #[tokio::test]
