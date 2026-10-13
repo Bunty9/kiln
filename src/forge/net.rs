@@ -109,24 +109,30 @@ pub fn keep(addrs: impl Iterator<Item = SocketAddr>, mode: Mode, own: &[IpAddr])
     addrs.filter(|a| mode.permits(a.ip(), own)).collect()
 }
 
-/// The IPv4 `ip:port` pairs a filtered job VM of an `internal` forge may reach: the forge URL's
-/// host resolved now, through the same address rules as the forge client. Fails if nothing it
-/// resolves to is permitted (loopback, host-own, link-local...) or there is no IPv4 address
-/// (job VMs have IPv6 off).
-pub async fn resolve_forge(url: &str, network: Network) -> Result<Vec<SocketAddr>> {
+/// The IPv4 `ip:port` a filtered job VM of an `internal` forge may reach, as one nft accept rule.
+/// Only an IPv4 literal in the forge url qualifies: a DNS name is never resolved for this, so whoever
+/// controls the name cannot choose where the hole goes (rebinding, a LAN host, the router).
+/// Refused as well: loopback, host-own, link-local and service addresses (the forge client's
+/// rules), slirp4netns's own 10.0.2.0/24 (10.0.2.2 is the host's loopback, 10.0.2.3 its DNS: the
+/// rule would reach the dashboard port) and port 25 (the rule sits ahead of the SMTP drop).
+pub fn resolve_forge(url: &str, network: Network) -> Result<Vec<SocketAddr>> {
     let u = check_forge_url(url, network)?;
-    let host = u.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string();
     let port = u.port_or_known_default().unwrap_or(443);
-    let found = tokio::net::lookup_host((host.as_str(), port)).await?;
-    let mut out: Vec<_> = keep(found, Mode::from(network), &own_addrs()?).into_iter().filter(SocketAddr::is_ipv4).collect();
-    out.sort();
-    out.dedup();
-    if out.is_empty() {
+    let Some(IpAddr::V4(ip)) = literal_ip(&u) else {
         bail!(
-            "forge {host} resolves to no address a job VM may reach: loopback, host-own, link-local and IPv6-only forges are not supported (bind the forge to a non-loopback IPv4 address)"
+            "filtered egress opens a private forge by IP address only: write the forge url with its IPv4 address (a DNS name could be pointed anywhere) or use egress open"
         );
+    };
+    if ip.octets()[..3] == [10, 0, 2] {
+        bail!("forge {ip} is inside the job VM's own network (10.0.2.0/24: the host's loopback and DNS): use another address");
     }
-    Ok(out)
+    if port == 25 {
+        bail!("forge port 25 is outbound SMTP, which job VMs never reach");
+    }
+    if !Mode::Internal.permits(ip.into(), &own_addrs()?) {
+        bail!("forge {ip} is not reachable by design: loopback, host-own, link-local and other non-routable addresses are refused");
+    }
+    Ok(vec![SocketAddr::new(ip.into(), port)])
 }
 
 /// DNS for guarded requests: system resolution, then only addresses `mode` permits. The

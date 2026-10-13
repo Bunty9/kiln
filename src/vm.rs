@@ -643,8 +643,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (forge, rr) = forge_for(app, repo)?;
     // Filtered: the VM's private forge, resolved now (every launch) and refused before a runner is minted.
-    let allow =
-        if v.egress == "filtered" { forge_allow(&crate::forge::effective(&cfg.forges, &cfg.repos), &rr.forge).await? } else { vec![] };
+    let allow = if v.egress == "filtered" { forge_allow(&crate::forge::effective(&cfg.forges, &cfg.repos), &rr.forge)? } else { vec![] };
     let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
     let runner_id = reg.runner_id;
     {
@@ -1805,7 +1804,7 @@ fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> C
 /// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
 ///
-/// `forge`: the resolved `ip:port` of the VM's private forge (see `net::resolve_forge`), accepted
+/// `forge`: the resolved `ip:port` of the VM's private forge (an IP literal, see `net::resolve_forge`), accepted
 /// ahead of the private-range drop. Nothing else private opens. Opening an address opens every
 /// site behind it (a reverse proxy's vhosts).
 fn egress_nft(mirror: bool, forge: &[std::net::SocketAddr]) -> String {
@@ -1885,13 +1884,13 @@ fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<Str
     a
 }
 
-/// The `ip:port` a filtered VM of `forge` may reach besides the internet: its resolved address
-/// when the forge is `network: internal`, nothing otherwise. Errors when no address is permitted.
-async fn forge_allow(forges: &[crate::forge::ForgeCfg], forge: &crate::forge::ForgeId) -> Result<Vec<std::net::SocketAddr>> {
+/// The `ip:port` a filtered VM of `forge` may reach besides the internet: its address
+/// when the forge is `network: internal`, nothing otherwise. Errors when its url is not a permitted IPv4 literal.
+fn forge_allow(forges: &[crate::forge::ForgeCfg], forge: &crate::forge::ForgeId) -> Result<Vec<std::net::SocketAddr>> {
     match forges.iter().find(|f| &f.id == forge) {
         Some(f) if f.network == Some(crate::forge::Network::Internal) => {
             let url = f.url.as_deref().context("forge has no url")?;
-            crate::forge::net::resolve_forge(url, crate::forge::Network::Internal).await
+            crate::forge::net::resolve_forge(url, crate::forge::Network::Internal)
         }
         _ => Ok(vec![]),
     }
@@ -2015,12 +2014,15 @@ async fn egress_probe(app: &App) -> Result<()> {
     let nft = dir.join("egress.nft");
     // Every private forge that resolves is opened for the probe; one that does not is refused at its own launches.
     let forges = crate::forge::effective(&cfg.forges, &cfg.repos);
-    let mut allow = vec![];
-    for f in forges.iter().filter(|f| f.network == Some(crate::forge::Network::Internal)) {
-        if let Some(a) = f.url.as_deref() {
-            allow.extend(crate::forge::net::resolve_forge(a, crate::forge::Network::Internal).await.unwrap_or_default());
+    // A refused forge is left out of both the rule and the checks (its own launches fail).
+    let (mut allow, mut forges) = (vec![], forges);
+    forges.retain(|f| {
+        if f.network != Some(crate::forge::Network::Internal) {
+            return true;
         }
-    }
+        let ok = f.url.as_deref().map(|a| crate::forge::net::resolve_forge(a, crate::forge::Network::Internal));
+        ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok())
+    });
     let targets = probe_targets(&forges);
     tokio::fs::write(&nft, egress_nft(cfg.docker_mirror, &allow)).await?;
     let mut cmd = Command::new("rootlesskit");
@@ -3121,27 +3123,57 @@ mod tests {
         assert!(!egress_nft(false, &[]).contains("100.64.0.7"));
     }
 
-    #[tokio::test]
-    async fn forge_allow_resolves_internal_forges_only() {
+    #[test]
+    fn forge_allow_resolves_internal_forges_only() {
         let fs = forges(
             r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"http://100.64.0.7:8080","network":"internal"},
                 {"id":"pub","kind":"gitlab","url":"https://gitlab.example.org"}]"#,
         );
         let id = |s: &str| crate::forge::ForgeId::new(s).unwrap();
-        assert_eq!(forge_allow(&fs, &id("gl")).await.unwrap(), ["100.64.0.7:8080".parse().unwrap()]);
-        assert!(forge_allow(&fs, &id("pub")).await.unwrap().is_empty() && forge_allow(&fs, &id("github")).await.unwrap().is_empty());
+        assert_eq!(forge_allow(&fs, &id("gl")).unwrap(), ["100.64.0.7:8080".parse().unwrap()]);
+        // an internal forge written as a name is refused (never resolved), also for the probe's own launches
+        let named = forges(r#"[{"id":"gl","kind":"gitlab","url":"http://gl.example.org","network":"internal"}]"#);
+        assert!(forge_allow(&named, &id("gl")).is_err());
+        assert!(forge_allow(&fs, &id("pub")).unwrap().is_empty() && forge_allow(&fs, &id("github")).unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn resolve_forge_refuses_loopback_and_host_own() {
+    #[test]
+    fn resolve_forge_is_ip_literal_and_refuses_host_reaching_addresses() {
         use crate::forge::{Network::Internal, net::resolve_forge};
-        assert!(resolve_forge("http://127.0.0.1:3000", Internal).await.is_err());
-        assert!(resolve_forge("http://localhost:3000", Internal).await.unwrap_err().to_string().contains("non-loopback"));
+        let no = |u: &str| assert!(resolve_forge(u, Internal).is_err(), "{u}");
+        // loopback, unspecified, link-local/metadata, service addresses
+        for u in ["http://127.0.0.1:3000", "http://0.0.0.0:3000", "http://169.254.169.254", "http://100.100.100.200", "http://[::1]:3000"] {
+            no(u);
+        }
+        // slirp4netns's own network: 10.0.2.2 is the host's loopback, 10.0.2.3 the DNS, any port
+        for u in ["http://10.0.2.2:5000", "http://10.0.2.2:8080", "http://10.0.2.3:53", "http://10.0.2.15:22", "http://10.0.2.1"] {
+            no(u);
+        }
+        // IPv6 and IPv4-mapped forms, names (never resolved), SMTP
+        for u in [
+            "http://[::ffff:10.0.2.2]:80",
+            "http://[fd00::5]:80",
+            "http://localhost:3000",
+            "http://gl.example.org",
+            "http://192.168.7.7:25",
+        ] {
+            no(u);
+        }
         let own = crate::forge::net::own_addrs().unwrap().into_iter().find(|a| a.is_ipv4() && !a.is_loopback());
         if let Some(ip) = own {
-            assert!(resolve_forge(&format!("http://{ip}:3000"), Internal).await.is_err());
+            no(&format!("http://{ip}:3000"));
         }
-        assert_eq!(resolve_forge("http://192.168.7.7:8080", Internal).await.unwrap(), ["192.168.7.7:8080".parse().unwrap()]);
+        assert_eq!(resolve_forge("http://192.168.7.7:8080", Internal).unwrap(), ["192.168.7.7:8080".parse().unwrap()]);
+        assert_eq!(resolve_forge("http://10.0.3.2", Internal).unwrap(), ["10.0.3.2:80".parse().unwrap()]);
+    }
+
+    /// Whatever the guest resolves the forge name to, the rule is by IP: nothing but the checked
+    /// `ip:port` is opened, and the private-range drop still follows it.
+    #[test]
+    fn nft_rule_is_by_address_only() {
+        let n = egress_nft(true, &["192.168.7.7:8080".parse().unwrap()]);
+        assert_eq!(n.matches("accept").count(), egress_nft(true, &[]).matches("accept").count() + 1);
+        assert!(!n.contains("saddr") && n.contains("ip daddr 192.168.7.7 tcp dport 8080 accept") && n.contains("10.0.0.0/8"));
     }
 
     #[test]
