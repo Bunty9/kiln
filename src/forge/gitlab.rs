@@ -25,13 +25,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
-/// GitLab has no workflow list (a project has one `.gitlab-ci.yml`) and no live step list.
-pub const CAPS: Caps = Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, workflows: false, live_steps: false };
+/// GitLab has no workflow list (a project has one `.gitlab-ci.yml`) and no live step list. Rerun,
+/// cancel and run-pipeline are POSTs the runner scopes cannot make: they need `api` (`caps`).
+const REQUIRED_SCOPES: [&str; 3] = ["create_runner", "manage_runner", "read_api"];
+/// How long the token's scopes are trusted before `refresh` reads them again.
+const INFO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 pub const LATER: &str = "GitLab runners arrive in a later version";
 /// No VM launches for GitLab until GL-6 (the guest's `run_gitlab` and `kiln-exec`) lands: a VM
 /// booted now would have nothing that reads its secret. Demand reports the queue, fork jobs and
 /// claims but no launchable jobs, and `register` refuses (warm VMs ask for a runner without demand).
-const LAUNCH_READY: bool = false;
+pub const LAUNCH_READY: bool = false;
 /// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
 const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long `cache_trust` waits for a job to finish: the VM powers off a moment before GitLab records the result.
@@ -89,6 +92,13 @@ pub struct GitLab {
     mine: Mutex<HashSet<u64>>,
     /// (project, pipeline, ref) -> (fork, MR source branch). Only answers, never lookup errors.
     origins: Mutex<HashMap<(u64, u64, String), Origin>>,
+    /// The token's scopes and expiry (`refresh`, `check`); none until read, and again after a new token.
+    info: Mutex<Option<TokenInfo>>,
+    /// The token user's login, from the last `check`.
+    login: Mutex<Option<String>>,
+    /// (repo key, job id) -> (project id, finished job): the one API read `job_result` makes, which the
+    /// `cache_trust` call right after it takes instead of asking again.
+    finished: Mutex<HashMap<(String, u64), (u64, Value)>>,
     /// Tests dial a mock on loopback, which the address guard refuses.
     #[cfg(test)]
     unguarded: bool,
@@ -106,11 +116,38 @@ impl Resp {
     }
 }
 
+/// What `GET /personal_access_tokens/self` said, when.
+struct TokenInfo {
+    scopes: Vec<String>,
+    expires: Option<String>,
+    at: std::time::Instant,
+}
+
 /// What pausing a runner found.
 enum Hold {
     Gone,
     /// The ids of the running jobs it holds.
     Held(Vec<String>),
+}
+
+/// GitLab's access levels, by name.
+fn role_name(level: u64) -> &'static str {
+    match level {
+        50.. => "Owner",
+        40.. => "Maintainer",
+        30.. => "Developer",
+        20.. => "Reporter",
+        10.. => "Guest",
+        _ => "no access",
+    }
+}
+
+/// Why a role below Maintainer fails, with the other causes of the same 403 (SP-6).
+fn low_role(level: u64) -> String {
+    format!(
+        "{} is below Maintainer, which creating a project runner needs; also check the instance setting valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) and the project's runner registration toggle",
+        role_name(level)
+    )
 }
 
 /// GitLab's own `message` or `error`, cut and stripped of control characters (it never echoes the credential).
@@ -142,6 +179,9 @@ impl GitLab {
             projects: Mutex::default(),
             mine: Mutex::default(),
             origins: Mutex::default(),
+            info: Mutex::default(),
+            login: Mutex::default(),
+            finished: Mutex::default(),
             #[cfg(test)]
             unguarded: false,
             id,
@@ -150,13 +190,177 @@ impl GitLab {
         Ok(g)
     }
 
-    /// Re-reads the credential (the dashboard writes the file; the environment is fixed).
+    /// A forge whose API is the mock on loopback (`base` replaces the configured origin), for tests elsewhere.
+    #[cfg(test)]
+    pub fn for_mock(cfg: &ForgeCfg, data: &Path, base: &str, token: &str) -> Self {
+        let mut g = Self::new(cfg, data).unwrap();
+        g.url = base.into();
+        g.client = net::base().build().unwrap();
+        g.unguarded = true;
+        g.settle = std::time::Duration::ZERO;
+        *g.token.write().unwrap() = token.into();
+        g
+    }
+
+    /// Re-reads the credential (the dashboard writes the file; the environment is fixed). A new
+    /// token has new scopes: what was read for the old one is forgotten.
     pub fn load_token(&self, data: &Path) {
         let t = match self.cred {
             Credential::File => read_token_file(data, &self.id).unwrap_or_default(),
             Credential::Env => std::env::var(env_name(&self.id)).unwrap_or_default(),
         };
-        *self.token.write().unwrap() = t.trim().to_string();
+        let t = t.trim().to_string();
+        if *self.token.read().unwrap() != t {
+            *self.info.lock().unwrap() = None;
+            *self.login.lock().unwrap() = None;
+            *self.token.write().unwrap() = t;
+        }
+    }
+
+    /// A forge like this one holding another token, to try it before it is saved. Nothing is shared.
+    pub fn candidate(&self, token: &str) -> GitLab {
+        GitLab {
+            id: self.id.clone(),
+            url: self.url.clone(),
+            mode: self.mode,
+            client: self.client.clone(),
+            cred: self.cred,
+            token_file: self.token_file.clone(),
+            token: RwLock::new(token.trim().to_string()),
+            install: self.install.clone(),
+            per_page: self.per_page,
+            settle: self.settle,
+            paused: Mutex::new(0),
+            poll: self.poll,
+            defaults: Mutex::default(),
+            projects: Mutex::default(),
+            mine: Mutex::default(),
+            origins: Mutex::default(),
+            info: Mutex::default(),
+            login: Mutex::default(),
+            finished: Mutex::default(),
+            #[cfg(test)]
+            unguarded: self.unguarded,
+        }
+    }
+
+    /// Takes over what a `candidate` that was just saved as this forge's token has read.
+    pub fn adopt(&self, c: &GitLab) {
+        *self.info.lock().unwrap() = c.info.lock().unwrap().take();
+        *self.login.lock().unwrap() = c.login.lock().unwrap().take();
+    }
+
+    /// Rerun, cancel and run-pipeline need the `api` scope, which the least-privilege token
+    /// (create_runner, manage_runner, read_api) does not have: without it (or before the scopes
+    /// are known) the dashboard hides those controls.
+    pub fn caps(&self) -> Caps {
+        let api = self.info.lock().unwrap().as_ref().is_some_and(|i| i.scopes.iter().any(|s| s == "api"));
+        Caps { rerun: api, rerun_failed: api, cancel: api, dispatch: api, workflows: false, live_steps: false }
+    }
+
+    /// Reads the token's scopes and expiry now and then (it is the tick's call, like Gitea's version).
+    pub async fn refresh(&self) {
+        if !self.has_credential() || self.info.lock().unwrap().as_ref().is_some_and(|i| i.at.elapsed() < INFO_TTL) {
+            return;
+        }
+        if let Err(e) = self.token_info().await {
+            tracing::debug!("forge {}: token check: {e:#}", self.id.as_str());
+        }
+    }
+
+    /// `GET /personal_access_tokens/self`, remembered. An inactive token reads as an error.
+    async fn token_info(&self) -> Result<(Vec<String>, Option<String>)> {
+        let r = self.get("personal_access_tokens/self").await?;
+        if r.status != 200 {
+            return Err(self.fail("token check", &r));
+        }
+        let v = r.json()?;
+        if v["active"] != true || v["revoked"] == true {
+            bail!("the token is revoked or expired");
+        }
+        let scopes: Vec<String> = v["scopes"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+        let expires = v["expires_at"].as_str().map(|e| e.chars().take(10).collect::<String>());
+        *self.info.lock().unwrap() = Some(TokenInfo { scopes: scopes.clone(), expires: expires.clone(), at: std::time::Instant::now() });
+        Ok((scopes, expires))
+    }
+
+    /// The setup check behind the dashboard's Test and token save: version, who the token is, its
+    /// scopes and expiry, and the role on each served project. No runner is created. `problems`
+    /// are what stops kiln; a repo's `ok` is its own role.
+    pub async fn check(&self, repos: &[RepoRef]) -> Value {
+        let mut out = json!({ "version": null, "login": null, "scopes": [], "expires": null, "missing": [], "full_api": false, "repos": [], "problems": [] });
+        let mut problems: Vec<String> = vec![];
+        // Unreachable or rejected: the rest would only repeat it.
+        let mut stop = false;
+        if let Some(why) = self.health() {
+            problems.push(why);
+            stop = true;
+        }
+        if !stop {
+            match self.get("version").await {
+                Ok(r) if r.status == 200 => {
+                    let v = r.json().ok().and_then(|v| v["version"].as_str().map(String::from)).unwrap_or_default();
+                    if v.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_none_or(|m| m < 16) {
+                        problems.push(format!("GitLab version {v:?}: kiln needs GitLab 16.0 or newer"));
+                    }
+                    out["version"] = v.chars().take(40).collect::<String>().into();
+                }
+                Ok(r) => problems.push(self.fail("version", &r).to_string()),
+                Err(e) => {
+                    problems.push(format!("{e:#}"));
+                    stop = true;
+                }
+            }
+        }
+        if !stop {
+            match self.get("user").await {
+                Ok(r) if r.status == 200 => {
+                    let login = r.json().ok().and_then(|v| v["username"].as_str().map(|u| u.chars().take(100).collect::<String>()));
+                    *self.login.lock().unwrap() = login.clone();
+                    out["login"] = login.into();
+                }
+                Ok(r) if r.status == 401 => {
+                    problems.push("GitLab rejected the token (expired, revoked or wrong)".into());
+                    stop = true;
+                }
+                Ok(r) => problems.push(self.fail("user lookup", &r).to_string()),
+                Err(e) => {
+                    problems.push(format!("{e:#}"));
+                    stop = true;
+                }
+            }
+        }
+        if !stop {
+            match self.token_info().await {
+                Ok((scopes, expires)) => {
+                    let full = scopes.iter().any(|s| s == "api");
+                    let missing: Vec<&str> = REQUIRED_SCOPES.into_iter().filter(|s| !full && !scopes.iter().any(|x| x == s)).collect();
+                    if !missing.is_empty() {
+                        let m: Vec<String> = missing.iter().map(|s| format!("`{s}`")).collect();
+                        problems.push(format!(
+                            "the token lacks {}: create it again with create_runner, manage_runner and read_api",
+                            m.join(", ")
+                        ));
+                    }
+                    out["scopes"] = json!(scopes);
+                    out["expires"] = json!(expires);
+                    out["missing"] = json!(missing);
+                    out["full_api"] = full.into();
+                }
+                Err(e) => problems.push(format!("{e:#}")),
+            }
+            for repo in repos {
+                let row = match self.project_role(&repo.path).await {
+                    Ok(l) if l >= 40 => json!({ "repo": repo.key(), "path": repo.path, "role": role_name(l), "ok": true, "message": "" }),
+                    Ok(l) => json!({ "repo": repo.key(), "path": repo.path, "role": role_name(l), "ok": false, "message": low_role(l) }),
+                    Err(e) => json!({ "repo": repo.key(), "path": repo.path, "role": null, "ok": false, "message": format!("{e:#}") }),
+                };
+                out["repos"].as_array_mut().unwrap().push(row);
+            }
+        }
+        out["ok"] = (problems.is_empty() && out["repos"].as_array().unwrap().iter().all(|r| r["ok"] == true)).into();
+        out["problems"] = json!(problems);
+        out
     }
 
     pub fn id(&self) -> ForgeId {
@@ -177,7 +381,8 @@ impl GitLab {
             (true, Credential::File) => "file",
             (true, Credential::Env) => "env",
         };
-        json!({ "source": source, "expires": null })
+        let i = self.info.lock().unwrap();
+        json!({ "source": source, "scopes": i.as_ref().map(|i| &i.scopes), "expires": i.as_ref().and_then(|i| i.expires.as_ref()), "login": *self.login.lock().unwrap() })
     }
 
     /// What stops this forge polling at all: no credential, or GitLab asked us to slow down.
@@ -388,7 +593,7 @@ impl GitLab {
             let n = format!("{name} {}", repo.path);
             out.push(match self.project_role(&repo.path).await {
                 Ok(l) if l >= 40 => (n, true, "Maintainer or above. If registering a runner still gets 403, check the instance setting valid_runner_registrars and the project's runner registration toggle".into()),
-                Ok(l) => (n, false, format!("access level {l} is below Maintainer, which creating a project runner needs; also check the instance setting valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) and the project's runner registration toggle")),
+                Ok(l) => (n, false, low_role(l)),
                 Err(e) => (n, false, format!("{e:#}")),
             });
         }
@@ -595,7 +800,15 @@ impl GitLab {
     }
 
     async fn origin_lookup(&self, pid: u64, j: &Value) -> Result<Origin> {
-        if j["pipeline"]["id"].as_u64().is_none() || !SOURCES.contains(&j["pipeline"]["source"].as_str().context("no pipeline source")?) {
+        // `pipeline` (multi-project downstream) is refused by the verdict like Gitea's workflow_run (R2b B-M1): its ref is a
+        // plain branch whatever the upstream was, but the variables come from a trigger job in another
+        // project that kiln never inspects. `parent_pipeline` (a child) is allowed, through the ref rules
+        // below only: a child of an MR pipeline keeps `refs/merge-requests/<iid>/head` (so the fork and MR
+        // checks apply), and a child on a branch ref is this project's own branch pipeline. It is never a
+        // cache writer (`cache_trust` only lets source `push` write). Residual: a child of a downstream
+        // pipeline looks like a child on a branch.
+        let source = j["pipeline"]["source"].as_str().context("no pipeline source")?;
+        if j["pipeline"]["id"].as_u64().is_none() || !SOURCES.contains(&source) {
             return Ok((true, None));
         }
         let r = j["ref"].as_str().filter(|r| !r.is_empty()).context("no ref")?;
@@ -683,10 +896,52 @@ impl GitLab {
             ours: j["pipeline"]["project_id"].as_u64() == Some(pid),
             // Not `origin`: that counts a failed lookup as a fork, this one must say it failed.
             fork: self.origin_lookup(pid, &j).await?.0,
+            downstream: j["pipeline"]["source"] == "pipeline",
             unknown_source: !SOURCES.contains(&j["pipeline"]["source"].as_str().unwrap_or("")),
             tag: j["tag"] == true,
+            train: mr_iid(j["ref"].as_str().unwrap_or("")).is_some() && j["ref"].as_str().is_some_and(|r| r.ends_with("/train")),
             ..Default::default()
         })
+    }
+
+    /// The job, once GitLab has recorded its end (the VM powers off a moment before): up to `TRUST_LOOKS`
+    /// looks, then whatever status it has. A finished job is stashed for the other caller.
+    async fn finished_job(&self, repo: &RepoRef, id: &str) -> Result<(u64, Value)> {
+        let key = (repo.key(), id.parse().unwrap_or(0));
+        if let Some(f) = self.finished.lock().unwrap().remove(&key) {
+            return Ok(f);
+        }
+        let (pid, mut j) = self.job(repo, id).await?;
+        for _ in 1..TRUST_LOOKS {
+            if stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(self.poll).await;
+            j = self.job(repo, id).await?.1;
+        }
+        if j["pipeline"]["project_id"].as_u64() != Some(pid) {
+            bail!("job {id} is not for {}", repo.key());
+        }
+        Ok((pid, j))
+    }
+
+    /// The VM's job result (R2b section 4), from the project's job API only, never a console line: `Succeeded`
+    /// only for status `success`, `Failed` for any other end, None while unfinished or when the job's runner
+    /// is not `runner_id` (a missing runner field counts as a mismatch). Called before the runner is deleted,
+    /// which nulls the job's runner. The read is kept for `cache_trust`.
+    pub async fn job_result(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<Option<&'static str>> {
+        let (pid, j) = self.finished_job(repo, job_id).await?;
+        let done = stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed;
+        let ours = j["runner"]["id"].as_u64() == Some(runner_id);
+        if done {
+            let mut f = self.finished.lock().unwrap();
+            // ponytail: wholesale reset keeps this bounded; the entry is normally taken within seconds.
+            if f.len() >= 64 {
+                f.clear();
+            }
+            f.insert((repo.key(), job_id.parse().unwrap_or(0)), (pid, j.clone()));
+        }
+        Ok((done && ours).then(|| if j["status"] == "success" { "Succeeded" } else { "Failed" }))
     }
 
     /// (event, branch, default branch, conclusion) of the job that ran, for `cache_verdict`. The
@@ -694,17 +949,7 @@ impl GitLab {
     /// `fork`, a tag `tag`, any other source is itself (so `pipeline`, `web`, ... never write). A
     /// writer branch must also be protected. The conclusion is `success` or GitLab's own status.
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
-        let (pid, mut j) = self.job(&job.repo, &job.id).await?;
-        for _ in 1..TRUST_LOOKS {
-            if stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed {
-                break;
-            }
-            tokio::time::sleep(self.poll).await;
-            j = self.job(&job.repo, &job.id).await?.1;
-        }
-        if j["pipeline"]["project_id"].as_u64() != Some(pid) {
-            bail!("job {} is not for {}", job.id, job.repo.key());
-        }
+        let (pid, j) = self.finished_job(&job.repo, &job.id).await?;
         let default = self.default_branch(&job.repo.path).await?;
         let (fork, mr_branch) = self.origin_lookup(pid, &j).await?;
         let (r, source) = (j["ref"].as_str().unwrap_or(""), j["pipeline"]["source"].as_str().unwrap_or(""));
@@ -829,6 +1074,18 @@ impl GitLab {
     /// and its rerun-failed. ponytail: no `play` of manual jobs; add when a "Run" button asks for it.
     pub async fn rerun(&self, repo: &RepoRef, id: u64, _failed_only: bool) -> Result<()> {
         self.act(repo, "retry", &format!("pipelines/{id}/retry"), None).await
+    }
+
+    /// Ids of the first 100 jobs of a pipeline, so a cancel can also stop VMs whose job started since the last poll.
+    pub async fn pipeline_job_ids(&self, repo: &RepoRef, id: u64) -> Result<Vec<String>> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let r = self.get(&format!("projects/{pid}/pipelines/{id}/jobs?per_page=100")).await?;
+        if r.status != 200 {
+            return Err(self.fail("pipeline jobs", &r));
+        }
+        let Value::Array(a) = r.json()? else { bail!("GitLab pipeline job list is not an array") };
+        Ok(a.iter().filter_map(|j| j["id"].as_u64()).map(|n| n.to_string()).collect())
     }
 
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
@@ -1447,7 +1704,7 @@ mod tests {
         let m = Mock::start().await;
         m.ok("projects/acme%2Fdemo", "project.json");
         m.route(&jobs_path(5, None), 404, vec![], fx("jobs_404.json"));
-        let e = gl("stale", &m).demand_for(&repo(), "kiln", 4, 16).await.err().unwrap();
+        let e = gl("stale-demand", &m).demand_for(&repo(), "kiln", 4, 16).await.err().unwrap();
         assert!(e.to_string().contains("no jobs endpoint"), "{e:#}");
         assert_eq!((m.count("projects/acme%2Fdemo"), m.count("/jobs?")), (2, 2));
     }
@@ -1867,7 +2124,11 @@ mod tests {
             ("tag", with(3, "v1", "push", |j| j["tag"] = true.into()), Call::Cold),
             ("MR from a fork", with(4, "refs/merge-requests/3/head", "merge_request_event", |_| {}), Call::Refuse),
             ("same-project MR", with(5, "refs/merge-requests/2/head", "merge_request_event", |_| {}), Call::Ok),
-            ("source pipeline", with(6, "ci", "pipeline", |_| {}), Call::Ok),
+            ("multi-project downstream", with(6, "ci", "pipeline", |_| {}), Call::Refuse),
+            ("child on a branch", with(16, "ci", "parent_pipeline", |_| {}), Call::Ok),
+            ("child of a same-project MR", with(17, "refs/merge-requests/2/head", "parent_pipeline", |_| {}), Call::Ok),
+            ("merge train", with(18, "refs/merge-requests/2/train", "merge_request_event", |_| {}), Call::Cold),
+            ("merged results", with(19, "refs/merge-requests/2/merge", "merge_request_event", |_| {}), Call::Ok),
             ("child of a fork MR", with(7, "refs/merge-requests/3/head", "parent_pipeline", |_| {}), Call::Refuse),
             ("unknown source", with(8, "ci", "external_pull_request_event", |_| {}), Call::Refuse),
             ("no source", with(9, "ci", "push", |j| j["pipeline"]["source"] = Value::Null), Call::Refuse),
@@ -1994,7 +2255,14 @@ mod tests {
                 &[],
                 t("fork", "refs/merge-requests/3/head", "success"),
             ),
-            ("source pipeline", with(10, "main", "pipeline", |_| {}), &[], t("pipeline", "main", "success")),
+            ("downstream pipeline", with(10, "main", "pipeline", |_| {}), &[], t("pipeline", "main", "success")),
+            ("child on the default branch", with(13, "main", "parent_pipeline", |_| {}), &[], t("parent_pipeline", "main", "success")),
+            (
+                "merge train",
+                with(14, "refs/merge-requests/2/train", "merge_request_event", |_| {}),
+                &[],
+                t("merge_request_event", "feat", "success"),
+            ),
             ("web", with(11, "main", "web", |_| {}), &[], t("web", "main", "success")),
             ("schedule", with(12, "main", "schedule", |_| {}), &[], t("schedule", "main", "success")),
         ];
@@ -2036,6 +2304,89 @@ mod tests {
         serve_job(&m, &b);
         m.route("projects/1/repository/branches/feat", 500, vec![], "{}".into());
         assert!(trust(&g, &b, &["feat"]).await.is_err(), "protected lookup failed");
+    }
+
+    /// The job result is the project's job API alone (R2b section 4): success only, on the VM's own runner.
+    #[tokio::test]
+    async fn job_result_comes_from_the_job_api_for_the_vms_runner() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let mut g = gl("result", &m);
+        g.poll = std::time::Duration::ZERO;
+        let id = |j: &Value| j["id"].to_string();
+        let on = |n: u64, runner: Value, f: &dyn Fn(&mut Value)| {
+            with(n, "main", "push", |j| {
+                j["runner"] = runner;
+                f(j)
+            })
+        };
+        let cases: Vec<(&str, Value, Option<&str>)> = vec![
+            ("success", on(1, json!({"id": 79}), &|_| {}), Some("Succeeded")),
+            ("failed", on(2, json!({"id": 79}), &|j| j["status"] = "failed".into()), Some("Failed")),
+            ("canceled", on(3, json!({"id": 79}), &|j| j["status"] = "canceled".into()), Some("Failed")),
+            ("another runner", on(4, json!({"id": 80}), &|_| {}), None),
+            ("runner nulled", on(5, Value::Null, &|_| {}), None),
+            ("runner without an id", on(6, json!({"description": "x"}), &|_| {}), None),
+            ("never finishes", on(7, json!({"id": 79}), &|j| j["status"] = "running".into()), None),
+        ];
+        for (name, j, want) in &cases {
+            serve_job(&m, j);
+            assert_eq!(g.job_result(&repo(), &id(j), 79).await.unwrap(), *want, "{name}");
+        }
+        // A job of another project, or one the API cannot read, is an error, never a result.
+        let other = with(8, "main", "push", |j| j["pipeline"]["project_id"] = 2.into());
+        serve_job(&m, &other);
+        assert!(g.job_result(&repo(), &id(&other), 79).await.is_err());
+        assert!(g.job_result(&repo(), "999", 79).await.is_err());
+        // The read is shared: the trust call right after makes no second one, and a later call asks again.
+        let j = on(9, json!({"id": 79}), &|_| {});
+        serve_job(&m, &j);
+        assert_eq!(g.job_result(&repo(), &id(&j), 79).await.unwrap(), Some("Succeeded"));
+        assert_eq!(m.count("projects/1/jobs/1009"), 1);
+        assert_eq!(trust(&g, &j, &[]).await.unwrap().3, "success");
+        assert_eq!(m.count("projects/1/jobs/1009"), 1, "cache_trust took the result's read");
+        trust(&g, &j, &[]).await.unwrap();
+        assert_eq!(m.count("projects/1/jobs/1009"), 2);
+    }
+
+    /// R2b B-L2: a restart deletes the runners of the records it finds ended, whatever ended them.
+    #[tokio::test]
+    async fn startup_deletes_the_runners_of_ended_records() {
+        let m = Mock::start().await;
+        m.on("DELETE", "runners/79", 204, String::new());
+        m.on("DELETE", "runners/81", 404, String::new());
+        let app = crate::test_app("retire-ended");
+        app.forges.insert(cfg(SPOOF), super::super::Forge::GitLab(Box::new(gl("retire-ended", &m))));
+        let t = crate::now();
+        let vm = |id: &str, repo: &str, runner: u64, ended: Option<u64>| -> crate::vm::Vm {
+            serde_json::from_value(json!({
+                "id": id, "repo": repo, "runner_id": runner, "state": "lost", "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": ended, "note": null
+            }))
+            .unwrap()
+        };
+        app.vms.lock().unwrap().extend([
+            vm("kiln-1-0", "gl:acme/demo", 79, Some(t - 60)),
+            vm("kiln-1-1", "gl:acme/demo", 80, Some(t - 3 * 86400)), // the orphan sweep's
+            vm("kiln-1-2", "gl:acme/demo", 81, Some(t - 60)),        // already gone: a 404 is fine
+            vm("kiln-1-3", "gl:acme/demo", 82, None),                // not ended
+            vm("kiln-1-4", "acme/demo", 83, Some(t - 60)),           // GitHub is not gated
+        ]);
+        crate::vm::retire_ended(&app).await;
+        let mut got = m.requests();
+        got.sort();
+        assert_eq!(got, ["runners/79", "runners/81"], "only DELETEs, only the ended records of the last day");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_lists_the_pipelines_jobs() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        m.ok("projects/1/pipelines/127/jobs?per_page=100", "pipeline_127_jobs.json");
+        let g = gl("pjobs", &m);
+        assert_eq!(g.pipeline_job_ids(&repo(), 127).await.unwrap(), ["251", "252", "253"]);
+        m.route("projects/1/pipelines/128/jobs?per_page=100", 403, vec![], "{}".into());
+        assert!(g.pipeline_job_ids(&repo(), 128).await.is_err());
     }
 
     #[tokio::test]
@@ -2172,6 +2523,119 @@ mod tests {
         assert!(g.cancel(&repo(), 9).await.is_err());
         assert!(!e.contains(TOKEN));
         assert!(g.workflows(&repo()).await.unwrap().is_empty());
-        assert_eq!(CAPS, Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, workflows: false, live_steps: false });
+    }
+
+    // ---- GL-7: the setup check, and caps that follow the token's scopes ----
+
+    fn serve_check(m: &Mock, scopes: &[&str], role: u64) {
+        m.ok("version", "version.json");
+        m.ok("user", "user.json");
+        let mut pat: Value = serde_json::from_str(&fx("pat_self.json")).unwrap();
+        pat["scopes"] = json!(scopes);
+        m.route("personal_access_tokens/self", 200, vec![], pat.to_string());
+        let mut p: Value = serde_json::from_str(&fx("project.json")).unwrap();
+        p["permissions"]["project_access"]["access_level"] = role.into();
+        m.route("projects/acme%2Fdemo", 200, vec![], p.to_string());
+    }
+
+    #[tokio::test]
+    async fn the_setup_check_names_who_the_token_is_what_it_lacks_and_the_role() {
+        let m = Mock::start().await;
+        serve_check(&m, &["create_runner", "manage_runner", "read_api"], 40);
+        let g = gl("check", &m);
+        let c = g.check(&[repo()]).await;
+        assert_eq!(
+            (c["ok"].clone(), c["login"].clone(), c["expires"].clone()),
+            (json!(true), json!("kiln-bot"), json!("2027-10-11")),
+            "{c}"
+        );
+        assert_eq!(
+            (c["repos"][0]["role"].clone(), c["repos"][0]["ok"].clone(), c["full_api"].clone()),
+            (json!("Maintainer"), json!(true), json!(false))
+        );
+        assert_eq!(c["repos"][0]["repo"], "gl:acme/demo");
+        // A read-only scope set: named, and the repos are still looked at.
+        serve_check(&m, &["read_api"], 40);
+        let c = g.check(&[repo()]).await;
+        let p = c["problems"][0].as_str().unwrap();
+        assert!(c["ok"] == false && p.contains("lacks `create_runner`, `manage_runner`") && !p.contains("`read_api`"), "{c}");
+        // `api` covers all of them, and is reported (the dashboard offers rerun and cancel with it).
+        serve_check(&m, &["api"], 50);
+        let c = g.check(&[repo()]).await;
+        assert!(c["ok"] == true && c["full_api"] == true && c["repos"][0]["role"] == "Owner", "{c}");
+        // A Developer cannot create runners; the 403's other causes ride along.
+        serve_check(&m, &["create_runner", "manage_runner", "read_api"], 30);
+        let c = g.check(&[repo()]).await;
+        let r = &c["repos"][0];
+        assert!(c["ok"] == false && r["role"] == "Developer" && r["ok"] == false, "{c}");
+        let msg = r["message"].as_str().unwrap();
+        assert!(msg.contains("below Maintainer") && msg.contains("valid_runner_registrars") && msg.contains("toggle"), "{msg}");
+        assert!(c["problems"].as_array().unwrap().is_empty(), "a low role is the repo's, not the token's");
+        // A project the token cannot see.
+        m.route("projects/acme%2Fdemo", 404, vec![], fx("project_404.json"));
+        let c = g.check(&[repo()]).await;
+        assert!(c["repos"][0]["message"].as_str().unwrap().contains("not found"), "{c}");
+        assert!(!c.to_string().contains(TOKEN));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_stops_the_check_there() {
+        let m = Mock::start().await;
+        m.ok("version", "version.json");
+        m.route("user", 401, vec![], fx("err_401.json"));
+        let g = gl("check-401", &m);
+        let c = g.check(&[repo()]).await;
+        assert!(c["ok"] == false && c["problems"][0].as_str().unwrap().contains("rejected the token"), "{c}");
+        assert_eq!(c["repos"], json!([]));
+        assert_eq!(m.count("personal_access_tokens"), 0, "nothing after a rejection");
+        // No token at all: said without a request.
+        let m = Mock::start().await;
+        let d = temp("check-none");
+        let g = GitLab::new(&cfg(SPOOF), &d).unwrap();
+        assert!(g.check(&[repo()]).await["problems"][0].as_str().unwrap().contains("no token"));
+        assert!(m.requests().is_empty());
+        // Unreachable: one problem, not one per call.
+        let mut g = gl("check-down", &m);
+        g.url = "http://127.0.0.1:1".into();
+        assert_eq!(g.check(&[repo()]).await["problems"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rerun_cancel_and_run_pipeline_show_only_with_the_api_scope() {
+        let m = Mock::start().await;
+        let none = Caps { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false, live_steps: false };
+        let g = gl("caps", &m);
+        assert_eq!(g.caps(), none, "scopes not read yet: hidden");
+        serve_check(&m, &["create_runner", "manage_runner", "read_api"], 40);
+        g.refresh().await;
+        assert_eq!(g.caps(), none, "the least-privilege token cannot rerun");
+        assert_eq!(g.auth()["scopes"], json!(["create_runner", "manage_runner", "read_api"]));
+        assert_eq!(g.auth()["expires"], "2027-10-11");
+        // Read again only after the TTL.
+        serve_check(&m, &["api"], 40);
+        g.refresh().await;
+        assert_eq!(g.caps(), none);
+        g.info.lock().unwrap().as_mut().unwrap().at -= INFO_TTL + std::time::Duration::from_secs(1);
+        g.refresh().await;
+        assert_eq!(g.caps(), Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, ..none });
+        // A new token's scopes are not the old one's.
+        let d = g.token_file.parent().unwrap().parent().unwrap().to_path_buf();
+        std::fs::write(d.join("forges/gl.token"), "another-token").unwrap();
+        g.load_token(&d);
+        assert_eq!((g.caps(), g.auth()["scopes"].clone()), (none, Value::Null));
+    }
+
+    #[tokio::test]
+    async fn a_candidate_token_is_tried_without_touching_the_saved_one() {
+        let m = Mock::start().await;
+        serve_check(&m, &["api"], 40);
+        let g = gl("candidate", &m);
+        let c = g.candidate("candidate-token");
+        assert!(c.check(&[repo()]).await["ok"] == true);
+        assert!(g.info.lock().unwrap().is_none() && !g.caps().rerun, "the saved token's state is untouched");
+        let seen: Vec<_> = m.log.lock().unwrap().iter().filter_map(|(_, t)| t.clone()).collect();
+        assert!(!seen.is_empty() && seen.iter().all(|t| t == "candidate-token"), "{seen:?}");
+        g.adopt(&c);
+        assert!(g.caps().rerun && g.auth()["login"] == "kiln-bot");
     }
 }

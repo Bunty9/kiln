@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn appends_rolls_over_and_stays_private() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("kiln-test-audit-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-appends_rolls_over_and_stays_private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         record(&d, json!({ "actor": "me@x.com", "path": "/api/config" }));

@@ -123,6 +123,10 @@ pub struct Vm {
     /// ends before `attach_jobs` sees it still blocks the commit.
     #[serde(default, skip_serializing_if = "is_default")]
     pub starts: u32,
+    /// The host's own call on the bound job, (call, job id): `ok`, `cold` or `refuse`. A gated forge's
+    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits (R2b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<(String, String)>,
     /// When GitHub queued the job this VM's runner picked up.
     #[serde(default)]
     pub queued_at: Option<u64>,
@@ -265,34 +269,57 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
 }
 
 /// Job minutes per UTC day and VM size, kept beyond the VM history so a month's
-/// total survives `prune`: day -> cpus -> [jobs, minutes].
+/// total survives `prune`: day -> cpus -> [jobs, minutes]. GitHub jobs only: this file's
+/// format is what older binaries read, so it never changes (a row they can't parse would
+/// make them start a new ledger and move this one aside).
 type Usage = std::collections::BTreeMap<u64, std::collections::BTreeMap<u32, [u64; 2]>>;
+/// The same for every other forge, in a file older binaries never open: day -> forge id -> [jobs, minutes].
+/// Counted, never priced.
+type UsageOther = std::collections::BTreeMap<u64, std::collections::BTreeMap<String, [u64; 2]>>;
+const USAGE_OTHER: &str = "usage-other.json";
 
-fn read_usage(data: &Path) -> std::io::Result<Usage> {
-    match std::fs::read(data.join("usage.json")) {
+fn read_ledger<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str) -> std::io::Result<T> {
+    match std::fs::read(data.join(name)) {
         Ok(b) => serde_json::from_slice(&b).map_err(std::io::Error::other),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Usage::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
     }
 }
 
 /// Add a finished job, counted the way GitHub bills it: from the job starting to its
 /// result, rounded up to the minute. A debug hold after the result is not counted.
+/// GitHub jobs go to `usage.json`, other forges' to `usage-other.json`.
 pub fn record_usage(data: &Path, v: &Vm) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let (Some(from), Some(to)) = (v.busy_since, v.done_at.or(v.ended)) else { return };
     let _g = LOCK.lock().unwrap();
-    let path = data.join("usage.json");
-    let mut u = read_usage(data).unwrap_or_else(|e| {
+    let mins = to.saturating_sub(from).div_ceil(60).max(1);
+    let forge = forge_id(&v.repo);
+    if forge == crate::forge::ForgeId::github() {
+        bump_ledger::<std::collections::BTreeMap<u32, [u64; 2]>>(data, "usage.json", to / 86400, |m| {
+            let e = m.entry(v.cpus).or_default();
+            e[0] += 1;
+            e[1] += mins;
+        });
+    } else {
+        bump_ledger::<std::collections::BTreeMap<String, [u64; 2]>>(data, USAGE_OTHER, to / 86400, |m| {
+            let e = m.entry(forge.as_str().to_string()).or_default();
+            e[0] += 1;
+            e[1] += mins;
+        });
+    }
+}
+
+fn bump_ledger<V: Default + Serialize + serde::de::DeserializeOwned>(data: &Path, name: &str, day: u64, f: impl FnOnce(&mut V)) {
+    let path = data.join(name);
+    let mut u = read_ledger::<std::collections::BTreeMap<u64, V>>(data, name).unwrap_or_else(|e| {
         // Kept for a look, never silently overwritten.
         let aside = path.with_extension("json.corrupt");
         tracing::warn!("{}: {e}; moved to {} and starting a new ledger", path.display(), aside.display());
         let _ = std::fs::rename(&path, &aside);
-        Usage::default()
+        Default::default()
     });
-    let e = u.entry(to / 86400).or_default().entry(v.cpus).or_default();
-    e[0] += 1;
-    e[1] += to.saturating_sub(from).div_ceil(60).max(1);
+    f(u.entry(day).or_default());
     // ponytail: rewrites the whole file per job; ~400 days x 4 sizes stays a few KB.
     while u.len() > 400 {
         u.pop_first();
@@ -303,9 +330,22 @@ pub fn record_usage(data: &Path, v: &Vm) {
     }
 }
 
-/// Usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
+/// GitHub usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
 pub fn usage_since(data: &Path, since: u64) -> Vec<[u64; 4]> {
-    read_usage(data).unwrap_or_default().range(since..).flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n])).collect()
+    read_ledger::<Usage>(data, "usage.json")
+        .unwrap_or_default()
+        .range(since..)
+        .flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n]))
+        .collect()
+}
+
+/// Other forges' usage from UTC day `since` on, as [day, forge id, jobs, minutes] rows.
+pub fn usage_other_since(data: &Path, since: u64) -> Vec<(u64, String, u64, u64)> {
+    read_ledger::<UsageOther>(data, USAGE_OTHER)
+        .unwrap_or_default()
+        .range(since..)
+        .flat_map(|(&d, m)| m.iter().map(move |(f, &[j, n])| (d, f.clone(), j, n)))
+        .collect()
 }
 
 fn update(app: &App, id: &str, f: impl FnOnce(&mut Vm)) -> Option<Vm> {
@@ -351,6 +391,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         result: None,
         job_url: None,
         job_id: None,
+        verdict: None,
         starts: 0,
         queued_at: None,
         started: now(),
@@ -474,7 +515,8 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
 
 /// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id` (R2 L-6): the runner only
 /// notices a cancel after about a minute, so a maintainer stopping a suspicious job must stop the VM.
-pub fn kill_pipeline(app: &App, repo: &str, id: u64) -> usize {
+/// Matched by the pipeline link, or by a console-bound job id in `jobs` (the API's list for the pipeline).
+pub fn kill_pipeline(app: &App, repo: &str, id: u64, jobs: &[String]) -> usize {
     let tail = format!("/-/pipelines/{id}");
     let ids: Vec<String> = app
         .vms
@@ -482,7 +524,10 @@ pub fn kill_pipeline(app: &App, repo: &str, id: u64) -> usize {
         .unwrap()
         .iter()
         .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active())
-        .filter(|v| v.run.as_ref().and_then(|r| r.links.run.as_deref()).is_some_and(|u| u.ends_with(&tail)))
+        .filter(|v| {
+            v.run.as_ref().and_then(|r| r.links.run.as_deref()).is_some_and(|u| u.ends_with(&tail))
+                || v.job_id.as_ref().is_some_and(|j| jobs.contains(j))
+        })
         .map(|v| v.id.clone())
         .collect();
     for i in &ids {
@@ -530,6 +575,24 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
         note(app, &id, reason.note());
         if let Some(k) = app.kills.lock().unwrap().get(&id) {
             k.notify_one();
+        }
+    }
+}
+
+/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2).
+/// A failed delete at the VM's end is not retried, and a record lost in a crash never ran its delete.
+/// Only the last day is tried: older runners fall to the orphan sweep, and a 404 is as good as a delete.
+pub async fn retire_ended(app: &App) {
+    let t = now();
+    let mut by_repo: std::collections::HashMap<String, Vec<(String, u64)>> = Default::default();
+    for v in app.vms.lock().unwrap().iter().filter(|v| v.ended.is_some_and(|e| e + 86400 > t)) {
+        if let Some(rid) = v.runner_id {
+            by_repo.entry(v.repo.clone()).or_default().push((v.id.clone(), rid));
+        }
+    }
+    for (repo, c) in by_repo {
+        if forge_for(app, &repo).is_ok_and(|(f, _)| f.gated()) {
+            retire(app, &repo, c, Reason::Unused).await;
         }
     }
 }
@@ -615,6 +678,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (forge, rr) = forge_for(app, repo)?;
+    // Filtered: the VM's private forge, resolved now (every launch) and refused before a runner is minted.
+    let allow = if v.egress == "filtered" { forge_allow(&crate::forge::effective(&cfg.forges, &cfg.repos), &rr.forge)? } else { vec![] };
     let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
     let runner_id = reg.runner_id;
     {
@@ -715,7 +780,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     if filtered {
-        tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror)).await?;
+        tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror, &allow)).await?;
         let mut rk = Command::new("rootlesskit");
         let stat = ssh_host.as_ref().filter(|_| publish == Publish::Static);
         rk.args(rk_args(dir, stat.map(|(ip, p)| (ip.as_str(), *p)), &confined)).kill_on_drop(true);
@@ -891,7 +956,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             Some((jid, vd)) = verdict_rx.recv() => {
                 send(&mut stdin, &vd.line(&jid)).await;
                 let refuse = vd.v == crate::forge::Call::Refuse;
-                if let Some(v) = update(app, id, |v| apply_verdict(v, &vd)) {
+                if let Some(v) = update(app, id, |v| apply_verdict(v, &jid, &vd)) {
                     persist(app, &v);
                 }
                 if refuse {
@@ -937,7 +1002,27 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if !status.success() && !dropped {
         bail!("qemu exited with {status}; see console log");
     }
-    let v = update(app, id, |_| {}).context("vm vanished")?;
+    let mut v = update(app, id, |_| {}).context("vm vanished")?;
+    // GitLab never prints a result the host may believe: ask the job API, and only for the one job the console
+    // bound, on a runner that started exactly one, with a recorded ok or cold verdict for that id (R2b section 4).
+    if v.result.is_none()
+        && forge.gated()
+        && v.starts == 1
+        && let (Some(jid), Some(rid)) = (v.job_id.clone(), v.runner_id)
+        && v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold"))
+    {
+        match forge.job_result(&rr, &jid, rid).await {
+            Ok(Some(r)) => {
+                v = update(app, id, |v| {
+                    v.result = Some(r.into());
+                    v.done_at = Some(now());
+                })
+                .context("vm vanished")?;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("{id}: job result: {e:#}"),
+        }
+    }
     if v.result.is_none() {
         let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
         note(app, id, why);
@@ -1324,7 +1409,12 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let writers = cfg.cache_branches(repo);
     let succeeded = done && v.result.as_deref() == Some("Succeeded");
     // Fail closed on console evidence alone (no API poll): exactly one job start, and a bound id.
+    let gated = forge_for(app, repo).is_ok_and(|(f, _)| f.gated());
+    // A gated forge also needs the host's own ok for exactly the bound job: no verdict recorded (the gate never ran,
+    // a restart) means no commit, whatever the guest did.
+    let verdict_ok = v.job_id.as_ref().is_some_and(|j| v.verdict.as_ref().is_some_and(|(c, vj)| c == "ok" && vj == j));
     let console = match (v.starts, v.job_id.is_some() || v.job_url.is_some()) {
+        (1, true) if gated && !verdict_ok => Err("the host recorded no ok verdict for this job"),
         (1, true) => Ok(()),
         (0, _) => Err("the console showed no job start"),
         (1, false) => Err("a job started but no job id is bound"),
@@ -1333,7 +1423,6 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
         // A gated forge's id is the console's alone: the API-sourced job page never stands in for it (R2 L-5).
-        let gated = forge_for(app, repo).is_ok_and(|(f, _)| f.gated());
         match v.job_id.clone().or_else(|| v.job_url.as_deref().filter(|_| !gated).and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
                 Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
@@ -1530,7 +1619,7 @@ fn start_cap(cfg: &crate::Config, warm: bool) -> u64 {
 /// Returns true when the change is worth persisting right away. Each lifecycle
 /// step is accepted once and only forward: the job (root in the guest) can echo
 /// these lines itself, and must not rewind the state or restart its timeout.
-fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool {
+pub(crate) fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool {
     use crate::forge::console::{Line, parse_line};
     match parse_line(kind, line) {
         Some(Line::Hostkey(k)) => {
@@ -1582,8 +1671,11 @@ fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool 
 
 /// The host's own record of a verdict. A refused or cold job never commits the cache, whatever the
 /// guest does (R2 L-2): a tag or release job may keep a mounted overlay.
-fn apply_verdict(v: &mut Vm, vd: &crate::forge::Verdict) {
+fn apply_verdict(v: &mut Vm, jid: &str, vd: &crate::forge::Verdict) {
     use crate::forge::Call;
+    if v.job_id.as_deref() == Some(jid) {
+        v.verdict = Some((vd.v.name().to_string(), jid.to_string()));
+    }
     if vd.v == Call::Refuse {
         v.note = Some(format!("refused: {}", vd.why));
     }
@@ -1796,7 +1888,12 @@ fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> C
 /// reaches the host's 127.0.0.1:5000. Every other host loopback port, the LAN, the
 /// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
-fn egress_nft(mirror: bool) -> String {
+///
+/// `forge`: the resolved `ip:port` of the VM's private forge (an IP literal, see `net::resolve_forge`), accepted
+/// ahead of the private-range drop. Nothing else private opens. Opening an address opens every
+/// site behind it (a reverse proxy's vhosts).
+fn egress_nft(mirror: bool, forge: &[std::net::SocketAddr]) -> String {
+    let forge: String = forge.iter().map(|a| format!("\n    ip daddr {} tcp dport {} accept", a.ip(), a.port())).collect();
     let (dnat, accept) = if mirror {
         (
             "\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }",
@@ -1814,7 +1911,7 @@ table inet kiln {{
     type filter hook output priority 0; policy drop;
     ct state established,related accept
     oifname "lo" accept
-    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}
+    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}{forge}
     ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
                172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} drop
     tcp dport 25 drop
@@ -1872,8 +1969,44 @@ fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<Str
     a
 }
 
-/// Script for the doctor's probe namespace. `$1` nft file, `$2` dashboard port, `$3` tailnet IP.
-fn egress_script(mirror: bool, tailnet: bool) -> String {
+/// The `ip:port` a filtered VM of `forge` may reach besides the internet: its address
+/// when the forge is `network: internal`, nothing otherwise. Errors when its url is not a permitted IPv4 literal.
+fn forge_allow(forges: &[crate::forge::ForgeCfg], forge: &crate::forge::ForgeId) -> Result<Vec<std::net::SocketAddr>> {
+    match forges.iter().find(|f| &f.id == forge) {
+        Some(f) if f.network == Some(crate::forge::Network::Internal) => {
+            let url = f.url.as_deref().context("forge has no url")?;
+            crate::forge::net::resolve_forge(url, crate::forge::Network::Internal)
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// One reachability check of the probe: a label for the failure message, the URL (any HTTP
+/// response counts unless `strict`) and whether it must also return a success status.
+type Target = (String, String, bool);
+
+/// What the probe must reach: each public forge's origin (GitHub keeps `api.github.com`), a neutral
+/// public URL when there is none, and each `internal` forge's own origin.
+fn probe_targets(forges: &[crate::forge::ForgeCfg]) -> Vec<Target> {
+    use crate::forge::{Kind, Network};
+    let origin = |f: &crate::forge::ForgeCfg| format!("{}/", f.url.as_deref().unwrap_or_default().trim_end_matches('/'));
+    let mut t: Vec<Target> = vec![];
+    for f in forges {
+        match (f.kind, f.network.unwrap_or(Network::Public)) {
+            (Kind::GitHub, _) => t.push(("internet".into(), "https://api.github.com/".into(), true)),
+            (_, Network::Public) => t.push(("internet".into(), origin(f), false)),
+            (_, Network::Internal) => t.push((format!("forge {}", f.id.as_str()), origin(f), false)),
+        }
+    }
+    if !forges.iter().any(|f| f.kind == Kind::GitHub || f.network.unwrap_or(Network::Public) == Network::Public) {
+        t.insert(0, ("internet".into(), "https://github.com/".into(), false));
+    }
+    t
+}
+
+/// Script for the doctor's probe namespace. `$1` nft file, `$2` dashboard port, `$3` tailnet IP,
+/// `$4...` the `targets` URLs.
+fn egress_script(mirror: bool, tailnet: bool, targets: &[Target]) -> String {
     let step = |cond: &str, msg: &str| format!("{cond} && {{ echo 'step: {msg}'; exit 1; }}\n");
     let mut s = String::from("sysctl -qw net.ipv4.conf.all.route_localnet=1 || { echo 'step: sysctl'; exit 1; }\n");
     s += "nft -f \"$1\" || { echo 'step: loading nft rules'; exit 1; }\n";
@@ -1885,7 +2018,13 @@ fn egress_script(mirror: bool, tailnet: bool) -> String {
         s += &step("curl -s -m3 -o /dev/null \"http://$3:$2/\"", "tailnet address reachable from jobs");
     }
     // Each check is `cond && fail`, so a passing last check leaves status 1: end explicitly.
-    s + &step("! curl -sf -m8 -o /dev/null https://api.github.com/", "internet unreachable") + "exit 0\n"
+    for (i, (label, _, strict)) in targets.iter().enumerate() {
+        s += &step(
+            &format!("! curl -s{} -m8 -o /dev/null \"${{{}}}\"", if *strict { "f" } else { "" }, i + 4),
+            &format!("{label} unreachable"),
+        );
+    }
+    s + "exit 0\n"
 }
 
 pub const FILTERED_LINUX_ONLY: &str = "filtered egress needs Linux (rootlesskit, slirp4netns and nftables): \
@@ -1918,7 +2057,12 @@ fn next_fails(ok: bool, prev: Option<u32>, force: bool) -> u32 {
 
 /// Whether a config save can change the probe's result, so it must run again now.
 pub fn egress_reprobe(old: &crate::Config, new: &crate::Config) -> bool {
-    new.egress == "filtered" && (old.egress != new.egress || old.listen != new.listen || old.docker_mirror != new.docker_mirror)
+    new.egress == "filtered"
+        && (old.egress != new.egress
+            || old.listen != new.listen
+            || old.docker_mirror != new.docker_mirror
+            || old.forges != new.forges
+            || old.repos != new.repos)
 }
 
 /// Result of the filtered-egress probe, cached (see `fresh`) unless `force`.
@@ -1953,13 +2097,26 @@ async fn egress_probe(app: &App) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&dir).await;
     tokio::fs::create_dir_all(&dir).await?;
     let nft = dir.join("egress.nft");
-    tokio::fs::write(&nft, egress_nft(cfg.docker_mirror)).await?;
+    // Every private forge that resolves is opened for the probe; one that does not is refused at its own launches.
+    let forges = crate::forge::effective(&cfg.forges, &cfg.repos);
+    // A refused forge is left out of both the rule and the checks (its own launches fail).
+    let (mut allow, mut forges) = (vec![], forges);
+    forges.retain(|f| {
+        if f.network != Some(crate::forge::Network::Internal) {
+            return true;
+        }
+        let ok = f.url.as_deref().map(|a| crate::forge::net::resolve_forge(a, crate::forge::Network::Internal));
+        ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok())
+    });
+    let targets = probe_targets(&forges);
+    tokio::fs::write(&nft, egress_nft(cfg.docker_mirror, &allow)).await?;
     let mut cmd = Command::new("rootlesskit");
     cmd.args(rk_base(&dir.join("rk")))
-        .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some()), "sh"])
+        .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some(), &targets), "sh"])
         .arg(&nft)
         .arg(port.to_string())
         .arg(ts.unwrap_or_default())
+        .args(targets.iter().map(|t| &t.1))
         .kill_on_drop(true);
     no_secrets(&mut cmd);
     let o = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await;
@@ -2616,14 +2773,10 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     for f in app.forges.all() {
         match &*f {
             crate::forge::Forge::GitHub(g) => doctor_github(app, &g.gh, &mut out).await,
-            // The full Gitea doctor (scope and role checks) arrives with registration.
             crate::forge::Forge::Gitea(g) => {
-                let name = format!("gitea {}", g.id().as_str());
-                out.push(match (g.health(), g.version().await) {
-                    (Some(why), _) => check(&name, false, why),
-                    (None, Ok(v)) => check(&name, true, format!("version {}.{}.{}", v.0, v.1, v.2)),
-                    (None, Err(e)) => check(&name, false, format!("{e:#}")),
-                });
+                let cfgs = crate::forge::effective(&cfg.forges, &cfg.repos);
+                let repos = cfgs.iter().find(|c| c.id == g.id()).map(|c| g.repos(c)).unwrap_or_default();
+                out.extend(g.doctor(&repos).await.into_iter().map(|(n, ok, d)| check(&n, ok, d)));
             }
             crate::forge::Forge::GitLab(g) => {
                 let cfgs = crate::forge::effective(&cfg.forges, &cfg.repos);
@@ -2719,8 +2872,13 @@ mod tests {
         let other = Arc::new(tokio::sync::Notify::new());
         app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
         app.kills.lock().unwrap().insert("kiln-1-1".into(), other.clone());
-        app.vms.lock().unwrap().extend([vm("kiln-1-0", 127, "busy"), vm("kiln-1-1", 1270, "busy")]);
-        assert_eq!(kill_pipeline(&app, "gitlab:acme/demo", 127), 1, "127 is not 1270");
+        let late = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-2".into(), late.clone());
+        let mut started_late = vm("kiln-1-2", 0, "busy");
+        (started_late.run, started_late.job_id) = (None, Some("555".into()));
+        app.vms.lock().unwrap().extend([vm("kiln-1-0", 127, "busy"), vm("kiln-1-1", 1270, "busy"), started_late]);
+        assert_eq!(kill_pipeline(&app, "gitlab:acme/demo", 127, &["555".into()]), 2, "127 is not 1270; 555 started since the last poll");
+        assert!(tokio::time::timeout(Duration::from_millis(50), late.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
     }
@@ -2737,13 +2895,20 @@ mod tests {
         };
         let say = |v, why: &str| Verdict { v, why: why.into() };
         let mut ok = vm();
-        apply_verdict(&mut ok, &say(Call::Ok, ""));
+        ok.job_id = Some("7".into());
+        apply_verdict(&mut ok, "7", &say(Call::Ok, ""));
         assert_eq!((ok.cache, ok.note), (CacheUse::Read, None));
+        assert_eq!(ok.verdict, Some(("ok".into(), "7".into())));
+        // A verdict for another id than the bound one is not recorded.
+        let mut other = vm();
+        other.job_id = Some("8".into());
+        apply_verdict(&mut other, "7", &say(Call::Ok, ""));
+        assert_eq!(other.verdict, None);
         let mut cold = vm();
-        apply_verdict(&mut cold, &say(Call::Cold, "tag or release"));
+        apply_verdict(&mut cold, "7", &say(Call::Cold, "tag or release"));
         assert_eq!((cold.cache, cold.cache_note.as_deref(), cold.note), (CacheUse::Discarded, Some("cache not saved: cold run"), None));
         let mut no = vm();
-        apply_verdict(&mut no, &say(Call::Refuse, "unknown job source"));
+        apply_verdict(&mut no, "7", &say(Call::Refuse, "unknown job source"));
         assert_eq!((no.cache, no.note.as_deref()), (CacheUse::Discarded, Some("refused: unknown job source")));
     }
 
@@ -2785,7 +2950,7 @@ mod tests {
 
     #[test]
     fn usage_is_seeded_once_and_corrupt_ledgers_are_kept() {
-        let d = std::env::temp_dir().join(format!("kiln-test-seed-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_is_seeded_once_and_corrupt_ledgers_are_kept-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let day = 20_000 * 86400;
         std::fs::create_dir_all(d.join("vms/kiln-1-0")).unwrap();
@@ -2815,7 +2980,7 @@ mod tests {
 
     #[tokio::test]
     async fn sockets_in_q_are_never_followed() {
-        let d = std::env::temp_dir().join(format!("kiln-test-sock-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-sockets_in_q_are_never_followed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let _l = std::os::unix::net::UnixListener::bind(d.join("mon.sock")).unwrap();
@@ -2846,8 +3011,32 @@ mod tests {
     }
 
     #[test]
+    fn other_forges_are_counted_in_their_own_file_and_never_touch_the_github_ledger() {
+        let d = std::env::temp_dir().join(format!("kiln-test-usage-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let day = 20_000 * 86400;
+        let job = |repo: &str, secs: u64| Vm {
+            repo: repo.into(),
+            cpus: 4,
+            busy_since: Some(day),
+            done_at: Some(day + secs),
+            ..vm("x", State::Done, None)
+        };
+        record_usage(&d, &job("acme/demo", 61));
+        let github = std::fs::read(d.join("usage.json")).unwrap();
+        record_usage(&d, &job("gl:g/p", 61));
+        record_usage(&d, &job("gl:g/p", 5));
+        record_usage(&d, &job("ge:o/n", 600));
+        assert_eq!(std::fs::read(d.join("usage.json")).unwrap(), github, "an older binary's ledger is untouched");
+        assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 1, 2]]);
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "ge".to_string(), 1, 10), (20_000, "gl".to_string(), 2, 3)]);
+        assert!(usage_other_since(&d, 20_001).is_empty());
+    }
+
+    #[test]
     fn usage_counts_job_minutes_as_github_bills_them() {
-        let d = std::env::temp_dir().join(format!("kiln-test-usage-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_counts_job_minutes_as_github_bills_them-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let day = 20_000 * 86400;
@@ -2863,7 +3052,8 @@ mod tests {
 
     #[test]
     fn history_trusts_only_records_naming_their_own_directory() {
-        let d = std::env::temp_dir().join(format!("kiln-test-hist-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("kiln-test-history_trusts_only_records_naming_their_own_directory-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let rec = |dir: &str, id: &str| {
             std::fs::create_dir_all(d.join("vms").join(dir).join("q")).unwrap();
@@ -2933,6 +3123,7 @@ mod tests {
             result: None,
             job_url: None,
             job_id: None,
+            verdict: None,
             starts: 0,
             queued_at: None,
             started: 0,
@@ -2987,20 +3178,108 @@ mod tests {
             a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all")
         );
         assert!(!rk_args(Path::new("/d"), None, &q).contains(&"-p".into()));
-        let on = egress_nft(true);
+        let on = egress_nft(true, &[]);
         assert!(on.contains("ct state established,related accept") && on.contains("tcp dport 25 drop"));
         assert!(on.contains("dnat to 10.0.2.2:5000") && on.contains("ip daddr 10.0.2.2 tcp dport 5000 accept"));
-        let off = egress_nft(false);
+        let off = egress_nft(false, &[]);
         assert!(!off.contains("5000") && off.contains("tcp dport 25 drop") && off.contains("masquerade"));
     }
 
     #[test]
     fn egress_probe_script() {
-        let s = egress_script(true, true);
-        assert!(s.contains("mirror") && s.contains("tailnet") && s.contains("internet unreachable"));
-        let s = egress_script(false, false);
+        let gh = probe_targets(&forges(r#"[{"id":"github","kind":"github"}]"#));
+        let s = egress_script(true, true, &gh);
+        assert!(
+            s.contains("mirror")
+                && s.contains("tailnet")
+                && s.contains("curl -sf -m8 -o /dev/null \"${4}\"")
+                && s.contains("internet unreachable")
+        );
+        let s = egress_script(false, false, &gh);
         assert!(!s.contains("mirror") && !s.contains("$3") && s.contains("dashboard port"));
         assert!(fresh(100, 0, 699) && !fresh(100, 0, 700));
+    }
+
+    fn forges(json: &str) -> Vec<crate::forge::ForgeCfg> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn probe_targets_follow_the_configured_forges() {
+        let t = |j: &str| probe_targets(&forges(j)).into_iter().map(|t| (t.0, t.1, t.2)).collect::<Vec<_>>();
+        let s = |a: &str, b: &str, c| (a.to_string(), b.to_string(), c);
+        // GitHub only: exactly today's single check
+        assert_eq!(t(r#"[{"id":"github","kind":"github"}]"#), [s("internet", "https://api.github.com/", true)]);
+        // a private-only box checks the forge and one neutral public URL
+        let p = r#"[{"id":"gl","kind":"gitlab","url":"http://100.64.0.7:8080","network":"internal"}]"#;
+        assert_eq!(t(p), [s("internet", "https://github.com/", false), s("forge gl", "http://100.64.0.7:8080/", false)]);
+        // a public GitLab is its own internet check; no neutral URL
+        let g = r#"[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.org/"}]"#;
+        assert_eq!(t(g), [s("internet", "https://gitlab.example.org/", false)]);
+    }
+
+    #[test]
+    fn nft_opens_only_the_forge_address() {
+        let a: std::net::SocketAddr = "100.64.0.7:8080".parse().unwrap();
+        let n = egress_nft(false, &[a, "192.168.1.5:443".parse().unwrap()]);
+        let accept = n.find("ip daddr 100.64.0.7 tcp dport 8080 accept").unwrap();
+        assert!(n.contains("ip daddr 192.168.1.5 tcp dport 443 accept"));
+        // before the private-range drop, so it wins; the drop itself stays
+        assert!(accept < n.find("100.64.0.0/10").unwrap() && n.contains("192.168.0.0/16"));
+        assert!(!egress_nft(false, &[]).contains("100.64.0.7"));
+    }
+
+    #[test]
+    fn forge_allow_resolves_internal_forges_only() {
+        let fs = forges(
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"http://100.64.0.7:8080","network":"internal"},
+                {"id":"pub","kind":"gitlab","url":"https://gitlab.example.org"}]"#,
+        );
+        let id = |s: &str| crate::forge::ForgeId::new(s).unwrap();
+        assert_eq!(forge_allow(&fs, &id("gl")).unwrap(), ["100.64.0.7:8080".parse().unwrap()]);
+        // an internal forge written as a name is refused (never resolved), also for the probe's own launches
+        let named = forges(r#"[{"id":"gl","kind":"gitlab","url":"http://gl.example.org","network":"internal"}]"#);
+        assert!(forge_allow(&named, &id("gl")).is_err());
+        assert!(forge_allow(&fs, &id("pub")).unwrap().is_empty() && forge_allow(&fs, &id("github")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_forge_is_ip_literal_and_refuses_host_reaching_addresses() {
+        use crate::forge::{Network::Internal, net::resolve_forge};
+        let no = |u: &str| assert!(resolve_forge(u, Internal).is_err(), "{u}");
+        // loopback, unspecified, link-local/metadata, service addresses
+        for u in ["http://127.0.0.1:3000", "http://0.0.0.0:3000", "http://169.254.169.254", "http://100.100.100.200", "http://[::1]:3000"] {
+            no(u);
+        }
+        // slirp4netns's own network: 10.0.2.2 is the host's loopback, 10.0.2.3 the DNS, any port
+        for u in ["http://10.0.2.2:5000", "http://10.0.2.2:8080", "http://10.0.2.3:53", "http://10.0.2.15:22", "http://10.0.2.1"] {
+            no(u);
+        }
+        // IPv6 and IPv4-mapped forms, names (never resolved), SMTP
+        for u in [
+            "http://[::ffff:10.0.2.2]:80",
+            "http://[fd00::5]:80",
+            "http://localhost:3000",
+            "http://gl.example.org",
+            "http://192.168.7.7:25",
+        ] {
+            no(u);
+        }
+        let own = crate::forge::net::own_addrs().unwrap().into_iter().find(|a| a.is_ipv4() && !a.is_loopback());
+        if let Some(ip) = own {
+            no(&format!("http://{ip}:3000"));
+        }
+        assert_eq!(resolve_forge("http://192.168.7.7:8080", Internal).unwrap(), ["192.168.7.7:8080".parse().unwrap()]);
+        assert_eq!(resolve_forge("http://10.0.3.2", Internal).unwrap(), ["10.0.3.2:80".parse().unwrap()]);
+    }
+
+    /// Whatever the guest resolves the forge name to, the rule is by IP: nothing but the checked
+    /// `ip:port` is opened, and the private-range drop still follows it.
+    #[test]
+    fn nft_rule_is_by_address_only() {
+        let n = egress_nft(true, &["192.168.7.7:8080".parse().unwrap()]);
+        assert_eq!(n.matches("accept").count(), egress_nft(true, &[]).matches("accept").count() + 1);
+        assert!(!n.contains("saddr") && n.contains("ip daddr 192.168.7.7 tcp dport 8080 accept") && n.contains("10.0.0.0/8"));
     }
 
     #[test]
@@ -3025,10 +3304,11 @@ mod tests {
     /// namespace must exit 0, a leaky one must name the failing step.
     #[test]
     fn egress_probe_script_runs() {
+        let gh = probe_targets(&forges(r#"[{"id":"github","kind":"github"}]"#));
         let run = |leaky: bool| {
             let curl = if leaky { "return 0" } else { r#"case "$*" in *5000*|*github*) return 0;; *) return 7;; esac"# };
-            let script = format!("sysctl(){{ :; }}; nft(){{ :; }}; curl(){{ {curl}; }}\n{}", egress_script(true, true));
-            std::process::Command::new("sh").args(["-c", &script, "sh", "x.nft", "7878", "100.1.2.3"]).output().unwrap()
+            let script = format!("sysctl(){{ :; }}; nft(){{ :; }}; curl(){{ {curl}; }}\n{}", egress_script(true, true, &gh));
+            std::process::Command::new("sh").args(["-c", &script, "sh", "x.nft", "7878", "100.1.2.3", &gh[0].1]).output().unwrap()
         };
         assert!(run(false).status.success());
         let leaky = run(true);
@@ -3054,7 +3334,7 @@ mod tests {
             .map(|l| format!("{}\n", l.get(6..).unwrap_or("")))
             .collect();
         assert!(script.starts_with("#!/bin/bash"));
-        let dir = std::env::temp_dir().join(format!("kiln-prejob-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-prejob_hook_refuses_forks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let run = |payload: Option<serde_json::Value>| {
             let p = dir.join("event.json");
@@ -3117,7 +3397,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-vreader-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_verdict_reader-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let read = |input: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3140,7 +3420,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-vwait-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_verdict_wait-{}", std::process::id()));
         let wait = guest_script("/usr/local/sbin/kiln-verdict-wait", &dir);
         let run = |content: Option<&str>, secs: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3169,7 +3449,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-exec-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_kiln_exec-{}", std::process::id()));
         let bin = dir.join("bin");
         let exec = guest_script("/usr/local/bin/kiln-exec", &dir)
             .replace("/usr/local/sbin/", &format!("{}/", bin.display()))
@@ -3317,7 +3597,9 @@ mod tests {
         let (rc, _, calls) = stage("ok 42", &env, &["prepare"]);
         assert_eq!(rc, Some(0));
         assert!(!marker.exists(), "hostile value executed");
-        assert!(calls.contains("kiln-svc-42-1") && !calls.contains("99"), "job id comes from the verdict: {calls}");
+        // Not a bare "99": the scratch dir (in every logged path) carries the pid, and a pid can contain "99".
+        let job99 = ["kiln-job-99", "kiln-svc-99", "kiln-certs-99", "kiln-99"].iter().any(|s| calls.contains(s));
+        assert!(calls.contains("kiln-svc-42-1") && !job99, "job id comes from the verdict: {calls}");
         assert!(calls.contains("-- postgres:16 -c") && calls.contains("--entrypoint sh"), "{calls}");
         for bad in ["-v/:/h", "a b", "x$(touch pwned)", "--privileged", "a\nb"] {
             fresh();
@@ -3339,7 +3621,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-forge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_forge_branch-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let run = |oem: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3371,7 +3653,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-rgl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_run_gitlab-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let tok = "glrt-t3_abc-DEF.123";
         let run = |oem: &str| {
@@ -4200,7 +4482,7 @@ esac
 
     #[test]
     fn only_github_runner_ages() {
-        let d = std::env::temp_dir().join(format!("kiln-test-ages-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-only_github_runner_ages-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(images(&d)).unwrap();
         std::fs::write(
@@ -4244,6 +4526,7 @@ esac
             result: Some("Succeeded".into()),
             job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
             job_id: None,
+            verdict: None,
             starts: 0,
             queued_at: Some(1_790_000_000),
             started: 1_790_000_010,
@@ -4281,7 +4564,7 @@ esac
 
     #[test]
     fn meta_json_golden() {
-        let d = std::env::temp_dir().join(format!("kiln-test-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-meta_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("vms/kiln-7-0")).unwrap();
         write_meta(&d, &full_vm());
@@ -4300,7 +4583,7 @@ esac
 
     #[test]
     fn usage_json_golden() {
-        let d = std::env::temp_dir().join(format!("kiln-test-usage-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let day = 20_000 * 86400;
@@ -4316,7 +4599,7 @@ esac
     #[test]
     fn base_json_golden() {
         // image_info adds runner_latest, age_days, stale and rebake to what the bake wrote.
-        let d = std::env::temp_dir().join(format!("kiln-test-base-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-base_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(images(&d)).unwrap();
         let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/golden/base.json");
@@ -4429,6 +4712,46 @@ esac
             cache: CacheUse::Read,
             ..vm(id, State::Done, None)
         });
+    }
+
+    /// A gated forge's cache commit needs the host's own ok for exactly the bound job (R2b section 4).
+    #[tokio::test]
+    async fn a_gated_forge_commits_only_after_an_ok_verdict_for_the_bound_job() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let m = Mock::github().await;
+        let app = mock::app("gated-verdict", &m, crate::Config::default());
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        app.forges.insert(cfg.clone(), Forge::GitLab(Box::new(crate::forge::gitlab::GitLab::new(&cfg, &app.data).unwrap())));
+        let why = |id: &'static str, verdict: Option<(&'static str, &'static str)>| {
+            let app = app.clone();
+            async move {
+                app.vms.lock().unwrap().push(Vm {
+                    repo: "gl:acme/demo".into(),
+                    job: Some("build".into()),
+                    result: Some("Succeeded".into()),
+                    job_id: Some("42".into()),
+                    verdict: verdict.map(|(c, j)| (c.into(), j.into())),
+                    starts: 1,
+                    cache: CacheUse::Read,
+                    ..vm(id, State::Done, None)
+                });
+                finish_cache(&app, id, "gl:acme/demo", &app.data.join("vms").join(id), true).await;
+                app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap().cache_note.unwrap_or_default()
+            }
+        };
+        let none = "cache not saved: the host recorded no ok verdict for this job";
+        assert_eq!(why("g1", None).await, none, "the gate never ran");
+        assert_eq!(why("g2", Some(("cold", "42"))).await, none, "cold never commits");
+        assert_eq!(why("g3", Some(("ok", "41"))).await, none, "an ok for another job");
+        assert_eq!(why("g4", Some(("refuse", "42"))).await, none);
     }
 
     #[tokio::test]

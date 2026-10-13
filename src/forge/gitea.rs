@@ -42,7 +42,7 @@ const NOT_OWNER: &str =
 /// Registration (GT-2) and the verdict facts (GT-3) work, but no VM launches for Gitea until the
 /// guest side lands (GT-5 `kiln-gate`): demand reports the queue, fork jobs and claims, but no
 /// launchable jobs.
-const LAUNCH_READY: bool = false;
+pub const LAUNCH_READY: bool = false;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -99,6 +99,8 @@ pub struct Gitea {
     /// The install's id (`<data>/install_id`): runner names are `<install>-<vm id>`.
     install: String,
     token: RwLock<Option<String>>,
+    /// Who the token is, from the last setup check (`GET /user`).
+    login: Mutex<Option<String>>,
     version: Mutex<Option<(Ver, Instant)>>,
     runs: Mutex<HashMap<(String, u64), Arc<RunRec>>>,
     /// Runner id -> VM id, filled when GT-2 registers a runner; claims are looked up by it.
@@ -124,6 +126,7 @@ impl Gitea {
             cred: cfg.credential.unwrap_or(Credential::File),
             install: super::gitlab::install_id(data)?,
             token: RwLock::new(None),
+            login: Mutex::new(None),
             version: Mutex::new(None),
             runs: Mutex::default(),
             tracked: Mutex::default(),
@@ -154,7 +157,13 @@ impl Gitea {
     }
 
     pub fn auth(&self) -> Value {
-        json!({ "source": if self.cred == Credential::Env { "env" } else { "file" }, "expires": null })
+        let source = match (self.has_credential(), self.cred) {
+            (false, _) => "none",
+            (true, Credential::Env) => "env",
+            (true, Credential::File) => "file",
+        };
+        let version = self.cached_version().map(|v| format!("{}.{}.{}", v.0, v.1, v.2));
+        json!({ "source": source, "expires": null, "login": *self.login.lock().unwrap(), "version": version })
     }
 
     /// What the dashboard may offer, from the last version read: nothing until it is known.
@@ -190,7 +199,37 @@ impl Gitea {
         if self.cred != Credential::File {
             return;
         }
-        *self.token.write().unwrap() = read_token_file(data, &self.id);
+        let t = read_token_file(data, &self.id);
+        if *self.token.read().unwrap() != t {
+            *self.login.lock().unwrap() = None;
+            *self.token.write().unwrap() = t;
+        }
+    }
+
+    /// A forge like this one holding another token, to try it before it is saved. Nothing is shared.
+    pub fn candidate(&self, token: &str) -> Gitea {
+        Gitea {
+            id: self.id.clone(),
+            url: self.url.clone(),
+            api: self.api.clone(),
+            mode: self.mode,
+            client: self.client.clone(),
+            guard: self.guard,
+            cred: self.cred,
+            install: self.install.clone(),
+            token: RwLock::new(Some(token.trim().to_string())),
+            login: Mutex::new(None),
+            version: Mutex::new(None),
+            runs: Mutex::default(),
+            tracked: Mutex::default(),
+            poll: self.poll,
+        }
+    }
+
+    /// Takes over what a `candidate` that was just saved as this forge's token has read.
+    pub fn adopt(&self, c: &Gitea) {
+        *self.login.lock().unwrap() = c.login.lock().unwrap().take();
+        *self.version.lock().unwrap() = *c.version.lock().unwrap();
     }
 
     /// What keeps this forge from polling: no credential, or a server older than 1.25.
@@ -285,6 +324,149 @@ impl Gitea {
             bail!("Gitea answered {path} with something that is not JSON");
         }
         Ok(v)
+    }
+
+    /// The doctor's rows for this forge, from the same check the dashboard's Test runs: what
+    /// stops kiln (each a failing row), the version and account with any warning, and the role on each repo.
+    pub async fn doctor(&self, repos: &[RepoRef]) -> Vec<(String, bool, String)> {
+        let name = format!("gitea {}", self.id.as_str());
+        let r = self.check(repos).await;
+        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        let problems: Vec<String> = r["problems"].as_array().into_iter().flatten().map(text).collect();
+        let mut out: Vec<(String, bool, String)> = problems.iter().map(|p| (name.clone(), false, p.clone())).collect();
+        if problems.is_empty() {
+            let warns: Vec<String> = r["warnings"].as_array().into_iter().flatten().map(text).collect();
+            let mut d = format!("version {}, account {}", text(&r["version"]), text(&r["login"]));
+            if !warns.is_empty() {
+                d += &format!(" (warning: {})", warns.join("; "));
+            }
+            out.push((name.clone(), true, d));
+        }
+        for row in r["repos"].as_array().into_iter().flatten() {
+            let ok = row["ok"] == true;
+            let d = if ok { "Owner: kiln can get the runner registration token".to_string() } else { text(&row["message"]) };
+            out.push((format!("{name} {}", text(&row["path"])), ok, d));
+        }
+        out
+    }
+
+    /// A 403 that is about the token's scopes (an owner check says "should be the owner" instead).
+    fn scope_refused(status: u16, v: &Value) -> bool {
+        status == 403 && Self::message(v).contains("scope")
+    }
+
+    fn answered(what: &str, status: u16, v: &Value) -> String {
+        format!("Gitea answered {status} for {what}: {}", Self::message(v))
+    }
+
+    /// The setup check behind the dashboard's Test and token save: version, who the token is, and
+    /// for each served repo whether the account can see it, read its jobs and get the runner
+    /// registration token (Owner only). No runner is created. `problems` stop kiln; a repo's `ok`
+    /// is its own.
+    pub async fn check(&self, repos: &[RepoRef]) -> Value {
+        let mut out = json!({ "version": null, "login": null, "repos": [], "problems": [], "warnings": [] });
+        let (mut problems, mut warnings): (Vec<String>, Vec<String>) = (vec![], vec![]);
+        let mut stop = !self.has_credential();
+        if stop {
+            problems.push(self.health().unwrap_or_default());
+        }
+        if !stop {
+            *self.version.lock().unwrap() = None;
+            match self.version().await {
+                Ok(v) => {
+                    out["version"] = format!("{}.{}.{}", v.0, v.1, v.2).into();
+                    if !v.supported() {
+                        problems.push(unsupported(v));
+                    } else if v < Ver(1, 26, 3) {
+                        warnings.push(format!(
+                            "Gitea {}.{}.{}: approving one fork pull request once trusts that user's later ones, and rerun, cancel and retiring runners need 1.26 or 28: use 1.26.3 or newer (28+ for everything)",
+                            v.0, v.1, v.2
+                        ));
+                    }
+                }
+                Err(e) => {
+                    problems.push(format!("{e:#}"));
+                    stop = true;
+                }
+            }
+        }
+        if !stop {
+            match self.call(Method::GET, "user", None).await {
+                Ok((200, v)) => {
+                    let login = v["login"].as_str().map(|u| u.chars().filter(|c| !c.is_control()).take(100).collect::<String>());
+                    *self.login.lock().unwrap() = login.clone();
+                    out["login"] = login.into();
+                }
+                Ok((401, _)) => {
+                    problems.push("Gitea rejected the token (expired, revoked or wrong)".into());
+                    stop = true;
+                }
+                Ok((s, v)) if Self::scope_refused(s, &v) => {
+                    problems.push("the token lacks the `read:user` scope: create it again with write:repository and read:user".into())
+                }
+                Ok((s, v)) => problems.push(Self::answered("the user lookup", s, &v)),
+                Err(e) => {
+                    problems.push(format!("{e:#}"));
+                    stop = true;
+                }
+            }
+        }
+        if !stop {
+            for repo in repos {
+                let (role, message) = self.repo_access(repo).await;
+                // A missing scope is the token's fault, not the repo's: it must not be saved.
+                if message.starts_with("the token lacks") && !problems.contains(&message) {
+                    problems.push(message.clone());
+                }
+                let row = json!({ "repo": repo.key(), "path": repo.path, "role": role, "ok": message.is_empty(), "message": message });
+                out["repos"].as_array_mut().unwrap().push(row);
+            }
+        }
+        out["ok"] = (problems.is_empty() && out["repos"].as_array().unwrap().iter().all(|r| r["ok"] == true)).into();
+        out["problems"] = json!(problems);
+        out["warnings"] = json!(warnings);
+        out
+    }
+
+    /// The account's role on `repo` and, when it is not enough, why (empty when all is well).
+    async fn repo_access(&self, repo: &RepoRef) -> (Option<&'static str>, String) {
+        let lacks = |scope: &str| format!("the token lacks the `{scope}` scope: create it again with write:repository and read:user");
+        let (s, v) = match self.call(Method::GET, &format!("repos/{}", repo.path), None).await {
+            Ok(r) => r,
+            Err(e) => return (None, format!("{e:#}")),
+        };
+        let role =
+            match (s, &v) {
+                (200, v) if v["permissions"]["admin"] == true => "admin",
+                (200, v) if v["permissions"]["push"] == true => "write",
+                (200, _) => "read",
+                (404, _) => return (
+                    None,
+                    "Gitea cannot find this repo for the account: check the path, and that the account owns it or is in its organisation"
+                        .into(),
+                ),
+                (s, v) if Self::scope_refused(s, v) => return (None, lacks("write:repository")),
+                (s, v) => return (None, Self::answered("the repo", s, v)),
+            };
+        match self.call(Method::GET, &format!("repos/{}/actions/jobs?limit=1", repo.path), None).await {
+            Ok((200, _)) => {}
+            Ok((404, _)) => {
+                return (
+                    Some(role),
+                    "Gitea has no Actions jobs list here: enable Actions for the repo (Settings › Advanced) and use Gitea 1.25 or newer"
+                        .into(),
+                );
+            }
+            Ok((s, v)) => return (Some(role), Self::answered("the jobs list", s, &v)),
+            Err(e) => return (Some(role), format!("{e:#}")),
+        }
+        match self.call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None).await {
+            Ok((200..=299, _)) => (Some("Owner"), String::new()),
+            Ok((s, v)) if Self::scope_refused(s, &v) => (Some(role), lacks("write:repository")),
+            Ok((403, _)) => (Some(role), format!("{NOT_OWNER} (this account is {role} here)")),
+            Ok((s, v)) => (Some(role), Self::answered("the registration token", s, &v)),
+            Err(e) => (Some(role), format!("{e:#}")),
+        }
     }
 
     /// Every job of `repo` in `status`, all pages (more than `MAX_PAGES` is an error: a partial
@@ -718,6 +900,7 @@ fn facts(run: &Value, ours: bool) -> VerdictFacts {
         unknown_source: !KNOWN_EVENTS.contains(&event),
         // `contains`, not a parse: a file or branch named to look like a tag only makes the job cold.
         tag: event == "release" || path.contains("@refs/tags/"),
+        ..Default::default()
     }
 }
 
@@ -1373,7 +1556,7 @@ mod tests {
         assert_eq!(ok.repos(&c).iter().map(RepoRef::key).collect::<Vec<_>>(), ["home-lab:acme/demo"]);
         assert!(ok.health().unwrap().contains("no Gitea token"));
         // A token file: read, trimmed, header-safe only; a bad one is no credential.
-        let dir = std::env::temp_dir().join(format!("kiln-gitea-token-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-credentials_and_construction-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("forges")).unwrap();
         let file = dir.join("forges/home-lab.token");
         std::fs::write(&file, "abc123\n").unwrap();
@@ -1765,5 +1948,57 @@ mod tests {
         assert!(none.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
         m.route("POST", rpc, 200, r#"{"runner":{"id":"0"}}"#);
         assert!(g.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_setup_check_names_what_stops_kiln() {
+        let (m, g) = mock().await;
+        let api = "/api/v1";
+        m.route("GET", &format!("{api}/user"), 200, r#"{"login":"kiln-bot"}"#);
+        m.route("GET", &format!("{api}/repos/acme/demo"), 200, r#"{"permissions":{"admin":true,"push":true,"pull":true}}"#);
+        m.route("GET", &format!("{API}/jobs?limit=1"), 200, r#"{"jobs":[]}"#);
+        let tok = format!("{API}/runners/registration-token");
+        m.route("POST", &tok, 200, fx("registration_token.json"));
+        let r = g.check(&[repo()]).await;
+        assert_eq!((r["ok"].clone(), r["login"].clone(), r["version"].clone()), (json!(true), json!("kiln-bot"), json!("28.1.0")), "{r}");
+        assert_eq!(g.auth()["login"], "kiln-bot");
+        // 1.26.0..1.26.2 works but warns; 1.25 warns too; 1.24 is refused.
+        for (v, warn, ok) in [("1.26.2", true, true), ("1.26.3", false, true), ("1.25.4", true, true), ("1.24.6", false, false)] {
+            m.route("GET", &format!("{api}/version"), 200, format!(r#"{{"version":"{v}"}}"#));
+            let r = g.check(&[repo()]).await;
+            assert_eq!(
+                (r["warnings"].as_array().unwrap().len() == 1, r["problems"].as_array().unwrap().is_empty()),
+                (warn, ok),
+                "{v}: {r}"
+            );
+        }
+        m.route("GET", &format!("{api}/version"), 200, fx("version.json"));
+        // A collaborator, a hidden repo, a bad token.
+        m.route("GET", &format!("{api}/repos/acme/demo"), 200, r#"{"permissions":{"admin":false,"push":true}}"#);
+        m.route("POST", &tok, 403, fx("registration_token_403.json"));
+        let r = g.check(&[repo()]).await;
+        assert!(r["repos"][0]["message"].as_str().unwrap().contains("Owners team") && r["repos"][0]["role"] == "write", "{r}");
+        m.route("GET", &format!("{api}/repos/acme/demo"), 404, "{}");
+        assert_eq!(g.check(&[repo()]).await["repos"][0]["ok"], false);
+        m.route("GET", &format!("{api}/user"), 401, fx("err_401.json"));
+        let r = g.check(&[repo()]).await;
+        assert!(r["problems"][0].as_str().unwrap().contains("rejected") && r["repos"].as_array().unwrap().is_empty(), "{r}");
+        assert!(!r.to_string().contains("\"tok\""), "{r}");
+    }
+
+    #[tokio::test]
+    async fn the_doctor_rows_say_what_stops_kiln() {
+        let (m, g) = mock().await;
+        m.route("GET", "/api/v1/user", 200, r#"{"login":"kiln-bot"}"#);
+        m.route("GET", "/api/v1/repos/acme/demo", 200, r#"{"permissions":{"admin":false,"push":true}}"#);
+        m.route("GET", &format!("{API}/jobs?limit=1"), 200, r#"{"jobs":[]}"#);
+        m.route("POST", &format!("{API}/runners/registration-token"), 403, fx("registration_token_403.json"));
+        let rows = g.doctor(&[repo()]).await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].1 && rows[0].2.contains("kiln-bot"), "{rows:?}");
+        assert!(!rows[1].1 && rows[1].2.contains("Owners team"), "{rows:?}");
+        m.route("GET", "/api/v1/version", 200, r#"{"version":"1.24.0"}"#);
+        let rows = g.doctor(&[repo()]).await;
+        assert!(!rows[0].1 && rows[0].2.contains("older than 1.25"), "{rows:?}");
     }
 }
