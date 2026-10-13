@@ -7,9 +7,10 @@
 
 use super::{
     Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, JobRef, JobSummary, Kind, Links, LogPage, Network, Outcome,
-    Reason, RegisterError, RepoRef, RunDetail, RunPage, RunQuery, RunStatus, RunSummary, RunnerReg, StepSummary, VerdictFacts, Workflow,
-    env_name, net, read_token_file,
+    Reason, RepoRef, RunDetail, RunPage, RunQuery, RunStatus, RunSummary, RunnerReg, StepSummary, VerdictFacts, Workflow, env_name, net,
+    read_token_file,
 };
+use crate::github::MintError;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use reqwest::Method;
@@ -341,20 +342,22 @@ impl Gitea {
         if plain.is_empty() {
             bail!("no runner labels to register");
         }
-        // From here a failure is a `RegisterError`: no answer or a 5xx backs off the whole forge, a 4xx is this repo's.
-        let unreached = |e: anyhow::Error| anyhow::Error::from(RegisterError::new(None, format!("{e:#}")));
-        let refused = |status, m: String| anyhow::Error::from(RegisterError::new(Some(status), m));
+        // From here a failure is a `MintError`: no answer or a 5xx backs off the whole forge, a 4xx is this repo's.
+        let mint = |endpoint, status, message: String| anyhow::Error::from(MintError { forge: "Gitea", status, endpoint, message });
         if !self.has_credential() {
             bail!("no Gitea token");
         }
-        let (status, v) =
-            self.call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None).await.map_err(unreached)?;
+        let (status, v) = self
+            .call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None)
+            .await
+            .map_err(|e| mint("registration-token", None, format!("{e:#}")))?;
         match status {
             200..=299 => {}
-            403 => return Err(refused(status, NOT_OWNER.into())),
+            403 => return Err(mint("registration-token", Some(status), NOT_OWNER.into())),
             _ => {
-                return Err(refused(
-                    status,
+                return Err(mint(
+                    "registration-token",
+                    Some(status),
                     format!("Gitea answered {status} for the registration token of {}: {}", repo.path, Self::message(&v)),
                 ));
             }
@@ -365,9 +368,14 @@ impl Gitea {
         // Connect-RPC over JSON, no auth header: the registration token in the body is the credential.
         // `self.api` is `{origin}/api/v1`; the RPC lives at `{origin}/api/actions/...`.
         let rpc = format!("{}/actions/runner.v1.RunnerService/Register", self.api.strip_suffix("/v1").context("api url")?);
-        let (status, v) = self.finish(self.client.post(rpc).json(&body)).await.map_err(unreached)?;
+        let (status, v) =
+            self.finish(self.client.post(rpc).json(&body)).await.map_err(|e| mint("runner-register", None, format!("{e:#}")))?;
         if !(200..300).contains(&status) {
-            return Err(refused(status, format!("Gitea answered {status} for runner registration of {name}: {}", Self::message(&v))));
+            return Err(mint(
+                "runner-register",
+                Some(status),
+                format!("Gitea answered {status} for runner registration of {name}: {}", Self::message(&v)),
+            ));
         }
         let r = &v["runner"];
         let id = r["id"].as_str().and_then(|i| i.parse::<u64>().ok()).or(r["id"].as_u64()).filter(|&i| i > 0);
@@ -504,7 +512,7 @@ impl Gitea {
         // awaiting approval) and `requested` (blocked by `needs`) are never demand.
         for j in self.jobs(repo, "queued").await?.iter().filter(|j| j["status"] == "queued") {
             // The server ignores a `labels` filter, so the job's labels are judged here.
-            let Some(n) = super::job_size(&j["labels"], label, default_cpus, crate::github::fixtures_arch_arm64()) else { continue };
+            let Some(n) = super::job_size(&j["labels"], label, default_cpus, crate::platform::host_arm64()) else { continue };
             let run = self.cached_run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
             if run.fork {
                 d.refused_forks += 1;
@@ -1732,7 +1740,7 @@ mod tests {
         let (m, g) = mock().await;
         let tok = format!("{RUNNERS}/registration-token");
         let rpc = "/api/actions/runner.v1.RunnerService/Register";
-        let why = |e: anyhow::Error| e.downcast::<RegisterError>().map(|r| (r.status, r.wide)).unwrap();
+        let why = |e: anyhow::Error| e.downcast::<MintError>().map(|r| (r.status, r.wide())).unwrap();
         // 403 (not the owner) and 404 are this repo's; they back nothing else off.
         m.route("POST", &tok, 403, fx("registration_token_403.json"));
         assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(403), false));
@@ -1754,8 +1762,8 @@ mod tests {
         // Not a registration failure at all: a missing credential and a 2xx without a runner stay plain errors.
         let none = Gitea::for_mock(WEB, &m.base, "tok");
         *none.token.write().unwrap() = None;
-        assert!(none.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<RegisterError>().is_err());
+        assert!(none.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
         m.route("POST", rpc, 200, r#"{"runner":{"id":"0"}}"#);
-        assert!(g.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<RegisterError>().is_err());
+        assert!(g.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
     }
 }

@@ -40,10 +40,12 @@ pub struct Gh {
     reg_probes: std::sync::Mutex<HashMap<String, (u64, Option<u16>)>>,
 }
 
-/// GitHub refused (or never answered) a runner registration call.
+/// A forge refused (or never answered) a runner registration call.
 #[derive(Debug)]
 pub struct MintError {
-    /// None: GitHub could not be reached.
+    /// "GitHub", "GitLab" or "Gitea", for the message.
+    pub forge: &'static str,
+    /// None: the forge could not be reached.
     pub status: Option<u16>,
     /// "generate-jitconfig" or "registration-token".
     pub endpoint: &'static str,
@@ -52,8 +54,8 @@ pub struct MintError {
 }
 
 impl MintError {
-    /// A 5xx or no answer is GitHub's, for every repo; a 4xx is about this repo or token.
-    pub fn github_wide(&self) -> bool {
+    /// A 5xx or no answer is the forge's, for every repo; a 4xx is about this repo or token.
+    pub fn wide(&self) -> bool {
         self.status.is_none_or(|s| s >= 500)
     }
 }
@@ -61,8 +63,8 @@ impl MintError {
 impl std::fmt::Display for MintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.status {
-            Some(s) => write!(f, "runner registration failed: GitHub returned HTTP {s} ({})", self.endpoint)?,
-            None => write!(f, "runner registration failed: could not reach GitHub ({})", self.endpoint)?,
+            Some(s) => write!(f, "runner registration failed: {} returned HTTP {s} ({})", self.forge, self.endpoint)?,
+            None => write!(f, "runner registration failed: could not reach {} ({})", self.forge, self.endpoint)?,
         }
         if !self.message.is_empty() {
             write!(f, ": {}", self.message)?;
@@ -80,7 +82,7 @@ fn as_mint_error(e: anyhow::Error, endpoint: &'static str) -> anyhow::Error {
     let Some(status) = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()).map(|r| r.status().map(|s| s.as_u16())) else {
         return e;
     };
-    MintError { status, endpoint, message: format!("{e:#}") }.into()
+    MintError { forge: "GitHub", status, endpoint, message: format!("{e:#}") }.into()
 }
 
 /// Doctor line for a registration-token probe's status (None = unreachable).
@@ -459,7 +461,7 @@ impl Gh {
         label: &str,
         default_cpus: u32,
     ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
-        let arm64 = fixtures_arch_arm64();
+        let arm64 = crate::platform::host_arm64();
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -657,7 +659,7 @@ impl Gh {
     /// host's architecture: a kiln of the other one may serve the same repo, and its
     /// runners are offline while their VMs boot.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
-        let arm64 = fixtures_arch_arm64();
+        let arm64 = crate::platform::host_arm64();
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
@@ -747,14 +749,14 @@ impl Gh {
         if let Some(b) = body {
             rb = rb.json(&b);
         }
-        let r = self.exec(rb, who).await.map_err(|_| MintError { status: None, endpoint, message: String::new() })?;
+        let r = self.exec(rb, who).await.map_err(|_| MintError { forge: "GitHub", status: None, endpoint, message: String::new() })?;
         let status = r.status().as_u16();
         let text = r.text().await.unwrap_or_default();
         if !(200..300).contains(&status) {
             self.note_body(who, status, &text);
             let message =
                 serde_json::from_str::<Value>(&text).ok().and_then(|v| v["message"].as_str().map(String::from)).unwrap_or_default();
-            return Err(MintError { status: Some(status), endpoint, message }.into());
+            return Err(MintError { forge: "GitHub", status: Some(status), endpoint, message }.into());
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
@@ -1003,7 +1005,7 @@ mod tests {
 
     #[test]
     fn mint_errors() {
-        let e = |status, message: &str| MintError { status, endpoint: "generate-jitconfig", message: message.into() };
+        let e = |status, message: &str| MintError { forge: "GitHub", status, endpoint: "generate-jitconfig", message: message.into() };
         assert_eq!(e(Some(500), "").to_string(), "runner registration failed: GitHub returned HTTP 500 (generate-jitconfig)");
         assert_eq!(e(None, "").to_string(), "runner registration failed: could not reach GitHub (generate-jitconfig)");
         assert_eq!(
@@ -1011,13 +1013,13 @@ mod tests {
             "runner registration failed: GitHub returned HTTP 403 (generate-jitconfig): Resource not accessible by integration"
         );
         // GitHub-wide: 5xx and network errors; a 4xx is about this repo or this token.
-        assert!(e(Some(500), "").github_wide() && e(Some(503), "").github_wide() && e(None, "").github_wide());
-        assert!(!e(Some(403), "").github_wide() && !e(Some(404), "").github_wide() && !e(Some(422), "").github_wide());
+        assert!(e(Some(500), "").wide() && e(Some(503), "").wide() && e(None, "").wide());
+        assert!(!e(Some(403), "").wide() && !e(Some(404), "").wide() && !e(Some(422), "").wide());
     }
 
     #[test]
     fn installation_token_failures_are_mint_errors() {
-        let class = |e: anyhow::Error| e.downcast_ref::<MintError>().map(|m| (m.status, m.github_wide()));
+        let class = |e: anyhow::Error| e.downcast_ref::<MintError>().map(|m| (m.status, m.wide()));
         let status = |s: u16| {
             let r = reqwest::Response::from(axum::http::Response::builder().status(s).body("").unwrap());
             anyhow::Error::new(r.error_for_status().unwrap_err()).context("minting an installation token")
@@ -1133,12 +1135,6 @@ mod tests {
     }
 }
 
-/// Whether this host's runners and jobs carry the arm64 labels. Unit tests always run as x64:
-/// the mock forge's fixtures are x64, and the arm64 label rules have their own tests.
-pub(crate) fn fixtures_arch_arm64() -> bool {
-    crate::platform::ARM64 && !cfg!(test)
-}
-
 /// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
 /// the forge refactor (P0-4..P0-11) must keep every assertion here unchanged.
 #[cfg(test)]
@@ -1236,7 +1232,7 @@ mod characterization {
         for (status, wide) in [(404, false), (422, false), (403, false), (500, true), (503, true)] {
             m.fail("POST", path, status, "boom");
             let e = mint(&gh).await;
-            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.github_wide()), (Some(status), "generate-jitconfig", "boom", wide));
+            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.wide()), (Some(status), "generate-jitconfig", "boom", wide));
         }
         // A secondary rate limit is a 403 whose only marker is the text: it pauses polling.
         assert_eq!(gh.paused_until(), None);
@@ -1252,7 +1248,7 @@ mod characterization {
         let down = Gh::for_mock(&format!("http://{}", dead.local_addr().unwrap()));
         drop(dead);
         let e = mint(&down).await;
-        assert!(e.status.is_none() && e.github_wide());
+        assert!(e.status.is_none() && e.wide());
     }
 
     #[tokio::test]

@@ -318,29 +318,6 @@ pub struct RunnerReg {
     pub guest_secret: String,
 }
 
-/// A forge refused (or never answered) a runner registration. `wide`: the forge's own trouble
-/// (no answer or a 5xx), which backs off every repo of the forge; a 4xx is about this repo or token.
-#[derive(Debug)]
-pub struct RegisterError {
-    pub status: Option<u16>,
-    pub wide: bool,
-    pub message: String,
-}
-
-impl RegisterError {
-    pub fn new(status: Option<u16>, message: impl Into<String>) -> Self {
-        Self { status, wide: status.is_none_or(|s| s >= 500), message: message.into() }
-    }
-}
-
-impl std::fmt::Display for RegisterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RegisterError {}
-
 /// Why a runner is being retired; `note` is what the dashboard shows on the VM.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
@@ -688,8 +665,7 @@ impl Forge {
             Self::Gitea(g) => g.demand(repo, label, default_cpus).await,
         }
     }
-    /// Registers a single-use runner named `name` for `repo`. A refusal is a `github::MintError`
-    /// (GitHub) or a `RegisterError`; both feed the forge's launch backoff.
+    /// Registers a single-use runner named `name` for `repo`. A refusal is a `github::MintError`, which feeds the forge's launch backoff.
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
         match self {
             Self::GitHub(g) => g.register(repo, name, labels).await,
@@ -731,10 +707,10 @@ impl Forge {
     /// Stops the runner taking a second job and lists the jobs it holds. `None`: this forge needs
     /// no pause (Gitea refuses a second task server-side; GitHub is not gated). `Some(ids)`:
     /// the gate accepts exactly the console's job id.
-    pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
+    pub async fn pause(&self, _repo: &RepoRef, runner_id: u64) -> Result<Option<Vec<String>>> {
         match self {
             Self::GitHub(_) => Ok(None),
-            Self::GitLab(_) => bail!(gitlab::LATER),
+            Self::GitLab(g) => g.pause(runner_id).await.map(Some),
             Self::Gitea(_) => Ok(None),
         }
     }
