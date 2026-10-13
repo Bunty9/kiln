@@ -145,7 +145,7 @@ jobs:
   Also keep GitHub's "Require approval for all outside collaborators" setting on (Settings › Actions › General). Workflows that check out a pull request's head from an `issue_comment`, `repository_dispatch` or `workflow_dispatch` trigger must not use kiln on a public repo: kiln cannot tell (see [Fork pull requests](#fork-pull-requests)).
 
 - Set `egress` to `filtered` before running untrusted pull requests, such as ones from forks, and check Diagnostics shows "filtered egress" passing. Also consider requiring approval for workflows from outside contributors in the repository's GitHub settings.
-- Prefer a GitHub App (Settings › GitHub › Create GitHub App, see [docs/configuration.md](docs/configuration.md#github-app)): only its private key is stored, its tokens expire after an hour, and it never gets write access to code. Otherwise,
+- Prefer a GitHub App (Settings › Forges › Create GitHub App, see [docs/configuration.md](docs/configuration.md#github-app)): only its private key is stored, its tokens expire after an hour, and it never gets write access to code. Otherwise,
 - use a fine-grained token with only the repos you serve and the permissions listed in [docs/configuration.md](docs/configuration.md#github-token): *Administration: write*, *Actions: read and write* and *Contents: read*. Add *Contents* and *Workflows* write only while you use the hello PR.
 - Keep `allowed_users` empty (owner only) or minimal, and do not share the box's node to other tailnets.
 - Keep the host, QEMU and Tailscale updated, and let `auto_rebake` keep the guest and runner current.
