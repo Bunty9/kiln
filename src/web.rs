@@ -1427,14 +1427,15 @@ async fn run_rerun(State(app): S, Path(id): Path<u64>, Query(q): Query<RerunPara
 
 async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoParam>) -> R<Audited> {
     let (f, repo) = served(&app, &q.repo)?;
-    if !f.caps().cancel {
-        bail_r(&cannot(&f, "cancel runs"))?;
-    }
-    // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel), because the
-    // runner only notices a cancel after about a minute. The job lookup also catches a job that started since the last poll.
+    // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel, which is
+    // also why this comes before the caps check), because the runner only notices a cancel after about a minute.
+    // The job lookup also catches a job that started since the last poll.
     if f.kind() == crate::forge::Kind::GitLab {
         let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_default();
         vm::kill_pipeline(&app, &repo.key(), id, &jobs);
+    }
+    if !f.caps().cancel {
+        bail_r(&cannot(&f, "cancel runs"))?;
     }
     f.cancel(&repo, id).await?;
     Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
@@ -2532,7 +2533,7 @@ mod tests {
             f["caps"],
             json!({ "rerun": false, "rerun_failed": false, "cancel": false, "dispatch": false, "workflows": false, "live_steps": false })
         );
-        assert_eq!((f["launches"].clone(), f["network"].clone()), (json!(false), json!("public")));
+        assert_eq!((f["launches"].clone(), f["network"].clone()), (json!(true), json!("public")));
         assert!(!f.to_string().contains("glpat") && !r.to_string().contains("glpat"));
         // The rerun route says why it is refused.
         let e =

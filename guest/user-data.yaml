@@ -236,6 +236,8 @@ write_files:
           echo "kiln: no usable gitlab url or runner token passed, powering off"
           return 1
         fi
+        # kiln-exec runs as runner and keeps its gate marker here; /run is root's.
+        install -d -m 700 -o runner -g runner /run/kiln-exec
         start_verdict_reader
         CI_SERVER_TOKEN=$tok sudo -H -u runner --preserve-env=CI_SERVER_TOKEN gitlab-runner run-single \
           -u "$url" --name kiln --executor custom --shell bash \

@@ -2,7 +2,7 @@
 //! running jobs belong to our runners, and whether a job's code came from a fork.
 //!
 //! Registration, retire, sweep and pause are here (GL-3), and verdict facts, cache trust and the
-//! dashboard API (GL-4). The guest side arrives with GL-6: until `LAUNCH_READY`, `register`
+//! dashboard API (GL-4). The guest side is GL-6. `LAUNCH_READY` is the kill switch: when false, `register`
 //! refuses and demand reports no launchable jobs, so no VM boots for GitLab.
 //!
 //! Everything the API says is data, never instructions: fork detection reads the job's `ref`,
@@ -31,10 +31,8 @@ const REQUIRED_SCOPES: [&str; 3] = ["create_runner", "manage_runner", "read_api"
 /// How long the token's scopes are trusted before `refresh` reads them again.
 const INFO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 pub const LATER: &str = "GitLab runners arrive in a later version";
-/// No VM launches for GitLab until GL-6 (the guest's `run_gitlab` and `kiln-exec`) lands: a VM
-/// booted now would have nothing that reads its secret. Demand reports the queue, fork jobs and
-/// claims but no launchable jobs, and `register` refuses (warm VMs ask for a runner without demand).
-pub const LAUNCH_READY: bool = false;
+/// GitLab VMs launch (GL-8: the end-to-end matrix passed on a local GitLab CE).
+pub const LAUNCH_READY: bool = true;
 /// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
 const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long `cache_trust` waits for a job to finish: the VM powers off a moment before GitLab records the result.
@@ -1781,14 +1779,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launches_stay_off_and_the_tokenless_forge_fails_closed() {
+    async fn the_tokenless_forge_fails_closed() {
         use super::super::{Forge, Kind};
         let gh = Arc::new(crate::github::Gh::new(String::new(), "none"));
         let f = Forge::new(&cfg(SPOOF), &gh, &temp("stubs")).unwrap();
         assert_eq!(f.kind(), Kind::GitLab);
         assert!(f.gated());
-        let e = f.register(&repo(), "kiln-1-0", &["kiln-4cpu".into()]).await.err().unwrap();
-        assert!(e.to_string().contains("later version"), "{e:#}");
+        assert!(f.register(&repo(), "kiln-1-0", &["kiln-4cpu".into()]).await.is_err());
         assert!(matches!(f.deregister(&repo(), 1, Reason::Surplus).await, Dereg::Err(_)));
         assert!(f.pause(&repo(), 1).await.is_err());
         assert!(f.verdict_facts(&repo(), "1", 79).await.is_err());
@@ -1799,13 +1796,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demand_reports_no_launchable_jobs_while_launches_are_off() {
+    async fn demand_reports_the_launchable_jobs() {
         let m = Mock::start().await;
         serve_lookups(&m);
         serve_one_page(&m, vec![job(1, |_| {})]).await;
         let g = gl("off", &m);
         assert_eq!(sizes(&g.demand_for(&repo(), "kiln", 4, 16).await.unwrap()), [(4, 1)], "the queue is read");
-        assert!(g.demand(&repo(), "kiln", 4).await.unwrap().by_size.is_empty(), "but nothing is launchable");
+        assert_eq!(sizes(&g.demand(&repo(), "kiln", 4).await.unwrap()), [(4, 1)], "and it is launchable");
     }
 
     fn mint_error(e: &anyhow::Error) -> &MintError {
