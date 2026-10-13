@@ -593,6 +593,13 @@ impl Forge {
             Self::Gitea(g) => g.cancel(repo, id).await,
         }
     }
+    /// GitLab only: the job ids of pipeline `id`; empty elsewhere.
+    pub async fn pipeline_job_ids(&self, repo: &RepoRef, id: u64) -> Result<Vec<String>> {
+        match self {
+            Self::GitLab(g) => g.pipeline_job_ids(repo, id).await,
+            _ => Ok(vec![]),
+        }
+    }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
@@ -704,6 +711,13 @@ impl Forge {
             Self::Gitea(g) => g.cache_trust(job, writers).await,
         }
     }
+    /// GitLab only: the job's result from the API (see `GitLab::job_result`); None elsewhere.
+    pub async fn job_result(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<Option<&'static str>> {
+        match self {
+            Self::GitLab(g) => g.job_result(repo, job_id, runner_id).await,
+            _ => Ok(None),
+        }
+    }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
         match self {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
@@ -749,6 +763,16 @@ pub enum Call {
     Refuse,
 }
 
+impl Call {
+    pub fn name(self) -> &'static str {
+        match self {
+            Call::Ok => "ok",
+            Call::Cold => "cold",
+            Call::Refuse => "refuse",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Verdict {
     pub v: Call,
@@ -761,12 +785,7 @@ impl Verdict {
     }
     /// The serial line the guest's `verdict_reader` accepts.
     pub fn line(&self, job_id: &str) -> String {
-        let v = match self.v {
-            Call::Ok => "ok",
-            Call::Cold => "cold",
-            Call::Refuse => "refuse",
-        };
-        format!("kiln.verdict={v} {job_id}\n")
+        format!("kiln.verdict={} {job_id}\n", self.v.name())
     }
 }
 
@@ -779,10 +798,14 @@ pub struct VerdictFacts {
     pub fork: bool,
     /// Gitea `workflow_run`: runs with the base repo's trust on attacker-chosen input.
     pub workflow_run: bool,
+    /// GitLab multi-project downstream pipeline (`pipeline` source): same trust problem as `workflow_run`.
+    pub downstream: bool,
     /// The pipeline source or event is none the forge knows.
     pub unknown_source: bool,
     /// Tag or release.
     pub tag: bool,
+    /// GitLab merge-train ref: target plus every MR ahead of this one, which may include fork MRs (R2b B-L1).
+    pub train: bool,
 }
 
 /// Pure: facts to verdict. Anything but a plain, known, same-repo, non-fork job refuses or goes cold.
@@ -791,12 +814,16 @@ pub fn decide(f: &VerdictFacts) -> Verdict {
         Verdict::refuse("job is not for this repo")
     } else if f.workflow_run {
         Verdict::refuse("workflow_run is never run")
+    } else if f.downstream {
+        Verdict::refuse("multi-project downstream pipelines are not run")
     } else if f.unknown_source {
         Verdict::refuse("unknown job source")
     } else if f.fork {
         Verdict::refuse("pull request from a fork")
     } else if f.tag {
         Verdict { v: Call::Cold, why: "tag or release".into() }
+    } else if f.train {
+        Verdict { v: Call::Cold, why: "merge train".into() }
     } else {
         Verdict { v: Call::Ok, why: String::new() }
     }
@@ -958,6 +985,8 @@ mod tests {
         assert_eq!(t(facts(|f| f.tag = true)), Call::Cold);
         assert_eq!(t(facts(|f| f.fork = true)), Call::Refuse);
         assert_eq!(t(facts(|f| f.workflow_run = true)), Call::Refuse);
+        assert_eq!(t(facts(|f| f.downstream = true)), Call::Refuse);
+        assert_eq!(t(facts(|f| f.train = true)), Call::Cold);
         assert_eq!(t(facts(|f| f.unknown_source = true)), Call::Refuse);
         assert_eq!(t(VerdictFacts::default()), Call::Refuse, "a job not known to be ours");
         // Refusal outranks cold.

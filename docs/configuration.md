@@ -226,7 +226,7 @@ A forge's address, kind, token source and network cannot be changed by a setting
 
 Settings › Forges › **Add a forge** takes the kind (GitLab), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab is chosen. Then the forge's card takes its token and projects:
 
-- `POST /api/forges` adds the forge with no token. `POST /api/forges/{id}/token` tries the token against the forge and saves it only if it works, with the scopes kiln needs. The token is never returned or logged; the audit log says "forge token replaced". `POST /api/forges/{id}/repos` replaces the project list (paths, `<id>:<path>`, or a project URL on that forge). `DELETE /api/forges/{id}` removes the forge and its token file, and is refused while it has running VMs. `POST /api/forges/{id}/check` is the card's **Test**. All of them need the `x-kiln` header like every write, and are audited.
+- `POST /api/forges` adds the forge with no token. `POST /api/forges/{id}/token` tries the token against the forge and saves it only if it works, with the scopes kiln needs. The token is never returned or logged; the audit log says which forge got a new token. `POST /api/forges/{id}/repos` replaces the project list (paths, `<id>:<path>`, or a project URL on that forge). `DELETE /api/forges/{id}` removes the forge and its token file, and is refused while it has running VMs. `POST /api/forges/{id}/check` is the card's **Test**. All of them need the `x-kiln` header like every write, and are audited.
 
 ### GitLab
 
@@ -249,6 +249,10 @@ Give it an expiry; the dashboard warns 14 days before. Project and group access 
 **Setup check** (`kiln doctor`, Settings › Diagnostics, and the card's **Test**, which creates nothing): the GitLab version, who the token belongs to, its scopes and expiry, and its role on each project. Saving a token refuses one that is rejected or lacks a scope, naming it ("the token lacks `create_runner`"). A role below Maintainer is shown on the project's row. When creating a runner still gets **403**, GitLab does not say why; there are three causes: the role is below Maintainer; the instance setting `valid_runner_registrars` (Admin › Settings › CI/CD › Runner registration) lacks `project`; or runner registration is switched off for the project or its group (a toggle with no API, so kiln cannot check it).
 
 **Using it.** Give a job `tags: [kiln]` (or `kiln-4cpu` and the other size labels) in `.gitlab-ci.yml`; jobs with no tag, or other tags, are left to your other runners. Merge request pipelines from forks are never run by kiln (decided by the job's ref, not by its variables). GitLab can also run a fork's pipeline in your project when someone clicks Run pipeline and the project allows it (*Run pipelines in the parent project for merge requests from forks*): that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave that setting off.
+
+## GitLab jobs
+
+Which GitLab jobs kiln runs is decided from GitLab's API (see [SECURITY.md](../SECURITY.md#fork-pull-requests)). Multi-project downstream pipelines (source `pipeline`) are refused: the upstream project chooses their variables and kiln cannot vouch for them. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request; fork merge requests are refused), and they never save the cache. Merge-train pipelines run without the cache. The cache is saved only after a `push` pipeline on the default or a protected cache branch whose job the API reports as `success`, on this VM's own runner, with exactly one job started and a recorded `ok` verdict for that job. kiln removes the runners of VMs that ended, at startup and about hourly for GitLab and Gitea. Cancelling a pipeline from the dashboard stops its VMs first, even when the token lacks the `api` scope and GitLab refuses the cancel.
 
 ## Notifications
 

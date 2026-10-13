@@ -66,6 +66,8 @@ kiln refuses to run code from a fork. The scheduler does not count queued jobs o
 
 The hook can only see where the event came from, not what the workflow then checks out. Workflows triggered by `issue_comment`, `repository_dispatch` or `workflow_dispatch` (or anything else) that check out a pull request's head, such as a "/test" comment bot, run fork code that kiln cannot detect. On a public repository such workflows must not run on kiln: give them a GitHub-hosted runner.
 
+GitLab (not launched yet) is decided by the host from GitLab's API alone, never from a `CI_*` variable. A job runs only for a source kiln knows, with a ref that is a branch of this project or a same-project merge request. Merge requests from forks, unknown sources and any lookup error are refused. Multi-project downstream pipelines (source `pipeline`) are refused, like Gitea's `workflow_run`: their ref is a plain branch whatever the upstream was, but their variables come from a trigger job in another project that kiln never sees. Child pipelines (`parent_pipeline`) are allowed through the ref rules only: a child of a merge request pipeline keeps the merge request ref, so the fork and merge request checks apply to it, and a child on a branch belongs to this project's own branch pipeline. A child never saves the cache. A child of a downstream pipeline cannot be told from a child on a branch, so do not point another project's trigger at a branch of a repo kiln serves. Merge-train refs run without the cache.
+
 ### Console and lifecycle hardening
 
 Console lines may shape the timeline but cannot rewind state or extend a VM's life:
