@@ -844,6 +844,12 @@ impl Forges {
         }
     }
 
+    /// Tests: put a ready-made forge (one built on a mock) in the registry.
+    #[cfg(test)]
+    pub fn insert(&self, cfg: ForgeCfg, f: Forge) {
+        self.0.write().unwrap().insert(cfg.id.clone(), (ForgeCfg { repos: vec![], ..cfg }, Arc::new(f)));
+    }
+
     /// Reads every forge's file credential from `data`; call after `sync` and when a token is replaced.
     pub fn load_tokens(&self, data: &std::path::Path) {
         for f in self.all() {

@@ -207,7 +207,14 @@ mod tests {
         // A long command line is seen whole (QEMU's VM path sits far into its arguments).
         let tail = format!("/kiln-test-{}/vms/x/disk.qcow2", "y".repeat(400));
         let mut child = std::process::Command::new("sh").args(["-c", "sleep 5; :", "sh", &tail]).spawn().unwrap();
-        let seen = process_cmdlines().iter().any(|c| c.contains(&tail));
+        // The child may not have exec'd `sh` yet: poll briefly instead of reading once.
+        let seen = (0..40).any(|_| {
+            let hit = process_cmdlines().iter().any(|c| c.contains(&tail));
+            if !hit {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            hit
+        });
         child.kill().ok();
         child.wait().ok();
         assert!(seen, "long command line cut short");
