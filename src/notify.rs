@@ -1579,6 +1579,114 @@ mod tests {
         assert_eq!(q.q.lock().unwrap().len(), n + 2);
     }
 
+    /// One kiln, the same `acme/demo` path on a GitHub, a GitLab and a Gitea forge.
+    fn trio_app() -> (Arc<crate::App>, Arc<Queue>) {
+        let (app, q) = job_app();
+        let f: Vec<crate::forge::ForgeCfg> = serde_json::from_str(
+            r#"[{"id":"github","kind":"github","repos":["acme/demo"]},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["acme/demo"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["acme/demo"]}]"#,
+        )
+        .unwrap();
+        let mut c = app.cfg();
+        c.forges = Some(f);
+        *app.cfg.write().unwrap() = c;
+        (app, q)
+    }
+
+    const GH_LINK: &str = "https://github.com/acme/demo/actions/runs/1/job/2";
+    const GL_LINK: &str = "https://gitlab.example.com/acme/demo/-/jobs/7";
+    const GE_LINK: &str = "https://gitea.example.com/acme/demo/actions/runs/3";
+
+    fn trio_vm(repo: &str, id: &str, link: &str) -> Vm {
+        let mut v = other_vm(repo, id, "ci.yml", link);
+        v.job_url = Some(link.into());
+        v
+    }
+
+    fn queued_jobs(q: &Queue) -> Vec<JobInfo> {
+        q.q.lock()
+            .unwrap()
+            .iter()
+            .map(|e| match &e.detail {
+                Detail::Job(j) => j.clone(),
+                _ => panic!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_forge_failures_name_their_forge_and_keep_only_their_own_link() {
+        let (app, q) = trio_app();
+        for (repo, id, link) in
+            [("acme/demo", "kiln-9-1", GH_LINK), ("gl:acme/demo", "kiln-9-2", GL_LINK), ("ge:acme/demo", "kiln-9-3", GE_LINK)]
+        {
+            job_ended(&app, &trio_vm(repo, id, link));
+        }
+        // Another configured forge's origin is not this job's origin: dropped, whichever way round.
+        job_ended(&app, &trio_vm("gl:acme/demo", "kiln-9-4", GE_LINK));
+        job_ended(&app, &trio_vm("ge:acme/demo", "kiln-9-5", GL_LINK));
+        job_ended(&app, &trio_vm("ge:acme/demo", "kiln-9-6", GH_LINK));
+        job_ended(&app, &trio_vm("acme/demo", "kiln-9-7", GL_LINK));
+        let got = queued_jobs(&q);
+        let key = |j: &JobInfo| (j.forge.clone(), j.forge_kind.clone(), j.url.clone());
+        let some = |u: &str| Some(u.to_string());
+        assert_eq!(
+            got.iter().map(key).collect::<Vec<_>>(),
+            [
+                ("github".into(), "github".into(), some(GH_LINK)),
+                ("gl".into(), "gitlab".into(), some(GL_LINK)),
+                ("ge".into(), "gitea".into(), some(GE_LINK)),
+                ("gl".into(), "gitlab".into(), None),
+                ("ge".into(), "gitea".into(), None),
+                ("ge".into(), "gitea".into(), None),
+                ("github".into(), "github".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_forge_rules_route_by_forge_id_and_match_the_forges_own_workflow() {
+        let (app, q) = trio_app();
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let rule = |repo: &str, wf: &str| Rule { repo: repo.into(), workflow: wf.into(), outcome: "success".into(), to: vec![d.clone()] };
+        let mut c = app.cfg();
+        // GitLab names the pipeline ("pipeline"), GitHub and Gitea the file ("ci.yml").
+        c.notify_rules = vec![rule("gl:acme/demo", "pipeline"), rule("ge:acme/demo", "ci.yml"), rule("acme/demo", "ci.yml")];
+        *app.cfg.write().unwrap() = c;
+        let ok = |repo: &str, id: &str| Vm { result: Some("Succeeded".into()), ..trio_vm(repo, id, GL_LINK) };
+        let run = |repo: &str, id: &str, wf: &str, file: &str| {
+            let mut v = ok(repo, id);
+            let r = v.run.as_mut().unwrap();
+            (r.workflow, r.file) = (wf.into(), file.into());
+            job_ended(&app, &v);
+        };
+        let sent = || queued_jobs(&q).iter().map(|j| j.forge.clone()).collect::<Vec<_>>();
+        // Right matcher on each forge: one alert each, and only to its own forge's rule.
+        run("gl:acme/demo", "kiln-9-1", "pipeline", "");
+        assert_eq!(sent(), ["gl"]);
+        run("ge:acme/demo", "kiln-9-2", "other", "ci.yml");
+        run("acme/demo", "kiln-9-3", "other", "ci.yml");
+        assert_eq!(sent(), ["gl", "ge", "github"]);
+        // The wrong matcher on each forge matches nothing: GitLab's file, GitHub's and Gitea's pipeline name.
+        run("gl:acme/demo", "kiln-9-4", "other", "ci.yml");
+        run("ge:acme/demo", "kiln-9-5", "pipeline", "other.yml");
+        run("acme/demo", "kiln-9-6", "pipeline", "other.yml");
+        assert_eq!(sent().len(), 3);
+    }
+
+    #[test]
+    fn a_forge_id_rule_never_routes_another_forges_repo_of_the_same_path() {
+        let (app, q) = trio_app();
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let mut c = app.cfg();
+        c.notify_rules = vec![Rule { repo: "gl:acme/demo".into(), workflow: "*".into(), outcome: "success".into(), to: vec![d] }];
+        *app.cfg.write().unwrap() = c;
+        for (i, repo) in ["acme/demo", "ge:acme/demo", "gl:acme/demo"].into_iter().enumerate() {
+            let v = Vm { result: Some("Succeeded".into()), ..trio_vm(repo, &format!("kiln-9-{i}"), GL_LINK) };
+            job_ended(&app, &v);
+        }
+        assert_eq!(queued_jobs(&q).iter().map(|j| j.forge.as_str()).collect::<Vec<_>>(), ["gl"]);
+    }
+
     #[test]
     fn generic_payload_names_the_forge_and_still_verifies() {
         let e = job("acme/kiln", "build", "main");

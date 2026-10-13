@@ -3074,6 +3074,28 @@ mod tests {
     }
 
     #[test]
+    fn mixed_forges_split_usage_and_github_stays_byte_compatible() {
+        let base = std::env::temp_dir().join(format!("kiln-test-usage-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (alone, mixed) = (base.join("alone"), base.join("mixed"));
+        for d in [&alone, &mixed] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let day = 20_000 * 86400;
+        let job =
+            |repo: &str| Vm { repo: repo.into(), cpus: 2, busy_since: Some(day), done_at: Some(day + 90), ..vm("x", State::Done, None) };
+        record_usage(&alone, &job("acme/demo"));
+        for repo in ["acme/demo", "gl:acme/demo", "ge:acme/demo"] {
+            record_usage(&mixed, &job(repo));
+        }
+        assert_eq!(std::fs::read(mixed.join("usage.json")).unwrap(), std::fs::read(alone.join("usage.json")).unwrap());
+        assert!(!alone.join("usage-other.json").exists(), "a GitHub-only kiln writes no new file");
+        assert_eq!(usage_since(&mixed, 0), vec![[20_000, 2, 1, 2]]);
+        assert_eq!(usage_other_since(&mixed, 0), vec![(20_000, "ge".to_string(), 1, 2), (20_000, "gl".to_string(), 1, 2)]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn usage_counts_job_minutes_as_github_bills_them() {
         let d = std::env::temp_dir().join(format!("kiln-test-usage_counts_job_minutes_as_github_bills_them-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
