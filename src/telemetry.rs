@@ -177,7 +177,7 @@ fn usage(app: &App, id: &str) -> Value {
         "build": BUILD,
         "arch": std::env::consts::ARCH,
         "host_threads": crate::host_threads(),
-        "host_mem_gb": crate::vm::meminfo_kb("MemTotal:") / 1_048_576,
+        "host_mem_gb": crate::platform::mem_total_mb() / 1024,
         "auth": match app.gh.source() { "app" => "app", "none" => "none", _ => "token" },
         "repos": app.repos().len(),
         "max_vms": c.max_vms,

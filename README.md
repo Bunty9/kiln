@@ -23,7 +23,7 @@ Full list: [Requirements](#requirements).
 On the CI box, install the latest release:
 
 ```sh
-flavor=x86_64-linux          # or x86_64-linux-musl
+flavor=x86_64-linux          # pick one from the table below
 v=$(curl -s https://api.github.com/repos/Bunty9/kiln/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
 f=kiln-$v-$flavor.tar.gz url=https://github.com/Bunty9/kiln/releases/latest/download
 cd "$(mktemp -d)"
@@ -47,7 +47,15 @@ openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in "$f" -sigf
 
 </details>
 
-`x86_64-linux` needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); `x86_64-linux-musl` is fully static and runs on any x86_64 Linux. You can also install [from crates.io or source](#other-ways-to-install).
+| Platform | `flavor` | Notes |
+|---|---|---|
+| Linux x86_64 | `x86_64-linux` | needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later) |
+| Linux x86_64 | `x86_64-linux-musl` | fully static, runs on any x86_64 Linux |
+| Linux arm64 | `aarch64-linux` | needs glibc 2.39 or newer |
+| Linux arm64 | `aarch64-linux-musl` | fully static, runs on any arm64 Linux |
+| macOS, Apple Silicon | `aarch64-macos` | experimental; follow [docs/apple-silicon.md](docs/apple-silicon.md) (launchd service, `shasum -a 256 -c` instead of `sha256sum -c`) |
+
+Every tarball is signed with the same Ed25519 key. The macOS binary carries the linker's ad-hoc code signature, which Apple Silicon requires, but it is not notarized by Apple; a download through curl is not quarantined, so it runs without a Gatekeeper prompt. Intel Macs have no release build. You can also install [from crates.io or source](#other-ways-to-install).
 
 Then bake the image, start the service and open `http://<box>:7878` from a device on your tailnet. A first-run stepper walks through the token, a repo and a first job.
 
@@ -127,8 +135,9 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - The box on a Tailscale tailnet. The dashboard answers only tailnet devices of the box's owner (or users in `allowed_users`), and the box itself with a dashboard key.
 - About 15 GB of free disk at a minimum (kiln refuses to launch VMs below that), plus room for the base image, caches and the Docker mirror.
 - A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
-- The `x86_64-linux` release binary needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the `x86_64-linux-musl` build does not. To build from source you need Rust 1.89 or newer.
+- The glibc release binaries (`x86_64-linux`, `aarch64-linux`) need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the `-musl` builds do not. To build from source you need Rust 1.89 or newer.
 - For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
+- Experimental, not yet tested on real hardware: an Apple Silicon Mac running arm64 job VMs with Hypervisor.framework. See [docs/apple-silicon.md](docs/apple-silicon.md).
 
 ## Installing and running
 
@@ -186,7 +195,7 @@ kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this
 
 ## Updates
 
-kiln updates itself from signed GitHub releases: Settings › Updates shows when a new version is out, with its release notes. **Update** downloads the release, checks its Ed25519 signature against the key built into kiln, lets running jobs finish (no new VMs start meanwhile), swaps the binary and restarts in place. If the new version fails to start twice, kiln restores the previous one. Set `auto_update` to install new releases on its own when the box is idle. Each release ships a glibc build and a fully static musl build; kiln updates to the same kind it is. Details: [docs/configuration.md](docs/configuration.md#updates).
+kiln updates itself from signed GitHub releases: Settings › Updates shows when a new version is out, with its release notes. **Update** downloads the release, checks its Ed25519 signature against the key built into kiln, lets running jobs finish (no new VMs start meanwhile), swaps the binary and restarts in place. If the new version fails to start twice, kiln restores the previous one. Set `auto_update` to install new releases on its own when the box is idle. Each release ships a glibc build and a fully static musl build for x86_64 and arm64 Linux, plus an Apple Silicon build; kiln updates to the same kind and CPU it is. Details: [docs/configuration.md](docs/configuration.md#updates).
 
 ## Dashboard tour
 
@@ -233,7 +242,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 - **Runner updates.** kiln pins the runner version when it bakes. GitHub stops sending jobs to runners much more than a month out of date, so kiln rebakes by itself (`auto_rebake`) once the image is stale.
 - **Network throughput.** User-mode networking (slirp) tops out well below line rate and is CPU-heavy on large `docker pull`s. A future option is `passt` (still rootless) or a one-time root setup of tap devices.
 - **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo; org-level runner groups are not implemented.
-- **Single host, x86_64, Ubuntu 24.04 guests only.** Scheduling is a per-repo count; there are no priorities or fair-share.
+- **Single host, Ubuntu 24.04 guests of the host's architecture** (x86_64; arm64 on Apple Silicon is experimental). Scheduling is a per-repo count; there are no priorities or fair-share.
 - **Filtered egress is opt-in.** It is implemented but not yet the default; DNS is not filtered.
 
 ## Documentation
@@ -242,6 +251,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 |---|---|
 | [docs/stacks.md](docs/stacks.md) | Language and tool compatibility, pricing, migration tips |
 | [docs/architecture.md](docs/architecture.md) | How kiln works: lifecycle, scheduling, cache, egress, API |
+| [docs/apple-silicon.md](docs/apple-silicon.md) | Running kiln on an Apple Silicon Mac (experimental, untested) |
 | [docs/configuration.md](docs/configuration.md) | Every setting, environment variable, file and command |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, tests, deploying |
 | [SECURITY.md](SECURITY.md) | Threat model, residual risks, reporting |

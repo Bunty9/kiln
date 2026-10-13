@@ -16,7 +16,14 @@
 //! QEMU's own seccomp filter (`-sandbox`, see `vm::qemu`) adds no exec, no setuid and
 //! no obsolete syscalls. Landlock is best effort: a kernel without it runs QEMU
 //! unconfined, and `kiln doctor` says so.
+//!
+//! Linux only. macOS has neither Landlock nor QEMU's seccomp sandbox: there `__confine`
+//! just execs QEMU, which runs as the kiln user; the guest is still isolated by
+//! Hypervisor.framework, but a QEMU escape reaches kiln's files. `kiln doctor` warns.
+//! The rules cover arm64 Linux hosts as they are: `qemu-system-aarch64` and its firmware
+//! live under `/usr`, and the fw_cfg secret files are in the VM's `q/` directory.
 
+#[cfg(target_os = "linux")]
 use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -32,6 +39,7 @@ const SYSTEM: [&str; 6] = ["/usr", "/lib", "/lib64", "/bin", "/etc", "/opt"];
 /// Read-only kernel interfaces QEMU inspects (CPU topology, its own fds and limits).
 const KERNEL: [&str; 2] = ["/proc", "/sys"];
 /// The device nodes QEMU opens, read-write with ioctls: KVM, and the usual character devices.
+#[cfg(target_os = "linux")]
 const DEVICES: [&str; 6] = ["/dev/kvm", "/dev/null", "/dev/zero", "/dev/full", "/dev/urandom", "/dev/random"];
 
 /// The read rule a data directory falls under, if any: then confined QEMU could read the token
@@ -83,12 +91,14 @@ impl Policy {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Apply `p` to this thread (and so to whatever it execs). Err only for a ruleset kiln got
 /// wrong; a kernel without (full) Landlock support is not an error: see the status.
 pub fn restrict(p: &Policy) -> Result<RulesetStatus, landlock::RulesetError> {
     restrict_as(p, ABI::V9)
 }
 
+#[cfg(target_os = "linux")]
 /// `restrict` asking for no more than `abi`'s features.
 fn restrict_as(p: &Policy, abi: ABI) -> Result<RulesetStatus, landlock::RulesetError> {
     let read = AccessFs::from_read(abi);
@@ -111,6 +121,7 @@ fn restrict_as(p: &Policy, abi: ABI) -> Result<RulesetStatus, landlock::RulesetE
     Ok(status.ruleset)
 }
 
+#[cfg(target_os = "linux")]
 /// Where `/etc/resolv.conf` really lives, when that is outside `/etc`: its directory
 /// (systemd-resolved replaces the file, so a rule on the file alone goes stale), unless
 /// that is a top-level one like `/run`, then the file only.
@@ -131,15 +142,19 @@ pub fn main(args: impl Iterator<Item = OsString>) -> ! {
     let (p, cmd) = Policy::parse(args).unwrap_or_else(|e| fail(e));
     // Partly enforced is the norm on kernels older than the newest Landlock ABI: `kiln
     // doctor` reports which protections this kernel has.
+    #[cfg(target_os = "linux")]
     match restrict(&p) {
         Ok(RulesetStatus::NotEnforced) => eprintln!("kiln confine: Landlock unavailable on this kernel; QEMU runs unconfined"),
         Ok(_) => {}
         Err(e) => fail(format!("Landlock: {e}")),
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = p;
     let e = std::process::Command::new(&cmd[0]).args(&cmd[1..]).exec();
     fail(format!("exec {:?}: {e}", cmd[0]))
 }
 
+#[cfg(target_os = "linux")]
 /// Landlock on this kernel, for `kiln doctor`: (ok, detail). ABI 6 (Linux 6.12) brings the
 /// signal and abstract-socket scopes; ABI 9 also limits connecting to unix sockets.
 pub fn probe() -> (bool, String) {
@@ -161,6 +176,16 @@ pub fn probe() -> (bool, String) {
         (_, Ok(Err(e))) => (false, format!("Landlock: {e}")),
         (_, Err(_)) => (false, "Landlock probe panicked".into()),
     }
+}
+
+/// macOS: nothing to probe. ok so `kiln doctor` passes, but a warning: QEMU is unconfined.
+#[cfg(not(target_os = "linux"))]
+pub fn probe() -> (bool, String) {
+    (
+        true,
+        "warning: no Landlock on macOS: job VMs' QEMU runs unconfined as the kiln user (Hypervisor.framework still isolates the guest)"
+            .into(),
+    )
 }
 
 #[cfg(test)]
@@ -189,6 +214,7 @@ mod tests {
         assert!(Policy::parse(["qemu".into()].into_iter()).is_err(), "no --");
     }
 
+    #[cfg(target_os = "linux")]
     /// The real thing, in a child thread: files outside the policy are out of reach.
     #[test]
     fn confines_files() {
