@@ -734,6 +734,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // A job is root in its VM and can write anything to the console, so console lines
     // may shape the timeline but never extend the VM's life past this hard cap.
     let hard_cap = start_cap(&cfg, v.warm);
+    // Verdicts of the host gate (gated forges only), written to the guest from this loop.
+    let (verdicts, mut verdict_rx) = tokio::sync::mpsc::channel::<(String, crate::forge::Verdict)>(1);
     loop {
         // Idle VMs are reaped quickly; busy ones get the full job timeout.
         let v = update(app, id, |_| {}).context("vm vanished")?;
@@ -770,6 +772,28 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 }
                 let text = String::from_utf8_lossy(&buf);
                 observe(app, id, &text);
+                if forge.gated()
+                    && let Some(crate::forge::console::Line::JobStart(jid)) = crate::forge::console::parse_line(forge.kind(), &text)
+                {
+                    let mut b = Bound::Repeat;
+                    if let Some(v) = update(app, id, |v| b = bind_job_id(v, &jid)) {
+                        persist(app, &v);
+                    }
+                    match b {
+                        Bound::Repeat => {}
+                        Bound::Second => {
+                            child.kill().await.ok();
+                            return Ok(State::Killed);
+                        }
+                        Bound::First => {
+                            let (forge, rr, tx) = (forge.clone(), rr.clone(), verdicts.clone());
+                            tokio::spawn(async move {
+                                let vd = crate::forge::gate(&jid, crate::forge::GATE_TIMEOUT, forge.pause(&rr, runner_id), forge.verdict_facts(&rr, &jid)).await;
+                                let _ = tx.send((jid, vd)).await;
+                            });
+                        }
+                    }
+                }
                 if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
                     let max_vms = app.cfg().max_vms;
@@ -813,6 +837,23 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         }
                     }
                     send(&mut stdin, &decide_msg(hold)).await;
+                }
+            }
+            Some((jid, vd)) = verdict_rx.recv() => {
+                send(&mut stdin, &vd.line(&jid)).await;
+                if vd.v == crate::forge::Call::Refuse {
+                    let rec = update(app, id, |v| {
+                        v.note = Some(format!("refused: {}", vd.why));
+                        if v.cache == CacheUse::Read {
+                            v.cache = CacheUse::Discarded;
+                            v.cache_note = Some("cache not saved: the job was refused".into());
+                        }
+                    });
+                    if let Some(v) = rec {
+                        persist(app, &v);
+                    }
+                    child.kill().await.ok();
+                    return Ok(State::Killed);
                 }
             }
             _ = release.notified() => send(&mut stdin, "release\n").await,
@@ -1479,7 +1520,38 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             v.note = Some("runner self-updating (rebake to avoid)".into());
             false
         }
+        // Gated forges: the run loop binds the id and starts the verdict (`bind_job_id`).
+        Some(Line::JobStart(_)) => false,
         None => false,
+    }
+}
+
+/// What a console job-start line did to a VM's bound job id.
+#[derive(PartialEq, Eq, Debug)]
+enum Bound {
+    /// The first id: it is now `v.job_id` and the verdict is due.
+    First,
+    Repeat,
+    /// A different id: the runner took two jobs. The overlay is discarded; the caller kills the VM.
+    Second,
+}
+
+/// Binds the console's job id once, forward only (4.3 of the forge design).
+fn bind_job_id(v: &mut Vm, id: &str) -> Bound {
+    match v.job_id.as_deref() {
+        None => {
+            v.job_id = Some(id.into());
+            Bound::First
+        }
+        Some(j) if j == id => Bound::Repeat,
+        Some(_) => {
+            if v.cache == CacheUse::Read {
+                v.cache = CacheUse::Discarded;
+                v.cache_note = Some("cache not saved: a second job reached this runner".into());
+            }
+            v.note = Some("killed: a second job reached this runner".into());
+            Bound::Second
+        }
     }
 }
 
@@ -2414,6 +2486,21 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn job_id_binds_once_and_a_second_id_discards_the_overlay() {
+        let mut v: Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read"
+        }))
+        .unwrap();
+        assert_eq!(bind_job_id(&mut v, "7"), Bound::First);
+        assert_eq!(bind_job_id(&mut v, "7"), Bound::Repeat);
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("7"), CacheUse::Read));
+        assert_eq!(bind_job_id(&mut v, "8"), Bound::Second);
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("7"), CacheUse::Discarded), "the first id stays");
+        assert_eq!(v.note.as_deref(), Some("killed: a second job reached this runner"));
+    }
+
     #[test]
     fn registration_backoff_is_keyed_by_the_vms_forge() {
         assert_eq!(super::forge_id("acme/demo").as_str(), "github");

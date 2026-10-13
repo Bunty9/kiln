@@ -12,6 +12,8 @@ pub enum Line {
     /// The runner's result text as printed (not validated: unknown words are kept).
     Completed(String),
     RunnerUpdate,
+    /// A gated forge's runner took a job: the forge's job id as printed. Not validated here.
+    JobStart(String),
 }
 
 /// Recognises one console line. Trailing whitespace is ignored.
