@@ -9,7 +9,10 @@
 //! config can overwrite those). Any doubt is a fork. All HTTP goes through `net.rs` (no
 //! redirects, address guard, size cap), and a `Link` URL is only compared, never fetched.
 
-use super::{Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Links, Network, RepoRef, RunnerReg, net};
+use super::{
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Links, Network, RepoRef, RunnerReg, env_name, net, read_token_file,
+    token_path,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
@@ -40,7 +43,6 @@ pub struct GitLab {
     client: reqwest::Client,
     cred: Credential,
     token_file: PathBuf,
-    token_env: String,
     /// Empty = none. Never logged or put in an error.
     token: RwLock<String>,
     /// Runner descriptions are `<install>-<vm id>`; ours are the ones with this prefix.
@@ -79,8 +81,7 @@ impl GitLab {
             mode: network.into(),
             client: net::client(network.into()),
             cred: cfg.credential.unwrap_or(Credential::File),
-            token_file: data.join("forges").join(format!("{}.token", id.as_str())),
-            token_env: env_name(&id),
+            token_file: token_path(data, &id),
             token: RwLock::new(String::new()),
             install: install_id(data)?,
             per_page: PER_PAGE,
@@ -91,15 +92,15 @@ impl GitLab {
             unguarded: false,
             id,
         };
-        g.refresh();
+        g.load_token(data);
         Ok(g)
     }
 
     /// Re-reads the credential (the dashboard writes the file; the environment is fixed).
-    pub fn refresh(&self) {
+    pub fn load_token(&self, data: &Path) {
         let t = match self.cred {
-            Credential::File => std::fs::read_to_string(&self.token_file).unwrap_or_default(),
-            Credential::Env => std::env::var(&self.token_env).unwrap_or_default(),
+            Credential::File => read_token_file(data, &self.id).unwrap_or_default(),
+            Credential::Env => std::env::var(env_name(&self.id)).unwrap_or_default(),
         };
         *self.token.write().unwrap() = t.trim().to_string();
     }
@@ -130,7 +131,7 @@ impl GitLab {
         if !self.has_credential() {
             return Some(match self.cred {
                 Credential::File => format!("no token for GitLab forge {}: put one in {}", self.id.as_str(), self.token_file.display()),
-                Credential::Env => format!("no token for GitLab forge {}: export {}", self.id.as_str(), self.token_env),
+                Credential::Env => format!("no token for GitLab forge {}: export {}", self.id.as_str(), env_name(&self.id)),
             });
         }
         self.paused_until().map(|t| format!("GitLab rate limit: paused until {t}"))
@@ -473,11 +474,6 @@ fn query(pairs: &[(&str, &str)]) -> String {
     let mut u = reqwest::Url::parse("http://x/").expect("static url");
     u.query_pairs_mut().extend_pairs(pairs);
     u.query().unwrap_or("").to_string()
-}
-
-/// `gl` -> `KILN_FORGE_GL_TOKEN`.
-fn env_name(id: &ForgeId) -> String {
-    format!("KILN_FORGE_{}_TOKEN", id.as_str().to_ascii_uppercase().replace('-', "_"))
 }
 
 /// The install's random 6-hex id (`<data>/install_id`), created on first use. Runner
@@ -939,7 +935,7 @@ mod tests {
         assert!(h.contains("forges/gl.token"), "{h}");
         assert_eq!(g.auth()["source"], "none");
         std::fs::write(d.join("forges/gl.token"), format!("  {TOKEN}\n")).unwrap();
-        g.refresh();
+        g.load_token(&d);
         assert!(g.has_credential() && g.health().is_none());
         assert_eq!(g.auth()["source"], "file");
         assert_eq!(env_name(&ForgeId::new("my-gl").unwrap()), "KILN_FORGE_MY_GL_TOKEN");

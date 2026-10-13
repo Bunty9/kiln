@@ -456,6 +456,7 @@ impl App {
         let gh = Arc::new(gh);
         let forges = forge::Forges::default();
         forges.sync(&forge::effective(&cfg.forges, &cfg.repos), &gh, &data);
+        forges.load_tokens(&data);
         App {
             gh,
             forges,
@@ -486,6 +487,7 @@ impl App {
         c.validate()?;
         *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         self.forges.sync(&forge::effective(&c.forges, &c.repos), &self.gh, &self.data);
+        self.forges.load_tokens(&self.data);
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
@@ -1050,7 +1052,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     }
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
     for c in cfgs.iter().filter(|c| app.forges.get(&c.id).is_none()) {
-        problems.push(("forge", format!("forge {}: {:?} is not yet supported", c.id.as_str(), c.kind)));
+        problems.push(("forge", format!("forge {}: {:?} could not be set up (check its url)", c.id.as_str(), c.kind)));
     }
     let mut ids: Vec<_> = apis.keys().collect();
     ids.sort_by_key(|id| id.as_str());
@@ -1360,7 +1362,7 @@ mod tests {
     async fn a_tick_reports_backoff_per_forge_and_unsupported_forges() {
         let m = forge_test_mock::Mock::github().await;
         let forges: Vec<forge::ForgeCfg> = serde_json::from_str(
-            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitea","url":"https://gitea.example.org","repos":["x/y"]}]"#,
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"ftp://gitlab.example.org","repos":["x/y"]}]"#,
         )
         .unwrap();
         let (app, cfg) = tick_app("tick-backoff", &m, Some(forges));
@@ -1376,7 +1378,7 @@ mod tests {
         p.health.retain(|(k, _)| k != "memory" && k != "disk");
         let kinds: Vec<_> = p.health.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(kinds, ["forge", "github_api", "forge_api"], "{:?}", p.health);
-        assert!(p.health[0].1.contains("gl") && p.health[0].1.contains("not yet supported"), "{:?}", p.health[0]);
+        assert!(p.health[0].1.contains("gl") && p.health[0].1.contains("could not be set up"), "{:?}", p.health[0]);
         assert_eq!(p.health[1].1.split(" — ").next().unwrap(), "GitHub is rejecting runner registration (HTTP 503)");
         assert!(p.health[2].1.starts_with("gl is unreachable for runner registration"), "{:?}", p.health[2]);
         // The first problem is what blocks, and the kind says whose.
@@ -1802,10 +1804,9 @@ mod tests {
         app.save_cfg(c).unwrap();
         // Same client (ETags, rate limits, App tokens) after a save that changed repos and added a forge.
         assert!(Arc::ptr_eq(&before, &app.forges.get(&forge::ForgeId::github()).unwrap()));
-        // Gitea is declared but refused for now: no forge is built. GitLab is built.
-        assert!(app.forges.get(&forge::ForgeId::new("gt").unwrap()).is_none());
+        assert!(app.forges.get(&forge::ForgeId::new("gt").unwrap()).is_some());
         let gl = app.forges.get(&forge::ForgeId::new("gl").unwrap()).unwrap();
-        assert_eq!(app.forges.all().len(), 2);
+        assert_eq!(app.forges.all().len(), 3);
         // A save that leaves it alone keeps the same client (its project-id and fork caches).
         let c = app.cfg();
         app.save_cfg(c).unwrap();

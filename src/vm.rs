@@ -2406,6 +2406,15 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     for f in app.forges.all() {
         match &*f {
             crate::forge::Forge::GitHub(g) => doctor_github(app, &g.gh, &mut out).await,
+            // The full Gitea doctor (scope and role checks) arrives with registration.
+            crate::forge::Forge::Gitea(g) => {
+                let name = format!("gitea {}", g.id().as_str());
+                out.push(match (g.health(), g.version().await) {
+                    (Some(why), _) => check(&name, false, why),
+                    (None, Ok(v)) => check(&name, true, format!("version {}.{}.{}", v.0, v.1, v.2)),
+                    (None, Err(e)) => check(&name, false, format!("{e:#}")),
+                });
+            }
             // The credential and role checks arrive with GL-3.
             crate::forge::Forge::GitLab(_) => {}
         }

@@ -44,8 +44,13 @@ impl Drop for Mock {
 }
 
 pub fn fixture(name: &str) -> String {
-    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/github/");
-    std::fs::read_to_string(format!("{p}{name}")).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+    fixture_in("github", name)
+}
+
+/// A recorded response under `testdata/forge/<forge>/`.
+pub fn fixture_in(forge: &str, name: &str) -> String {
+    let p = format!("{}/src/testdata/forge/{forge}/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("fixture {forge}/{name}: {e}"))
 }
 
 async fn serve(State(inner): State<Arc<Mutex<Inner>>>, req: Request) -> Response {
