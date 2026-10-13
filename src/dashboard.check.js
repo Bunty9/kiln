@@ -88,8 +88,8 @@ assert(!X.credsOk([gh1, { ...gl1, auth: { source: 'none' } }], false));
 const P = { error: 'gitlab:g/s/p: HTTP 401; acme/demo: rate', repo_errors: { 'gitlab:g/s/p': 'HTTP 401', 'acme/demo': 'rate' } };
 assert.equal(X.ghErr(P, [gh1]), P.error, 'GitHub-only: unchanged'); assert.equal(X.ghErr(P, FF), 'acme/demo: rate'); assert.equal(X.ghErr({ error: null }, FF), '');
 assert.equal(X.ghErr({ error: 'boom' }, null), 'boom');
-assert(X.ciSnippet('gitlab', 'kiln').includes('tags: [kiln]') && X.ciSnippet('gitea', 'kiln').includes('runs-on: kiln\n') && X.ciSnippet('github', 'kiln').includes('runs-on: [self-hosted, kiln]'));
-assert(X.sizeNote('gitlab', 'kiln', 2).includes('tags: [kiln-2cpu]') && X.sizeNote('gitea', 'kiln', 2).includes('runs-on: kiln-2cpu') && X.sizeNote('github', 'kiln', 4).includes('Default is 4 vCPUs'));
+assert(X.ciSnippet('gitlab', 'kiln').includes('tags: [kiln]') && X.ciSnippet('gitea', 'kiln').includes('runs-on: [kiln]\n') && X.ciSnippet('github', 'kiln').includes('runs-on: [self-hosted, kiln]'));
+assert(X.sizeNote('gitlab', 'kiln', 2).includes('tags: [kiln-2cpu]') && X.sizeNote('gitea', 'kiln', 2).includes('runs-on: [kiln-2cpu]') && X.sizeNote('github', 'kiln', 4).includes('Default is 4 vCPUs'));
 // Only non-GitHub minutes, this month, by forge name.
 const vm = (repo, a, b) => ({ repo, busy_since: a, done_at: b });
 assert.deepEqual(X.otherMins([vm('acme/demo', 100, 200), vm('gitlab:g/s/p', 100, 161), vm('gitea:o/n', 100, 130), vm('gitlab:g/s/p', 1, 2), { repo: 'gitlab:g/s/p', busy_since: 100 }], FF, 50), { GitLab: 2, Gitea: 1 });
