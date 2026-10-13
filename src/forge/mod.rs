@@ -822,6 +822,8 @@ pub async fn gate(
         match pause.await {
             Err(e) => return Verdict::refuse(format!("pause failed: {e:#}")),
             Ok(Some(held)) if held.len() != 1 || held[0] != job_id => {
+                // A second job slipped past the pause (R2 L-4): worth a look, as the settle time is one lab measurement.
+                tracing::warn!("verdict gate for job {job_id}: the paused runner holds {} job(s), refusing", held.len());
                 return Verdict::refuse(format!("runner holds {} job(s), not only the one it started", held.len()));
             }
             Ok(_) => {}

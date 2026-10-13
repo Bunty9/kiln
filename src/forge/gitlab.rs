@@ -481,15 +481,9 @@ impl GitLab {
         }
     }
 
-    async fn unpause(&self, id: u64) {
-        match self.send(Method::PUT, &format!("runners/{id}"), Some(json!({ "paused": false }))).await {
-            Ok(r) if r.status == 200 || r.status == 404 => {}
-            Ok(r) => tracing::warn!("GitLab runner {id} stays paused: {:#}", self.fail("unpause", &r)),
-            Err(e) => tracing::warn!("GitLab runner {id} stays paused: {e:#}"),
-        }
-    }
-
-    /// Pause, check, delete (3.3): `Busy` (and unpaused again) when the runner holds a job. A stale
+    /// Pause, check, delete (3.3): `Busy` when the runner holds a job. A runner is never unpaused
+    /// (R2 C-1): it runs one job at most, and an unpause could undo the verdict gate's pause on a
+    /// job whose code is already running. `Unused` (the VM is over) deletes with no pause. A stale
     /// policy never waits for the job: the VM is killed either way, and a job that raced in fails
     /// and is retried (security beats availability). The caller's VM record already names the
     /// runner id and job id, so deleting the runner loses nothing.
@@ -498,16 +492,11 @@ impl GitLab {
             return Dereg::Err(e);
         }
         let stale = reason == Reason::StalePolicy;
-        match self.hold(runner_id).await {
+        let hold = if reason == Reason::Unused { Ok(Hold::Held(vec![])) } else { self.hold(runner_id).await };
+        match hold {
             Ok(Hold::Gone) => {}
-            Ok(Hold::Held(jobs)) if !jobs.is_empty() && !stale => {
-                self.unpause(runner_id).await;
-                return Dereg::Busy;
-            }
-            Err(e) if !stale => {
-                self.unpause(runner_id).await;
-                return Dereg::Err(e);
-            }
+            Ok(Hold::Held(jobs)) if !jobs.is_empty() && !stale => return Dereg::Busy,
+            Err(e) if !stale => return Dereg::Err(e),
             _ => match self.send(Method::DELETE, &format!("runners/{runner_id}"), None).await {
                 Ok(r) if r.status == 204 || r.status == 404 => {}
                 Ok(r) => return Dereg::Err(self.fail("delete runner", &r)),
@@ -1889,27 +1878,36 @@ mod tests {
         assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Gone));
         assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "DELETE runners/79"]);
         assert!(g.mine.lock().unwrap().is_empty());
-        // It got a job meanwhile: unpaused again, and not deleted.
+        // It got a job meanwhile: not deleted, and never unpaused (R2 C-1: the gate may have paused it too).
         serve_runner(&m, "runner_jobs_running.json");
         m.sent.lock().unwrap().clear();
         assert!(matches!(g.deregister(&repo(), 79, Reason::Warm).await, Dereg::Busy));
-        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "PUT runners/79"]);
-        assert_eq!(serde_json::from_str::<Value>(&m.sent.lock().unwrap()[2].1).unwrap(), json!({"paused": false}));
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running"]);
+        assert_eq!(serde_json::from_str::<Value>(&m.sent.lock().unwrap()[0].1).unwrap(), json!({"paused": true}));
         // Already gone (the guest deleted itself, or an earlier retire did).
         m.on("PUT", "runners/79", 404, fx("err_404_runner.json"));
         m.sent.lock().unwrap().clear();
-        assert!(matches!(g.deregister(&repo(), 79, Reason::Unused).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Gone));
         assert_eq!(m.calls(), ["PUT runners/79"]);
         // A refused delete leaves the VM alone.
         serve_runner(&m, "runner_jobs_none.json");
         m.on("DELETE", "runners/79", 403, fx("err_403_scope.json"));
         assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Err(_)));
-        // An unreadable job list is no proof of idleness: nothing is deleted, the runner is unpaused.
+        // An unreadable job list is no proof of idleness: nothing is deleted, and the runner stays paused.
         m.route("runners/79/jobs?status=running", 500, vec![], "{}".into());
         m.sent.lock().unwrap().clear();
         assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Err(_)));
-        assert_eq!(m.calls().last().unwrap(), "PUT runners/79");
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running"]);
         assert_eq!(m.count("DELETE"), 0);
+        // No path ever sends paused=false.
+        assert!(m.sent.lock().unwrap().iter().all(|(_, b)| !b.contains("false")));
+        // The VM is over (R2 H-1): the runner is deleted at once, with no pause and no job check.
+        serve_runner(&m, "runner_jobs_running.json");
+        m.sent.lock().unwrap().clear();
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Unused).await, Dereg::Gone));
+        assert_eq!(m.calls(), ["DELETE runners/79"]);
+        m.on("DELETE", "runners/79", 404, fx("err_404_runner.json"));
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Unused).await, Dereg::Gone));
     }
 
     #[tokio::test]

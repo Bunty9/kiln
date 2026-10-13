@@ -1420,6 +1420,9 @@ async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoPara
         bail_r(&cannot(&f, "cancel runs"))?;
     }
     f.cancel(&repo, id).await?;
+    if f.kind() == crate::forge::Kind::GitLab {
+        vm::kill_pipeline(&app, &repo.key(), id);
+    }
     Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
 }
 

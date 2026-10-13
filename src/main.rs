@@ -1245,6 +1245,9 @@ fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
         .iter_mut()
         .filter_map(|v| {
             let job = runners.get(&v.id)?;
+            // A gated forge's job id comes from the console alone: it starts the verdict gate (R2 M-1).
+            // The API only compares: a mismatch is a second job, but a lagging console must not be beaten to the id.
+            let gated = vm::forge_for(app, &v.repo).is_ok_and(|(f, _)| f.gated());
             if v.job_id.as_deref().is_some_and(|id| id != job.id) {
                 if v.cache == vm::CacheUse::Read {
                     v.cache = vm::CacheUse::Discarded;
@@ -1261,7 +1264,7 @@ fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
                 v.note = Some("refused: pull request from a fork".into());
                 kill.push(v.id.clone());
             }
-            if v.job_id.as_deref() == Some(&job.id)
+            if (gated || v.job_id.as_deref() == Some(&job.id))
                 && v.job_url.as_deref() == Some(&job.url)
                 && v.queued_at == Some(job.queued_at)
                 && v.run.as_ref() == Some(&job.run)
@@ -1270,7 +1273,9 @@ fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
                 return None;
             }
             v.fork = job.fork;
-            v.job_id = Some(job.id.clone());
+            if !gated {
+                v.job_id = Some(job.id.clone());
+            }
             v.job_url = Some(job.url.clone());
             v.queued_at = Some(job.queued_at);
             v.run = Some(job.run.clone());
@@ -1355,6 +1360,42 @@ mod tests {
         let v = app.vms.lock().unwrap()[0].clone();
         assert_eq!((v.job_id.as_deref(), v.cache), (Some("2"), vm::CacheUse::Discarded));
         assert_eq!(v.job_url.as_deref(), Some("https://github.com/acme/kiln/actions/runs/1/job/2"));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_gated_forge_never_gets_its_job_id_from_attach_jobs() {
+        let m = forge_test_mock::Mock::github().await;
+        let app = forge_test_mock::app("attach-gated", &m, Config::default());
+        let cfg: forge::ForgeCfg =
+            serde_json::from_str(r#"{"id":"gitea","kind":"gitea","url":"https://gitea.example.org","repos":["acme/demo"]}"#).unwrap();
+        app.forges.insert(cfg, forge::Forge::Gitea(Box::new(forge::gitea::Gitea::for_mock("https://gitea.example.org", &m.base, "tok"))));
+        let v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "gitea:acme/demo", "runner_id": 1, "state": "idle", "job": null, "result": null,
+            "started": 1, "busy_since": null, "ended": null, "note": null, "cache": "read"
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-5-0".into(), kill.clone());
+        let job = |id: &str| forge::JobInfo {
+            id: id.into(),
+            url: format!("https://gitea.example.org/acme/demo/actions/runs/1/jobs/{id}"),
+            queued_at: 1,
+            fork: false,
+            run: vm::Run::default(),
+        };
+        // The API saw the job first: the page shows, but the console's `JobStart` is still the one to bind the id.
+        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job("2"))]));
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id, v.cache), (None, vm::CacheUse::Read));
+        assert!(v.job_url.is_some());
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
+        // Once the console bound an id, a different API id is a second job.
+        app.vms.lock().unwrap()[0].job_id = Some("2".into());
+        app.vms.lock().unwrap()[0].state = vm::State::Busy;
+        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job("3"))]));
+        assert_eq!(app.vms.lock().unwrap()[0].job_id.as_deref(), Some("2"));
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
 
