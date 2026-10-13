@@ -351,7 +351,7 @@ impl Gh {
         Ok(Resp { status, content_type, body })
     }
 
-    async fn get(&self, path: &str) -> Result<Value> {
+    pub(crate) async fn get(&self, path: &str) -> Result<Value> {
         let cached = {
             let mut c = self.etags.lock().await;
             // ponytail: ceiling of 500 cached URLs, dropped wholesale; an LRU if the clear ever hurts the 304 hit rate.

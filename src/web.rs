@@ -142,6 +142,14 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/tailscale/ping", post(ts_ping))
         .route("/api/tailscale/serve", post(ts_serve))
         .route("/api/gh/{*path}", any(gh_proxy))
+        .route("/api/forges", get(forges_list))
+        .route("/api/runs", get(runs_list))
+        .route("/api/runs/{id}", get(run_get))
+        .route("/api/runs/{id}/rerun", post(run_rerun))
+        .route("/api/runs/{id}/cancel", post(run_cancel))
+        .route("/api/jobs/{id}/log", get(job_log))
+        .route("/api/workflows", get(workflows))
+        .route("/api/dispatch", post(dispatch))
         .merge(crate::notify::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
@@ -1292,6 +1300,140 @@ fn bail_r(msg: &str) -> R<()> {
     Err(anyhow!(msg.to_string()).into())
 }
 
+/* ---------- the forge-neutral API: kiln's own JSON, never a forge's ---------- */
+
+/// `repo` is a canonical key and must be one kiln serves; the forge path used for the call is
+/// the configured one, never the request's text.
+fn served(app: &App, key: &str) -> anyhow::Result<(Arc<crate::forge::Forge>, crate::forge::RepoRef)> {
+    use crate::forge;
+    let want = forge::RepoRef::parse(key)?;
+    let cfg = app.cfg();
+    let fc = forge::effective(&cfg.forges, &cfg.repos).into_iter().find(|c| c.id == want.forge);
+    let f = app.forges.get(&want.forge).zip(fc).ok_or_else(|| anyhow!("{key}: not a forge kiln serves"))?;
+    let repo = f.0.repos(&f.1).into_iter().find(|r| r.eq_key(key)).ok_or_else(|| anyhow!("{key}: not a repo kiln serves"))?;
+    Ok((f.0, repo))
+}
+
+#[derive(Deserialize)]
+struct RepoParam {
+    repo: String,
+}
+
+async fn forges_list(State(app): S) -> R<Json<Value>> {
+    let cfg = app.cfg();
+    let cfgs = crate::forge::effective(&cfg.forges, &cfg.repos);
+    let out: Vec<_> = app
+        .forges
+        .all()
+        .iter()
+        .map(|f| {
+            let repos: Vec<_> = cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default().iter().map(|r| r.key()).collect();
+            json!({ "id": f.id(), "kind": f.kind(), "url": f.web_url(), "caps": f.caps(), "auth": f.auth(), "repos": repos, "health": f.health() })
+        })
+        .collect();
+    Ok(Json(json!(out)))
+}
+
+#[derive(Deserialize)]
+struct RunsParam {
+    repo: String,
+    status: Option<String>,
+    branch: Option<String>,
+    page: Option<u32>,
+}
+
+async fn runs_list(State(app): S, Query(q): Query<RunsParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    if q.branch.as_deref().is_some_and(|b| b.is_empty() || b.len() > 255 || b.chars().any(char::is_control)) {
+        bail_r("bad branch")?;
+    }
+    let rq = crate::forge::RunQuery { status: q.status, branch: q.branch, page: q.page.unwrap_or(1) };
+    Ok(Json(serde_json::to_value(f.runs(&repo, &rq).await?)?))
+}
+
+async fn run_get(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    Ok(Json(serde_json::to_value(f.run(&repo, id).await?)?))
+}
+
+#[derive(Deserialize)]
+struct LogParam {
+    repo: String,
+    from: Option<usize>,
+}
+
+async fn job_log(State(app): S, Path(id): Path<u64>, Query(q): Query<LogParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    Ok(Json(serde_json::to_value(f.job_log(&repo, id, q.from.unwrap_or(0)).await?)?))
+}
+
+async fn workflows(State(app): S, Query(q): Query<RepoParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    let caps = f.caps();
+    Ok(Json(serde_json::to_value(if caps.workflows { f.workflows(&repo).await? } else { vec![] })?))
+}
+
+#[derive(Deserialize)]
+struct RerunParam {
+    repo: String,
+    failed: Option<String>,
+}
+
+type Audited = (Extension<crate::audit::Note>, StatusCode);
+
+async fn run_rerun(State(app): S, Path(id): Path<u64>, Query(q): Query<RerunParam>) -> R<Audited> {
+    let (f, repo) = served(&app, &q.repo)?;
+    let failed = q.failed.as_deref() == Some("1");
+    let caps = f.caps();
+    if !(if failed { caps.rerun_failed } else { caps.rerun }) {
+        bail_r("this forge cannot rerun runs")?;
+    }
+    f.rerun(&repo, id, failed).await?;
+    Ok((
+        Extension(crate::audit::Note(format!("rerun{} {} run {id}", if failed { " failed" } else { "" }, repo.key()))),
+        StatusCode::NO_CONTENT,
+    ))
+}
+
+async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoParam>) -> R<Audited> {
+    let (f, repo) = served(&app, &q.repo)?;
+    if !f.caps().cancel {
+        bail_r("this forge cannot cancel runs")?;
+    }
+    f.cancel(&repo, id).await?;
+    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchBody {
+    repo: String,
+    workflow: Option<String>,
+    #[serde(rename = "ref")]
+    git_ref: String,
+    #[serde(default)]
+    inputs: HashMap<String, String>,
+}
+
+async fn dispatch(State(app): S, Json(b): Json<DispatchBody>) -> R<Audited> {
+    let (f, repo) = served(&app, &b.repo)?;
+    if !f.caps().dispatch {
+        bail_r("this forge cannot dispatch workflows")?;
+    }
+    // The workflow lands in a URL path: a plain file name or id, nothing that could climb out.
+    if let Some(w) = &b.workflow
+        && (w.is_empty() || w == "." || w == ".." || !w.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+    {
+        bail_r("workflow must be a file name or id")?;
+    }
+    if b.git_ref.is_empty() || b.git_ref.len() > 255 || b.git_ref.chars().any(char::is_control) {
+        bail_r("bad ref")?;
+    }
+    f.dispatch(&repo, b.workflow.as_deref(), &b.git_ref, &b.inputs).await?;
+    let note = format!("dispatch {} {} on {}", repo.key(), b.workflow.as_deref().unwrap_or("-"), b.git_ref);
+    Ok((Extension(crate::audit::Note(note)), StatusCode::NO_CONTENT))
+}
+
 /// GitHub passthrough, restricted to `repos/<configured repo>/actions/...`,
 /// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
 /// or cancel without a dedicated endpoint per call.
@@ -1443,6 +1585,148 @@ mod tests {
         assert!(!audited(&Method::POST, "/api/config", false), "refusals stay out of audit.log");
         assert!(!audited(&Method::GET, "/api/state", true));
         assert!(!audited(&Method::POST, "/", true));
+    }
+
+    async fn typed(name: &str) -> (crate::forge_test_mock::Mock, Arc<App>) {
+        use crate::forge_test_mock::{Mock, app as mock_app, fixture};
+        let m = Mock::start().await;
+        let r = "/repos/acme/demo/actions";
+        m.route("GET", &format!("{r}/runs?per_page=30&page=1"), 200, fixture("runs_queued.json"));
+        m.route("GET", &format!("{r}/runs?per_page=30&page=1&status=in_progress&branch=a%2Fb"), 200, fixture("runs_in_progress.json"));
+        m.route("GET", &format!("{r}/runs/2001"), 200, fixture("run_2001.json"));
+        m.route("GET", &format!("{r}/runs/2001/jobs?per_page=100"), 200, fixture("jobs_1001.json"));
+        m.route(
+            "GET",
+            &format!("{r}/workflows?per_page=100"),
+            200,
+            r#"{"workflows":[{"id":9001,"name":"CI","path":".github/workflows/ci.yml"}]}"#,
+        );
+        m.route("GET", &format!("{r}/jobs/5001/logs"), 200, "héllo\nworld\n");
+        for p in ["runs/2001/rerun", "runs/2001/rerun-failed-jobs", "runs/2001/cancel", "workflows/ci.yml/dispatches"] {
+            m.route("POST", &format!("{r}/{p}"), 204, "");
+        }
+        let cfg = Config { repos: vec!["acme/demo".into()], ..Config::default() };
+        let app = mock_app(name, &m, cfg);
+        (m, app)
+    }
+
+    fn repo(r: &str) -> Query<RepoParam> {
+        Query(RepoParam { repo: r.into() })
+    }
+
+    #[tokio::test]
+    async fn typed_reads_are_normalised() {
+        let (m, app) = typed("typed-reads").await;
+        let Json(f) = forges_list(State(app.clone())).await.unwrap_or_else(|_| panic!("forges"));
+        assert_eq!(f[0]["id"], "github");
+        assert_eq!(f[0]["repos"], json!(["acme/demo"]));
+        assert_eq!(f[0]["caps"]["workflows"], true);
+        assert!(f[0]["auth"].get("source").is_some() && !f.to_string().contains("tok"));
+        let q = RunsParam { repo: "acme/demo".into(), status: None, branch: None, page: None };
+        let Json(runs) = runs_list(State(app.clone()), Query(q)).await.unwrap_or_else(|_| panic!("runs"));
+        let r0 = &runs["runs"][0];
+        // kiln's names and values, not GitHub's.
+        assert!(r0.get("workflow_id").is_none() && r0.get("html_url").is_none());
+        assert!(["queued", "running", "completed"].contains(&r0["status"].as_str().unwrap()));
+        assert_eq!(r0["links"]["run"], format!("https://github.com/acme/demo/actions/runs/{}", r0["id"]));
+        let Json(d) = run_get(State(app.clone()), Path(2001), repo("acme/demo")).await.unwrap_or_else(|_| panic!("run"));
+        assert_eq!(d["id"], 2001);
+        assert_eq!(d["outcome"], "Succeeded");
+        assert_eq!(d["jobs"][0]["status"], "queued");
+        assert_eq!(d["jobs"][0]["links"]["job"], "https://github.com/acme/demo/actions/runs/2001/job/5001");
+        let Json(w) = workflows(State(app.clone()), repo("acme/demo")).await.unwrap_or_else(|_| panic!("wf"));
+        assert_eq!(w, json!([{ "id": 9001, "name": "CI", "file": "ci.yml" }]));
+        let lq = |from| Query(LogParam { repo: "acme/demo".into(), from });
+        let Json(l) = job_log(State(app.clone()), Path(5001), lq(None)).await.unwrap_or_else(|_| panic!("log"));
+        assert_eq!(l, json!({ "text": "héllo\nworld\n", "next": 13, "complete": true }));
+        let Json(l) = job_log(State(app.clone()), Path(5001), lq(Some(7))).await.unwrap_or_else(|_| panic!("log"));
+        assert_eq!(l["text"], "world\n");
+        // Filters are encoded, not spliced.
+        let q = RunsParam { repo: "acme/demo".into(), status: Some("running".into()), branch: Some("a/b".into()), page: Some(1) };
+        assert!(runs_list(State(app), Query(q)).await.is_ok());
+        assert!(m.requests().iter().all(|r| r.starts_with("GET /repos/acme/demo/actions/")), "{:?}", m.requests());
+    }
+
+    #[tokio::test]
+    async fn typed_endpoints_refuse_unserved_and_malformed_repos() {
+        let (m, app) = typed("typed-refuse").await;
+        for bad in [
+            "other/repo",
+            "acme/demo-evil",
+            "acme/demo/../../x",
+            "acme/demo%2f..%2fsecrets",
+            "acme/demo/actions/runners",
+            "github:acme/demo",
+            "gitlab:acme/demo",
+            "acme/demo?x=1",
+            "",
+        ] {
+            assert!(run_get(State(app.clone()), Path(2001), repo(bad)).await.is_err(), "{bad:?}");
+            assert!(run_cancel(State(app.clone()), Path(2001), repo(bad)).await.is_err(), "{bad:?}");
+            assert!(workflows(State(app.clone()), repo(bad)).await.is_err(), "{bad:?}");
+        }
+        let b = |repo: &str, workflow: Option<&str>, r: &str| DispatchBody {
+            repo: repo.into(),
+            workflow: workflow.map(String::from),
+            git_ref: r.into(),
+            inputs: HashMap::new(),
+        };
+        assert!(dispatch(State(app.clone()), Json(b("other/repo", Some("ci.yml"), "main"))).await.is_err());
+        for wf in [
+            Some("../../../runners/generate-jitconfig"),
+            Some("ci.yml/enable"),
+            Some(".."),
+            Some("ci.yml?x"),
+            Some("a%2fb"),
+            Some(""),
+            None,
+        ] {
+            assert!(dispatch(State(app.clone()), Json(b("acme/demo", wf, "main"))).await.is_err(), "{wf:?}");
+        }
+        assert!(dispatch(State(app.clone()), Json(b("acme/demo", Some("ci.yml"), ""))).await.is_err());
+        let bad_status = RunsParam { repo: "acme/demo".into(), status: Some("x&y=1".into()), branch: None, page: None };
+        assert!(runs_list(State(app), Query(bad_status)).await.is_err());
+        assert!(m.requests().is_empty(), "a refusal must not reach the forge: {:?}", m.requests());
+    }
+
+    #[tokio::test]
+    async fn typed_writes_are_only_rerun_cancel_dispatch() {
+        let (m, app) = typed("typed-writes").await;
+        let rp = |failed: Option<&str>| Query(RerunParam { repo: "acme/demo".into(), failed: failed.map(String::from) });
+        let ok = |r: R<Audited>| r.unwrap_or_else(|_| panic!("write")).0.0.0;
+        assert_eq!(ok(run_rerun(State(app.clone()), Path(2001), rp(None)).await), "rerun acme/demo run 2001");
+        assert_eq!(ok(run_rerun(State(app.clone()), Path(2001), rp(Some("1"))).await), "rerun failed acme/demo run 2001");
+        assert_eq!(ok(run_cancel(State(app.clone()), Path(2001), repo("acme/demo")).await), "cancel acme/demo run 2001");
+        let mut inputs = HashMap::new();
+        inputs.insert("k".to_string(), "v".to_string());
+        let d = DispatchBody { repo: "acme/demo".into(), workflow: Some("ci.yml".into()), git_ref: "main".into(), inputs };
+        assert_eq!(ok(dispatch(State(app), Json(d)).await), "dispatch acme/demo ci.yml on main");
+        let log = m.log();
+        assert_eq!(
+            m.requests(),
+            [
+                "POST /repos/acme/demo/actions/runs/2001/rerun",
+                "POST /repos/acme/demo/actions/runs/2001/rerun-failed-jobs",
+                "POST /repos/acme/demo/actions/runs/2001/cancel",
+                "POST /repos/acme/demo/actions/workflows/ci.yml/dispatches"
+            ]
+        );
+        assert_eq!(log[3].body, Some(json!({ "ref": "main", "inputs": { "k": "v" } })));
+    }
+
+    /// The writes are API POSTs: admission demands `x-kiln` for them and the audit log records them.
+    #[test]
+    fn typed_writes_are_audited() {
+        for p in ["/api/runs/1/rerun", "/api/runs/1/cancel", "/api/dispatch"] {
+            assert!(audited(&Method::POST, p, true), "{p}");
+        }
+        assert!(!audited(&Method::GET, "/api/runs", true));
+    }
+
+    #[test]
+    fn dispatch_body_rejects_unknown_fields() {
+        assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main","path":"x"}"#).is_err());
+        assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main"}"#).is_ok());
     }
 
     #[test]

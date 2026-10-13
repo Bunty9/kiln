@@ -334,6 +334,101 @@ pub struct Demand {
     pub refused_forks: usize,
 }
 
+/// What a forge can do from the dashboard; it hides the controls whose flag is false.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Caps {
+    pub rerun: bool,
+    pub rerun_failed: bool,
+    pub cancel: bool,
+    pub dispatch: bool,
+    pub workflows: bool,
+    pub live_steps: bool,
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum RunStatus {
+    Queued,
+    Running,
+    Completed,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct RunSummary {
+    pub id: u64,
+    pub name: String,
+    pub title: String,
+    pub number: u64,
+    pub attempt: u64,
+    pub status: RunStatus,
+    pub outcome: Option<Outcome>,
+    pub event: EventKind,
+    pub branch: String,
+    pub sha: String,
+    pub actor: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub links: Links,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct StepSummary {
+    pub number: u64,
+    pub name: String,
+    pub status: RunStatus,
+    pub outcome: Option<Outcome>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct JobSummary {
+    pub id: u64,
+    pub name: String,
+    pub status: RunStatus,
+    pub outcome: Option<Outcome>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub runner: Option<String>,
+    pub steps: Vec<StepSummary>,
+    pub links: Links,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct RunPage {
+    pub runs: Vec<RunSummary>,
+    /// The `page` to ask for next, if there is one.
+    pub next: Option<u32>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct RunDetail {
+    #[serde(flatten)]
+    pub run: RunSummary,
+    pub jobs: Vec<JobSummary>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct LogPage {
+    pub text: String,
+    /// The byte offset to pass as `from` for the rest.
+    pub next: usize,
+    pub complete: bool,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct Workflow {
+    pub id: u64,
+    pub name: String,
+    pub file: String,
+}
+
+/// Filters of a run listing; `status` is kiln's (queued|running|completed).
+#[derive(Default, Debug)]
+pub struct RunQuery {
+    pub status: Option<String>,
+    pub branch: Option<String>,
+    pub page: u32,
+}
+
 /// A configured forge. Only GitHub exists so far; Gitea and GitLab arrive with their own variants,
 /// and `Forge::new` refuses their config until then.
 pub enum Forge {
@@ -345,6 +440,58 @@ impl Forge {
         match cfg.kind {
             Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
             k => bail!("forge {:?}: {k:?} is not yet supported", cfg.id.as_str()),
+        }
+    }
+    pub fn caps(&self) -> Caps {
+        match self {
+            Self::GitHub(_) => github::CAPS,
+        }
+    }
+    /// Where the forge's own web UI lives.
+    pub fn web_url(&self) -> &'static str {
+        match self {
+            Self::GitHub(_) => "https://github.com",
+        }
+    }
+    /// Which credential is in use and when it expires; never the credential.
+    pub fn auth(&self) -> Value {
+        match self {
+            Self::GitHub(g) => g.auth(),
+        }
+    }
+    pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
+        match self {
+            Self::GitHub(g) => g.runs(repo, q).await,
+        }
+    }
+    pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
+        match self {
+            Self::GitHub(g) => g.run(repo, id).await,
+        }
+    }
+    pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
+        match self {
+            Self::GitHub(g) => g.job_log(repo, id, from).await,
+        }
+    }
+    pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
+        match self {
+            Self::GitHub(g) => g.workflows(repo).await,
+        }
+    }
+    pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
+        match self {
+            Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
+        }
+    }
+    pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
+        match self {
+            Self::GitHub(g) => g.cancel(repo, id).await,
+        }
+    }
+    pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
+        match self {
+            Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
         }
     }
     pub fn id(&self) -> ForgeId {
