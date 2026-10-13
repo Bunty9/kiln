@@ -1661,7 +1661,7 @@ mod tests {
 
     #[test]
     fn config_load_fails_closed() {
-        let d = std::env::temp_dir().join(format!("kiln-test-cfg-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-config_load_fails_closed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(load_config(&d).unwrap().egress, "open", "no file: defaults");

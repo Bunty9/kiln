@@ -790,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn tar_reads_the_verified_bytes_from_memory() {
-        let d = std::env::temp_dir().join(format!("kiln-test-tar-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-tar_reads_the_verified_bytes_from_memory-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("src/k-1")).unwrap();
         std::fs::write(d.join("src/k-1/kiln"), b"binary").unwrap();

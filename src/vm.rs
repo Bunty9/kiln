@@ -2801,7 +2801,7 @@ mod tests {
 
     #[test]
     fn usage_is_seeded_once_and_corrupt_ledgers_are_kept() {
-        let d = std::env::temp_dir().join(format!("kiln-test-seed-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_is_seeded_once_and_corrupt_ledgers_are_kept-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let day = 20_000 * 86400;
         std::fs::create_dir_all(d.join("vms/kiln-1-0")).unwrap();
@@ -2831,7 +2831,7 @@ mod tests {
 
     #[tokio::test]
     async fn sockets_in_q_are_never_followed() {
-        let d = std::env::temp_dir().join(format!("kiln-test-sock-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-sockets_in_q_are_never_followed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let _l = std::os::unix::net::UnixListener::bind(d.join("mon.sock")).unwrap();
@@ -2863,7 +2863,7 @@ mod tests {
 
     #[test]
     fn usage_counts_job_minutes_as_github_bills_them() {
-        let d = std::env::temp_dir().join(format!("kiln-test-usage-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_counts_job_minutes_as_github_bills_them-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let day = 20_000 * 86400;
@@ -2879,7 +2879,8 @@ mod tests {
 
     #[test]
     fn history_trusts_only_records_naming_their_own_directory() {
-        let d = std::env::temp_dir().join(format!("kiln-test-hist-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("kiln-test-history_trusts_only_records_naming_their_own_directory-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let rec = |dir: &str, id: &str| {
             std::fs::create_dir_all(d.join("vms").join(dir).join("q")).unwrap();
@@ -3071,7 +3072,7 @@ mod tests {
             .map(|l| format!("{}\n", l.get(6..).unwrap_or("")))
             .collect();
         assert!(script.starts_with("#!/bin/bash"));
-        let dir = std::env::temp_dir().join(format!("kiln-prejob-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-prejob_hook_refuses_forks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let run = |payload: Option<serde_json::Value>| {
             let p = dir.join("event.json");
@@ -3134,7 +3135,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-vreader-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_verdict_reader-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let read = |input: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3157,7 +3158,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-vwait-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_verdict_wait-{}", std::process::id()));
         let wait = guest_script("/usr/local/sbin/kiln-verdict-wait", &dir);
         let run = |content: Option<&str>, secs: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3186,7 +3187,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-exec-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_kiln_exec-{}", std::process::id()));
         let bin = dir.join("bin");
         let exec = guest_script("/usr/local/bin/kiln-exec", &dir)
             .replace("/usr/local/sbin/", &format!("{}/", bin.display()))
@@ -3334,7 +3335,9 @@ mod tests {
         let (rc, _, calls) = stage("ok 42", &env, &["prepare"]);
         assert_eq!(rc, Some(0));
         assert!(!marker.exists(), "hostile value executed");
-        assert!(calls.contains("kiln-svc-42-1") && !calls.contains("99"), "job id comes from the verdict: {calls}");
+        // Not a bare "99": the scratch dir (in every logged path) carries the pid, and a pid can contain "99".
+        let job99 = ["kiln-job-99", "kiln-svc-99", "kiln-certs-99", "kiln-99"].iter().any(|s| calls.contains(s));
+        assert!(calls.contains("kiln-svc-42-1") && !job99, "job id comes from the verdict: {calls}");
         assert!(calls.contains("-- postgres:16 -c") && calls.contains("--entrypoint sh"), "{calls}");
         for bad in ["-v/:/h", "a b", "x$(touch pwned)", "--privileged", "a\nb"] {
             fresh();
@@ -3356,7 +3359,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-forge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_forge_branch-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let run = |oem: &str| {
             let _ = std::fs::remove_dir_all(&dir);
@@ -3388,7 +3391,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-rgl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_run_gitlab-{}", std::process::id()));
         let job = guest_script("/usr/local/sbin/kiln-job", &dir);
         let tok = "glrt-t3_abc-DEF.123";
         let run = |oem: &str| {
@@ -4010,7 +4013,7 @@ mod tests {
 
     #[test]
     fn only_github_runner_ages() {
-        let d = std::env::temp_dir().join(format!("kiln-test-ages-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-only_github_runner_ages-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(images(&d)).unwrap();
         std::fs::write(
@@ -4092,7 +4095,7 @@ mod tests {
 
     #[test]
     fn meta_json_golden() {
-        let d = std::env::temp_dir().join(format!("kiln-test-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-meta_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("vms/kiln-7-0")).unwrap();
         write_meta(&d, &full_vm());
@@ -4111,7 +4114,7 @@ mod tests {
 
     #[test]
     fn usage_json_golden() {
-        let d = std::env::temp_dir().join(format!("kiln-test-usage-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-usage_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let day = 20_000 * 86400;
@@ -4127,7 +4130,7 @@ mod tests {
     #[test]
     fn base_json_golden() {
         // image_info adds runner_latest, age_days, stale and rebake to what the bake wrote.
-        let d = std::env::temp_dir().join(format!("kiln-test-base-golden-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-base_json_golden-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(images(&d)).unwrap();
         let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/golden/base.json");

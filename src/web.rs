@@ -2013,7 +2013,7 @@ mod tests {
     #[tokio::test]
     async fn bounded_kills_the_whole_group() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("kiln-fake-ts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-bounded_kills_the_whole_group-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let hang = "sh -c 'sleep 1000; :' \"$0\"";
         for (name, body) in [
@@ -2287,7 +2287,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_socket_is_private() {
-        let dir = std::env::temp_dir().join(format!("kiln-sock-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-serve_socket_is_private-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("serve.sock");
         std::fs::write(&path, "stale").unwrap();
