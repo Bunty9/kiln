@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use super::{
-    Caps, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobRef, JobSummary, Links, LogPage, Outcome, RepoRef, RunDetail, RunPage, RunQuery,
-    RunStatus, RunSummary, RunnerReg, StepSummary, Workflow,
+    Caps, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobRef, JobSummary, LOG_DOWNLOAD_CAP, Links, LogPage, Outcome, Reason, RepoRef,
+    RunDetail, RunPage, RunQuery, RunStatus, RunSummary, RunnerReg, StepSummary, Workflow,
 };
 use crate::github::Gh;
 use anyhow::{Context, Result, bail};
@@ -46,7 +46,7 @@ impl GitHub {
     }
 
     /// 204/404 = Gone (404: the ephemeral runner already deregistered itself), 422 = Busy (it got a job).
-    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64, _reason: Reason) -> Dereg {
         match self.gh.delete_runner_status(&repo.path, runner_id).await {
             Ok(s) if s.is_success() || s == 404 => Dereg::Gone,
             Ok(s) if s == 422 => Dereg::Busy,
@@ -63,9 +63,6 @@ impl GitHub {
 
 pub const CAPS: Caps = Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, workflows: true, live_steps: true };
 const PER_PAGE: usize = 30;
-/// Most log bytes returned per request; the caller continues from `next`.
-const LOG_CAP: usize = 1 << 20;
-const LOG_DOWNLOAD_CAP: usize = 16 << 20;
 
 impl GitHub {
     pub fn auth(&self) -> Value {
@@ -111,19 +108,7 @@ impl GitHub {
         if !(200..300).contains(&r.status) {
             bail!("job log: GitHub answered {}", r.status);
         }
-        let b = &r.body;
-        let start = from.min(b.len());
-        let mut end = (start + LOG_CAP).min(b.len());
-        // Do not cut a UTF-8 sequence in half.
-        while end > start && end < b.len() && b[end] & 0xC0 == 0x80 {
-            end -= 1;
-        }
-        Ok(LogPage {
-            text: String::from_utf8_lossy(&b[start..end]).into_owned(),
-            next: end,
-            complete: end == b.len() && !truncated,
-            truncated: truncated && end == b.len(),
-        })
+        Ok(LogPage::slice(&r.body, from, truncated))
     }
 
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
@@ -169,7 +154,7 @@ impl GitHub {
     }
 }
 
-fn query(pairs: &[(&str, String)]) -> String {
+pub(super) fn query(pairs: &[(&str, String)]) -> String {
     let mut u = reqwest::Url::parse("http://x/").expect("static url");
     u.query_pairs_mut().extend_pairs(pairs);
     u.query().unwrap_or("").to_string()

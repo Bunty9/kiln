@@ -40,10 +40,10 @@ pub struct Gh {
     reg_probes: std::sync::Mutex<HashMap<String, (u64, Option<u16>)>>,
 }
 
-/// GitHub refused (or never answered) a runner registration call.
+/// A forge refused (or never answered) a runner registration call.
 #[derive(Debug)]
 pub struct MintError {
-    /// "GitHub" or "GitLab", for the message.
+    /// "GitHub", "GitLab" or "Gitea", for the message.
     pub forge: &'static str,
     /// None: the forge could not be reached.
     pub status: Option<u16>,
@@ -54,8 +54,8 @@ pub struct MintError {
 }
 
 impl MintError {
-    /// A 5xx or no answer is GitHub's, for every repo; a 4xx is about this repo or token.
-    pub fn github_wide(&self) -> bool {
+    /// A 5xx or no answer is the forge's, for every repo; a 4xx is about this repo or token.
+    pub fn wide(&self) -> bool {
         self.status.is_none_or(|s| s >= 500)
     }
 }
@@ -1013,13 +1013,13 @@ mod tests {
             "runner registration failed: GitHub returned HTTP 403 (generate-jitconfig): Resource not accessible by integration"
         );
         // GitHub-wide: 5xx and network errors; a 4xx is about this repo or this token.
-        assert!(e(Some(500), "").github_wide() && e(Some(503), "").github_wide() && e(None, "").github_wide());
-        assert!(!e(Some(403), "").github_wide() && !e(Some(404), "").github_wide() && !e(Some(422), "").github_wide());
+        assert!(e(Some(500), "").wide() && e(Some(503), "").wide() && e(None, "").wide());
+        assert!(!e(Some(403), "").wide() && !e(Some(404), "").wide() && !e(Some(422), "").wide());
     }
 
     #[test]
     fn installation_token_failures_are_mint_errors() {
-        let class = |e: anyhow::Error| e.downcast_ref::<MintError>().map(|m| (m.status, m.github_wide()));
+        let class = |e: anyhow::Error| e.downcast_ref::<MintError>().map(|m| (m.status, m.wide()));
         let status = |s: u16| {
             let r = reqwest::Response::from(axum::http::Response::builder().status(s).body("").unwrap());
             anyhow::Error::new(r.error_for_status().unwrap_err()).context("minting an installation token")
@@ -1232,7 +1232,7 @@ mod characterization {
         for (status, wide) in [(404, false), (422, false), (403, false), (500, true), (503, true)] {
             m.fail("POST", path, status, "boom");
             let e = mint(&gh).await;
-            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.github_wide()), (Some(status), "generate-jitconfig", "boom", wide));
+            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.wide()), (Some(status), "generate-jitconfig", "boom", wide));
         }
         // A secondary rate limit is a 403 whose only marker is the text: it pauses polling.
         assert_eq!(gh.paused_until(), None);
@@ -1248,7 +1248,7 @@ mod characterization {
         let down = Gh::for_mock(&format!("http://{}", dead.local_addr().unwrap()));
         drop(dead);
         let e = mint(&down).await;
-        assert!(e.status.is_none() && e.github_wide());
+        assert!(e.status.is_none() && e.wide());
     }
 
     #[tokio::test]

@@ -2,12 +2,15 @@
 //! matched client-side, each job joined to its run for event, path and fork status, and the
 //! server version that gates what Gitea can do, runner registration over the connect-RPC JSON
 //! `Register` call, retire and sweep. All HTTP goes through `net` with the forge's network mode.
-//! Verdict facts and logs arrive with GT-3 and fail closed until then.
+//! Verdict facts (API data only, bound to the console's job id), cache trust from the run's
+//! `path` ref, logs and the dashboard actions (rerun, cancel, dispatch) gated by server version.
 
 use super::{
-    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, RunnerReg, env_name, net,
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, JobRef, JobSummary, Kind, Links, LogPage, Network, Outcome,
+    Reason, RepoRef, RunDetail, RunPage, RunQuery, RunStatus, RunSummary, RunnerReg, StepSummary, VerdictFacts, Workflow, env_name, net,
     read_token_file,
 };
+use crate::github::MintError;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use reqwest::Method;
@@ -24,14 +27,21 @@ const MAX_PAGES: usize = 10;
 const BODY_CAP: usize = 8 << 20;
 const VERSION_TTL: Duration = Duration::from_secs(600);
 const RUN_CACHE_MAX: usize = 1000;
+/// Runs per page of the dashboard listing.
+const RUNS_PAGE: usize = 30;
+/// Looks (a `poll` apart) for a finished job before cache trust gives up: the VM powers off a
+/// moment before the server records the conclusion.
+const TRUST_LOOKS: usize = 6;
+/// Events a run can come from that kiln knows how to judge; anything else is refused.
+const KNOWN_EVENTS: [&str; 7] = ["push", "pull_request", "pull_request_target", "workflow_dispatch", "schedule", "release", "workflow_run"];
 /// What `Register` is told the runner is; the server stores it and shows it.
 const RUNNER_VERSION: &str = "v5.0.0";
 const NOT_OWNER: &str =
     "Gitea refused the runner registration token: the service account must be the repo owner or a member of the organisation's Owners team";
 
-/// Registration works (GT-2), but no VM launches for Gitea until the guest side and the verdict
-/// gate land (GT-5 `kiln-gate`, GT-3 facts): demand reports the queue, fork jobs and claims, but
-/// no launchable jobs.
+/// Registration (GT-2) and the verdict facts (GT-3) work, but no VM launches for Gitea until the
+/// guest side lands (GT-5 `kiln-gate`): demand reports the queue, fork jobs and claims, but no
+/// launchable jobs.
 const LAUNCH_READY: bool = false;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
@@ -93,6 +103,8 @@ pub struct Gitea {
     runs: Mutex<HashMap<(String, u64), Arc<RunRec>>>,
     /// Runner id -> VM id, filled when GT-2 registers a runner; claims are looked up by it.
     tracked: Mutex<HashMap<u64, String>>,
+    /// How long `cache_trust` waits between looks for a job that has not completed yet.
+    poll: Duration,
 }
 
 impl Gitea {
@@ -115,6 +127,7 @@ impl Gitea {
             version: Mutex::new(None),
             runs: Mutex::default(),
             tracked: Mutex::default(),
+            poll: Duration::from_secs(5),
         })
     }
 
@@ -127,6 +140,7 @@ impl Gitea {
         g.api = format!("{mock}/api/v1");
         g.client = net::base().build().unwrap();
         g.guard = false;
+        g.poll = Duration::from_millis(10);
         *g.token.write().unwrap() = Some(token.into());
         g
     }
@@ -143,10 +157,18 @@ impl Gitea {
         json!({ "source": if self.cred == Credential::Env { "env" } else { "file" }, "expires": null })
     }
 
-    /// The dashboard actions (rerun, cancel, dispatch) arrive with their own task; until then no
-    /// control is offered. `Ver::rerun` and `Ver::cancel` say when they may be turned on.
+    /// What the dashboard may offer, from the last version read: nothing until it is known.
     pub fn caps(&self) -> Caps {
-        Caps { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false, live_steps: false }
+        let v = self.cached_version().filter(|v| v.supported());
+        let has = |f: fn(Ver) -> bool| v.is_some_and(f);
+        Caps {
+            rerun: has(Ver::rerun),
+            rerun_failed: has(Ver::rerun),
+            cancel: has(Ver::cancel),
+            dispatch: v.is_some(),
+            workflows: v.is_some(),
+            live_steps: false,
+        }
     }
 
     /// The credential: the environment variable, or what `load_token` read from the data dir.
@@ -221,19 +243,27 @@ impl Gitea {
 
     /// One authenticated API request: the status and the body as JSON (`Null` if it is not).
     async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
-        let token = self.token().context("no Gitea token")?;
-        let mut auth = HeaderValue::from_str(&format!("token {token}"))?;
-        auth.set_sensitive(true);
-        let mut rb =
-            self.client.request(method, format!("{}/{path}", self.api)).header(AUTHORIZATION, auth).header(ACCEPT, "application/json");
+        let mut rb = self.req(method, path, "application/json")?;
         if let Some(b) = body {
             rb = rb.json(b);
         }
         self.finish(rb).await
     }
 
+    /// An authenticated request to `{api}/{path}`.
+    fn req(&self, method: Method, path: &str, accept: &'static str) -> Result<reqwest::RequestBuilder> {
+        let token = self.token().context("no Gitea token")?;
+        let mut auth = HeaderValue::from_str(&format!("token {token}"))?;
+        auth.set_sensitive(true);
+        Ok(self.client.request(method, format!("{}/{path}", self.api)).header(AUTHORIZATION, auth).header(ACCEPT, accept))
+    }
+
+    async fn send(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        if self.guard { net::send(&self.client, self.mode, rb).await } else { Ok(rb.send().await?) }
+    }
+
     async fn finish(&self, rb: reqwest::RequestBuilder) -> Result<(u16, Value)> {
-        let r = if self.guard { net::send(&self.client, self.mode, rb).await? } else { rb.send().await? };
+        let r = self.send(rb).await?;
         let status = r.status().as_u16();
         let body = net::read_capped(r, BODY_CAP).await?;
         Ok((status, serde_json::from_slice(&body).unwrap_or(Value::Null)))
@@ -276,7 +306,7 @@ impl Gitea {
     }
 
     /// The run behind a job (event, path, pull request), fetched once per id.
-    async fn run(&self, repo: &RepoRef, id: u64) -> Result<Arc<RunRec>> {
+    async fn cached_run(&self, repo: &RepoRef, id: u64) -> Result<Arc<RunRec>> {
         let key = (repo.path.clone(), id);
         if let Some(r) = self.runs.lock().unwrap().get(&key) {
             return Ok(r.clone());
@@ -312,11 +342,25 @@ impl Gitea {
         if plain.is_empty() {
             bail!("no runner labels to register");
         }
-        let (status, v) = self.call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None).await?;
+        // From here a failure is a `MintError`: no answer or a 5xx backs off the whole forge, a 4xx is this repo's.
+        let mint = |endpoint, status, message: String| anyhow::Error::from(MintError { forge: "Gitea", status, endpoint, message });
+        if !self.has_credential() {
+            bail!("no Gitea token");
+        }
+        let (status, v) = self
+            .call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None)
+            .await
+            .map_err(|e| mint("registration-token", None, format!("{e:#}")))?;
         match status {
             200..=299 => {}
-            403 => bail!(NOT_OWNER),
-            _ => bail!("Gitea answered {status} for the registration token of {}: {}", repo.path, Self::message(&v)),
+            403 => return Err(mint("registration-token", Some(status), NOT_OWNER.into())),
+            _ => {
+                return Err(mint(
+                    "registration-token",
+                    Some(status),
+                    format!("Gitea answered {status} for the registration token of {}: {}", repo.path, Self::message(&v)),
+                ));
+            }
         }
         let reg_token = v["token"].as_str().filter(|t| !t.is_empty()).context("Gitea sent no registration token")?;
         let name = format!("{}-{vm}", self.install);
@@ -324,9 +368,14 @@ impl Gitea {
         // Connect-RPC over JSON, no auth header: the registration token in the body is the credential.
         // `self.api` is `{origin}/api/v1`; the RPC lives at `{origin}/api/actions/...`.
         let rpc = format!("{}/actions/runner.v1.RunnerService/Register", self.api.strip_suffix("/v1").context("api url")?);
-        let (status, v) = self.finish(self.client.post(rpc).json(&body)).await?;
+        let (status, v) =
+            self.finish(self.client.post(rpc).json(&body)).await.map_err(|e| mint("runner-register", None, format!("{e:#}")))?;
         if !(200..300).contains(&status) {
-            bail!("Gitea answered {status} for runner registration of {name}: {}", Self::message(&v));
+            return Err(mint(
+                "runner-register",
+                Some(status),
+                format!("Gitea answered {status} for runner registration of {name}: {}", Self::message(&v)),
+            ));
         }
         let r = &v["runner"];
         let id = r["id"].as_str().and_then(|i| i.parse::<u64>().ok()).or(r["id"].as_u64()).filter(|&i| i > 0);
@@ -348,15 +397,22 @@ impl Gitea {
     ///   A job in progress: leave it, the entry deletes itself when the job ends (`Busy`).
     /// - 1.25: no disable, so a delete could strand a job being assigned. The runner idles out
     ///   (`Busy`) unless it is already gone.
-    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
+    ///
+    /// `StalePolicy` (3.3) never leaves a runner alive: a job it holds is cancelled (28+; older
+    /// servers leave it to their zombie timeout) and `Gone` tells the caller to kill the VM
+    /// regardless, as security beats availability. The cancel goes first, only because the caller
+    /// kills the VM right after; either way the job ends.
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64, reason: Reason) -> Dereg {
+        let stale = reason == Reason::StalePolicy;
         let r = async {
             repo.check_kind(Kind::Gitea)?;
             if self.version().await?.rerun() {
-                return self.retire(repo, runner_id, true).await;
+                return self.retire(repo, runner_id, true, stale).await;
             }
             let (status, v) = self.call(Method::GET, &format!("repos/{}/actions/runners/{runner_id}", repo.path), None).await?;
             match status {
                 404 => Ok(Dereg::Gone),
+                200..=299 if stale => Ok(Dereg::Gone),
                 200..=299 => Ok(Dereg::Busy),
                 _ => bail!("Gitea answered {status} for runner {runner_id}: {}", Self::message(&v)),
             }
@@ -369,7 +425,7 @@ impl Gitea {
     }
 
     /// Disable (when the server can), check for a job, delete. 404 at any step: already gone.
-    async fn retire(&self, repo: &RepoRef, runner_id: u64, disable: bool) -> Result<Dereg> {
+    async fn retire(&self, repo: &RepoRef, runner_id: u64, disable: bool, stale: bool) -> Result<Dereg> {
         let path = format!("repos/{}/actions/runners/{runner_id}", repo.path);
         if disable {
             let (status, v) = self.call(Method::PATCH, &path, Some(&json!({ "disabled": true }))).await?;
@@ -380,8 +436,19 @@ impl Gitea {
             }
         }
         // An unreadable listing is an error, not "no job": a delete here could strand one.
-        if self.jobs(repo, "in_progress").await?.iter().any(|j| j["runner_id"].as_u64() == Some(runner_id)) {
-            return Ok(Dereg::Busy);
+        if let Some(j) = self.jobs(repo, "in_progress").await?.iter().find(|j| j["runner_id"].as_u64() == Some(runner_id)) {
+            if !stale {
+                return Ok(Dereg::Busy);
+            }
+            match j["run_id"].as_u64() {
+                Some(run) => {
+                    if let Err(e) = self.cancel(repo, run).await {
+                        tracing::warn!("{}: run {run} of a recycled runner keeps running until the server times it out: {e:#}", repo.path);
+                    }
+                }
+                None => tracing::warn!("{}: a recycled runner's job has no run id", repo.path),
+            }
+            return Ok(Dereg::Gone);
         }
         let (status, v) = self.call(Method::DELETE, &path, None).await?;
         match status {
@@ -417,7 +484,7 @@ impl Gitea {
         }
         let mut n = 0;
         for id in stale {
-            match self.retire(repo, id, disable).await {
+            match self.retire(repo, id, disable, false).await {
                 Ok(Dereg::Gone) => n += 1,
                 Ok(_) => {}
                 Err(e) => tracing::warn!("{}: stale runner {id}: {e:#}", repo.path),
@@ -446,7 +513,7 @@ impl Gitea {
         for j in self.jobs(repo, "queued").await?.iter().filter(|j| j["status"] == "queued") {
             // The server ignores a `labels` filter, so the job's labels are judged here.
             let Some(n) = super::job_size(&j["labels"], label, default_cpus, crate::platform::host_arm64()) else { continue };
-            let run = self.run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
+            let run = self.cached_run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
             if run.fork {
                 d.refused_forks += 1;
                 d.fork_queued = true;
@@ -458,7 +525,7 @@ impl Gitea {
         if !tracked.is_empty() {
             for j in self.jobs(repo, "in_progress").await? {
                 let Some(vm) = j["runner_id"].as_u64().and_then(|r| tracked.get(&r)) else { continue };
-                let run = self.run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
+                let run = self.cached_run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
                 let mut r = run.run.clone();
                 r.links.job = j["html_url"].as_str().filter(|u| net::same_origin(&self.url, u) && net::link_safe(u)).map(String::from);
                 d.claimed.insert(
@@ -475,6 +542,275 @@ impl Gitea {
         }
         Ok(d)
     }
+}
+
+/// The dashboard and the host verdict (GT-3). Every call is for a repo kiln serves; ids that go
+/// into a path are numbers, and the workflow is a plain file name.
+impl Gitea {
+    async fn post(&self, path: &str, body: Option<&Value>) -> Result<()> {
+        let (status, v) = self.call(Method::POST, path, body).await?;
+        if !(200..300).contains(&status) {
+            bail!("Gitea answered {status}: {}", Self::message(&v));
+        }
+        Ok(())
+    }
+
+    /// Refuses an action the server is too old for, saying which version it needs.
+    async fn needs(&self, ok: fn(Ver) -> bool, what: &str, min: &str) -> Result<()> {
+        let v = self.version().await?;
+        if !ok(v) {
+            bail!("Gitea {}.{}.{} cannot {what}: it needs {min} or newer", v.0, v.1, v.2);
+        }
+        Ok(())
+    }
+
+    pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
+        repo.check_kind(Kind::Gitea)?;
+        let page = q.page.max(1);
+        let mut pairs = vec![("limit", RUNS_PAGE.to_string()), ("page", page.to_string())];
+        match q.status.as_deref() {
+            None => {}
+            Some(s @ ("queued" | "completed")) => pairs.push(("status", s.into())),
+            Some("running") => pairs.push(("status", "in_progress".into())),
+            Some(s) => bail!("status must be queued, running or completed, not {s:?}"),
+        }
+        if let Some(b) = &q.branch {
+            pairs.push(("branch", b.clone()));
+        }
+        let v = self.get(&format!("repos/{}/actions/runs?{}", repo.path, super::github::query(&pairs))).await?;
+        let runs = v["workflow_runs"].as_array().context("runs listing has no workflow_runs")?;
+        let runs: Vec<_> = runs.iter().filter_map(|r| run_summary(&self.url, &repo.path, r)).collect();
+        let next = (v["total_count"].as_u64().unwrap_or(0) > u64::from(page) * RUNS_PAGE as u64).then_some(page + 1);
+        Ok(RunPage { runs, next })
+    }
+
+    pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
+        repo.check_kind(Kind::Gitea)?;
+        let r = self.get(&format!("repos/{}/actions/runs/{id}", repo.path)).await?;
+        let run = run_summary(&self.url, &repo.path, &r).filter(|s| s.id == id).context("malformed run")?;
+        let j = self.get(&format!("repos/{}/actions/runs/{id}/jobs?limit=50", repo.path)).await?;
+        let jobs = j["jobs"].as_array().into_iter().flatten().filter_map(|j| job_summary(&self.url, j)).collect();
+        Ok(RunDetail { run, jobs })
+    }
+
+    /// The log, cut like GitHub's: the download is capped (a longer log is truncated, not refused)
+    /// and a page is at most `LOG_CAP`. A running job's log is not final, so only a finished job's
+    /// last page is `complete`.
+    pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
+        repo.check_kind(Kind::Gitea)?;
+        let r = self.send(self.req(Method::GET, &format!("repos/{}/actions/jobs/{id}/logs", repo.path), "text/plain")?).await?;
+        let status = r.status().as_u16();
+        let (body, truncated) = net::read_prefix(r, super::LOG_DOWNLOAD_CAP).await?;
+        if !(200..300).contains(&status) {
+            bail!("job log: Gitea answered {status}");
+        }
+        let mut page = LogPage::slice(&body, from, truncated);
+        if page.complete {
+            page.complete = self.get(&format!("repos/{}/actions/jobs/{id}", repo.path)).await?["status"] == "completed";
+        }
+        Ok(page)
+    }
+
+    pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
+        repo.check_kind(Kind::Gitea)?;
+        let v = self.get(&format!("repos/{}/actions/workflows", repo.path)).await?;
+        Ok(v["workflows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|w| w["state"].as_str().is_none_or(|s| s == "active"))
+            .filter_map(|w| {
+                let file = w["path"].as_str()?.rsplit('/').next()?.to_string();
+                // Gitea names a workflow by its file; there is no numeric id.
+                Some(Workflow { id: 0, name: w["name"].as_str().unwrap_or(&file).into(), file })
+            })
+            .collect())
+    }
+
+    pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
+        repo.check_kind(Kind::Gitea)?;
+        self.needs(Ver::rerun, "rerun", "1.26").await?;
+        let what = if failed_only { "rerun-failed-jobs" } else { "rerun" };
+        self.post(&format!("repos/{}/actions/runs/{id}/{what}", repo.path), None).await
+    }
+
+    pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
+        repo.check_kind(Kind::Gitea)?;
+        self.needs(Ver::cancel, "cancel runs", "28").await?;
+        self.post(&format!("repos/{}/actions/runs/{id}/cancel", repo.path), None).await
+    }
+
+    pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
+        repo.check_kind(Kind::Gitea)?;
+        let wf = workflow.context("Gitea needs a workflow file name to dispatch")?;
+        // It lands in a URL path.
+        if wf.is_empty() || wf == "." || wf == ".." || !wf.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+            bail!("workflow must be a file name");
+        }
+        self.needs(Ver::supported, "dispatch workflows", "1.25").await?;
+        let mut body = json!({ "ref": git_ref });
+        if !inputs.is_empty() {
+            body["inputs"] = json!(inputs);
+        }
+        self.post(&format!("repos/{}/actions/workflows/{wf}/dispatches", repo.path), Some(&body)).await
+    }
+
+    /// The job with the console's id, read through `repo`'s own path (another repo's job is a 404).
+    async fn job(&self, repo: &RepoRef, job_id: &str) -> Result<Value> {
+        repo.check_kind(Kind::Gitea)?;
+        // The id came off the console: digits only, and it comes back as the same id.
+        let id: u64 = job_id.parse().ok().filter(|_| job_id.bytes().all(|b| b.is_ascii_digit())).context("bad job id")?;
+        let j = self.get(&format!("repos/{}/actions/jobs/{id}", repo.path)).await?;
+        if j["id"].as_u64() != Some(id) {
+            bail!("Gitea answered for another job than {id}");
+        }
+        Ok(j)
+    }
+
+    /// The run behind `job`, and whether both belong to `repo`.
+    async fn job_run(&self, repo: &RepoRef, job: &Value) -> Result<(Value, bool)> {
+        let run_id = job["run_id"].as_u64().context("job has no run_id")?;
+        let run = self.get(&format!("repos/{}/actions/runs/{run_id}", repo.path)).await?;
+        let ours = run["id"].as_u64() == Some(run_id)
+            && run["repository"]["full_name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(&repo.path));
+        Ok((run, ours))
+    }
+
+    /// What the API says about the job the console named (4.2: nothing from the guest). Fork,
+    /// `workflow_run`, unknown event and tag come from the run record; a read error is the
+    /// caller's refusal.
+    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
+        let job = self.job(repo, job_id).await?;
+        let (run, ours) = self.job_run(repo, &job).await?;
+        Ok(facts(&run, ours))
+    }
+
+    /// (event, branch, default branch, conclusion) of the job that ran, from the run's `path` ref
+    /// (5.3). A tag is event `tag`; anything that is not exactly one branch ref the run's own
+    /// `head_branch` agrees with gets a branch name no branch can have.
+    pub async fn cache_trust(&self, job: &JobRef, _writers: &[String]) -> Result<(String, String, String, String)> {
+        let repo = &job.repo;
+        let mut j = self.job(repo, &job.id).await?;
+        for _ in 1..TRUST_LOOKS {
+            if j["status"] == "completed" {
+                break;
+            }
+            tokio::time::sleep(self.poll).await;
+            j = self.job(repo, &job.id).await?;
+        }
+        let (run, ours) = self.job_run(repo, &j).await?;
+        if !ours {
+            bail!("job {} is not for {}", job.id, repo.key());
+        }
+        let default = self.get(&format!("repos/{}", repo.path)).await?["default_branch"].as_str().context("no default_branch")?.to_string();
+        let (event, branch) = trust_ref(&run);
+        let conclusion = j["conclusion"].as_str().unwrap_or("none").to_string();
+        Ok((event, branch, default, conclusion))
+    }
+}
+
+fn facts(run: &Value, ours: bool) -> VerdictFacts {
+    let (event, path) = (run["event"].as_str().unwrap_or(""), run["path"].as_str().unwrap_or(""));
+    VerdictFacts {
+        ours,
+        fork: is_fork(run),
+        workflow_run: event == "workflow_run",
+        unknown_source: !KNOWN_EVENTS.contains(&event),
+        // `contains`, not a parse: a file or branch named to look like a tag only makes the job cold.
+        tag: event == "release" || path.contains("@refs/tags/"),
+    }
+}
+
+/// (event, branch) for `cache_verdict`. The path is `<file>@<ref>` and both halves are the
+/// repo's text, so a path with more than one `@refs/` cannot be split and is never trusted.
+fn trust_ref(run: &Value) -> (String, String) {
+    let (event, path) = (run["event"].as_str().unwrap_or("").to_string(), run["path"].as_str().unwrap_or(""));
+    let untrusted = |why: &str| (event.clone(), format!("{} ({why})", path.chars().take(100).collect::<String>()));
+    if path.matches("@refs/").count() != 1 {
+        return untrusted("no single ref");
+    }
+    let r = &path[path.find("@refs/").unwrap_or(0) + 1..];
+    if let Some(tag) = r.strip_prefix("refs/tags/") {
+        return (if event == "push" { "tag".into() } else { event }, tag.into());
+    }
+    match r.strip_prefix("refs/heads/") {
+        Some(b) if run["head_branch"].as_str() == Some(b) => (event, b.into()),
+        Some(_) => untrusted("not the run's head branch"),
+        None => untrusted("not a branch"),
+    }
+}
+
+fn status(s: &str) -> RunStatus {
+    match s {
+        "completed" => RunStatus::Completed,
+        "in_progress" => RunStatus::Running,
+        _ => RunStatus::Queued,
+    }
+}
+
+fn outcome(v: &Value) -> Option<Outcome> {
+    Some(match v.as_str()? {
+        "" => return None,
+        "success" => Outcome::Succeeded,
+        "failure" => Outcome::Failed,
+        "cancelled" => Outcome::Canceled,
+        "skipped" => Outcome::Skipped,
+        _ => Outcome::Abandoned,
+    })
+}
+
+/// A timestamp, or `None` for Gitea's 1970 "unset".
+fn stamp(v: &Value) -> Option<String> {
+    v.as_str().filter(|t| !t.is_empty() && !t.starts_with("1970")).map(|t| t.chars().take(40).collect())
+}
+
+fn run_summary(web: &str, repo: &str, r: &Value) -> Option<RunSummary> {
+    let id = r["id"].as_u64()?;
+    let run = run_rec(web, repo, r).run;
+    let s = |k: &str| stamp(&r[k]).unwrap_or_default();
+    Some(RunSummary {
+        id,
+        name: run.workflow,
+        title: run.title,
+        number: run.number,
+        attempt: r["run_attempt"].as_u64().unwrap_or(1),
+        status: status(r["status"].as_str().unwrap_or("")),
+        outcome: outcome(&r["conclusion"]),
+        event: run.kind,
+        branch: run.branch,
+        sha: run.sha,
+        actor: r["actor"]["login"].as_str().or(r["trigger_actor"]["login"].as_str()).map(|a| a.chars().take(100).collect()),
+        created_at: s("created_at"),
+        updated_at: s("updated_at"),
+        links: run.links,
+    })
+}
+
+fn job_summary(web: &str, j: &Value) -> Option<JobSummary> {
+    let t = |v: &Value| v.as_str().unwrap_or("").chars().take(200).collect::<String>();
+    let steps = j["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|s| StepSummary {
+            number: s["number"].as_u64().unwrap_or(0),
+            name: t(&s["name"]),
+            status: status(s["status"].as_str().unwrap_or("")),
+            outcome: outcome(&s["conclusion"]),
+        })
+        .collect();
+    let job = j["html_url"].as_str().filter(|u| net::same_origin(web, u) && net::link_safe(u)).map(String::from);
+    Some(JobSummary {
+        id: j["id"].as_u64()?,
+        name: t(&j["name"]),
+        status: status(j["status"].as_str().unwrap_or("")),
+        outcome: outcome(&j["conclusion"]),
+        started_at: stamp(&j["started_at"]),
+        completed_at: stamp(&j["completed_at"]),
+        runner: j["runner_name"].as_str().map(|r| r.chars().take(100).collect()),
+        steps,
+        links: Links { job, ..Links::default() },
+    })
 }
 
 fn unsupported(v: Ver) -> String {
@@ -928,7 +1264,7 @@ mod tests {
     async fn retire_disables_checks_then_deletes() {
         let (m, g) = retire_mock("28.1.0").await;
         g.track(52, "vm");
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Gone));
         let log = m.log();
         assert_eq!(
             m.requests(),
@@ -945,12 +1281,12 @@ mod tests {
         m.clear_log();
         m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(52));
         g.track(52, "vm");
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Busy));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Busy));
         assert!(!m.requests().iter().any(|r| r.starts_with("DELETE")));
         assert_eq!(g.tracked.lock().unwrap().len(), 1);
         // Another runner's job does not hold this one.
         m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(53));
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Gone));
     }
 
     #[tokio::test]
@@ -958,30 +1294,30 @@ mod tests {
         let (m, g) = retire_mock("28.1.0").await;
         // Already gone: 404 on the disable (or the delete) is Gone.
         m.route("PATCH", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Gone));
         m.route("PATCH", &format!("{RUNNERS}/52"), 200, fx("runner_disabled.json"));
         m.route("DELETE", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Gone));
         // An unreadable job listing is an error and nothing is deleted.
         m.clear_log();
         m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 500, "{}");
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Err(_)));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Err(_)));
         assert!(!m.requests().iter().any(|r| r.starts_with("DELETE")));
         // A refused disable: no check, no delete.
         m.clear_log();
         m.route("PATCH", &format!("{RUNNERS}/52"), 403, r#"{"message":"no"}"#);
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Err(_)));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Err(_)));
         assert_eq!(m.requests(), [format!("PATCH {RUNNERS}/52")]);
     }
 
     #[tokio::test]
     async fn retire_on_1_25_never_deletes_a_runner_that_may_hold_a_job() {
         let (m, g) = retire_mock("1.25.3").await;
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Busy));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Busy));
         assert_eq!(m.requests(), ["GET /api/v1/version".to_string(), format!("GET {RUNNERS}/52")]);
         // Gone on its own (it took a job and deleted itself).
         m.route("GET", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
-        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Surplus).await, Dereg::Gone));
         assert!(m.requests().iter().all(|r| !r.starts_with("DELETE") && !r.starts_with("PATCH")));
     }
 
@@ -1075,5 +1411,359 @@ mod tests {
         g.api = "http://127.0.0.1:9/api/v1".into();
         let e = g.finish(g.client.post("http://127.0.0.1:9/api/actions/x")).await.unwrap_err();
         assert!(format!("{e:#}").contains("internal address"), "{e:#}");
+    }
+
+    const REPO_API: &str = "/api/v1/repos/acme/demo";
+
+    /// A job of run `run` (a fixture) as the API lists it, with the routes a verdict or trust read needs.
+    fn job_routes(m: &Mock, job: u64, run: u64, status: &str, conclusion: Option<&str>) {
+        let mut j = json!({"id": job, "run_id": run, "status": status});
+        if let Some(c) = conclusion {
+            j["conclusion"] = c.into();
+        }
+        m.route("GET", &format!("{API}/jobs/{job}"), 200, j.to_string());
+        m.route("GET", REPO_API, 200, fx("repo.json"));
+    }
+
+    /// The whole host path for a job: `gate` with Gitea's no-op pause and `verdict_facts`.
+    async fn verdict(g: &Gitea, job: &str) -> crate::forge::Verdict {
+        crate::forge::gate(job, Duration::from_secs(5), async { Ok(None) }, g.verdict_facts(&repo(), job)).await
+    }
+
+    #[tokio::test]
+    async fn verdict_table_for_gitea_runs() {
+        use crate::forge::Call::*;
+        let (m, g) = mock().await;
+        // job id -> (run fixture, call): push to the default branch ok, tag cold, same-repo PR ok,
+        // a fork PR (waiting or approved), a fork pull_request_target and every workflow_run refused.
+        let table = [
+            (100, 70, Ok, "push to the default branch"),
+            (101, 75, Cold, "tag"),
+            (102, 71, Ok, "same-repo pull_request"),
+            (103, 72, Ok, "same-repo pull_request_target"),
+            (104, 76, Refuse, "fork pull_request (waiting)"),
+            (105, 77, Refuse, "fork pull_request_target"),
+            (106, 78, Refuse, "workflow_run"),
+        ];
+        for (job, run, _, _) in table {
+            job_routes(&m, job, run, "in_progress", None);
+        }
+        for (job, _, want, what) in table {
+            assert_eq!(verdict(&g, &job.to_string()).await.v, want, "{what}");
+        }
+        assert!(verdict(&g, "106").await.why.contains("workflow_run"));
+        assert!(verdict(&g, "104").await.why.contains("fork"));
+        // A release event is cold even without a tag path; an event kiln cannot judge is refused.
+        for (job, run, event, call) in [(110, 70, "release", Cold), (111, 70, "issue_comment", Refuse), (112, 70, "", Refuse)] {
+            job_routes(&m, job, run, "in_progress", None);
+            let mut r: Value = serde_json::from_str(&fx("run_70.json")).unwrap();
+            r["event"] = event.into();
+            r["id"] = (200 + job).into();
+            m.route("GET", &format!("{API}/runs/{}", 200 + job), 200, r.to_string());
+            m.route("GET", &format!("{API}/jobs/{job}"), 200, json!({"id": job, "run_id": 200 + job}).to_string());
+            assert_eq!(verdict(&g, &job.to_string()).await.v, call, "event {event:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn verdict_refuses_on_api_errors_foreign_jobs_and_bad_ids() {
+        use crate::forge::Call::Refuse;
+        let (m, g) = mock().await;
+        // Nothing routed: the job read is a 404. A 500 and unreadable JSON refuse too.
+        assert_eq!(verdict(&g, "100").await.v, Refuse);
+        assert!(verdict(&g, "100").await.why.starts_with("API error"));
+        m.route("GET", &format!("{API}/jobs/100"), 500, "{}");
+        assert_eq!(verdict(&g, "100").await.v, Refuse);
+        m.route("GET", &format!("{API}/jobs/100"), 200, "not json");
+        assert_eq!(verdict(&g, "100").await.v, Refuse);
+        // The run is unreadable.
+        m.route("GET", &format!("{API}/jobs/100"), 200, json!({"id": 100, "run_id": 999}).to_string());
+        assert_eq!(verdict(&g, "100").await.v, Refuse);
+        // The server answers for another job than the console named.
+        m.route("GET", &format!("{API}/jobs/101"), 200, json!({"id": 5, "run_id": 70}).to_string());
+        assert!(verdict(&g, "101").await.why.starts_with("API error"));
+        // A run of another repo (the id matches but the repository does not): not ours.
+        job_routes(&m, 102, 70, "in_progress", None);
+        let mut r: Value = serde_json::from_str(&fx("run_70.json")).unwrap();
+        r["repository"]["full_name"] = "acme/other".into();
+        m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
+        assert_eq!(verdict(&g, "102").await.why, "job is not for this repo");
+        // A missing repository on the run fails closed as well.
+        r.as_object_mut().unwrap().remove("repository");
+        m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
+        assert_eq!(verdict(&g, "102").await.v, Refuse);
+        // The id is the console's: anything but digits never reaches the API.
+        m.clear_log();
+        for bad in ["", "1/../2", "1 2", "-1", "٣"] {
+            assert_eq!(verdict(&g, bad).await.v, Refuse, "{bad:?}");
+        }
+        assert!(m.requests().is_empty());
+        assert!(m.log().iter().all(|r| !r.path.contains("..")));
+    }
+
+    #[tokio::test]
+    async fn cache_trust_comes_from_the_run_path_ref() {
+        let (m, g) = mock().await;
+        let trust = |job: u64| {
+            let (g, repo) = (&g, repo());
+            async move { g.cache_trust(&JobRef { repo, id: job.to_string() }, &[]).await }
+        };
+        let t = |e: &str, b: &str, c: &str| (e.to_string(), b.to_string(), "main".to_string(), c.to_string());
+        job_routes(&m, 100, 70, "completed", Some("success"));
+        assert_eq!(trust(100).await.unwrap(), t("push", "main", "success"));
+        // The head branch of the push run is the path's ref; the default branch comes from the repo API.
+        assert!(m.requests().contains(&format!("GET {REPO_API}")));
+        assert!(m.log().iter().all(|r| r.auth.as_deref() == Some("token tok")));
+        // A tag is event `tag`, whatever its name; a failed job keeps its conclusion.
+        job_routes(&m, 101, 75, "completed", Some("failure"));
+        assert_eq!(trust(101).await.unwrap(), t("tag", "v0.1.0", "failure"));
+        // PRs (fork or not) and workflow_run keep their event, which `cache_verdict` refuses.
+        for (job, run, event) in [(102, 71, "pull_request"), (103, 77, "pull_request_target"), (104, 78, "workflow_run")] {
+            job_routes(&m, job, run, "completed", Some("success"));
+            assert_eq!(trust(job).await.unwrap().0, event);
+        }
+        assert!(trust(102).await.unwrap().1.ends_with("(not a branch)"));
+        // Paths that cannot be split, or a branch the run's head_branch disagrees with, never match a branch.
+        let run_with = |id: u64, path: &str, head: Option<&str>| {
+            let mut r: Value = serde_json::from_str(&fx("run_70.json")).unwrap();
+            r["id"] = id.into();
+            r["path"] = path.into();
+            r["head_branch"] = head.into();
+            r.to_string()
+        };
+        for (job, path, head) in [
+            (110, "a@refs/heads/main.yml@refs/heads/dev", Some("dev")),
+            (111, "x.yml@refs/heads/main", Some("dev")),
+            (112, "x.yml@refs/heads/main", None),
+            (113, "x.yml", Some("main")),
+            (114, "x.yml@refs/other/main", Some("main")),
+            (115, "x.yml@refs/tags/main@refs/heads/main", Some("main")),
+        ] {
+            job_routes(&m, job, 300 + job, "completed", Some("success"));
+            m.route("GET", &format!("{API}/runs/{}", 300 + job), 200, run_with(300 + job, path, head));
+            let (e, b, _, _) = trust(job).await.unwrap();
+            assert_eq!(e, "push");
+            assert_ne!(b, "main", "{path}");
+            assert!(b.contains(' '), "a marked name no branch can have: {b:?}");
+        }
+        // A job of another repo's run is an error, and so is an unreadable one.
+        job_routes(&m, 120, 70, "completed", Some("success"));
+        let mut r: Value = serde_json::from_str(&fx("run_70.json")).unwrap();
+        r["repository"]["full_name"] = "acme/other".into();
+        m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
+        assert!(trust(120).await.is_err());
+        assert!(trust(999).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_trust_waits_for_the_conclusion_then_gives_none() {
+        let (m, g) = mock().await;
+        job_routes(&m, 100, 70, "in_progress", None);
+        m.route("GET", &format!("{API}/runs/70"), 200, fx("run_70.json"));
+        let t = g.cache_trust(&JobRef { repo: repo(), id: "100".into() }, &[]).await.unwrap();
+        assert_eq!((t.0.as_str(), t.3.as_str()), ("push", "none"));
+        assert_eq!(m.requests().iter().filter(|r| r.ends_with("/jobs/100")).count(), TRUST_LOOKS);
+    }
+
+    #[tokio::test]
+    async fn runs_and_run_detail_carry_status_outcome_and_server_built_links() {
+        let (m, g) = mock().await;
+        m.route("GET", &format!("{API}/runs?limit=30&page=1"), 200, fx("runs_page.json"));
+        let p = g.runs(&repo(), &RunQuery { page: 0, ..Default::default() }).await.unwrap();
+        assert_eq!(p.runs.len(), 2);
+        assert_eq!(p.next, Some(2), "69 runs, 30 a page");
+        let r = &p.runs[0];
+        assert_eq!((r.id, r.status, r.event, r.branch.as_str()), (69, RunStatus::Completed, EventKind::Other, "main"));
+        assert_eq!(r.outcome, Some(Outcome::Canceled));
+        assert_eq!(r.links.run.as_deref(), Some("https://gitea.example.org/acme/demo/actions/runs/69"));
+        assert!(r.links.commit.as_deref().unwrap().starts_with("https://gitea.example.org/acme/demo/commit/"));
+        assert_eq!(r.links.branch.as_deref(), Some("https://gitea.example.org/acme/demo/src/branch/main"));
+        // Filters become Gitea's: running is in_progress, a branch is passed on, a stray status is refused.
+        m.route(
+            "GET",
+            &format!("{API}/runs?limit=30&page=3&status=in_progress&branch=feat%2Fx"),
+            200,
+            r#"{"workflow_runs":[],"total_count":65}"#,
+        );
+        let q = RunQuery { status: Some("running".into()), branch: Some("feat/x".into()), page: 3 };
+        let p = g.runs(&repo(), &q).await.unwrap();
+        assert!(p.runs.is_empty() && p.next.is_none());
+        assert!(g.runs(&repo(), &RunQuery { status: Some("x&y".into()), ..Default::default() }).await.is_err());
+        // One run with its jobs and steps; Gitea's 1970 is "not set".
+        m.route("GET", &format!("{API}/runs/29"), 200, fx("run_29_failed.json"));
+        m.route("GET", &format!("{API}/runs/29/jobs?limit=50"), 200, fx("run_29_jobs.json"));
+        let d = g.run(&repo(), 29).await.unwrap();
+        assert_eq!((d.run.outcome, d.run.event, d.run.name.as_str()), (Some(Outcome::Failed), EventKind::Manual, "fail.yml"));
+        let j = &d.jobs[0];
+        assert_eq!((j.id, j.name.as_str(), j.outcome, j.runner.clone()), (32, "boom", Some(Outcome::Failed), None));
+        assert_eq!(j.links.job.as_deref(), Some("https://gitea.example.org/acme/demo/actions/runs/29/jobs/32"));
+        let steps: Vec<_> = j.steps.iter().map(|s| s.outcome).collect();
+        assert_eq!(steps, [Some(Outcome::Succeeded), Some(Outcome::Failed), Some(Outcome::Skipped)]);
+        assert!(j.started_at.is_some());
+        // A run that is not the one asked for, or a job link on another host, is not shown as asked.
+        assert!(g.run(&repo(), 30).await.is_err());
+        let foreign = fx("run_29_jobs.json").replace("https://gitea.example.org/acme", "https://evil.example.net/acme");
+        m.route("GET", &format!("{API}/runs/29/jobs?limit=50"), 200, foreign);
+        assert_eq!(g.run(&repo(), 29).await.unwrap().jobs[0].links.job, None);
+        let queued = job_summary(WEB, &json!({"id": 1, "status": "queued", "started_at": "1970-01-01T00:00:00Z"})).unwrap();
+        assert_eq!((queued.status, queued.outcome, queued.started_at), (RunStatus::Queued, None, None));
+    }
+
+    #[tokio::test]
+    async fn logs_are_paged_capped_and_complete_only_for_a_finished_job() {
+        let (m, g) = mock().await;
+        let (log, job) = (format!("{API}/jobs/32/logs"), format!("{API}/jobs/32"));
+        m.route("GET", &log, 200, fx("job_32_log.txt"));
+        m.route("GET", &job, 200, fx("job_32.json"));
+        let p = g.job_log(&repo(), 32, 0).await.unwrap();
+        assert!(p.complete && !p.truncated && p.text.contains("##[error]Process completed"), "{p:?}");
+        assert_eq!(p.next, fx("job_32_log.txt").len());
+        // Still running: the end of what exists is not the end of the log.
+        m.route("GET", &job, 200, json!({"id": 32, "status": "in_progress"}).to_string());
+        let p = g.job_log(&repo(), 32, 0).await.unwrap();
+        assert!(!p.complete && p.next > 0);
+        // Continuing from `next` gives the rest (nothing) and a page never splits a character.
+        let big = "é".repeat(super::super::LOG_CAP); // 2 bytes each: 2 MiB
+        m.route("GET", &log, 200, &big);
+        let p = g.job_log(&repo(), 32, 0).await.unwrap();
+        assert_eq!((p.next, p.text.len(), p.complete), (super::super::LOG_CAP, super::super::LOG_CAP, false));
+        let p2 = g.job_log(&repo(), 32, p.next).await.unwrap();
+        assert_eq!(p.text.len() + p2.text.len(), big.len());
+        // An error status is an error, with no body echoed.
+        m.route("GET", &log, 404, r#"{"message":"secret-ish"}"#);
+        let e = g.job_log(&repo(), 32, 0).await.unwrap_err();
+        assert_eq!(e.to_string(), "job log: Gitea answered 404");
+    }
+
+    #[tokio::test]
+    async fn actions_follow_the_server_version() {
+        let (m, g) = mock().await;
+        m.route("POST", &format!("{API}/runs/29/rerun"), 201, "{}");
+        m.route("POST", &format!("{API}/runs/29/rerun-failed-jobs"), 201, "{}");
+        m.route("POST", &format!("{API}/runs/29/cancel"), 200, "{}");
+        m.route("POST", &format!("{API}/workflows/spike.yml/dispatches"), 204, "");
+        m.route("GET", &format!("{API}/workflows"), 200, fx("workflows.json"));
+        // 28.1: everything.
+        g.refresh().await;
+        let c = g.caps();
+        assert!(c.rerun && c.rerun_failed && c.cancel && c.dispatch && c.workflows && !c.live_steps);
+        g.rerun(&repo(), 29, false).await.unwrap();
+        g.rerun(&repo(), 29, true).await.unwrap();
+        g.cancel(&repo(), 29).await.unwrap();
+        let inputs = HashMap::from([("who".to_string(), "me".to_string())]);
+        g.dispatch(&repo(), Some("spike.yml"), "main", &inputs).await.unwrap();
+        let log = m.log();
+        let last = log.last().unwrap();
+        assert_eq!(last.body, Some(json!({"ref": "main", "inputs": {"who": "me"}})));
+        assert!(log.iter().filter(|r| r.method == "POST").all(|r| r.auth.as_deref() == Some("token tok")));
+        let w = g.workflows(&repo()).await.unwrap();
+        assert_eq!(
+            w.iter().map(|w| (w.name.as_str(), w.file.as_str())).collect::<Vec<_>>(),
+            [("failwf", "fail.yml"), ("spike", "spike.yml")]
+        );
+        // 1.26: rerun but no cancel. 1.25: neither. Each says what it needs and sends nothing.
+        for (v, rerun, cancel) in [("1.26.3", true, false), ("1.25.2", false, false)] {
+            let (m, g) = mock().await;
+            m.route("GET", "/api/v1/version", 200, json!({ "version": v }).to_string());
+            m.route("POST", &format!("{API}/runs/29/rerun"), 201, "{}");
+            assert!(!g.caps().dispatch && !g.caps().rerun, "no caps until the version is known");
+            g.refresh().await;
+            let c = g.caps();
+            assert_eq!((c.rerun, c.rerun_failed, c.cancel, c.dispatch, c.workflows), (rerun, rerun, cancel, true, true), "{v}");
+            let e = g.cancel(&repo(), 29).await.unwrap_err();
+            assert!(e.to_string().contains("needs 28"), "{e}");
+            assert_eq!(g.rerun(&repo(), 29, false).await.is_ok(), rerun, "{v}");
+            assert!(!m.requests().iter().any(|r| r.ends_with("/cancel")));
+        }
+        // 1.24 is below the floor: nothing at all.
+        let (m, g) = mock().await;
+        m.route("GET", "/api/v1/version", 200, r#"{"version":"1.24.6"}"#);
+        g.refresh().await;
+        let c = g.caps();
+        assert!(!(c.rerun || c.cancel || c.dispatch || c.workflows));
+    }
+
+    #[tokio::test]
+    async fn action_errors_name_gitea_and_dispatch_validates_what_it_puts_in_a_path() {
+        let (m, g) = mock().await;
+        m.route("POST", &format!("{API}/runs/29/cancel"), 409, fx("err_409_completed.json"));
+        m.route("POST", &format!("{API}/workflows/spike.yml/dispatches"), 404, fx("err_404_ref.json"));
+        let e = g.cancel(&repo(), 29).await.unwrap_err();
+        assert_eq!(e.to_string(), "Gitea answered 409: run is already completed");
+        let e = g.dispatch(&repo(), Some("spike.yml"), "nonexistent-ref", &HashMap::new()).await.unwrap_err();
+        assert!(e.to_string().starts_with("Gitea answered 404: ref"), "{e}");
+        m.clear_log();
+        for bad in [None, Some(""), Some(".."), Some("../x.yml"), Some("a/b.yml"), Some("a b.yml"), Some("a?x.yml")] {
+            assert!(g.dispatch(&repo(), bad, "main", &HashMap::new()).await.is_err(), "{bad:?}");
+        }
+        assert!(m.requests().is_empty());
+        // Another forge's repo shape never reaches the API.
+        let gl = RepoRef::parse("gitea:a/b/c").unwrap();
+        assert!(g.cancel(&gl, 1).await.is_err() && g.runs(&gl, &RunQuery::default()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_policy_cancels_what_a_recycled_runner_holds_and_always_lets_the_vm_die() {
+        let (m, g) = retire_mock("28.1.0").await;
+        let jobs = format!("{API}/jobs?status=in_progress&limit=50&page=1");
+        let running = json!({"jobs": [{"id": 5, "run_id": 70, "status": "in_progress", "runner_id": 52}], "total_count": 1}).to_string();
+        m.route("GET", &jobs, 200, running);
+        m.route("POST", &format!("{API}/runs/70/cancel"), 200, "{}");
+        g.track(52, "vm");
+        // A job holds the runner: other reasons leave it (Busy); StalePolicy cancels its run and says Gone, never deleting.
+        assert!(matches!(g.deregister(&repo(), 52, Reason::Warm).await, Dereg::Busy));
+        assert!(!m.requests().iter().any(|r| r.contains("cancel")));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::StalePolicy).await, Dereg::Gone));
+        let reqs = m.requests();
+        assert!(reqs.contains(&format!("POST {API}/runs/70/cancel")) && !reqs.iter().any(|r| r.starts_with("DELETE")), "{reqs:?}");
+        // The cancel failing does not keep the VM alive.
+        m.route("POST", &format!("{API}/runs/70/cancel"), 500, "{}");
+        assert!(matches!(g.deregister(&repo(), 52, Reason::StalePolicy).await, Dereg::Gone));
+        // No job: the ordinary delete.
+        m.route("GET", &jobs, 200, r#"{"jobs":[],"total_count":0}"#);
+        m.clear_log();
+        assert!(matches!(g.deregister(&repo(), 52, Reason::StalePolicy).await, Dereg::Gone));
+        assert!(m.requests().contains(&format!("DELETE {RUNNERS}/52")));
+        // Before 28 there is no cancel: the VM still dies (the server's zombie timeout ends the job).
+        let (m, g) = retire_mock("1.26.3").await;
+        m.route("GET", &jobs, 200, jobs_running(52));
+        assert!(matches!(g.deregister(&repo(), 52, Reason::StalePolicy).await, Dereg::Gone));
+        assert!(!m.requests().iter().any(|r| r.contains("cancel") || r.starts_with("DELETE")));
+        // 1.25 cannot disable: a runner that may hold a job is still not deleted, but the VM dies.
+        let (m, g) = retire_mock("1.25.3").await;
+        assert!(matches!(g.deregister(&repo(), 52, Reason::StalePolicy).await, Dereg::Gone));
+        assert!(m.requests().iter().all(|r| !r.starts_with("DELETE") && !r.starts_with("PATCH")));
+    }
+
+    #[tokio::test]
+    async fn registration_refusals_say_whether_the_forge_or_the_repo_is_at_fault() {
+        let (m, g) = mock().await;
+        let tok = format!("{RUNNERS}/registration-token");
+        let rpc = "/api/actions/runner.v1.RunnerService/Register";
+        let why = |e: anyhow::Error| e.downcast::<MintError>().map(|r| (r.status, r.wide())).unwrap();
+        // 403 (not the owner) and 404 are this repo's; they back nothing else off.
+        m.route("POST", &tok, 403, fx("registration_token_403.json"));
+        assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(403), false));
+        m.route("POST", &tok, 404, "{}");
+        assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(404), false));
+        // A 5xx from either call is Gitea's.
+        m.route("POST", &tok, 502, "{}");
+        assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(502), true));
+        m.route("POST", &tok, 200, fx("registration_token.json"));
+        m.route("POST", rpc, 500, fx("register_bad_token.json"));
+        assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(500), true));
+        m.route("POST", rpc, 400, "{}");
+        assert_eq!(why(g.register(&repo(), "v", &labels()).await.err().unwrap()), (Some(400), false));
+        // Nobody listening is Gitea's too; its text carries no token.
+        let down = Gitea::for_mock(WEB, "http://127.0.0.1:1", "tok");
+        let e = down.register(&repo(), "v", &labels()).await.err().unwrap();
+        assert!(!format!("{e:?}").contains("tok") || !format!("{e:?}").contains("token tok"));
+        assert_eq!(why(e), (None, true));
+        // Not a registration failure at all: a missing credential and a 2xx without a runner stay plain errors.
+        let none = Gitea::for_mock(WEB, &m.base, "tok");
+        *none.token.write().unwrap() = None;
+        assert!(none.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
+        m.route("POST", rpc, 200, r#"{"runner":{"id":"0"}}"#);
+        assert!(g.register(&repo(), "v", &labels()).await.err().unwrap().downcast::<MintError>().is_err());
     }
 }
