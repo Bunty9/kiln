@@ -642,6 +642,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (forge, rr) = forge_for(app, repo)?;
+    // Filtered: the VM's private forge, resolved now (every launch) and refused before a runner is minted.
+    let allow =
+        if v.egress == "filtered" { forge_allow(&crate::forge::effective(&cfg.forges, &cfg.repos), &rr.forge).await? } else { vec![] };
     let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
     let runner_id = reg.runner_id;
     {
@@ -736,7 +739,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     if filtered {
-        tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror)).await?;
+        tokio::fs::write(dir.join("egress.nft"), egress_nft(cfg.docker_mirror, &allow)).await?;
         let mut rk = Command::new("rootlesskit");
         let stat = ssh_host.as_ref().filter(|_| publish == Publish::Static);
         rk.args(rk_args(dir, stat.map(|(ip, p)| (ip.as_str(), *p)), &confined)).kill_on_drop(true);
@@ -1801,7 +1804,12 @@ fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> C
 /// reaches the host's 127.0.0.1:5000. Every other host loopback port, the LAN, the
 /// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
-fn egress_nft(mirror: bool) -> String {
+///
+/// `forge`: the resolved `ip:port` of the VM's private forge (see `net::resolve_forge`), accepted
+/// ahead of the private-range drop. Nothing else private opens. Opening an address opens every
+/// site behind it (a reverse proxy's vhosts).
+fn egress_nft(mirror: bool, forge: &[std::net::SocketAddr]) -> String {
+    let forge: String = forge.iter().map(|a| format!("\n    ip daddr {} tcp dport {} accept", a.ip(), a.port())).collect();
     let (dnat, accept) = if mirror {
         (
             "\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }",
@@ -1819,7 +1827,7 @@ table inet kiln {{
     type filter hook output priority 0; policy drop;
     ct state established,related accept
     oifname "lo" accept
-    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}
+    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}{forge}
     ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
                172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} drop
     tcp dport 25 drop
@@ -1877,8 +1885,44 @@ fn rk_args(dir: &Path, publish: Option<(&str, u16)>, qemu: &[String]) -> Vec<Str
     a
 }
 
-/// Script for the doctor's probe namespace. `$1` nft file, `$2` dashboard port, `$3` tailnet IP.
-fn egress_script(mirror: bool, tailnet: bool) -> String {
+/// The `ip:port` a filtered VM of `forge` may reach besides the internet: its resolved address
+/// when the forge is `network: internal`, nothing otherwise. Errors when no address is permitted.
+async fn forge_allow(forges: &[crate::forge::ForgeCfg], forge: &crate::forge::ForgeId) -> Result<Vec<std::net::SocketAddr>> {
+    match forges.iter().find(|f| &f.id == forge) {
+        Some(f) if f.network == Some(crate::forge::Network::Internal) => {
+            let url = f.url.as_deref().context("forge has no url")?;
+            crate::forge::net::resolve_forge(url, crate::forge::Network::Internal).await
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+/// One reachability check of the probe: a label for the failure message, the URL (any HTTP
+/// response counts unless `strict`) and whether it must also return a success status.
+type Target = (String, String, bool);
+
+/// What the probe must reach: each public forge's origin (GitHub keeps `api.github.com`), a neutral
+/// public URL when there is none, and each `internal` forge's own origin.
+fn probe_targets(forges: &[crate::forge::ForgeCfg]) -> Vec<Target> {
+    use crate::forge::{Kind, Network};
+    let origin = |f: &crate::forge::ForgeCfg| format!("{}/", f.url.as_deref().unwrap_or_default().trim_end_matches('/'));
+    let mut t: Vec<Target> = vec![];
+    for f in forges {
+        match (f.kind, f.network.unwrap_or(Network::Public)) {
+            (Kind::GitHub, _) => t.push(("internet".into(), "https://api.github.com/".into(), true)),
+            (_, Network::Public) => t.push(("internet".into(), origin(f), false)),
+            (_, Network::Internal) => t.push((format!("forge {}", f.id.as_str()), origin(f), false)),
+        }
+    }
+    if !forges.iter().any(|f| f.kind == Kind::GitHub || f.network.unwrap_or(Network::Public) == Network::Public) {
+        t.insert(0, ("internet".into(), "https://github.com/".into(), false));
+    }
+    t
+}
+
+/// Script for the doctor's probe namespace. `$1` nft file, `$2` dashboard port, `$3` tailnet IP,
+/// `$4...` the `targets` URLs.
+fn egress_script(mirror: bool, tailnet: bool, targets: &[Target]) -> String {
     let step = |cond: &str, msg: &str| format!("{cond} && {{ echo 'step: {msg}'; exit 1; }}\n");
     let mut s = String::from("sysctl -qw net.ipv4.conf.all.route_localnet=1 || { echo 'step: sysctl'; exit 1; }\n");
     s += "nft -f \"$1\" || { echo 'step: loading nft rules'; exit 1; }\n";
@@ -1890,7 +1934,13 @@ fn egress_script(mirror: bool, tailnet: bool) -> String {
         s += &step("curl -s -m3 -o /dev/null \"http://$3:$2/\"", "tailnet address reachable from jobs");
     }
     // Each check is `cond && fail`, so a passing last check leaves status 1: end explicitly.
-    s + &step("! curl -sf -m8 -o /dev/null https://api.github.com/", "internet unreachable") + "exit 0\n"
+    for (i, (label, _, strict)) in targets.iter().enumerate() {
+        s += &step(
+            &format!("! curl -s{} -m8 -o /dev/null \"${{{}}}\"", if *strict { "f" } else { "" }, i + 4),
+            &format!("{label} unreachable"),
+        );
+    }
+    s + "exit 0\n"
 }
 
 pub const FILTERED_LINUX_ONLY: &str = "filtered egress needs Linux (rootlesskit, slirp4netns and nftables): \
@@ -1923,7 +1973,12 @@ fn next_fails(ok: bool, prev: Option<u32>, force: bool) -> u32 {
 
 /// Whether a config save can change the probe's result, so it must run again now.
 pub fn egress_reprobe(old: &crate::Config, new: &crate::Config) -> bool {
-    new.egress == "filtered" && (old.egress != new.egress || old.listen != new.listen || old.docker_mirror != new.docker_mirror)
+    new.egress == "filtered"
+        && (old.egress != new.egress
+            || old.listen != new.listen
+            || old.docker_mirror != new.docker_mirror
+            || old.forges != new.forges
+            || old.repos != new.repos)
 }
 
 /// Result of the filtered-egress probe, cached (see `fresh`) unless `force`.
@@ -1958,13 +2013,23 @@ async fn egress_probe(app: &App) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(&dir).await;
     tokio::fs::create_dir_all(&dir).await?;
     let nft = dir.join("egress.nft");
-    tokio::fs::write(&nft, egress_nft(cfg.docker_mirror)).await?;
+    // Every private forge that resolves is opened for the probe; one that does not is refused at its own launches.
+    let forges = crate::forge::effective(&cfg.forges, &cfg.repos);
+    let mut allow = vec![];
+    for f in forges.iter().filter(|f| f.network == Some(crate::forge::Network::Internal)) {
+        if let Some(a) = f.url.as_deref() {
+            allow.extend(crate::forge::net::resolve_forge(a, crate::forge::Network::Internal).await.unwrap_or_default());
+        }
+    }
+    let targets = probe_targets(&forges);
+    tokio::fs::write(&nft, egress_nft(cfg.docker_mirror, &allow)).await?;
     let mut cmd = Command::new("rootlesskit");
     cmd.args(rk_base(&dir.join("rk")))
-        .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some()), "sh"])
+        .args(["/bin/sh", "-c", &egress_script(mirror, ts.is_some(), &targets), "sh"])
         .arg(&nft)
         .arg(port.to_string())
         .arg(ts.unwrap_or_default())
+        .args(targets.iter().map(|t| &t.1))
         .kill_on_drop(true);
     no_secrets(&mut cmd);
     let o = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await;
@@ -3005,20 +3070,78 @@ mod tests {
             a[at("-ec") + 1].ends_with("--no-new-privs \"$@\"") && a[at("-ec") + 1].contains("; shift; exec setpriv --bounding-set=-all")
         );
         assert!(!rk_args(Path::new("/d"), None, &q).contains(&"-p".into()));
-        let on = egress_nft(true);
+        let on = egress_nft(true, &[]);
         assert!(on.contains("ct state established,related accept") && on.contains("tcp dport 25 drop"));
         assert!(on.contains("dnat to 10.0.2.2:5000") && on.contains("ip daddr 10.0.2.2 tcp dport 5000 accept"));
-        let off = egress_nft(false);
+        let off = egress_nft(false, &[]);
         assert!(!off.contains("5000") && off.contains("tcp dport 25 drop") && off.contains("masquerade"));
     }
 
     #[test]
     fn egress_probe_script() {
-        let s = egress_script(true, true);
-        assert!(s.contains("mirror") && s.contains("tailnet") && s.contains("internet unreachable"));
-        let s = egress_script(false, false);
+        let gh = probe_targets(&forges(r#"[{"id":"github","kind":"github"}]"#));
+        let s = egress_script(true, true, &gh);
+        assert!(
+            s.contains("mirror")
+                && s.contains("tailnet")
+                && s.contains("curl -sf -m8 -o /dev/null \"${4}\"")
+                && s.contains("internet unreachable")
+        );
+        let s = egress_script(false, false, &gh);
         assert!(!s.contains("mirror") && !s.contains("$3") && s.contains("dashboard port"));
         assert!(fresh(100, 0, 699) && !fresh(100, 0, 700));
+    }
+
+    fn forges(json: &str) -> Vec<crate::forge::ForgeCfg> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn probe_targets_follow_the_configured_forges() {
+        let t = |j: &str| probe_targets(&forges(j)).into_iter().map(|t| (t.0, t.1, t.2)).collect::<Vec<_>>();
+        let s = |a: &str, b: &str, c| (a.to_string(), b.to_string(), c);
+        // GitHub only: exactly today's single check
+        assert_eq!(t(r#"[{"id":"github","kind":"github"}]"#), [s("internet", "https://api.github.com/", true)]);
+        // a private-only box checks the forge and one neutral public URL
+        let p = r#"[{"id":"gl","kind":"gitlab","url":"http://100.64.0.7:8080","network":"internal"}]"#;
+        assert_eq!(t(p), [s("internet", "https://github.com/", false), s("forge gl", "http://100.64.0.7:8080/", false)]);
+        // a public GitLab is its own internet check; no neutral URL
+        let g = r#"[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.org/"}]"#;
+        assert_eq!(t(g), [s("internet", "https://gitlab.example.org/", false)]);
+    }
+
+    #[test]
+    fn nft_opens_only_the_forge_address() {
+        let a: std::net::SocketAddr = "100.64.0.7:8080".parse().unwrap();
+        let n = egress_nft(false, &[a, "192.168.1.5:443".parse().unwrap()]);
+        let accept = n.find("ip daddr 100.64.0.7 tcp dport 8080 accept").unwrap();
+        assert!(n.contains("ip daddr 192.168.1.5 tcp dport 443 accept"));
+        // before the private-range drop, so it wins; the drop itself stays
+        assert!(accept < n.find("100.64.0.0/10").unwrap() && n.contains("192.168.0.0/16"));
+        assert!(!egress_nft(false, &[]).contains("100.64.0.7"));
+    }
+
+    #[tokio::test]
+    async fn forge_allow_resolves_internal_forges_only() {
+        let fs = forges(
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"http://100.64.0.7:8080","network":"internal"},
+                {"id":"pub","kind":"gitlab","url":"https://gitlab.example.org"}]"#,
+        );
+        let id = |s: &str| crate::forge::ForgeId::new(s).unwrap();
+        assert_eq!(forge_allow(&fs, &id("gl")).await.unwrap(), ["100.64.0.7:8080".parse().unwrap()]);
+        assert!(forge_allow(&fs, &id("pub")).await.unwrap().is_empty() && forge_allow(&fs, &id("github")).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_forge_refuses_loopback_and_host_own() {
+        use crate::forge::{Network::Internal, net::resolve_forge};
+        assert!(resolve_forge("http://127.0.0.1:3000", Internal).await.is_err());
+        assert!(resolve_forge("http://localhost:3000", Internal).await.unwrap_err().to_string().contains("non-loopback"));
+        let own = crate::forge::net::own_addrs().unwrap().into_iter().find(|a| a.is_ipv4() && !a.is_loopback());
+        if let Some(ip) = own {
+            assert!(resolve_forge(&format!("http://{ip}:3000"), Internal).await.is_err());
+        }
+        assert_eq!(resolve_forge("http://192.168.7.7:8080", Internal).await.unwrap(), ["192.168.7.7:8080".parse().unwrap()]);
     }
 
     #[test]
@@ -3043,10 +3166,11 @@ mod tests {
     /// namespace must exit 0, a leaky one must name the failing step.
     #[test]
     fn egress_probe_script_runs() {
+        let gh = probe_targets(&forges(r#"[{"id":"github","kind":"github"}]"#));
         let run = |leaky: bool| {
             let curl = if leaky { "return 0" } else { r#"case "$*" in *5000*|*github*) return 0;; *) return 7;; esac"# };
-            let script = format!("sysctl(){{ :; }}; nft(){{ :; }}; curl(){{ {curl}; }}\n{}", egress_script(true, true));
-            std::process::Command::new("sh").args(["-c", &script, "sh", "x.nft", "7878", "100.1.2.3"]).output().unwrap()
+            let script = format!("sysctl(){{ :; }}; nft(){{ :; }}; curl(){{ {curl}; }}\n{}", egress_script(true, true, &gh));
+            std::process::Command::new("sh").args(["-c", &script, "sh", "x.nft", "7878", "100.1.2.3", &gh[0].1]).output().unwrap()
         };
         assert!(run(false).status.success());
         let leaky = run(true);

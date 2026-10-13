@@ -109,6 +109,26 @@ pub fn keep(addrs: impl Iterator<Item = SocketAddr>, mode: Mode, own: &[IpAddr])
     addrs.filter(|a| mode.permits(a.ip(), own)).collect()
 }
 
+/// The IPv4 `ip:port` pairs a filtered job VM of an `internal` forge may reach: the forge URL's
+/// host resolved now, through the same address rules as the forge client. Fails if nothing it
+/// resolves to is permitted (loopback, host-own, link-local...) or there is no IPv4 address
+/// (job VMs have IPv6 off).
+pub async fn resolve_forge(url: &str, network: Network) -> Result<Vec<SocketAddr>> {
+    let u = check_forge_url(url, network)?;
+    let host = u.host_str().unwrap_or_default().trim_matches(['[', ']']).to_string();
+    let port = u.port_or_known_default().unwrap_or(443);
+    let found = tokio::net::lookup_host((host.as_str(), port)).await?;
+    let mut out: Vec<_> = keep(found, Mode::from(network), &own_addrs()?).into_iter().filter(SocketAddr::is_ipv4).collect();
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        bail!(
+            "forge {host} resolves to no address a job VM may reach: loopback, host-own, link-local and IPv6-only forges are not supported (bind the forge to a non-loopback IPv4 address)"
+        );
+    }
+    Ok(out)
+}
+
 /// DNS for guarded requests: system resolution, then only addresses `mode` permits. The
 /// connection uses exactly these.
 pub struct Guard(pub Mode);
