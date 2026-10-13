@@ -546,49 +546,49 @@ impl Forge {
     pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
         match self {
             Self::GitHub(g) => g.runs(repo, q).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.runs(repo, q).await,
             Self::Gitea(g) => g.runs(repo, q).await,
         }
     }
     pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
         match self {
             Self::GitHub(g) => g.run(repo, id).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.run(repo, id).await,
             Self::Gitea(g) => g.run(repo, id).await,
         }
     }
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
         match self {
             Self::GitHub(g) => g.job_log(repo, id, from).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.job_log(repo, id, from).await,
             Self::Gitea(g) => g.job_log(repo, id, from).await,
         }
     }
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
         match self {
             Self::GitHub(g) => g.workflows(repo).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.workflows(repo).await,
             Self::Gitea(g) => g.workflows(repo).await,
         }
     }
     pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
         match self {
             Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.rerun(repo, id, failed_only).await,
             Self::Gitea(g) => g.rerun(repo, id, failed_only).await,
         }
     }
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         match self {
             Self::GitHub(g) => g.cancel(repo, id).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.cancel(repo, id).await,
             Self::Gitea(g) => g.cancel(repo, id).await,
         }
     }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
             Self::Gitea(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
         }
     }
@@ -684,7 +684,7 @@ impl Forge {
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
         match self {
             Self::GitHub(g) => g.cache_trust(job, writers).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.cache_trust(job, writers).await,
             Self::Gitea(g) => g.cache_trust(job, writers).await,
         }
     }
@@ -718,7 +718,7 @@ impl Forge {
     pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
-            Self::GitLab(_) => bail!(gitlab::LATER),
+            Self::GitLab(g) => g.verdict_facts(repo, job_id).await,
             Self::Gitea(g) => g.verdict_facts(repo, job_id).await,
         }
     }

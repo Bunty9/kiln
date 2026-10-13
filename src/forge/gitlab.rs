@@ -1,9 +1,9 @@
 //! The GitLab forge, demand side (GL-2): which of the project's pending jobs are ours, which
 //! running jobs belong to our runners, and whether a job's code came from a fork.
 //!
-//! Registration, retire, sweep and pause are here (GL-3). Verdict facts and cache trust arrive
-//! with GL-4, and the guest side with GL-6: until `LAUNCH_READY`, `register` refuses and demand
-//! reports no launchable jobs, so no VM boots for GitLab.
+//! Registration, retire, sweep and pause are here (GL-3), and verdict facts, cache trust and the
+//! dashboard API (GL-4). The guest side arrives with GL-6: until `LAUNCH_READY`, `register`
+//! refuses and demand reports no launchable jobs, so no VM boots for GitLab.
 //!
 //! Everything the API says is data, never instructions: fork detection reads the job's `ref`,
 //! `tag` and pipeline `source` plus one MR or branch lookup, never a `CI_*` value (a job's own
@@ -11,8 +11,9 @@
 //! redirects, address guard, size cap), and a `Link` URL is only compared, never fetched.
 
 use super::{
-    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, Reason, RepoRef, RunnerReg, env_name,
-    net, read_token_file, token_path,
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, JobRef, JobSummary, Kind, Links, LogPage, Network, Outcome,
+    Reason, RepoRef, RunDetail, RunPage, RunQuery, RunStatus, RunSummary, RunnerReg, VerdictFacts, Workflow, env_name, net,
+    read_token_file, token_path,
 };
 use crate::github::MintError;
 use anyhow::{Context, Result, anyhow, bail};
@@ -24,9 +25,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
-/// Dashboard actions arrive with GL-4.
-pub const CAPS: Caps = Caps { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false, live_steps: false };
-pub const NOT_YET: &str = "not available for GitLab yet";
+/// GitLab has no workflow list (a project has one `.gitlab-ci.yml`) and no live step list.
+pub const CAPS: Caps = Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, workflows: false, live_steps: false };
 pub const LATER: &str = "GitLab runners arrive in a later version";
 /// No VM launches for GitLab until GL-6 (the guest's `run_gitlab` and `kiln-exec`) lands: a VM
 /// booted now would have nothing that reads its secret. Demand reports the queue, fork jobs and
@@ -34,6 +34,11 @@ pub const LATER: &str = "GitLab runners arrive in a later version";
 const LAUNCH_READY: bool = false;
 /// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
 const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long `cache_trust` waits for a job to finish: the VM powers off a moment before GitLab records the result.
+const TRUST_LOOKS: usize = 7;
+const TRUST_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+/// Pipelines per dashboard page.
+const RUNS_PAGE: usize = 30;
 /// A runner with no VM record is orphaned once older than the longest `job_timeout_mins` (1440,
 /// the config ceiling) plus 10 minutes: whatever its status, which lies for hours (SP-7).
 const ORPHAN_SECS: u64 = (1440 + 10) * 60;
@@ -73,6 +78,10 @@ pub struct GitLab {
     settle: std::time::Duration,
     /// Unix time before which GitLab told us to back off (429), 0 = no.
     paused: Mutex<u64>,
+    /// How long `cache_trust` waits between looks for a job that has not finished.
+    poll: std::time::Duration,
+    /// repo path -> (default branch, unix time read); an hour is plenty.
+    defaults: Mutex<HashMap<String, (String, u64)>>,
     /// repo path -> numeric project id.
     projects: Mutex<HashMap<String, u64>>,
     /// Runners this process registered and has not retired: kiln's own VM records, which a sweep
@@ -106,7 +115,10 @@ enum Hold {
 
 /// GitLab's own `message` or `error`, cut and stripped of control characters (it never echoes the credential).
 fn message(v: &Value) -> String {
-    v["message"].as_str().or(v["error"].as_str()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect()
+    // A refused `POST /pipeline` answers `{"message": {"base": [...]}}`: show it as text.
+    let m = &v["message"];
+    let text = m.as_str().map(String::from).or_else(|| (!m.is_null()).then(|| m.to_string()));
+    text.or(v["error"].as_str().map(String::from)).unwrap_or_default().chars().filter(|c| !c.is_control()).take(200).collect()
 }
 
 impl GitLab {
@@ -125,6 +137,8 @@ impl GitLab {
             per_page: PER_PAGE,
             settle: PAUSE_SETTLE,
             paused: Mutex::new(0),
+            poll: TRUST_POLL,
+            defaults: Mutex::default(),
             projects: Mutex::default(),
             mine: Mutex::default(),
             origins: Mutex::default(),
@@ -409,8 +423,8 @@ impl GitLab {
         self.send(Method::GET, path, None).await
     }
 
-    /// One API call. The token only ever goes to the configured origin.
-    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
+    /// One API call, answered but not yet read. The token only ever goes to the configured origin.
+    async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<(u16, HeaderMap, reqwest::Response)> {
         if let Some(t) = self.paused_until() {
             bail!("GitLab rate limit: paused until {t}");
         }
@@ -428,12 +442,16 @@ impl GitLab {
         #[cfg(not(test))]
         let r = net::send(&self.client, self.mode, rb).await?;
         let (status, headers) = (r.status().as_u16(), r.headers().clone());
-        let body = net::read_capped(r, BODY_CAP).await?;
         if status == 429 {
             let secs = headers.get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
             *self.paused.lock().unwrap() = crate::now() + secs.unwrap_or(60).clamp(1, 3600);
         }
-        Ok(Resp { status, headers, body })
+        Ok((status, headers, r))
+    }
+
+    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
+        let (status, headers, r) = self.request(method, path, body).await?;
+        Ok(Resp { status, headers, body: net::read_capped(r, BODY_CAP).await? })
     }
 
     /// An error for a response that was not the one we wanted. GitLab's own message is shown
@@ -624,28 +642,10 @@ impl GitLab {
         let s = |v: &Value| v.as_str().unwrap_or("").chars().take(200).collect::<String>();
         let (id, r, sha, source) = (j["id"].as_u64().unwrap_or_default(), s(&j["ref"]), s(&j["commit"]["id"]), s(&j["pipeline"]["source"]));
         let pr = mr_iid(&r);
-        let kind = if j["tag"] == true {
-            EventKind::Tag
-        } else if pr.is_some() || source == "merge_request_event" {
-            EventKind::PullRequest
-        } else {
-            match source.as_str() {
-                "push" => EventKind::Push,
-                "schedule" => EventKind::Schedule,
-                // A multi-project downstream pipeline runs the target's own branch, but the caller's config controls it.
-                "web" | "api" | "trigger" | "pipeline" => EventKind::Manual,
-                _ => EventKind::Other,
-            }
-        };
+        let kind = kind_of(j["tag"] == true, &source, &r);
         let branch = mr_branch.filter(|_| pr.is_some()).unwrap_or_else(|| r.clone());
         let base = format!("{}/{}", self.url, repo.path);
-        let links = Links {
-            run: j["pipeline"]["id"].as_u64().map(|p| format!("{base}/-/pipelines/{p}")),
-            job: Some(format!("{base}/-/jobs/{id}")),
-            commit: (!sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("{base}/-/commit/{sha}")),
-            pr: pr.map(|n| format!("{base}/-/merge_requests/{n}")),
-            branch: (pr.is_none() && plain_ref(&r)).then(|| format!("{base}/-/tree/{r}")),
-        };
+        let links = links(&base, j["pipeline"]["id"].as_u64(), Some(id), &sha, &r);
         JobInfo {
             id: id.to_string(),
             url: format!("{base}/-/jobs/{id}"),
@@ -664,6 +664,293 @@ impl GitLab {
                 links,
             },
         }
+    }
+}
+
+impl GitLab {
+    /// The job the console named, read through the repo's own project (another project's job is a
+    /// 404), and that project's id. The id is digits only and must come back as the same id.
+    async fn job(&self, repo: &RepoRef, job_id: &str) -> Result<(u64, Value)> {
+        repo.check_kind(Kind::GitLab)?;
+        let id: u64 = job_id.parse().ok().filter(|_| job_id.bytes().all(|b| b.is_ascii_digit())).context("bad job id")?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let r = self.get(&format!("projects/{pid}/jobs/{id}")).await?;
+        if r.status != 200 {
+            return Err(self.fail("job lookup", &r));
+        }
+        let j = r.json()?;
+        if j["id"].as_u64() != Some(id) {
+            bail!("GitLab answered for another job than {id}");
+        }
+        Ok((pid, j))
+    }
+
+    /// What the API says about the job the console named (4.2): `pipeline.source`, the job's `ref`
+    /// and `tag`, and the MR or branch lookup. Never a `CI_*` value, which the job's own config can
+    /// overwrite, and nothing from the guest. A read error is the caller's refusal.
+    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
+        let (pid, j) = self.job(repo, job_id).await?;
+        Ok(VerdictFacts {
+            ours: j["pipeline"]["project_id"].as_u64() == Some(pid),
+            // Not `origin`: that counts a failed lookup as a fork, this one must say it failed.
+            fork: self.origin_lookup(pid, &j).await?.0,
+            unknown_source: !SOURCES.contains(&j["pipeline"]["source"].as_str().unwrap_or("")),
+            tag: j["tag"] == true,
+            ..Default::default()
+        })
+    }
+
+    /// (event, branch, default branch, conclusion) of the job that ran, for `cache_verdict`. The
+    /// event is `push` only for a pipeline sourced `push` on a branch of this project; a fork is
+    /// `fork`, a tag `tag`, any other source is itself (so `pipeline`, `web`, ... never write). A
+    /// writer branch must also be protected. The conclusion is `success` or GitLab's own status.
+    pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
+        let (pid, mut j) = self.job(&job.repo, &job.id).await?;
+        for _ in 1..TRUST_LOOKS {
+            if stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(self.poll).await;
+            j = self.job(&job.repo, &job.id).await?.1;
+        }
+        if j["pipeline"]["project_id"].as_u64() != Some(pid) {
+            bail!("job {} is not for {}", job.id, job.repo.key());
+        }
+        let default = self.default_branch(&job.repo.path).await?;
+        let (fork, mr_branch) = self.origin_lookup(pid, &j).await?;
+        let (r, source) = (j["ref"].as_str().unwrap_or(""), j["pipeline"]["source"].as_str().unwrap_or(""));
+        let (event, mut branch) = match kind_of(j["tag"] == true, source, r) {
+            _ if fork => ("fork", r.to_string()),
+            EventKind::Tag => ("tag", r.to_string()),
+            EventKind::PullRequest => ("merge_request_event", mr_branch.unwrap_or_else(|| r.to_string())),
+            _ => (source, r.to_string()),
+        };
+        if event == "push" && (branch == default || writers.contains(&branch)) {
+            if !crate::valid_branch(&branch) {
+                branch = format!("{branch} (not a plain branch name)");
+            } else if branch != default && !self.branch(pid, &branch).await?["protected"].as_bool().unwrap_or(false) {
+                branch = format!("{branch} (not protected)");
+            }
+        }
+        let status = j["status"].as_str().unwrap_or("none");
+        let conclusion = if stat(status).1 == Some(Outcome::Succeeded) { "success" } else { status };
+        Ok((event.to_string(), branch, default, conclusion.to_string()))
+    }
+
+    async fn branch(&self, pid: u64, name: &str) -> Result<Value> {
+        let r = self.get(&format!("projects/{pid}/repository/branches/{}", enc(name))).await?;
+        match r.status {
+            200 => r.json(),
+            _ => Err(self.fail("branch lookup", &r)),
+        }
+    }
+
+    /// The project's default branch, read at most once an hour.
+    async fn default_branch(&self, path: &str) -> Result<String> {
+        let key = path.to_ascii_lowercase();
+        if let Some((b, at)) = self.defaults.lock().unwrap().get(&key)
+            && crate::now() < at + 3600
+        {
+            return Ok(b.clone());
+        }
+        let r = self.get(&format!("projects/{}", enc(path))).await?;
+        if r.status != 200 {
+            return Err(self.fail("project lookup", &r));
+        }
+        let b = r.json()?["default_branch"].as_str().context("no default_branch")?.to_string();
+        self.defaults.lock().unwrap().insert(key, (b.clone(), crate::now()));
+        Ok(b)
+    }
+
+    pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let page = q.page.max(1);
+        let (per, pg) = (RUNS_PAGE.to_string(), page.to_string());
+        let mut pairs = vec![("per_page", per.as_str()), ("page", pg.as_str())];
+        match q.status.as_deref() {
+            None => {}
+            Some("queued") => pairs.push(("scope", "pending")),
+            Some("running") => pairs.push(("scope", "running")),
+            Some("completed") => pairs.push(("scope", "finished")),
+            Some(s) => bail!("status must be queued, running or completed, not {s:?}"),
+        }
+        if let Some(b) = &q.branch {
+            pairs.push(("ref", b));
+        }
+        let r = self.get(&format!("projects/{pid}/pipelines?{}", query(&pairs))).await?;
+        if r.status != 200 {
+            return Err(self.fail("pipeline list", &r));
+        }
+        let Value::Array(a) = r.json()? else { bail!("GitLab pipeline list is not an array") };
+        let base = format!("{}/{}", self.url, repo.path);
+        let runs = a.iter().filter_map(|p| run_summary(&base, p)).collect();
+        let more = r.headers.get("x-next-page").and_then(|v| v.to_str().ok()).is_some_and(|n| !n.is_empty());
+        Ok(RunPage { runs, next: more.then_some(page + 1) })
+    }
+
+    pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let r = self.get(&format!("projects/{pid}/pipelines/{id}")).await?;
+        if r.status != 200 {
+            return Err(self.fail("pipeline lookup", &r));
+        }
+        let p = r.json()?;
+        let base = format!("{}/{}", self.url, repo.path);
+        let mut run = run_summary(&base, &p).filter(|s| s.id == id).context("malformed pipeline")?;
+        let r = self.get(&format!("projects/{pid}/pipelines/{id}/jobs?per_page=100")).await?;
+        if r.status != 200 {
+            return Err(self.fail("pipeline jobs", &r));
+        }
+        let Value::Array(a) = r.json()? else { bail!("GitLab pipeline job list is not an array") };
+        // The pipeline has no title of its own; its commit's is on every job.
+        if let Some(t) = a.first().and_then(|j| j["commit"]["title"].as_str()) {
+            run.title = t.chars().take(200).collect();
+        }
+        let jobs = a.iter().filter_map(|j| job_summary(&base, j)).collect();
+        Ok(RunDetail { run, jobs })
+    }
+
+    /// The trace, cut like GitHub's: the download is capped (a longer one is truncated, not
+    /// refused) and a page is at most `LOG_CAP`. A running job's trace is not final, so only a
+    /// finished job's last page is `complete`. `section_start:` markers and ANSI stay in the text.
+    pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let (status, _, r) = self.request(Method::GET, &format!("projects/{pid}/jobs/{id}/trace"), None).await?;
+        let (body, truncated) = net::read_prefix(r, super::LOG_DOWNLOAD_CAP).await?;
+        if status != 200 {
+            bail!("job log: GitLab answered {status}");
+        }
+        let mut page = LogPage::slice(&body, from, truncated);
+        if page.complete {
+            let j = self.get(&format!("projects/{pid}/jobs/{id}")).await?;
+            page.complete = j.status == 200 && stat(j.json()?["status"].as_str().unwrap_or("")).0 == RunStatus::Completed;
+        }
+        Ok(page)
+    }
+
+    /// A project has one `.gitlab-ci.yml`, so there is nothing to list.
+    pub async fn workflows(&self, _repo: &RepoRef) -> Result<Vec<Workflow>> {
+        Ok(vec![])
+    }
+
+    /// `retry` re-runs the pipeline's failed and canceled jobs, which is both the dashboard's rerun
+    /// and its rerun-failed. ponytail: no `play` of manual jobs; add when a "Run" button asks for it.
+    pub async fn rerun(&self, repo: &RepoRef, id: u64, _failed_only: bool) -> Result<()> {
+        self.act(repo, "retry", &format!("pipelines/{id}/retry"), None).await
+    }
+
+    pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
+        self.act(repo, "cancel", &format!("pipelines/{id}/cancel"), None).await
+    }
+
+    /// A new pipeline on `git_ref`. No variables in v1, and no workflow: there is one file.
+    pub async fn dispatch(&self, repo: &RepoRef, _workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
+        if !inputs.is_empty() {
+            bail!("GitLab pipelines are started without variables for now");
+        }
+        self.act(repo, "run pipeline", "pipeline", Some(json!({ "ref": git_ref }))).await
+    }
+
+    /// POST `projects/<id>/<path>`. Rerun, cancel and run need the `api` scope, which the runner
+    /// scopes (create_runner, manage_runner, read_api) do not include: say so.
+    async fn act(&self, repo: &RepoRef, what: &str, path: &str, body: Option<Value>) -> Result<()> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let r = self.send(Method::POST, &format!("projects/{pid}/{path}"), body).await?;
+        if (200..300).contains(&r.status) {
+            return Ok(());
+        }
+        if r.status == 403 && serde_json::from_slice::<Value>(&r.body).is_ok_and(|v| v["error"] == "insufficient_scope") {
+            bail!("GitLab {what}: the token needs the api scope for this (kiln's runner scopes only read)");
+        }
+        Err(self.fail(what, &r))
+    }
+}
+
+fn run_summary(base: &str, p: &Value) -> Option<RunSummary> {
+    let id = p["id"].as_u64()?;
+    let s = |k: &str| p[k].as_str().unwrap_or("").chars().take(200).collect::<String>();
+    let (r, sha, source) = (s("ref"), s("sha"), s("source"));
+    let (status, outcome) = stat(&s("status"));
+    // ponytail: the list has no `tag` flag, so a tag pipeline reads as a push there; the detail knows.
+    let event = kind_of(p["tag"] == true, &source, &r);
+    Some(RunSummary {
+        id,
+        name: if s("name").is_empty() { "pipeline".into() } else { s("name") },
+        title: s("name"),
+        number: p["iid"].as_u64().unwrap_or(0),
+        attempt: 1,
+        status,
+        outcome,
+        event,
+        branch: r.clone(),
+        sha: sha.clone(),
+        actor: p["user"]["username"].as_str().map(|a| a.chars().take(100).collect()),
+        created_at: s("created_at"),
+        updated_at: s("updated_at"),
+        links: links(base, Some(id), None, &sha, &r),
+    })
+}
+
+fn job_summary(base: &str, j: &Value) -> Option<JobSummary> {
+    let id = j["id"].as_u64()?;
+    let (status, outcome) = stat(j["status"].as_str().unwrap_or(""));
+    let t = |k: &str| j[k].as_str().map(|t| t.chars().take(40).collect());
+    Some(JobSummary {
+        id,
+        name: j["name"].as_str().unwrap_or("").chars().take(200).collect(),
+        status,
+        outcome,
+        started_at: t("started_at"),
+        completed_at: t("finished_at"),
+        runner: j["runner"]["description"].as_str().map(|d| d.chars().take(100).collect()),
+        steps: vec![],
+        links: Links { job: links(base, None, Some(id), "", "").job, ..Links::default() },
+    })
+}
+
+/// What triggered a pipeline, from API data. A multi-project downstream (`pipeline`) runs the
+/// target's own branch, but the caller's config controls it: Manual, never a cache writer.
+fn kind_of(tag: bool, source: &str, r: &str) -> EventKind {
+    if tag {
+        EventKind::Tag
+    } else if mr_iid(r).is_some() || source == "merge_request_event" {
+        EventKind::PullRequest
+    } else {
+        match source {
+            "push" => EventKind::Push,
+            "schedule" => EventKind::Schedule,
+            "web" | "api" | "trigger" | "pipeline" => EventKind::Manual,
+            _ => EventKind::Other,
+        }
+    }
+}
+
+/// Links on the configured host, built from ids and a validated ref, never taken from a response.
+fn links(base: &str, pipeline: Option<u64>, job: Option<u64>, sha: &str, r: &str) -> Links {
+    let pr = mr_iid(r);
+    Links {
+        run: pipeline.map(|p| format!("{base}/-/pipelines/{p}")),
+        job: job.map(|j| format!("{base}/-/jobs/{j}")),
+        commit: (!sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("{base}/-/commit/{sha}")),
+        pr: pr.map(|n| format!("{base}/-/merge_requests/{n}")),
+        branch: (pr.is_none() && plain_ref(r)).then(|| format!("{base}/-/tree/{r}")),
+    }
+}
+
+/// A pipeline or job status as (state, result). `canceling` is still running; `manual` waits for a person.
+fn stat(s: &str) -> (RunStatus, Option<Outcome>) {
+    match s {
+        "success" => (RunStatus::Completed, Some(Outcome::Succeeded)),
+        "success-with-warnings" => (RunStatus::Completed, Some(Outcome::SucceededWithIssues)),
+        "failed" => (RunStatus::Completed, Some(Outcome::Failed)),
+        "canceled" => (RunStatus::Completed, Some(Outcome::Canceled)),
+        "skipped" => (RunStatus::Completed, Some(Outcome::Skipped)),
+        "running" | "canceling" => (RunStatus::Running, None),
+        _ => (RunStatus::Queued, None),
     }
 }
 
@@ -1524,5 +1811,369 @@ mod tests {
         let d = &out[2].2;
         assert!(!out[2].1 && d.contains("below Maintainer") && d.contains("valid_runner_registrars") && d.contains("toggle"), "{d}");
         assert!(out.iter().all(|c| !c.2.contains(TOKEN)));
+    }
+
+    // ---- GL-4: verdict facts, cache trust, dashboard API ----
+
+    use super::super::{Call, Verdict, gate};
+
+    fn serve_job(m: &Mock, j: &Value) {
+        m.route(&format!("projects/1/jobs/{}", j["id"]), 200, vec![], j.to_string());
+    }
+
+    fn protected_branch(m: &Mock, name: &str) {
+        m.route(
+            &format!("projects/1/repository/branches/{name}"),
+            200,
+            vec![],
+            fx("branch_ci.json").replace("\"protected\": false", "\"protected\": true"),
+        );
+    }
+
+    /// The lookups every trust test needs: project, MRs, branches (`prot` is protected, `feat` is not).
+    fn serve_trust(m: &Mock) {
+        serve_lookups(m);
+        m.ok("projects/1/repository/branches/main", "branch_ci.json");
+        protected_branch(m, "prot");
+    }
+
+    /// The whole host path for a job: `gate` with GitLab's pause answer (the job it holds) and `verdict_facts`.
+    async fn gated(g: &GitLab, job: &str, held: &[&str]) -> Verdict {
+        let held = Some(held.iter().map(|s| s.to_string()).collect());
+        gate(job, std::time::Duration::from_secs(5), async { Ok(held) }, g.verdict_facts(&repo(), job)).await
+    }
+
+    fn with(n: u64, r: &str, source: &str, f: impl FnOnce(&mut Value)) -> Value {
+        job(n, |j| {
+            set(j, r, source);
+            j["status"] = "success".into();
+            f(j)
+        })
+    }
+
+    async fn trust(g: &GitLab, j: &Value, writers: &[&str]) -> Result<(String, String, String, String)> {
+        let id = j["id"].to_string();
+        g.cache_trust(&JobRef { repo: repo(), id }, &writers.iter().map(|w| w.to_string()).collect::<Vec<_>>()).await
+    }
+
+    #[tokio::test]
+    async fn every_decide_case_against_the_api() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        m.route("projects/1/merge_requests/7", 500, vec![], "{}".into());
+        m.route("projects/1/merge_requests/9", 404, vec![], fx("mr_404.json"));
+        let other = |j: &mut Value| j["pipeline"]["project_id"] = 2.into();
+        let cases: Vec<(&str, Value, Call)> = vec![
+            ("push to the default branch", with(1, "main", "push", |_| {}), Call::Ok),
+            ("push to a protected branch", with(2, "prot", "push", |_| {}), Call::Ok),
+            ("tag", with(3, "v1", "push", |j| j["tag"] = true.into()), Call::Cold),
+            ("MR from a fork", with(4, "refs/merge-requests/3/head", "merge_request_event", |_| {}), Call::Refuse),
+            ("same-project MR", with(5, "refs/merge-requests/2/head", "merge_request_event", |_| {}), Call::Ok),
+            ("source pipeline", with(6, "ci", "pipeline", |_| {}), Call::Ok),
+            ("child of a fork MR", with(7, "refs/merge-requests/3/head", "parent_pipeline", |_| {}), Call::Refuse),
+            ("unknown source", with(8, "ci", "external_pull_request_event", |_| {}), Call::Refuse),
+            ("no source", with(9, "ci", "push", |j| j["pipeline"]["source"] = Value::Null), Call::Refuse),
+            ("MR lookup fails", with(10, "refs/merge-requests/7/head", "merge_request_event", |_| {}), Call::Refuse),
+            ("MR not found", with(11, "refs/merge-requests/9/head", "merge_request_event", |_| {}), Call::Refuse),
+            ("branch deleted", with(12, "gone", "push", |_| {}), Call::Refuse),
+            ("pipeline of another project", with(13, "main", "push", other), Call::Refuse),
+            ("no pipeline project", with(14, "main", "push", |j| j["pipeline"]["project_id"] = Value::Null), Call::Refuse),
+            ("tag from the web", with(15, "v1", "web", |j| j["tag"] = true.into()), Call::Cold),
+        ];
+        m.route("projects/1/repository/branches/gone", 404, vec![], fx("branch_404.json"));
+        let g = gl("decide", &m);
+        for (name, j, want) in &cases {
+            serve_job(&m, j);
+            let id = j["id"].to_string();
+            assert_eq!(gated(&g, &id, &[&id]).await.v, *want, "{name}");
+        }
+        // API errors and unreadable jobs refuse, with the reason.
+        m.route("projects/1/jobs/500", 500, vec![], "{}".into());
+        let v = gated(&g, "500", &["500"]).await;
+        assert_eq!((v.v, v.why.contains("API error")), (Call::Refuse, true), "{}", v.why);
+        assert_eq!(gated(&g, "404", &["404"]).await.v, Call::Refuse, "no such job");
+        // A job answered under another id than asked is no answer.
+        let mut wrong = with(16, "main", "push", |_| {});
+        m.route("projects/1/jobs/1016", 200, vec![], {
+            wrong["id"] = 77.into();
+            wrong.to_string()
+        });
+        assert_eq!(gated(&g, "1016", &["1016"]).await.v, Call::Refuse);
+        // Not digits: nothing is asked of GitLab.
+        let before = m.requests().len();
+        assert_eq!(gated(&g, "1/../2", &["1/../2"]).await.v, Call::Refuse);
+        assert_eq!(g.verdict_facts(&repo(), "1/../2").await.err().unwrap().to_string(), "bad job id");
+        assert_eq!(m.requests().len(), before);
+    }
+
+    #[tokio::test]
+    async fn the_verdict_is_about_the_job_the_paused_runner_holds() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let j = with(1, "main", "push", |_| {});
+        serve_job(&m, &j);
+        let g = gl("held", &m);
+        assert_eq!(gated(&g, "1001", &["1001"]).await.v, Call::Ok);
+        for held in [&[][..], &["1002"], &["1001", "1002"]] {
+            let v = gated(&g, "1001", held).await;
+            assert_eq!(v.v, Call::Refuse, "{held:?}");
+        }
+        // The real pause against the runner's job list: one job, and it is the console's.
+        let m = Mock::start().await;
+        m.on("PUT", "runners/79", 200, fx("runner_paused.json"));
+        m.ok("runners/79/jobs?status=running", "runner_jobs_running.json");
+        serve_trust(&m);
+        let mut ours = with(1, "main", "push", |_| {});
+        ours["id"] = 251.into();
+        serve_job(&m, &ours);
+        let mut g = gl("held2", &m);
+        g.settle = std::time::Duration::ZERO;
+        let v =
+            gate("251", std::time::Duration::from_secs(5), async { Ok(Some(g.pause(79).await?)) }, g.verdict_facts(&repo(), "251")).await;
+        assert_eq!(v.v, Call::Ok, "{}", v.why);
+        let v =
+            gate("250", std::time::Duration::from_secs(5), async { Ok(Some(g.pause(79).await?)) }, g.verdict_facts(&repo(), "250")).await;
+        assert_eq!(v.v, Call::Refuse, "the runner holds 251, not 250");
+    }
+
+    /// A fork's `.gitlab-ci.yml` (and a `trigger:` child's) sets every `CI_*` it can to look like a
+    /// trusted push. The recorded jobs carry those claims in every place a reader might look; the
+    /// verdict comes from the API's pipeline source, ref and MR lookup alone.
+    #[tokio::test]
+    async fn spoofed_ci_variables_cannot_turn_a_fork_into_a_trusted_job() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let mut g = gl("spoof", &m);
+        g.poll = std::time::Duration::ZERO;
+        for name in ["job_spoof_mr.json", "job_spoof_child.json"] {
+            let raw = fx(name);
+            for claim in ["CI_COMMIT_REF_PROTECTED", "CI_PIPELINE_SOURCE", "CI_MERGE_REQUEST_SOURCE_PROJECT_ID", "CI_COMMIT_TAG"] {
+                assert!(raw.contains(claim), "{name} must carry {claim}");
+            }
+            let j: Value = serde_json::from_str(&raw).unwrap();
+            m.route(&format!("projects/1/jobs/{}", j["id"]), 200, vec![], raw);
+            let id = j["id"].to_string();
+            let f = g.verdict_facts(&repo(), &id).await.unwrap();
+            assert!(f.ours && f.fork && !f.tag && !f.unknown_source, "{name}: {f:?}");
+            let v = gated(&g, &id, &[&id]).await;
+            assert_eq!((v.v, v.why.as_str()), (Call::Refuse, "pull request from a fork"), "{name}");
+            // And it is no cache writer either, whatever it claims.
+            let t = g.cache_trust(&JobRef { repo: repo(), id }, &[]).await.unwrap();
+            assert_eq!(t.0, "fork", "{name}");
+        }
+        // The same job with its MR pointing at this project is trusted: the API data decided, not the claims.
+        m.ok("projects/1/merge_requests/3", "mr_same.json");
+        let g = gl("spoof2", &m);
+        let v = gated(&g, "245", &["245"]).await;
+        assert_eq!(v.v, Call::Ok);
+    }
+
+    #[tokio::test]
+    async fn cache_trust_is_the_job_that_ran() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let mut g = gl("trust", &m);
+        g.poll = std::time::Duration::ZERO;
+        let t = |event: &str, branch: &str, c: &str| (event.to_string(), branch.to_string(), "main".to_string(), c.to_string());
+        type Trust = (String, String, String, String);
+        let cases: Vec<(&str, Value, &[&str], Trust)> = vec![
+            ("push to the default branch", with(1, "main", "push", |_| {}), &[], t("push", "main", "success")),
+            ("failed", with(2, "main", "push", |j| j["status"] = "failed".into()), &[], t("push", "main", "failed")),
+            ("canceled", with(3, "main", "push", |j| j["status"] = "canceled".into()), &[], t("push", "main", "canceled")),
+            ("protected writer branch", with(4, "prot", "push", |_| {}), &["prot"], t("push", "prot", "success")),
+            ("unprotected writer branch", with(5, "feat", "push", |_| {}), &["feat"], t("push", "feat (not protected)", "success")),
+            ("branch that is no writer", with(6, "feat", "push", |_| {}), &[], t("push", "feat", "success")),
+            ("tag", with(7, "v1", "push", |j| j["tag"] = true.into()), &[], t("tag", "v1", "success")),
+            (
+                "same-project MR",
+                with(8, "refs/merge-requests/2/head", "merge_request_event", |_| {}),
+                &[],
+                t("merge_request_event", "feat", "success"),
+            ),
+            (
+                "fork MR",
+                with(9, "refs/merge-requests/3/head", "merge_request_event", |_| {}),
+                &[],
+                t("fork", "refs/merge-requests/3/head", "success"),
+            ),
+            ("source pipeline", with(10, "main", "pipeline", |_| {}), &[], t("pipeline", "main", "success")),
+            ("web", with(11, "main", "web", |_| {}), &[], t("web", "main", "success")),
+            ("schedule", with(12, "main", "schedule", |_| {}), &[], t("schedule", "main", "success")),
+        ];
+        for (name, j, writers, want) in &cases {
+            serve_job(&m, j);
+            assert_eq!(&trust(&g, j, writers).await.unwrap(), want, "{name}");
+        }
+        // The default branch is read once, not per job.
+        assert_eq!(m.count("projects/acme%2Fdemo"), 2, "project id once, default branch once");
+        // A branch name no branch can have is marked, and a writer entry cannot rescue it.
+        let odd = with(20, "a..b", "push", |_| {});
+        m.ok("projects/1/repository/branches/a..b", "branch_ci.json");
+        serve_job(&m, &odd);
+        assert_eq!(trust(&g, &odd, &["a..b"]).await.unwrap().1, "a..b (not a plain branch name)");
+    }
+
+    #[tokio::test]
+    async fn cache_trust_waits_for_the_result_and_fails_closed() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let mut g = gl("trustwait", &m);
+        g.poll = std::time::Duration::ZERO;
+        let running = with(1, "main", "push", |j| j["status"] = "running".into());
+        serve_job(&m, &running);
+        let t = trust(&g, &running, &[]).await.unwrap();
+        assert_eq!(t.3, "running", "never success while unfinished");
+        assert_eq!(m.count("projects/1/jobs/1001"), TRUST_LOOKS);
+        // Another project's job, an unreadable job and a failed lookup are errors, not trust.
+        let other = with(2, "main", "push", |j| j["pipeline"]["project_id"] = 2.into());
+        serve_job(&m, &other);
+        assert!(trust(&g, &other, &[]).await.unwrap_err().to_string().contains("not for"));
+        m.route("projects/1/jobs/1003", 500, vec![], "{}".into());
+        assert!(g.cache_trust(&JobRef { repo: repo(), id: "1003".into() }, &[]).await.is_err());
+        m.route("projects/1/merge_requests/7", 500, vec![], "{}".into());
+        let mr = with(4, "refs/merge-requests/7/head", "merge_request_event", |_| {});
+        serve_job(&m, &mr);
+        assert!(trust(&g, &mr, &[]).await.is_err());
+        let b = with(5, "feat", "push", |_| {});
+        serve_job(&m, &b);
+        m.route("projects/1/repository/branches/feat", 500, vec![], "{}".into());
+        assert!(trust(&g, &b, &["feat"]).await.is_err(), "protected lookup failed");
+    }
+
+    #[tokio::test]
+    async fn runs_list_pipelines_with_server_built_links() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        m.route(
+            "projects/1/pipelines?per_page=30&page=1&scope=finished&ref=main",
+            200,
+            fx_headers("pipelines.headers"),
+            fx("pipelines.json"),
+        );
+        let g = gl("runs", &m);
+        let q = RunQuery { status: Some("completed".into()), branch: Some("main".into()), page: 0 };
+        let p = g.runs(&repo(), &q).await.unwrap();
+        assert_eq!(p.next, Some(2));
+        let r = &p.runs;
+        assert_eq!(r.len(), 5);
+        assert_eq!((r[0].id, r[0].number, r[0].status, r[0].outcome, r[0].event), (127, 116, RunStatus::Running, None, EventKind::Push));
+        let b = format!("{}/acme/demo/-/", m.base);
+        assert_eq!(r[0].links.run.as_deref(), Some(format!("{b}pipelines/127").as_str()));
+        assert_eq!(r[0].links.branch.as_deref(), Some(format!("{b}tree/long").as_str()));
+        assert_eq!(r[0].links.commit.as_deref(), Some(format!("{b}commit/{}", r[0].sha).as_str()));
+        assert_eq!((r[1].event, r[1].outcome, r[1].links.branch.clone()), (EventKind::PullRequest, Some(Outcome::Succeeded), None));
+        assert_eq!(r[1].links.pr.as_deref(), Some(format!("{b}merge_requests/2").as_str()));
+        assert_eq!((r[2].outcome, r[2].name.as_str(), r[2].title.as_str()), (Some(Outcome::Failed), "nightly", "nightly"));
+        assert_eq!((r[0].name.as_str(), r[0].title.as_str()), ("pipeline", ""));
+        // A ref or sha that is not plain text gets no link; kiln builds links, GitLab's web_url is never used.
+        assert_eq!(
+            (r[3].status, r[3].event, r[3].links.branch.clone(), r[3].links.commit.clone()),
+            (RunStatus::Queued, EventKind::Manual, None, None)
+        );
+        assert!(r[3].links.run.is_some());
+        assert_eq!((r[4].status, r[4].outcome), (RunStatus::Running, None), "canceling is not finished");
+        assert!(g.runs(&repo(), &RunQuery { status: Some("odd".into()), ..Default::default() }).await.is_err());
+        // The last page has no X-Next-Page.
+        m.route("projects/1/pipelines?per_page=30&page=1", 200, vec![], "[]".into());
+        assert_eq!(g.runs(&repo(), &Default::default()).await.unwrap().next, None);
+        m.route("projects/1/pipelines?per_page=30&page=1&scope=pending", 500, vec![], "{}".into());
+        assert!(g.runs(&repo(), &RunQuery { status: Some("queued".into()), ..Default::default() }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_run_has_its_jobs_and_its_commit_title() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        m.ok("projects/1/pipelines/127", "pipeline_127.json");
+        m.ok("projects/1/pipelines/127/jobs?per_page=100", "pipeline_127_jobs.json");
+        let g = gl("run", &m);
+        let d = g.run(&repo(), 127).await.unwrap();
+        assert_eq!((d.run.id, d.run.title.as_str(), d.run.actor.as_deref()), (127, "long ci", Some("root")));
+        let jobs: Vec<_> = d.jobs.iter().map(|j| (j.id, j.status, j.outcome, j.runner.as_deref())).collect();
+        assert_eq!(
+            jobs,
+            [
+                (251, RunStatus::Running, None, Some("a1b2c3-kiln-7-0")),
+                (252, RunStatus::Completed, Some(Outcome::Failed), None),
+                (253, RunStatus::Queued, None, None)
+            ]
+        );
+        assert_eq!(d.jobs[0].links.job.as_deref(), Some(format!("{}/acme/demo/-/jobs/251", m.base).as_str()));
+        assert!(d.jobs[0].steps.is_empty());
+        // Another pipeline's answer under the asked id is no answer.
+        m.ok("projects/1/pipelines/128", "pipeline_127.json");
+        assert!(g.run(&repo(), 128).await.is_err());
+        assert!(g.run(&repo(), 999).await.is_err());
+    }
+
+    fn with_status(id: u64, status: &str) -> String {
+        let mut j = recorded_jobs().into_iter().find(|j| j["id"] == id).unwrap();
+        j["status"] = status.into();
+        j.to_string()
+    }
+
+    #[tokio::test]
+    async fn the_trace_is_capped_paged_and_complete_only_when_the_job_is_over() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        let trace = fx("trace_251.txt");
+        m.route("projects/1/jobs/251/trace", 200, vec![], trace.clone());
+        let g = gl("trace", &m);
+        // The job is still running: the whole trace comes back but is not final.
+        m.route("projects/1/jobs/251", 200, vec![], with_status(251, "running"));
+        let p = g.job_log(&repo(), 251, 0).await.unwrap();
+        assert_eq!((p.text.as_str(), p.next, p.complete, p.truncated), (trace.as_str(), trace.len(), false, false));
+        assert!(p.text.contains("section_start:") && p.text.contains('\u{1b}'), "markers and ANSI are kept");
+        m.route("projects/1/jobs/251", 200, vec![], with_status(251, "success"));
+        assert!(g.job_log(&repo(), 251, 0).await.unwrap().complete);
+        // From an offset, and past the end.
+        let p = g.job_log(&repo(), 251, 10).await.unwrap();
+        assert_eq!(p.text, trace[10..]);
+        assert_eq!(g.job_log(&repo(), 251, 1 << 30).await.unwrap().text, "");
+        // A big trace is paged at LOG_CAP.
+        let big = "x".repeat(super::super::LOG_CAP + 10);
+        m.route("projects/1/jobs/251/trace", 200, vec![], big);
+        let p = g.job_log(&repo(), 251, 0).await.unwrap();
+        assert_eq!((p.text.len(), p.next, p.complete), (super::super::LOG_CAP, super::super::LOG_CAP, false));
+        m.route("projects/1/jobs/251/trace", 404, vec![], "{}".into());
+        assert!(g.job_log(&repo(), 251, 0).await.unwrap_err().to_string().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn rerun_cancel_and_run_pipeline_map_to_gitlab_and_say_when_the_scope_is_short() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        m.on("POST", "projects/1/pipelines/127/retry", 201, "{}".into());
+        m.on("POST", "projects/1/pipelines/127/cancel", 200, "{}".into());
+        m.on("POST", "projects/1/pipeline", 201, "{}".into());
+        let g = gl("acts", &m);
+        g.rerun(&repo(), 127, false).await.unwrap();
+        g.rerun(&repo(), 127, true).await.unwrap();
+        g.cancel(&repo(), 127).await.unwrap();
+        g.dispatch(&repo(), None, "main", &HashMap::new()).await.unwrap();
+        g.dispatch(&repo(), Some("ignored.yml"), "feat/x", &HashMap::new()).await.unwrap();
+        let sent = m.sent.lock().unwrap().clone();
+        let posts: Vec<_> =
+            sent.iter().filter(|(c, _)| c.starts_with("POST")).map(|(c, b)| (c.replace("/api/v4/", ""), b.clone())).collect();
+        assert_eq!(posts[0].0, "POST projects/1/pipelines/127/retry");
+        assert_eq!(posts[2].0, "POST projects/1/pipelines/127/cancel");
+        assert_eq!(serde_json::from_str::<Value>(&posts[3].1).unwrap(), json!({"ref": "main"}));
+        assert_eq!(serde_json::from_str::<Value>(&posts[4].1).unwrap(), json!({"ref": "feat/x"}), "no variables, whatever was asked");
+        assert_eq!(posts.len(), 5);
+        // No variables in v1: refused before anything is sent.
+        let inputs = HashMap::from([("A".to_string(), "1".to_string())]);
+        assert!(g.dispatch(&repo(), None, "main", &inputs).await.unwrap_err().to_string().contains("variables"));
+        assert_eq!(m.sent.lock().unwrap().iter().filter(|(c, _)| c.starts_with("POST")).count(), 5);
+        // A token without `api` is told so; GitLab's own refusal text is shown.
+        m.on("POST", "projects/1/pipelines/127/retry", 403, fx("err_403_scope.json"));
+        assert!(g.rerun(&repo(), 127, false).await.unwrap_err().to_string().contains("api scope"));
+        m.on("POST", "projects/1/pipeline", 400, r#"{"message":{"base":["Reference not found"]}}"#.into());
+        let e = g.dispatch(&repo(), None, "nope", &HashMap::new()).await.unwrap_err().to_string();
+        assert!(e.contains("400") && e.contains("Reference not found"), "{e}");
+        m.on("POST", "projects/1/pipelines/9/cancel", 404, r#"{"message":"404 Not found"}"#.into());
+        assert!(g.cancel(&repo(), 9).await.is_err());
+        assert!(!e.contains(TOKEN));
+        assert!(g.workflows(&repo()).await.unwrap().is_empty());
+        assert_eq!(CAPS, Caps { rerun: true, rerun_failed: true, cancel: true, dispatch: true, workflows: false, live_steps: false });
     }
 }
