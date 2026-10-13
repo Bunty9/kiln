@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd LaunchAgent for macOS (Apple Silicon): kiln runs as your user, no root.
+     launchd does not expand ~ or $HOME, so install it with the paths filled in:
+       sed "s|@HOME@|$HOME|g" deploy/kiln.plist > ~/Library/LaunchAgents/dev.kiln.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.kiln.plist
+     Stop: launchctl bootout gui/$(id -u)/dev.kiln    Logs: ~/Library/Logs/kiln.log
+     A LaunchAgent runs while you are logged in: turn on automatic login for an always-on box. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.kiln</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/kiln</string>
+    <string>serve</string>
+  </array>
+  <!-- launchd's default PATH lacks Homebrew (qemu, xorriso). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Optional: <key>KILN_GITHUB_TOKEN</key><string>...</string> (or set it from the dashboard) -->
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Like systemd's Restart=on-failure: restart after a non-zero exit (this is also what
+       rolls back an update that fails to start), not after a clean stop. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <!-- SIGTERM: kiln kills its VMs and deregisters runners that never got a job, then launchd
+       kills what is left of the process group. -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/kiln.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/kiln.log</string>
+</dict>
+</plist>

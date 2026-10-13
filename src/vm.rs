@@ -5,7 +5,7 @@
 //! so the base never changes and a job's writes vanish with its overlay.
 
 use crate::forge::{Dereg, JobRef, Reason, RepoRef};
-use crate::{App, now};
+use crate::{App, now, platform};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
@@ -597,8 +597,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if let Some(r) = rec {
         persist(app, &r);
     }
-    // Delivered as an SMBIOS OEM string: works with the stock cloud kernel
-    // (fw_cfg needs a module it lacks), and `path=` keeps it out of `ps`.
+    // Handed over as a file QEMU reads at start (fw_cfg on arm64, SMBIOS on x86: see job_args);
+    // `path=`/`file=` keep it out of `ps`.
     write_secret(&q.join("jit"), &reg.guest_secret).await?;
 
     let base = images(&app.data).join("base.qcow2");
@@ -625,7 +625,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let mut fwd = String::new();
     let publish = if !filtered {
         Publish::Monitor
-    } else if which("rootlessctl") {
+    } else if platform::which("rootlessctl") {
         Publish::Rootless
     } else {
         Publish::Static
@@ -652,24 +652,14 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     if filtered {
         fwd.push_str(",ipv6=off");
     }
-    let mut cmd = qemu(cpus, mem_mb, &disk, &fwd);
+    let mut cmd = qemu(&GUEST, cpus, mem_mb, &disk, &fwd);
     if let Some(ov) = &cache_ov {
         cmd.arg("-drive").arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", ov.display()));
     }
     // Direct kernel boot without initrd: virtio + ext4 are built into the
-    // Ubuntu kernel, which brings boot-to-runner down to ~4s. panic=1 + -no-reboot
-    // make a kernel panic end the VM instead of hanging until the timeout.
+    // Ubuntu kernel, which brings boot-to-runner down to ~4s.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
-    cmd.args(["-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"]);
-    cmd.arg("-smbios").arg(format!("type=11,path={}", q.join("jit").display()));
-    if ssh_host.is_some() {
-        cmd.arg("-smbios").arg(format!("type=11,path={}", q.join("ssh").display()));
-    }
-    // stdio is the guest's ttyS0: its input is the host->guest control channel (hold/release).
-    cmd.arg("-serial").arg("stdio");
-    // ttyS1 (steps) is a unix socket kiln copies into a capped steps.log.
-    cmd.arg("-chardev").arg(format!("socket,id=s1,path={},server=on,wait=off", q.join("steps.sock").display()));
-    cmd.args(["-serial", "chardev:s1"]);
+    cmd.args(job_args(&GUEST, &q, ssh_host.is_some(), now_us()));
     if ssh_host.is_some() && publish == Publish::Monitor {
         cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", q.join("mon.sock").display()));
     }
@@ -700,7 +690,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // which then gives the job its stop grace. Kills target the child's pid, never a group.
     cmd.process_group(0);
     if !crate::confine::ENFORCED.load(std::sync::atomic::Ordering::Relaxed) {
-        note(app, id, "QEMU runs unconfined: this kernel has no Landlock (see Diagnostics)");
+        note(app, id, "QEMU runs unconfined: no Landlock on this host (see Diagnostics)");
     }
     let console = tokio::fs::File::create(dir.join("console.log")).await?;
     if filtered {
@@ -710,7 +700,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
     let steps = tokio::fs::File::create(dir.join("steps.log")).await?;
-    let mut child = cmd.spawn().context(if filtered { "spawning rootlesskit" } else { "spawning qemu-system-x86_64" })?;
+    let mut child =
+        cmd.spawn().with_context(|| if filtered { "spawning rootlesskit".into() } else { format!("spawning {}", GUEST.qemu) })?;
     if let Some(err) = child.stderr.take() {
         // rootlesskit warns on every start that we keep host loopback; we do on purpose
         // (the mirror), and nft blocks every other loopback port. Keep the rest.
@@ -756,7 +747,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     break; // guest powered off, QEMU closed stdout
                 }
                 if first {
-                    // QEMU read the SMBIOS file before the guest printed anything.
+                    // QEMU read the secret files at start, before the guest printed anything.
                     first = false;
                     let _ = tokio::fs::remove_file(q.join("jit")).await;
                     let _ = tokio::fs::remove_file(q.join("ssh")).await;
@@ -1040,14 +1031,10 @@ fn hmp_failed(out: &str) -> bool {
     out.contains("Could not") || out.contains("rror")
 }
 
-fn which(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|p| std::env::split_paths(&p).chain(["/usr/sbin".into(), "/sbin".into()]).any(|d| d.join(bin).is_file()))
-}
-
 /// Connect to a socket QEMU made in its `q/` directory. The confined QEMU can write there, so
 /// the path could be a symlink to another VM's monitor: open it without following links, check
 /// it is a socket, and connect through that very inode (`/proc/self/fd/N`), so no swap can race.
+#[cfg(target_os = "linux")]
 async fn connect_own(p: &Path) -> std::io::Result<tokio::net::UnixStream> {
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
     use std::os::unix::io::AsRawFd;
@@ -1060,8 +1047,19 @@ async fn connect_own(p: &Path) -> std::io::Result<tokio::net::UnixStream> {
     s
 }
 
-/// Copy the guest's ttyS1 (QEMU serves it on a unix socket) into steps.log, capped like
-/// console.log. Reads in 64 KiB chunks, so a flood costs disk up to LOG_CAP and no memory.
+/// macOS has no O_PATH or /proc, and QEMU is not confined there (no Landlock), so it could
+/// do worse than plant a symlink: refuse one anyway, then connect by path.
+#[cfg(not(target_os = "linux"))]
+async fn connect_own(p: &Path) -> std::io::Result<tokio::net::UnixStream> {
+    use std::os::unix::fs::FileTypeExt;
+    if !std::fs::symlink_metadata(p)?.file_type().is_socket() {
+        return Err(std::io::Error::other(format!("{} is not a socket", p.display())));
+    }
+    tokio::net::UnixStream::connect(p).await
+}
+
+/// Copy the guest's steps channel (ttyS1, or a virtio-serial port on arm64; QEMU serves it
+/// on a unix socket) into steps.log, capped like console.log. Reads in 64 KiB chunks, so a flood costs disk up to LOG_CAP and no memory.
 async fn copy_steps(sock: PathBuf, mut out: tokio::fs::File) {
     let mut s = None;
     // QEMU creates the socket at start; in filtered mode that is after rootlesskit's setup.
@@ -1113,7 +1111,7 @@ async fn bind_ip() -> String {
 }
 
 async fn tailnet_ip() -> Option<String> {
-    let out = output("tailscale", &["ip", "-4"]).await.unwrap_or_default();
+    let out = output(platform::tailscale(), &["ip", "-4"]).await.unwrap_or_default();
     out.lines().next().map(str::trim).filter(|l| l.parse::<std::net::Ipv4Addr>().is_ok()).map(String::from)
 }
 
@@ -1562,6 +1560,89 @@ async fn write_secret(path: &Path, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// What differs between x86_64 and arm64 guests. A guest always has the host's architecture.
+struct Guest {
+    /// Ubuntu's name for the architecture (cloud image files).
+    ubuntu: &'static str,
+    /// GitHub's and Node's name (runner label, runner and Node tarballs, tool cache).
+    gh: &'static str,
+    qemu: &'static str,
+    machine: &'static str,
+    /// The kernel console. It is QEMU's stdio, so its input is also the host->guest control channel.
+    console: &'static str,
+    /// Device the guest mirrors step logs to, and the QEMU flags that attach it to chardev `s1`.
+    steps: &'static str,
+    steps_args: &'static [&'static str],
+    /// SMBIOS OEM strings reach the guest (x86 only: arm64 `virt` has no SMBIOS without UEFI).
+    smbios: bool,
+    /// The guest kernel reads a real-time clock at boot. x86's rtc_cmos is built in; arm64's
+    /// PL031 driver is a module the cloud image lacks (and rtc-efi needs UEFI), so an arm64 guest
+    /// would start at systemd's build time, months behind, and apt rejects the archive's Release
+    /// files as "not valid yet". Guests without one get the host's time on the kernel command line.
+    rtc: bool,
+}
+
+const X64: Guest = Guest {
+    ubuntu: "amd64",
+    gh: "x64",
+    qemu: "qemu-system-x86_64",
+    machine: "q35",
+    console: "ttyS0",
+    steps: "/dev/ttyS1",
+    steps_args: &["-serial", "chardev:s1"],
+    smbios: true,
+    rtc: true,
+};
+
+/// Apple Silicon (HVF) or aarch64 Linux (KVM). `virt` has a single UART (PL011, ttyAMA0), so
+/// steps go over a virtio-serial port. GICv3: GICv2 stops at 8 vCPUs.
+const ARM64: Guest = Guest {
+    ubuntu: "arm64",
+    gh: "arm64",
+    qemu: "qemu-system-aarch64",
+    machine: "virt,gic-version=3",
+    console: "ttyAMA0",
+    steps: "/dev/virtio-ports/kiln.steps",
+    steps_args: &["-device", "virtio-serial-pci", "-device", "virtserialport,chardev=s1,name=kiln.steps"],
+    smbios: false,
+    rtc: false,
+};
+
+const GUEST: Guest = if platform::ARM64 { ARM64 } else { X64 };
+
+/// Kernel command line: `base`, plus `systemd.clock_usec` (the host's time, which systemd sets
+/// early in boot) on guests without an RTC. `now_us` is microseconds since the epoch.
+fn cmdline(g: &Guest, base: &str, now_us: u128) -> String {
+    if g.rtc { base.into() } else { format!("{base} systemd.clock_usec={now_us}") }
+}
+
+fn now_us() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()
+}
+
+/// Job VM flags after the kernel: its command line, the secrets (JIT config, debug SSH
+/// keys) and the serial channels. Secrets go in as fw_cfg files on arm64 (bakes install the
+/// qemu_fw_cfg module) and as SMBIOS OEM strings on x86 (its command line is unchanged); `path=`/`file=` keep them out of `ps`.
+/// panic=1 + -no-reboot make a kernel panic end the VM instead of hanging until the timeout.
+fn job_args(g: &Guest, dir: &Path, ssh: bool, now_us: u128) -> Vec<String> {
+    let base = format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console);
+    let mut a = vec!["-append".into(), cmdline(g, &base, now_us)];
+    for s in if ssh { &["jit", "ssh"][..] } else { &["jit"] } {
+        let f = dir.join(s).display().to_string();
+        if g.smbios {
+            a.extend(["-smbios".into(), format!("type=11,path={f}")]);
+        } else {
+            a.extend(["-fw_cfg".into(), format!("name=opt/kiln/{s},file={f}")]);
+        }
+    }
+    // stdio is the guest's console: its input is the host->guest control channel (hold/release).
+    a.extend(["-serial".into(), "stdio".into()]);
+    // Steps: a unix socket kiln copies into a capped steps.log.
+    a.extend(["-chardev".into(), format!("socket,id=s1,path={},server=on,wait=off", dir.join("steps.sock").display())]);
+    a.extend(g.steps_args.iter().map(|s| s.to_string()));
+    a
+}
+
 /// The only variables QEMU and its helpers (rootlesskit, slirp4netns) inherit from kiln: no
 /// token, no forge credential, nothing kiln was started with by accident.
 const VM_ENV: [&str; 10] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR", "RUST_LOG"];
@@ -1588,13 +1669,25 @@ const SANDBOX: &str = "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resour
 
 /// Common QEMU flags for both bake and job VMs.
 /// `netdev_extra`: more `-netdev user` options, e.g. `,hostfwd=...`.
-fn qemu(cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
-    let mut c = Command::new("qemu-system-x86_64");
-    c.args(["-machine", "q35,accel=kvm", "-cpu", "host", "-nodefaults", "-display", "none", "-no-reboot"])
-        // libvirt's seccomp policy: no exec, no setuid, no obsolete syscalls, no scheduler or
-        // CPU-affinity changes. A QEMU built without seccomp refuses this: the VM fails closed.
-        .args(["-sandbox", SANDBOX])
-        .args(["-smp", &cpus.to_string(), "-m", &mem_mb.to_string()])
+fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> Command {
+    let mut c = Command::new(g.qemu);
+    c.args([
+        "-machine",
+        &format!("{},accel={}", g.machine, platform::ACCEL),
+        "-cpu",
+        "host",
+        "-nodefaults",
+        "-display",
+        "none",
+        "-no-reboot",
+    ]);
+    // libvirt's seccomp policy: no exec, no setuid, no obsolete syscalls, no scheduler or
+    // CPU-affinity changes. A QEMU built without seccomp refuses this: the VM fails closed.
+    // seccomp is Linux-only; macOS QEMU has no `-sandbox`.
+    if !platform::MACOS {
+        c.args(["-sandbox", SANDBOX]);
+    }
+    c.args(["-smp", &cpus.to_string(), "-m", &mem_mb.to_string()])
         // cache=unsafe: the overlay is discarded after the job anyway, so skip fsyncs.
         .arg("-drive")
         .arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", disk.display()))
@@ -1703,6 +1796,9 @@ fn egress_script(mirror: bool, tailnet: bool) -> String {
     s + &step("! curl -sf -m8 -o /dev/null https://api.github.com/", "internet unreachable") + "exit 0\n"
 }
 
+pub const FILTERED_LINUX_ONLY: &str = "filtered egress needs Linux (rootlesskit, slirp4netns and nftables): \
+     not available on macOS, where jobs run with open egress (set egress to \"open\")";
+
 /// A probe: (unix time, consecutive failures, result).
 type Probe = (u64, u32, Result<(), String>);
 /// The last probe. Held across the probe so callers share one run.
@@ -1749,8 +1845,11 @@ pub async fn egress_ready(app: &App, force: bool) -> Result<(), String> {
 }
 
 async fn egress_probe(app: &App) -> Result<()> {
+    if platform::MACOS {
+        bail!("{FILTERED_LINUX_ONLY}");
+    }
     for bin in ["rootlesskit", "slirp4netns", "nft", "setpriv"] {
-        if !which(bin) {
+        if !platform::which(bin) {
             bail!("{bin} not found; install: sudo apt install rootlesskit slirp4netns nftables uidmap util-linux");
         }
     }
@@ -1816,11 +1915,14 @@ const CLOUD: &str = "https://cloud-images.ubuntu.com/noble/current";
 /// Disk image plus its matching kernel/initrd. They must come from the same
 /// build (the kernel has to match /lib/modules inside the image), so they are
 /// always downloaded together.
-const CLOUD_FILES: [&str; 3] = [
-    "noble-server-cloudimg-amd64.img",
-    "unpacked/noble-server-cloudimg-amd64-vmlinuz-generic",
-    "unpacked/noble-server-cloudimg-amd64-initrd-generic",
-];
+fn cloud_files(g: &Guest) -> [String; 3] {
+    let u = g.ubuntu;
+    [
+        format!("noble-server-cloudimg-{u}.img"),
+        format!("unpacked/noble-server-cloudimg-{u}-vmlinuz-generic"),
+        format!("unpacked/noble-server-cloudimg-{u}-initrd-generic"),
+    ]
+}
 
 /// Build images/base.qcow2: Ubuntu cloud image + cloud-init recipe
 /// (guest/user-data.yaml) booted once, then frozen.
@@ -1903,7 +2005,8 @@ async fn bake_inner(app: &App) -> Result<()> {
     let part = |f: &str| img.join(format!("{}.part", f.rsplit('/').next().unwrap()));
     // -z: skip files that haven't changed, but pick up a moved "current".
     // Parts are renamed only once all three arrived, so image and kernel stay a matched set.
-    for f in CLOUD_FILES {
+    let files = cloud_files(&GUEST);
+    for f in &files {
         say(format!("fetching {CLOUD}/{f}")).await?;
         let _ = tokio::fs::remove_file(part(f)).await;
         let mut curl = Command::new("curl");
@@ -1914,12 +2017,12 @@ async fn bake_inner(app: &App) -> Result<()> {
             .arg(format!("{CLOUD}/{f}"));
         sh(&log, &mut curl).await?;
     }
-    for f in CLOUD_FILES {
+    for f in &files {
         if part(f).exists() {
             tokio::fs::rename(part(f), local(f)).await?;
         }
     }
-    let [cloud, kernel, initrd] = CLOUD_FILES.map(local);
+    let [cloud, kernel, initrd] = files.map(|f| local(&f));
 
     let rel = app.gh.raw(reqwest::Method::GET, "repos/actions/runner/releases/latest", None).await?;
     let tag: serde_json::Value = serde_json::from_slice(&rel.body)?;
@@ -1942,10 +2045,7 @@ async fn bake_inner(app: &App) -> Result<()> {
         .context("nodejs.org release index")?;
     let node = resolve_node(&index, &cfg.bake_node_versions)?;
     say(format!("node {}", node.join(" "))).await?;
-    let user_data = include_str!("../guest/user-data.yaml")
-        .replace("{{RUNNER_VERSION}}", &version)
-        .replace("{{NODE_VERSIONS}}", &node.join(" "))
-        .replace("{{APT_PACKAGES}}", &cfg.bake_apt_packages.join(" "));
+    let user_data = recipe(&GUEST, &version, &node.join(" "), &cfg.bake_apt_packages.join(" "));
     tokio::fs::write(work.join("seed/user-data"), user_data).await?;
     tokio::fs::write(work.join("seed/meta-data"), "instance-id: kiln-bake\nlocal-hostname: kiln\n").await?;
     let seed = work.join("seed.iso");
@@ -1963,9 +2063,9 @@ async fn bake_inner(app: &App) -> Result<()> {
     sh(&log, Command::new("qemu-img").arg("resize").arg(&disk).arg(format!("{}G", cfg.vm_disk_gb))).await?;
 
     say("booting bake VM (installs packages + runner, takes a few minutes)".into()).await?;
-    let mut cmd = qemu(cfg.vm_cpus, cfg.vm_mem_mb.max(4096), &disk, "");
+    let mut cmd = qemu(&GUEST, cfg.vm_cpus, cfg.vm_mem_mb.max(4096), &disk, "");
     cmd.arg("-kernel").arg(&kernel).arg("-initrd").arg(&initrd);
-    cmd.args(["-append", "root=LABEL=cloudimg-rootfs ro console=ttyS0"]);
+    cmd.arg("-append").arg(cmdline(&GUEST, &format!("root=LABEL=cloudimg-rootfs ro console={}", GUEST.console), now_us()));
     cmd.arg("-drive").arg(format!("file={},if=virtio,format=raw,readonly=on", seed.display()));
     cmd.arg("-serial").arg(format!("file:{}", work.join("console.log").display()));
     let qemu_err = std::fs::OpenOptions::new().append(true).open(&log)?;
@@ -2030,8 +2130,21 @@ fn runner_version(tag: &str) -> Result<String> {
 /// depends on; such images are stale (and rebaked by auto_rebake).
 /// 2: fork-refusal job hook, apt archives on the cache disk, bake_node_versions.
 /// 3: the hook also refuses workflow_run from forks; Node tarballs checked against SHASUMS256.txt.
-/// 4: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
-const RECIPE: u64 = 5;
+/// 4: skipped (an unmerged arm64 build used it for what is now 6, so its images count as stale).
+/// 5: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
+/// 6: secrets also read from fw_cfg; console and steps devices per architecture (arm64 guests).
+const RECIPE: u64 = 6;
+
+/// guest/user-data.yaml with kiln's values filled in.
+fn recipe(g: &Guest, runner: &str, node: &str, apt: &str) -> String {
+    include_str!("../guest/user-data.yaml")
+        .replace("{{RUNNER_VERSION}}", runner)
+        .replace("{{NODE_VERSIONS}}", node)
+        .replace("{{APT_PACKAGES}}", apt)
+        .replace("{{ARCH}}", g.gh)
+        .replace("{{CONSOLE}}", g.console)
+        .replace("{{STEPS}}", g.steps)
+}
 
 /// Was the image at `base` (base.json) baked from the current recipe? kiln launches
 /// nothing on an older one: it may lack the current job hooks (fork refusal, cold release
@@ -2097,35 +2210,6 @@ async fn copy_new(src: &Path, dst: &Path, off: &mut usize) {
 }
 
 // ---------------------------------------------------------------- host checks
-
-/// gid of the `kvm` group from /etc/group text.
-fn kvm_gid(etc_group: &str) -> Option<u32> {
-    etc_group.lines().find_map(|l| {
-        let mut f = l.split(':');
-        (f.next()? == "kvm").then(|| f.nth(1)?.parse().ok())?
-    })
-}
-
-/// Is `gid` among the `Groups:` of /proc/self/status text?
-fn has_gid(status: &str, gid: u32) -> bool {
-    status.lines().find_map(|l| l.strip_prefix("Groups:")).is_some_and(|g| g.split_whitespace().any(|x| x.parse() == Ok(gid)))
-}
-
-fn proc_uid(status: &str) -> Option<u32> {
-    status.lines().find_map(|l| l.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
-}
-
-fn kb_of(meminfo: &str, key: &str) -> u64 {
-    meminfo.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse().ok()).unwrap_or(0)
-}
-
-pub fn meminfo_kb(key: &str) -> u64 {
-    kb_of(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default(), key)
-}
-
-pub fn mem_avail_mb() -> u64 {
-    meminfo_kb("MemAvailable:") / 1024
-}
 
 /// Doctor's memory line. MemAvailable already excludes what kiln's running VMs hold
 /// (`held`), so that is added back: otherwise every busy slot counts twice and a full
@@ -2255,7 +2339,7 @@ fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
 
 async fn output(bin: &str, args: &[&str]) -> Result<String> {
     // Every tailscale call is bounded: the CLI can wait forever on a wedged tailscaled.
-    let o = if bin == "tailscale" {
+    let o = if bin == platform::tailscale() {
         crate::web::tailscale(args).await?
     } else {
         Command::new(bin).args(args).output().await.with_context(|| format!("running {bin}"))?
@@ -2342,36 +2426,27 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let cfg = app.cfg();
     let mut out = vec![];
 
-    let kvm = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm");
-    // The running process's groups, not `id -nG`: a group added after login shows up
-    // in `id` but not in processes started by the old user manager.
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
-    let warn = match (kvm_gid(&group), proc_uid(&status)) {
-        (Some(g), uid) if !has_gid(&status, g) => format!(
-            " (kvm group not active for this process yet — restart the user manager (sudo systemctl restart user@{}) or reboot)",
-            uid.map_or("<uid>".into(), |u| u.to_string())
-        ),
-        _ => String::new(),
-    };
-    out.push(match kvm {
-        Ok(_) => check("kvm", true, format!("/dev/kvm opens read/write{warn}")),
-        Err(e) => check("kvm", false, format!("/dev/kvm: {e}{warn}")),
-    });
+    let (ok, detail) = platform::hypervisor();
+    out.push(check(if platform::MACOS { "hvf" } else { "kvm" }, ok, detail));
 
-    for bin in ["qemu-system-x86_64", "qemu-img", "xorriso", "curl", "tailscale"] {
+    for bin in [GUEST.qemu, "qemu-img", "xorriso", "curl", platform::tailscale()] {
+        // The macOS app's CLI is .../Tailscale.app/Contents/MacOS/Tailscale.
+        let name = bin.rsplit('/').next().unwrap_or(bin).to_ascii_lowercase();
         out.push(match output(bin, &["--version"]).await {
-            Ok(v) => check(bin, true, v.lines().next().unwrap_or("").to_string()),
-            Err(e) => check(bin, false, format!("{e:#}")),
+            Ok(v) => check(&name, true, v.lines().next().unwrap_or("").to_string()),
+            Err(e) => check(&name, false, format!("{e:#}")),
         });
     }
 
     // `-version` exits right after the options are parsed, and a QEMU without seccomp
     // rejects `-sandbox` while parsing.
-    out.push(match output("qemu-system-x86_64", &["-sandbox", SANDBOX, "-version"]).await {
-        Ok(_) => check("qemu sandbox", true, "seccomp: no exec, setuid or obsolete syscalls in job VMs"),
-        Err(e) => check("qemu sandbox", false, format!("QEMU rejects -sandbox (built without seccomp?), so VMs fail to start: {e:#}")),
-    });
+    // seccomp is Linux-only: macOS QEMU runs without `-sandbox` (see vm::qemu).
+    if !platform::MACOS {
+        out.push(match output(GUEST.qemu, &["-sandbox", SANDBOX, "-version"]).await {
+            Ok(_) => check("qemu sandbox", true, "seccomp: no exec, setuid or obsolete syscalls in job VMs"),
+            Err(e) => check("qemu sandbox", false, format!("QEMU rejects -sandbox (built without seccomp?), so VMs fail to start: {e:#}")),
+        });
+    }
     let (ok, detail) = crate::confine::probe();
     out.push(check("landlock", ok, detail));
 
@@ -2381,7 +2456,7 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         None => check("disk", false, "df failed"),
     });
 
-    let (ok, detail) = memory_check(mem_avail_mb(), crate::host::vms_mb(), cfg.max_vms, cfg.vm_mem_mb);
+    let (ok, detail) = memory_check(platform::mem_avail_mb(), crate::host::vms_mb(), cfg.max_vms, cfg.vm_mem_mb);
     out.push(check("memory", ok, detail));
 
     app.gh.refresh_latest().await;
@@ -2464,16 +2539,7 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());
-    let stray = std::fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| std::fs::read(e.path().join("cmdline")).ok())
-        .filter(|c| {
-            let c = String::from_utf8_lossy(c);
-            c.contains("qemu-system") && c.contains(&vms_dir)
-        })
-        .count();
+    let stray = platform::process_cmdlines().iter().filter(|c| c.contains("qemu-system") && c.contains(&vms_dir)).count();
     let active = app.vms.lock().unwrap().iter().any(|v| v.state.is_active());
     let serving =
         cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
@@ -2788,8 +2854,10 @@ mod tests {
     #[test]
     fn prejob_hook_refuses_forks() {
         let have = |b: &str| std::process::Command::new(b).arg("--version").output().is_ok_and(|o| o.status.success());
-        if !have("bash") || !have("jq") {
-            eprintln!("skipping: bash and jq needed");
+        // The guest's bash is 5.x; macOS ships 3.2, which lacks ${x,,}.
+        let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
+        if !have("bash") || !have("jq") || !bash4() {
+            eprintln!("skipping: bash 4+ and jq needed");
             return;
         }
         let yaml = include_str!("../guest/user-data.yaml");
@@ -3083,7 +3151,6 @@ mod tests {
         assert!(launch_gate(5000, 8192, Some(100), None, None).unwrap().starts_with("not enough memory"));
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 100 40 62914560 40% /\n";
         assert_eq!(parse_df_kb(df), Some(62914560));
-        assert_eq!(kb_of("MemTotal: 10 kB\nMemAvailable:    2048 kB\n", "MemAvailable:"), 2048);
     }
 
     #[test]
@@ -3357,13 +3424,51 @@ mod tests {
     }
 
     #[test]
-    fn kvm_group_parsing() {
-        let st = "Name:\tkiln\nUid:\t1000\t1000\t1000\t1000\nGroups:\t4 24 993 1000 \n";
-        assert_eq!(kvm_gid("root:x:0:\nkvm:x:993:kame\n"), Some(993));
-        assert_eq!(kvm_gid("root:x:0:\n"), None);
-        assert!(has_gid(st, 993));
-        assert!(!has_gid(st, 994));
-        assert_eq!(proc_uid(st), Some(1000));
+    fn guest_wiring_per_arch() {
+        let has = |a: &[String], k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
+        let d = Path::new("/d/vm");
+        // x86: unchanged SMBIOS path, ttyS0 console, ttyS1 steps.
+        // x86 has an RTC (rtc_cmos is built in), so its command line carries no clock.
+        let x = job_args(&X64, d, true, 1_791_740_492_019_978);
+        assert!(has(&x, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"));
+        assert!(has(&x, "-smbios", "type=11,path=/d/vm/jit") && has(&x, "-smbios", "type=11,path=/d/vm/ssh"));
+        assert!(!x.iter().any(|s| s == "-fw_cfg"), "x86 command line has no fw_cfg");
+        assert!(has(&x, "-serial", "stdio") && has(&x, "-chardev", "socket,id=s1,path=/d/vm/steps.sock,server=on,wait=off"));
+        assert!(has(&x, "-serial", "chardev:s1"));
+        // arm64: no SMBIOS without UEFI; PL011 console; steps on a virtio-serial port.
+        // arm64: no RTC driver in the image, so the host's time goes in for systemd.
+        let a = job_args(&ARM64, d, false, 1_791_740_492_019_978);
+        assert!(has(&a, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyAMA0 quiet panic=1 systemd.clock_usec=1791740492019978"));
+        assert!(!a.iter().any(|s| s == "-smbios" || s.contains("opt/kiln/ssh")));
+        assert!(has(&a, "-fw_cfg", "name=opt/kiln/jit,file=/d/vm/jit") && has(&a, "-serial", "stdio"));
+        assert!(has(&a, "-device", "virtserialport,chardev=s1,name=kiln.steps") && !has(&a, "-serial", "chardev:s1"));
+        let argv = |g: &Guest| -> Vec<String> {
+            let c = qemu(g, 4, 8192, Path::new("/d/disk.qcow2"), "");
+            std::iter::once(c.as_std().get_program()).chain(c.as_std().get_args()).map(|s| s.to_string_lossy().into_owned()).collect()
+        };
+        let accel = if platform::MACOS { "hvf" } else { "kvm" };
+        assert_eq!(argv(&X64)[..3], ["qemu-system-x86_64", "-machine", &format!("q35,accel={accel}")]);
+        assert_eq!(argv(&ARM64)[..3], ["qemu-system-aarch64", "-machine", &format!("virt,gic-version=3,accel={accel}")]);
+        assert_eq!(cloud_files(&X64)[0], "noble-server-cloudimg-amd64.img");
+        assert_eq!(cloud_files(&ARM64)[1], "unpacked/noble-server-cloudimg-arm64-vmlinuz-generic");
+        assert_eq!(GUEST.gh, if platform::ARM64 { "arm64" } else { "x64" });
+    }
+
+    #[test]
+    fn recipe_per_arch() {
+        let x = recipe(&X64, "2.338.0", "22.1.0 24.2.0", "chromium");
+        assert!(!x.contains("{{"));
+        assert!(x.contains("actions-runner-linux-x64-$V.tar.gz") && x.contains("T=node-v$N-linux-x64.tar.xz"));
+        assert!(x.contains("/opt/hostedtoolcache/node/$N/x64.complete") && x.contains("serial-getty@ttyS0.service"));
+        assert!(x.contains("exec 3</dev/ttyS0") && x.contains("exec >/dev/ttyS1") && x.contains("KILN_BAKE_OK > /dev/ttyS0"));
+        assert!(x.contains("V=2.338.0") && x.contains("for N in 22.1.0 24.2.0;") && x.contains("APT_EXTRA=\"chromium\""));
+        let a = recipe(&ARM64, "2.338.0", "24.2.0", "");
+        assert!(!a.contains("{{") && !a.contains("x64") && !a.contains("ttyS"));
+        assert!(a.contains("actions-runner-linux-arm64-$V.tar.gz") && a.contains("T=node-v$N-linux-arm64.tar.xz"));
+        assert!(a.contains("serial-getty@ttyAMA0.service") && a.contains("exec 3</dev/ttyAMA0"));
+        assert!(a.contains("exec >/dev/virtio-ports/kiln.steps") && a.contains("KILN_BAKE_OK > /dev/ttyAMA0"));
+        // The cloud image lacks qemu_fw_cfg: arm64 bakes add it (x86 still has SMBIOS).
+        assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
     }
 
     #[test]

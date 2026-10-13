@@ -459,6 +459,7 @@ impl Gh {
         label: &str,
         default_cpus: u32,
     ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
+        let arm64 = fixtures_arch_arm64();
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -473,7 +474,7 @@ impl Gh {
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
-                        && let Some(n) = crate::forge::job_size(&j["labels"], label, default_cpus).filter(|&n| n <= host)
+                        && let Some(n) = crate::forge::job_size(&j["labels"], label, default_cpus, arm64).filter(|&n| n <= host)
                     {
                         let jid = j["id"].as_u64().unwrap_or_default();
                         if fork {
@@ -652,13 +653,17 @@ impl Gh {
         }
     }
 
-    /// Delete offline, idle `kiln-*` runners left behind by a crash.
+    /// Delete offline, idle `kiln-*` runners left behind by a crash. Only runners of this
+    /// host's architecture: a kiln of the other one may serve the same repo, and its
+    /// runners are offline while their VMs boot.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
+        let arm64 = fixtures_arch_arm64();
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
             if let Some(id) = r["id"].as_u64()
                 && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-"))
+                && crate::forge::same_arch(&r["labels"], arm64)
                 && r["status"] == "offline"
                 && r["busy"] == false
             {
@@ -1126,6 +1131,12 @@ mod tests {
         let e = conversion_error(502);
         assert!(e.contains("try again") && !e.contains("existing App"), "{e}");
     }
+}
+
+/// Whether this host's runners and jobs carry the arm64 labels. Unit tests always run as x64:
+/// the mock forge's fixtures are x64, and the arm64 label rules have their own tests.
+pub(crate) fn fixtures_arch_arm64() -> bool {
+    crate::platform::ARM64 && !cfg!(test)
 }
 
 /// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
