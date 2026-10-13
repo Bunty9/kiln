@@ -3,7 +3,9 @@
 //! text from a repo format, mention or inject into the target. See the Notifications section
 //! of docs/configuration.md and SECURITY.md.
 
-use crate::forge::net::{self, Mode, allowed, literal_ip};
+#[cfg(test)]
+use crate::forge::net::allowed;
+use crate::forge::net::{self, Mode, literal_ip};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -51,7 +53,7 @@ pub fn check_url(kind: Kind, url: &str, tailnet: bool) -> Result<reqwest::Url, S
         _ => {}
     }
     if let Some(ip) = literal_ip(&u)
-        && !allowed(ip, tailnet)
+        && !Mode::public(tailnet).permits(ip, &net::own_addrs().map_err(|e| format!("cannot list host addresses: {e}"))?)
     {
         return Err(format!("{ip} is an internal address{}", if tailnet { "" } else { " (tick \"on my tailnet\" for a tailnet address)" }));
     }
@@ -667,7 +669,7 @@ fn new_msg_id() -> String {
 async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool, origins: &[String]) -> Outcome {
     let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
     let open = open_for_tests && cfg!(test);
-    if !open && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
+    if !open && literal_ip(&u).is_some_and(|ip| net::own_addrs().map_or(true, |own| !Mode::public(d.tailnet).permits(ip, &own))) {
         return Outcome::Permanent("refused: internal address".into());
     }
     // The URL rules again, on every send: a hand-edited notify.json must not get past them.

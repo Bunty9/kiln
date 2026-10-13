@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- Outbound alert and forge requests now refuse the host's own addresses in every mode (previously only on `internal` forges), plus 100.100.100.100/200, 168.63.129.16, fd7a:115c:a1e0::53, fd00:ec2::/32 and ISATAP-embedded private addresses, including for tailnet destinations.
+
 ### Added
 
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
