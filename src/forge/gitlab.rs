@@ -1,8 +1,9 @@
 //! The GitLab forge, demand side (GL-2): which of the project's pending jobs are ours, which
 //! running jobs belong to our runners, and whether a job's code came from a fork.
 //!
-//! Registration, retire, sweep, pause and verdict facts arrive with GL-3 and GL-4. Until then
-//! they fail closed: `register` refuses, so no VM launches for GitLab demand yet.
+//! Registration, retire, sweep and pause are here (GL-3). Verdict facts and cache trust arrive
+//! with GL-4, and the guest side with GL-6: until `LAUNCH_READY`, `register` refuses and demand
+//! reports no launchable jobs, so no VM boots for GitLab.
 //!
 //! Everything the API says is data, never instructions: fork detection reads the job's `ref`,
 //! `tag` and pipeline `source` plus one MR or branch lookup, never a `CI_*` value (a job's own
@@ -10,10 +11,13 @@
 //! redirects, address guard, size cap), and a `Link` URL is only compared, never fetched.
 
 use super::{
-    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Links, Network, RepoRef, RunnerReg, env_name, net,
-    read_token_file, token_path,
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, Reason, RepoRef, RunnerReg, env_name,
+    net, read_token_file, token_path,
 };
+use crate::github::MintError;
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine;
+use reqwest::Method;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -24,6 +28,23 @@ use std::sync::{Mutex, RwLock};
 pub const CAPS: Caps = Caps { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false, live_steps: false };
 pub const NOT_YET: &str = "not available for GitLab yet";
 pub const LATER: &str = "GitLab runners arrive in a later version";
+/// No VM launches for GitLab until GL-6 (the guest's `run_gitlab` and `kiln-exec`) lands: a VM
+/// booted now would have nothing that reads its secret. Demand reports the queue, fork jobs and
+/// claims but no launchable jobs, and `register` refuses (warm VMs ask for a runner without demand).
+const LAUNCH_READY: bool = false;
+/// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
+const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+/// A runner with no VM record is orphaned once older than the longest `job_timeout_mins` (1440,
+/// the config ceiling) plus 10 minutes: whatever its status, which lies for hours (SP-7).
+const ORPHAN_SECS: u64 = (1440 + 10) * 60;
+/// A runner that never polled belongs to a VM that died before its runner started.
+const NEVER_CONTACTED_SECS: u64 = 600;
+/// Labels the GitHub-shaped runner label list carries that GitLab has no use for.
+const IMPLICIT_LABELS: [&str; 4] = ["self-hosted", "linux", "x64", "ARM64"];
+/// A 403 on `POST /user/runners` cannot be told apart by the response (SP-6).
+const REGISTER_403: &str = "the token's user must be at least Maintainer on the project, the instance setting \
+valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) must include `project`, and runner \
+registration must be enabled for the project and its group (a toggle with no API field); one of these is not met";
 const PER_PAGE: usize = 100;
 /// 100 pages of 100 jobs; a longer queue is an error, not a silent undercount.
 const MAX_PAGES: usize = 100;
@@ -48,10 +69,15 @@ pub struct GitLab {
     /// Runner descriptions are `<install>-<vm id>`; ours are the ones with this prefix.
     install: String,
     per_page: usize,
+    /// Wait between pausing a runner and listing its jobs.
+    settle: std::time::Duration,
     /// Unix time before which GitLab told us to back off (429), 0 = no.
     paused: Mutex<u64>,
     /// repo path -> numeric project id.
     projects: Mutex<HashMap<String, u64>>,
+    /// Runners this process registered and has not retired: kiln's own VM records, which a sweep
+    /// never touches.
+    mine: Mutex<HashSet<u64>>,
     /// (project, pipeline, ref) -> (fork, MR source branch). Only answers, never lookup errors.
     origins: Mutex<HashMap<(u64, u64, String), Origin>>,
     /// Tests dial a mock on loopback, which the address guard refuses.
@@ -71,6 +97,18 @@ impl Resp {
     }
 }
 
+/// What pausing a runner found.
+enum Hold {
+    Gone,
+    /// The ids of the running jobs it holds.
+    Held(Vec<String>),
+}
+
+/// GitLab's own `message` or `error`, cut and stripped of control characters (it never echoes the credential).
+fn message(v: &Value) -> String {
+    v["message"].as_str().or(v["error"].as_str()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
 impl GitLab {
     pub fn new(cfg: &ForgeCfg, data: &Path) -> Result<Self> {
         let network = cfg.network.unwrap_or(Network::Public);
@@ -85,8 +123,10 @@ impl GitLab {
             token: RwLock::new(String::new()),
             install: install_id(data)?,
             per_page: PER_PAGE,
+            settle: PAUSE_SETTLE,
             paused: Mutex::new(0),
             projects: Mutex::default(),
+            mine: Mutex::default(),
             origins: Mutex::default(),
             #[cfg(test)]
             unguarded: false,
@@ -145,20 +185,232 @@ impl GitLab {
         cfg.repos.iter().filter_map(|r| RepoRef::parse(&format!("{}:{r}", self.id.as_str())).ok()).collect()
     }
 
-    // The rest waits for GL-3 / GL-4 and refuses.
-    pub async fn register(&self, _repo: &RepoRef, _name: &str, _labels: &[String]) -> Result<RunnerReg> {
-        bail!(LATER)
-    }
-    pub async fn deregister(&self, _repo: &RepoRef, _runner_id: u64) -> Dereg {
-        Dereg::Err(anyhow!(LATER))
-    }
-    /// No runner of ours can exist yet, so there is nothing to sweep.
-    pub async fn sweep(&self, _repo: &RepoRef) -> Result<usize> {
-        Ok(0)
+    /// Registers a single-use project runner for the VM `name` and returns its guest secret.
+    /// A refusal or an unreachable GitLab is a `MintError`.
+    pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
+        if !LAUNCH_READY {
+            bail!(LATER);
+        }
+        self.mint(repo, name, labels).await
     }
 
-    /// GET `api/v4/<path>`. The token only ever goes to the configured origin.
+    async fn mint(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
+        repo.check_kind(Kind::GitLab)?;
+        let err = |status, message: String| anyhow::Error::from(MintError { forge: "GitLab", status, endpoint: "user/runners", message });
+        let unreachable = |e: anyhow::Error| match e.chain().any(|c| c.is::<reqwest::Error>()) {
+            true => err(None, format!("{e:#}")),
+            false => e,
+        };
+        let pid = self.project_id(&repo.path, false).await.map_err(unreachable)?;
+        // The label list is GitHub-shaped; GitLab matches `kiln-Ncpu` and `kiln` only (`runner_tags`).
+        let tags: Vec<&String> = labels.iter().filter(|l| !IMPLICIT_LABELS.contains(&l.as_str())).collect();
+        // ponytail: no `maximum_timeout` (the runner's job cap): kiln stops the VM at job_timeout_mins itself.
+        let body = json!({
+            "runner_type": "project_type", "project_id": pid, "description": format!("{}-{name}", self.install),
+            "tag_list": tags, "run_untagged": false, "locked": true, "access_level": "not_protected",
+        });
+        let r = self.send(Method::POST, "user/runners", Some(body)).await.map_err(|e| err(None, format!("{e:#}")))?;
+        if r.status != 201 {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+            let why = match (r.status, v["error"].as_str()) {
+                (401, _) => "the token was rejected (expired, revoked or wrong)".to_string(),
+                (403, Some("insufficient_scope")) => "the token lacks the create_runner scope".to_string(),
+                (403, _) => format!("403: {REGISTER_403}"),
+                _ => message(&v),
+            };
+            return Err(err(Some(r.status), why));
+        }
+        let v = r.json()?;
+        let (Some(id), Some(token)) =
+            (v["id"].as_u64(), v["token"].as_str().filter(|t| t.starts_with("glrt-") && t.bytes().all(|b| b.is_ascii_graphic())))
+        else {
+            bail!("GitLab runner registration answered without an id and a glrt- token");
+        };
+        self.mine.lock().unwrap().insert(id);
+        // The URL passed `check_forge_url`; the token is encoded so no byte of it is shell-significant.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(token);
+        Ok(RunnerReg { runner_id: id, guest_secret: format!("kiln.forge=gitlab\nkiln.url={}\nkiln.cred={b64}", self.url) })
+    }
+
+    /// Stops the runner taking another job, waits out the one request that may be in flight, and
+    /// lists the jobs it holds. `Gone`: the runner no longer exists.
+    async fn hold(&self, id: u64) -> Result<Hold> {
+        let r = self.send(Method::PUT, &format!("runners/{id}"), Some(json!({ "paused": true }))).await?;
+        match r.status {
+            200 => {}
+            404 => return Ok(Hold::Gone),
+            _ => return Err(self.fail("pause runner", &r)),
+        }
+        if r.json()?["paused"] != true {
+            bail!("GitLab did not pause runner {id}");
+        }
+        tokio::time::sleep(self.settle).await;
+        let j = self.get(&format!("runners/{id}/jobs?status=running")).await?;
+        match j.status {
+            200 => {}
+            404 => return Ok(Hold::Gone),
+            _ => return Err(self.fail("runner jobs", &j)),
+        }
+        let Value::Array(a) = j.json()? else { bail!("GitLab runner job list is not an array") };
+        // A job without an id is a job we cannot name: fail closed.
+        a.iter()
+            .map(|j| j["id"].as_u64().map(|n| n.to_string()).context("GitLab runner job without an id"))
+            .collect::<Result<_>>()
+            .map(Hold::Held)
+    }
+
+    /// The gate's pause: the ids of the jobs the paused runner holds (needs `manage_runner` only).
+    pub async fn pause(&self, runner_id: u64) -> Result<Vec<String>> {
+        match self.hold(runner_id).await? {
+            Hold::Held(ids) => Ok(ids),
+            Hold::Gone => bail!("GitLab runner {runner_id} is gone"),
+        }
+    }
+
+    async fn unpause(&self, id: u64) {
+        match self.send(Method::PUT, &format!("runners/{id}"), Some(json!({ "paused": false }))).await {
+            Ok(r) if r.status == 200 || r.status == 404 => {}
+            Ok(r) => tracing::warn!("GitLab runner {id} stays paused: {:#}", self.fail("unpause", &r)),
+            Err(e) => tracing::warn!("GitLab runner {id} stays paused: {e:#}"),
+        }
+    }
+
+    /// Pause, check, delete (3.3): `Busy` (and unpaused again) when the runner holds a job. A stale
+    /// policy never waits for the job: the VM is killed either way, and a job that raced in fails
+    /// and is retried (security beats availability). The caller's VM record already names the
+    /// runner id and job id, so deleting the runner loses nothing.
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64, reason: Reason) -> Dereg {
+        if let Err(e) = repo.check_kind(Kind::GitLab) {
+            return Dereg::Err(e);
+        }
+        let stale = reason == Reason::StalePolicy;
+        match self.hold(runner_id).await {
+            Ok(Hold::Gone) => {}
+            Ok(Hold::Held(jobs)) if !jobs.is_empty() && !stale => {
+                self.unpause(runner_id).await;
+                return Dereg::Busy;
+            }
+            Err(e) if !stale => {
+                self.unpause(runner_id).await;
+                return Dereg::Err(e);
+            }
+            _ => match self.send(Method::DELETE, &format!("runners/{runner_id}"), None).await {
+                Ok(r) if r.status == 204 || r.status == 404 => {}
+                Ok(r) => return Dereg::Err(self.fail("delete runner", &r)),
+                Err(e) => return Dereg::Err(e),
+            },
+        }
+        self.mine.lock().unwrap().remove(&runner_id);
+        Dereg::Gone
+    }
+
+    /// Deletes this install's runners that no VM can own, never by status (a killed runner stays
+    /// `online` for hours): the `<install>-` prefix, not registered by this process, and older than
+    /// `ORPHAN_SECS`; or never contacted and older than 10 minutes.
+    pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let prefix = format!("{}-", self.install);
+        let now = crate::now();
+        let mut n = 0;
+        for page in 1..=MAX_PAGES {
+            let r = self.get(&format!("projects/{pid}/runners?type=project_type&per_page={}&page={page}", self.per_page)).await?;
+            if r.status != 200 {
+                return Err(self.fail("runner list", &r));
+            }
+            let Value::Array(runners) = r.json()? else { bail!("GitLab runner list is not an array") };
+            for x in &runners {
+                let (Some(id), Some(desc), Some(at)) =
+                    (x["id"].as_u64(), x["description"].as_str(), x["created_at"].as_str().and_then(crate::github::parse_rfc3339))
+                else {
+                    continue;
+                };
+                let age = now.saturating_sub(at);
+                let stale = age > ORPHAN_SECS || (x["status"] == "never_contacted" && age > NEVER_CONTACTED_SECS);
+                if x["runner_type"] != "project_type" || !desc.starts_with(&prefix) || !stale || self.mine.lock().unwrap().contains(&id) {
+                    continue;
+                }
+                let d = self.send(Method::DELETE, &format!("runners/{id}"), None).await?;
+                match d.status {
+                    204 | 404 => n += 1,
+                    _ => return Err(self.fail("delete runner", &d)),
+                }
+            }
+            if runners.len() < self.per_page {
+                break;
+            }
+        }
+        Ok(n)
+    }
+
+    /// The doctor's checks for this forge: version, token scopes and expiry, and the role on each
+    /// served project. No runner is created.
+    pub async fn doctor(&self, repos: &[RepoRef]) -> Vec<(String, bool, String)> {
+        let name = format!("gitlab {}", self.id.as_str());
+        if let Some(why) = self.health() {
+            return vec![(name, false, why)];
+        }
+        let mut out = vec![];
+        out.push(match self.get("version").await {
+            Ok(r) if r.status == 200 => {
+                let v = r.json().ok().and_then(|v| v["version"].as_str().map(String::from)).unwrap_or_default();
+                let major = v.split('.').next().and_then(|m| m.parse::<u32>().ok());
+                match major {
+                    Some(m) if m >= 16 => (name.clone(), true, format!("version {v}")),
+                    _ => (name.clone(), false, format!("version {v:?}: kiln needs GitLab 16.0 or newer")),
+                }
+            }
+            Ok(r) => (name.clone(), false, self.fail("version", &r).to_string()),
+            Err(e) => (name.clone(), false, format!("{e:#}")),
+        });
+        let tok = format!("{name} token");
+        out.push(match self.get("personal_access_tokens/self").await {
+            Ok(r) if r.status == 200 => {
+                let v = r.json().unwrap_or(Value::Null);
+                let scopes: Vec<&str> = v["scopes"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let has = |s: &str| scopes.contains(&s) || scopes.contains(&"api");
+                let missing: Vec<&str> = ["create_runner", "manage_runner", "read_api"].into_iter().filter(|s| !has(s)).collect();
+                if v["active"] != true || v["revoked"] == true {
+                    (tok, false, "the token is revoked or expired".into())
+                } else if !missing.is_empty() {
+                    (tok, false, format!("missing scope(s): {}", missing.join(", ")))
+                } else {
+                    (tok, true, format!("scopes ok, expires {}", v["expires_at"].as_str().unwrap_or("never")))
+                }
+            }
+            Ok(r) => (tok, false, self.fail("token check", &r).to_string()),
+            Err(e) => (tok, false, format!("{e:#}")),
+        });
+        for repo in repos {
+            let n = format!("{name} {}", repo.path);
+            out.push(match self.project_role(&repo.path).await {
+                Ok(l) if l >= 40 => (n, true, "Maintainer or above. If registering a runner still gets 403, check the instance setting valid_runner_registrars and the project's runner registration toggle".into()),
+                Ok(l) => (n, false, format!("access level {l} is below Maintainer, which creating a project runner needs; also check the instance setting valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) and the project's runner registration toggle")),
+                Err(e) => (n, false, format!("{e:#}")),
+            });
+        }
+        out
+    }
+
+    /// The token user's access level on the project: the higher of its project and group membership.
+    async fn project_role(&self, path: &str) -> Result<u64> {
+        let r = self.get(&format!("projects/{}", enc(path))).await?;
+        match r.status {
+            200 => {}
+            404 => bail!("GitLab project {path} not found, or the token cannot see it"),
+            _ => return Err(self.fail("project lookup", &r)),
+        }
+        let p = &r.json()?["permissions"];
+        Ok(p["project_access"]["access_level"].as_u64().unwrap_or(0).max(p["group_access"]["access_level"].as_u64().unwrap_or(0)))
+    }
+
+    /// GET `api/v4/<path>`.
     async fn get(&self, path: &str) -> Result<Resp> {
+        self.send(Method::GET, path, None).await
+    }
+
+    /// One API call. The token only ever goes to the configured origin.
+    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
         if let Some(t) = self.paused_until() {
             bail!("GitLab rate limit: paused until {t}");
         }
@@ -167,7 +419,10 @@ impl GitLab {
             bail!("no GitLab token");
         }
         tok.set_sensitive(true);
-        let rb = self.client.get(format!("{}/api/v4/{path}", self.url)).header("PRIVATE-TOKEN", tok);
+        let mut rb = self.client.request(method, format!("{}/api/v4/{path}", self.url)).header("PRIVATE-TOKEN", tok);
+        if let Some(b) = body {
+            rb = rb.json(&b);
+        }
         #[cfg(test)]
         let r = if self.unguarded { self.client.execute(rb.build()?).await? } else { net::send(&self.client, self.mode, rb).await? };
         #[cfg(not(test))]
@@ -185,13 +440,11 @@ impl GitLab {
     /// (it never echoes the credential), cut and stripped of control characters.
     fn fail(&self, what: &str, r: &Resp) -> anyhow::Error {
         let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
-        let msg: String =
-            v["message"].as_str().or(v["error"].as_str()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
         let why = match (r.status, v["error"].as_str()) {
             (401, _) => "the token was rejected (expired, revoked or wrong)".to_string(),
-            (403, Some("insufficient_scope")) => "the token lacks a scope (it needs read_api)".to_string(),
+            (403, Some("insufficient_scope")) => "the token lacks a scope (it needs create_runner, manage_runner and read_api)".to_string(),
             (429, _) => "rate limited; backing off".to_string(),
-            _ => msg,
+            _ => message(&v),
         };
         anyhow!("GitLab {what}: HTTP {}{}{why}", r.status, if why.is_empty() { "" } else { ": " })
     }
@@ -264,7 +517,11 @@ impl GitLab {
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        self.demand_for(repo, label, default_cpus, crate::host_threads()).await
+        let mut d = self.demand_for(repo, label, default_cpus, crate::host_threads()).await?;
+        if !LAUNCH_READY {
+            d.by_size.clear();
+        }
+        Ok(d)
     }
 
     async fn demand_for(&self, repo: &RepoRef, label: &str, default_cpus: u32, host: u32) -> Result<Demand> {
@@ -281,7 +538,7 @@ impl GitLab {
         let (mut by_size, mut claimed, mut refused_forks) = (HashMap::new(), HashMap::new(), 0);
         let prefix = format!("{}-", self.install);
         // arm64 hosts tag their runners `<label>-arm64[-Ncpu]`, so x64 jobs never match them.
-        let label = &super::arch_label(label, crate::github::fixtures_arch_arm64());
+        let label = &super::arch_label(label, crate::platform::host_arm64());
         for j in &jobs {
             match j["status"].as_str() {
                 Some("pending") => {
@@ -412,7 +669,8 @@ impl GitLab {
 
 /// The tags a runner of `cpus` vCPUs carries: `kiln-Ncpu`, and `kiln` too for the default size.
 /// GitLab runs a job only on a runner whose tags include all the job's, so a job is ours exactly
-/// when its tags are a subset of one size's set. (GL-3 registers with these.)
+/// when its tags are a subset of one size's set. `register` sends the same tags: the runner label list
+/// minus the GitHub-only labels.
 pub fn runner_tags(label: &str, cpus: u32, default_cpus: u32) -> Vec<String> {
     let mut t = vec![format!("{label}-{cpus}cpu")];
     if cpus == default_cpus {
@@ -509,6 +767,8 @@ mod tests {
     const SPOOF: &str = "https://gitlab.example.org";
     type Routes = Arc<Mutex<HashMap<String, (u16, Vec<(String, String)>, String)>>>;
     type Log = Arc<Mutex<Vec<(String, Option<String>)>>>;
+    /// "METHOD path" and body of every request, in order.
+    type Sent = Arc<Mutex<Vec<(String, String)>>>;
 
     /// A mock GitLab on loopback: `path?query` -> canned status, headers and body. Anything
     /// unrouted is a 404, so a changed request sequence shows up in `requests()`.
@@ -516,6 +776,7 @@ mod tests {
         base: String,
         routes: Routes,
         log: Log,
+        sent: Sent,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -527,32 +788,51 @@ mod tests {
 
     impl Mock {
         async fn start() -> Mock {
-            let (routes, log): (Routes, Log) = Default::default();
-            async fn serve(State((routes, log)): State<(Routes, Log)>, req: Request) -> Response {
+            let (routes, log, sent): (Routes, Log, Sent) = Default::default();
+            async fn serve(State((routes, log, sent)): State<(Routes, Log, Sent)>, req: Request) -> Response {
                 let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
                 let tok = req.headers().get("private-token").and_then(|v| v.to_str().ok()).map(String::from);
+                let method = req.method().to_string();
+                let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap_or_default();
                 log.lock().unwrap().push((path.clone(), tok));
-                let (status, headers, body) =
-                    routes.lock().unwrap().get(&path).cloned().unwrap_or((404, vec![], r#"{"message":"404 Not Found"}"#.into()));
+                sent.lock().unwrap().push((format!("{method} {path}"), String::from_utf8_lossy(&body).into_owned()));
+                // A route registered for one method wins over the method-less one.
+                let r = routes.lock().unwrap();
+                let (status, headers, body) = r.get(&format!("{method} {path}")).or_else(|| r.get(&path)).cloned().unwrap_or((
+                    404,
+                    vec![],
+                    r#"{"message":"404 Not Found"}"#.into(),
+                ));
+                drop(r);
                 let mut r = Response::builder().status(status);
                 for (k, v) in headers {
                     r = r.header(k, v);
                 }
                 r.body(Body::from(body)).unwrap()
             }
-            let app = Router::new().fallback(serve).with_state((routes.clone(), log.clone()));
+            let app = Router::new().fallback(serve).with_state((routes.clone(), log.clone(), sent.clone()));
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", l.local_addr().unwrap());
             let task = tokio::spawn(async move {
                 let _ = axum::serve(l, app).await;
             });
-            Mock { base, routes, log, task }
+            Mock { base, routes, log, sent, task }
         }
 
         /// `api/v4/<path>`; the fixtures' placeholder host becomes this mock's origin.
         fn route(&self, path: &str, status: u16, headers: Vec<(String, String)>, body: String) {
             let headers = headers.into_iter().map(|(k, v)| (k, v.replace(SPOOF, &self.base))).collect();
             self.routes.lock().unwrap().insert(format!("/api/v4/{path}"), (status, headers, body.replace(SPOOF, &self.base)));
+        }
+
+        /// Like `route`, for one method only (`PUT`, `DELETE`, ...), body from a fixture.
+        fn on(&self, method: &str, path: &str, status: u16, body: String) {
+            self.routes.lock().unwrap().insert(format!("{method} /api/v4/{path}"), (status, vec![], body.replace(SPOOF, &self.base)));
+        }
+
+        /// "METHOD path" of every request so far.
+        fn calls(&self) -> Vec<String> {
+            self.sent.lock().unwrap().iter().map(|(c, _)| c.replace("/api/v4/", "")).collect()
         }
 
         fn ok(&self, path: &str, fixture: &str) {
@@ -968,20 +1248,281 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_and_the_gate_fail_closed_until_the_later_tasks() {
-        use super::super::{Dereg, Forge, Kind};
+    async fn launches_stay_off_and_the_tokenless_forge_fails_closed() {
+        use super::super::{Forge, Kind};
         let gh = Arc::new(crate::github::Gh::new(String::new(), "none"));
         let f = Forge::new(&cfg(SPOOF), &gh, &temp("stubs")).unwrap();
         assert_eq!(f.kind(), Kind::GitLab);
         assert!(f.gated());
-        let e = f.register(&repo(), "a1b2c3-kiln-1-0", &["kiln-4cpu".into()]).await.err().unwrap();
+        let e = f.register(&repo(), "kiln-1-0", &["kiln-4cpu".into()]).await.err().unwrap();
         assert!(e.to_string().contains("later version"), "{e:#}");
-        assert!(matches!(f.deregister(&repo(), 1).await, Dereg::Err(_)));
+        assert!(matches!(f.deregister(&repo(), 1, Reason::Surplus).await, Dereg::Err(_)));
         assert!(f.pause(&repo(), 1).await.is_err());
         assert!(f.verdict_facts(&repo(), "1").await.is_err());
-        assert_eq!(f.sweep(&repo()).await.unwrap(), 0);
+        assert!(f.sweep(&repo()).await.is_err());
         assert!(f.runs(&repo(), &Default::default()).await.is_err());
         assert_eq!(f.repo_paused(&repo()), None);
         assert!(f.health().unwrap().contains("no token"));
+    }
+
+    #[tokio::test]
+    async fn demand_reports_no_launchable_jobs_while_launches_are_off() {
+        let m = Mock::start().await;
+        serve_lookups(&m);
+        serve_one_page(&m, vec![job(1, |_| {})]).await;
+        let g = gl("off", &m);
+        assert_eq!(sizes(&g.demand_for(&repo(), "kiln", 4, 16).await.unwrap()), [(4, 1)], "the queue is read");
+        assert!(g.demand(&repo(), "kiln", 4).await.unwrap().by_size.is_empty(), "but nothing is launchable");
+    }
+
+    fn mint_error(e: &anyhow::Error) -> &MintError {
+        e.downcast_ref::<MintError>().unwrap_or_else(|| panic!("not a MintError: {e:#}"))
+    }
+
+    /// A forge that has the project's id cached, talking to `m`.
+    fn gl_ready(name: &str, m: &Mock) -> GitLab {
+        m.ok("projects/acme%2Fdemo", "project.json");
+        let mut g = gl(name, m);
+        g.settle = std::time::Duration::ZERO;
+        g
+    }
+
+    const LABELS: [&str; 6] = ["self-hosted", "linux", "x64", "kiln-2cpu", "kiln", "ARM64"];
+
+    #[tokio::test]
+    async fn register_posts_the_runner_and_hands_the_guest_only_its_own_token() {
+        let m = Mock::start().await;
+        m.on("POST", "user/runners", 201, fx("runner_register.json"));
+        let g = gl_ready("reg", &m);
+        let labels: Vec<String> = LABELS.iter().map(|s| s.to_string()).collect();
+        let reg = g.mint(&repo(), "kiln-5-0", &labels).await.unwrap();
+        assert_eq!(reg.runner_id, 79);
+        let b64 = base64::engine::general_purpose::STANDARD.encode("glrt-FIXTURE-REDACTED");
+        assert_eq!(reg.guest_secret, format!("kiln.forge=gitlab\nkiln.url={}\nkiln.cred={b64}", m.base));
+        assert!(!reg.guest_secret.contains(TOKEN), "never the PAT");
+        let sent = m.sent.lock().unwrap();
+        let (call, body) = sent.iter().find(|(c, _)| c.starts_with("POST ")).unwrap();
+        assert_eq!(call, "POST /api/v4/user/runners");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body,
+            json!({"runner_type": "project_type", "project_id": 1, "description": "a1b2c3-kiln-5-0", "tag_list": ["kiln-2cpu", "kiln"],
+                   "run_untagged": false, "locked": true, "access_level": "not_protected"})
+        );
+        // The tags are the ones demand matches on.
+        assert_eq!(body["tag_list"], json!(runner_tags("kiln", 2, 2)));
+        assert!(g.mine.lock().unwrap().contains(&79));
+    }
+
+    async fn mint_err(g: &GitLab) -> anyhow::Error {
+        g.mint(&repo(), "kiln-5-0", &["kiln-2cpu".to_string()]).await.err().unwrap()
+    }
+
+    #[tokio::test]
+    async fn register_errors_name_the_cause_and_keep_the_token_out() {
+        let m = Mock::start().await;
+        let g = gl_ready("regerr", &m);
+        // Developer and below, the instance setting and the toggle all look the same (SP-6).
+        m.on("POST", "user/runners", 403, fx("err_403_role.json"));
+        let e = mint_err(&g).await;
+        let me = mint_error(&e);
+        assert_eq!((me.status, me.github_wide()), (Some(403), false));
+        let s = e.to_string();
+        assert!(
+            s.contains("GitLab returned HTTP 403")
+                && s.contains("Maintainer")
+                && s.contains("valid_runner_registrars")
+                && s.contains("toggle"),
+            "{s}"
+        );
+        // A wrong scope is a different 403.
+        m.on("POST", "user/runners", 403, fx("err_403_scope.json"));
+        let s = mint_err(&g).await.to_string();
+        assert!(s.contains("create_runner scope") && !s.contains("Maintainer"), "{s}");
+        m.on("POST", "user/runners", 401, fx("err_401.json"));
+        assert!(mint_err(&g).await.to_string().contains("rejected"));
+        m.on("POST", "user/runners", 502, "<html>bad gateway</html>".into());
+        let e = mint_err(&g).await;
+        assert!(mint_error(&e).github_wide());
+        // A 201 without a runner token is no registration.
+        m.on("POST", "user/runners", 201, r#"{"id":5,"token":"not-a-runner-token"}"#.into());
+        let e = mint_err(&g).await;
+        assert!(e.downcast_ref::<MintError>().is_none() && !e.to_string().contains("not-a-runner-token"), "{e:#}");
+        assert!(g.mine.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_gitlab_is_a_forge_wide_registration_failure() {
+        let m = Mock::start().await;
+        let g = gl_ready("down", &m);
+        g.project_id("acme/demo", false).await.unwrap();
+        let mut g = g;
+        g.url = "http://127.0.0.1:1".into();
+        let e = g.mint(&repo(), "kiln-5-0", &[]).await.err().unwrap();
+        let me = mint_error(&e);
+        assert!(me.status.is_none() && me.github_wide());
+        assert!(!e.to_string().contains(TOKEN));
+    }
+
+    #[tokio::test]
+    async fn pause_pauses_waits_then_lists_the_jobs_the_runner_holds() {
+        let m = Mock::start().await;
+        m.on("PUT", "runners/79", 200, fx("runner_paused.json"));
+        m.ok("runners/79/jobs?status=running", "runner_jobs_running.json");
+        let g = gl_ready("pause", &m);
+        assert_eq!(g.pause(79).await.unwrap(), ["251"]);
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running"]);
+        assert_eq!(serde_json::from_str::<Value>(&m.sent.lock().unwrap()[0].1).unwrap(), json!({"paused": true}));
+        m.ok("runners/79/jobs?status=running", "runner_jobs_none.json");
+        assert!(g.pause(79).await.unwrap().is_empty());
+        // Fail closed: a refused pause, an unpaused answer, a missing runner, an unreadable list.
+        m.on("PUT", "runners/79", 403, fx("err_403_scope.json"));
+        assert!(g.pause(79).await.unwrap_err().to_string().contains("scope"));
+        m.on("PUT", "runners/79", 200, fx("runner_new.json"));
+        assert!(g.pause(79).await.is_err(), "paused was not confirmed");
+        m.on("PUT", "runners/79", 404, fx("err_404_runner.json"));
+        assert!(g.pause(79).await.is_err());
+        m.on("PUT", "runners/79", 200, fx("runner_paused.json"));
+        m.route("runners/79/jobs?status=running", 200, vec![], r#"[{"status":"running"}]"#.into());
+        assert!(g.pause(79).await.is_err(), "a job without an id");
+    }
+
+    fn serve_runner(m: &Mock, jobs: &str) {
+        m.on("PUT", "runners/79", 200, fx("runner_paused.json"));
+        m.ok("runners/79/jobs?status=running", jobs);
+        m.on("DELETE", "runners/79", 204, String::new());
+    }
+
+    #[tokio::test]
+    async fn deregister_deletes_an_idle_runner_and_leaves_a_busy_one() {
+        let m = Mock::start().await;
+        serve_runner(&m, "runner_jobs_none.json");
+        let g = gl_ready("dereg", &m);
+        g.mine.lock().unwrap().insert(79);
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Gone));
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "DELETE runners/79"]);
+        assert!(g.mine.lock().unwrap().is_empty());
+        // It got a job meanwhile: unpaused again, and not deleted.
+        serve_runner(&m, "runner_jobs_running.json");
+        m.sent.lock().unwrap().clear();
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Warm).await, Dereg::Busy));
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "PUT runners/79"]);
+        assert_eq!(serde_json::from_str::<Value>(&m.sent.lock().unwrap()[2].1).unwrap(), json!({"paused": false}));
+        // Already gone (the guest deleted itself, or an earlier retire did).
+        m.on("PUT", "runners/79", 404, fx("err_404_runner.json"));
+        m.sent.lock().unwrap().clear();
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Unused).await, Dereg::Gone));
+        assert_eq!(m.calls(), ["PUT runners/79"]);
+        // A refused delete leaves the VM alone.
+        serve_runner(&m, "runner_jobs_none.json");
+        m.on("DELETE", "runners/79", 403, fx("err_403_scope.json"));
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Err(_)));
+        // An unreadable job list is no proof of idleness: nothing is deleted, the runner is unpaused.
+        m.route("runners/79/jobs?status=running", 500, vec![], "{}".into());
+        m.sent.lock().unwrap().clear();
+        assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Err(_)));
+        assert_eq!(m.calls().last().unwrap(), "PUT runners/79");
+        assert_eq!(m.count("DELETE"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_stale_policy_deletes_the_runner_even_when_a_job_raced_in() {
+        let m = Mock::start().await;
+        serve_runner(&m, "runner_jobs_running.json");
+        let g = gl_ready("stale", &m);
+        assert!(matches!(g.deregister(&repo(), 79, Reason::StalePolicy).await, Dereg::Gone));
+        assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "DELETE runners/79"]);
+        // Even when pausing failed: the VM dies either way, so the runner must not outlive it.
+        m.sent.lock().unwrap().clear();
+        m.on("PUT", "runners/79", 500, "{}".into());
+        assert!(matches!(g.deregister(&repo(), 79, Reason::StalePolicy).await, Dereg::Gone));
+        assert_eq!(m.calls(), ["PUT runners/79", "DELETE runners/79"]);
+    }
+
+    /// RFC 3339 for `t` seconds since the epoch (Hinnant's civil-from-days).
+    fn ts(t: u64) -> String {
+        let (days, s) = ((t / 86400) as i64, t % 86400);
+        let z = days + 719468;
+        let (era, doe) = (z.div_euclid(146097), z.rem_euclid(146097));
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let (d, mo) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+        let y = yoe + era * 400 + i64::from(mo <= 2);
+        format!("{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}.000Z", s / 3600, s % 3600 / 60, s % 60)
+    }
+
+    #[test]
+    fn the_test_timestamp_round_trips() {
+        for t in [0, 951_782_400, 1_760_000_000, 4_102_444_800] {
+            assert_eq!(crate::github::parse_rfc3339(&ts(t)), Some(t));
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_orphans_by_prefix_and_age_never_by_status() {
+        let now = crate::now();
+        let runner = |id: u64, desc: &str, status: &str, age: u64, kind: &str| {
+            let mut r = serde_json::from_str::<Vec<Value>>(&fx("runner_list.json")).unwrap().remove(0);
+            r["id"] = id.into();
+            r["description"] = desc.into();
+            r["status"] = status.into();
+            r["created_at"] = ts(now - age).into();
+            r["runner_type"] = kind.into();
+            r
+        };
+        let day = 86_400;
+        let list = vec![
+            runner(1, "a1b2c3-kiln-1-0", "never_contacted", 11 * 60, "project_type"), // died before its first poll
+            runner(2, "a1b2c3-kiln-1-1", "never_contacted", 5 * 60, "project_type"),  // still booting
+            runner(3, "a1b2c3-kiln-1-2", "online", 2 * 3600, "project_type"),         // "online" lies for hours: kept
+            runner(4, "a1b2c3-kiln-1-3", "online", day + 11 * 60, "project_type"),    // older than any job could run
+            runner(5, "a1b2c3-kiln-1-4", "paused", day + 11 * 60, "project_type"),    // crashed after pause
+            runner(6, "ffffff-kiln-1-0", "never_contacted", 3 * day, "project_type"), // another install
+            runner(7, "a1b2c3-kiln-1-5", "never_contacted", 3 * day, "group_type"),   // not a project runner
+            runner(8, "my-own-runner", "online", 30 * day, "project_type"),
+            runner(9, "a1b2c3-kiln-1-6", "never_contacted", 3 * day, "project_type"), // registered by this process
+        ];
+        let m = Mock::start().await;
+        let path = |p: usize| format!("projects/1/runners?type=project_type&per_page=5&page={p}");
+        m.route(&path(1), 200, vec![], serde_json::to_string(&list[..5]).unwrap());
+        m.route(&path(2), 200, vec![], serde_json::to_string(&list[5..]).unwrap());
+        for id in [1, 4, 5] {
+            m.on("DELETE", &format!("runners/{id}"), 204, String::new());
+        }
+        let g = gl_ready("sweep", &m);
+        g.mine.lock().unwrap().insert(9);
+        assert_eq!(g.sweep(&repo()).await.unwrap(), 3);
+        let deleted: Vec<_> = m.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deleted, ["DELETE runners/1", "DELETE runners/4", "DELETE runners/5"]);
+        assert!(m.requests().iter().all(|r| !r.contains("status=")), "status is never a filter");
+        // A refused delete stops the sweep with an error.
+        m.on("DELETE", "runners/4", 403, fx("err_403_scope.json"));
+        assert!(g.sweep(&repo()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_doctor_names_a_missing_scope_and_a_low_role() {
+        let m = Mock::start().await;
+        m.ok("version", "version.json");
+        m.ok("personal_access_tokens/self", "pat_self.json");
+        m.ok("projects/acme%2Fdemo", "project.json");
+        let g = gl_ready("doc", &m);
+        let all = |v: &[(String, bool, String)]| v.iter().all(|c| c.1);
+        let out = g.doctor(&[repo()]).await;
+        assert!(all(&out) && out.len() == 3, "{out:?}");
+        assert!(out[0].2.contains("19.4.1") && out[1].2.contains("2027-10-11"));
+        let mut pat: Value = serde_json::from_str(&fx("pat_self.json")).unwrap();
+        pat["scopes"] = json!(["read_api"]);
+        m.route("personal_access_tokens/self", 200, vec![], pat.to_string());
+        let out = g.doctor(&[repo()]).await;
+        assert!(!out[1].1 && out[1].2.contains("create_runner, manage_runner"), "{out:?}");
+        let mut p: Value = serde_json::from_str(&fx("project.json")).unwrap();
+        p["permissions"]["project_access"]["access_level"] = 30.into();
+        m.route("projects/acme%2Fdemo", 200, vec![], p.to_string());
+        let out = g.doctor(&[repo()]).await;
+        let d = &out[2].2;
+        assert!(!out[2].1 && d.contains("below Maintainer") && d.contains("valid_runner_registrars") && d.contains("toggle"), "{d}");
+        assert!(out.iter().all(|c| !c.2.contains(TOKEN)));
     }
 }

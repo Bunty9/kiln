@@ -654,10 +654,10 @@ impl Forge {
             Self::Gitea(g) => g.register(repo, name, labels).await,
         }
     }
-    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64, reason: Reason) -> Dereg {
         match self {
             Self::GitHub(g) => g.deregister(repo, runner_id).await,
-            Self::GitLab(g) => g.deregister(repo, runner_id).await,
+            Self::GitLab(g) => g.deregister(repo, runner_id, reason).await,
             Self::Gitea(g) => g.deregister(repo, runner_id).await,
         }
     }
@@ -688,10 +688,10 @@ impl Forge {
     /// Stops the runner taking a second job and lists the jobs it holds. `None`: this forge needs
     /// no pause (Gitea refuses a second task server-side; GitHub is not gated). `Some(ids)`:
     /// the gate accepts exactly the console's job id.
-    pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
+    pub async fn pause(&self, _repo: &RepoRef, runner_id: u64) -> Result<Option<Vec<String>>> {
         match self {
             Self::GitHub(_) => Ok(None),
-            Self::GitLab(_) => bail!(gitlab::LATER),
+            Self::GitLab(g) => g.pause(runner_id).await.map(Some),
             Self::Gitea(_) => Ok(None),
         }
     }

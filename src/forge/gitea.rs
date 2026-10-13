@@ -445,7 +445,7 @@ impl Gitea {
         // awaiting approval) and `requested` (blocked by `needs`) are never demand.
         for j in self.jobs(repo, "queued").await?.iter().filter(|j| j["status"] == "queued") {
             // The server ignores a `labels` filter, so the job's labels are judged here.
-            let Some(n) = super::job_size(&j["labels"], label, default_cpus, crate::github::fixtures_arch_arm64()) else { continue };
+            let Some(n) = super::job_size(&j["labels"], label, default_cpus, crate::platform::host_arm64()) else { continue };
             let run = self.run(repo, j["run_id"].as_u64().context("job has no run_id")?).await?;
             if run.fork {
                 d.refused_forks += 1;
