@@ -31,10 +31,8 @@ const REQUIRED_SCOPES: [&str; 3] = ["create_runner", "manage_runner", "read_api"
 /// How long the token's scopes are trusted before `refresh` reads them again.
 const INFO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 pub const LATER: &str = "GitLab runners arrive in a later version";
-/// No VM launches for GitLab until GL-6 (the guest's `run_gitlab` and `kiln-exec`) lands: a VM
-/// booted now would have nothing that reads its secret. Demand reports the queue, fork jobs and
-/// claims but no launchable jobs, and `register` refuses (warm VMs ask for a runner without demand).
-pub const LAUNCH_READY: bool = false;
+/// GitLab VMs launch (GL-8: the end-to-end matrix passed on a local GitLab CE).
+pub const LAUNCH_READY: bool = true;
 /// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
 const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long `cache_trust` waits for a job to finish: the VM powers off a moment before GitLab records the result.
