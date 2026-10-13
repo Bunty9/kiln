@@ -2138,7 +2138,7 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 4: skipped (an unmerged arm64 build used it for what is now 6, so its images count as stale).
 /// 5: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
 /// 6: secrets also read from fw_cfg; console and steps devices per architecture (arm64 guests).
-/// 7: GitLab and Gitea runners (pinned below), Docker checked, guest hardening (memfd_noexec, no cron/linger).
+/// 7: GitLab and Gitea runners (pinned below), Docker and guest checks.
 const RECIPE: u64 = 7;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
@@ -3550,7 +3550,11 @@ mod tests {
             ] {
                 assert!(r.find(c).unwrap() < ok, "{c}");
             }
-            assert!(r.contains("vm.memfd_noexec=2"));
+            assert!(
+                !r.contains("memfd_noexec=2\n")
+                    && r.contains("harden_gitea() { sysctl -w vm.memfd_noexec=2")
+                    && r.contains("/proc/config.gz")
+            );
         }
     }
 
