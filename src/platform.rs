@@ -7,6 +7,13 @@ use std::sync::LazyLock;
 pub const MACOS: bool = cfg!(target_os = "macos");
 /// Guests are arm64 (and runners advertise `ARM64`); x86_64 otherwise.
 pub const ARM64: bool = cfg!(target_arch = "aarch64");
+
+/// Whether this host's runners and jobs carry the arm64 labels. Unit tests always run as x64:
+/// the mock forge's fixtures are x64, and the arm64 label rules have their own tests.
+pub fn host_arm64() -> bool {
+    ARM64 && !cfg!(test)
+}
+
 /// QEMU accelerator: Hypervisor.framework on macOS, KVM on Linux.
 pub const ACCEL: &str = if MACOS { "hvf" } else { "kvm" };
 

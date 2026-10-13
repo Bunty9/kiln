@@ -16,6 +16,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
 - A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos.
 - A `kind: "gitlab"` forge is now built from config: kiln reads its token (`<data>/forges/<id>.token` or `KILN_FORGE_<ID>_TOKEN`), resolves project ids and polls the pending jobs for demand (kiln-tagged jobs only, fork merge request pipelines refused by ref), and the forge's health shows a missing token or a rate limit. GitLab runners cannot be registered yet, so no VM launches for GitLab jobs in this version.
+- GitLab runner registration, retire, sweep and the pause step of the host verdict gate, plus `kiln doctor` checks for the GitLab token's scopes, expiry and its role on each project (creating a project runner needs Maintainer; a 403 on registration is named with its three possible causes). Registration is built but switched off until the GitLab guest lands, so still no VM launches for GitLab jobs. A refused runner registration now names the forge in its message.
 
 ### Changed
 

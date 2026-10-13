@@ -484,7 +484,7 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
         Err(e) => return tracing::warn!("{repo}: {e:#}"),
     };
     for (id, rid) in c {
-        match forge.deregister(&rr, rid).await {
+        match forge.deregister(&rr, rid, reason).await {
             Dereg::Gone => {}
             Dereg::Busy if reason != Reason::Unused => continue,
             Dereg::Busy => {
@@ -2490,8 +2490,11 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
                     (None, Err(e)) => check(&name, false, format!("{e:#}")),
                 });
             }
-            // The credential and role checks arrive with GL-3.
-            crate::forge::Forge::GitLab(_) => {}
+            crate::forge::Forge::GitLab(g) => {
+                let cfgs = crate::forge::effective(&cfg.forges, &cfg.repos);
+                let repos = cfgs.iter().find(|c| c.id == g.id()).map(|c| g.repos(c)).unwrap_or_default();
+                out.extend(g.doctor(&repos).await.into_iter().map(|(n, ok, d)| check(&n, ok, d)));
+            }
         }
     }
 
