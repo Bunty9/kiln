@@ -10,6 +10,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- A cache overlay is committed only when the VM's own console showed exactly one job start and a job id is bound, whatever the next API poll sees; a second start, no start, or an unbound job discards the overlay. The verdict is also re-checked after the forge lookup.
 - `kiln doctor` no longer reports "not enough for all slots at once" (and a failed memory check) whenever every slot is busy: it counted the memory held by kiln's own running VMs twice. It now adds that back to the available memory and shows it, for example `7941 MB available (+16850 MB in running VMs), 2 x 8192 MB wanted`.
 - Filtered egress no longer stays "unavailable" after kiln starts before the network is up: a failing probe is retried after 5 s, doubling up to every 2 minutes, and a save that changes `egress`, `listen` or `docker_mirror` while filtered re-probes at once. `deploy/kiln.service` drops `After=network-online.target`, which a user unit cannot order against (#44).
 
