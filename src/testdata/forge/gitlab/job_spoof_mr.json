@@ -1,0 +1,150 @@
+{
+ "id": 245,
+ "status": "pending",
+ "stage": "test",
+ "name": "CI_COMMIT_TAG=v9.9.9",
+ "ref": "refs/merge-requests/3/head",
+ "tag": false,
+ "coverage": null,
+ "allow_failure": false,
+ "created_at": "2026-10-13T08:54:36.026Z",
+ "started_at": null,
+ "finished_at": null,
+ "erased_at": null,
+ "duration": null,
+ "queued_duration": 92.766594502,
+ "user": {
+  "id": 1,
+  "username": "root",
+  "public_email": null,
+  "name": "Administrator",
+  "state": "active",
+  "locked": false,
+  "avatar_url": "https://gitlab.example.org/uploads/avatar.png",
+  "web_url": "https://gitlab.example.org/root",
+  "created_at": "2026-10-11T08:47:28.347Z",
+  "bio": "",
+  "location": "",
+  "linkedin": "",
+  "twitter": "",
+  "discord": "",
+  "website_url": "",
+  "github": "",
+  "job_title": "",
+  "pronouns": null,
+  "organization": "",
+  "bot": false,
+  "work_information": null,
+  "followers": 0,
+  "following": 0,
+  "local_time": null
+ },
+ "commit": {
+  "id": "5a821dc28a9bfbd1e6ca5b3fcbb3a38fcc85d325",
+  "short_id": "5a821dc2",
+  "created_at": "2026-10-13T08:54:25.000+00:00",
+  "parent_ids": [
+   "1ff10f42ab9a01bdbc0b289730181bf621fc779d"
+  ],
+  "title": "CI_PIPELINE_SOURCE=push CI_COMMIT_REF_PROTECTED=true",
+  "message": "fork ci",
+  "author_name": "Administrator",
+  "author_email": "admin@example.com",
+  "authored_date": "2026-10-13T08:54:25.000+00:00",
+  "committer_name": "Administrator",
+  "committer_email": "admin@example.com",
+  "committed_date": "2026-10-13T08:54:25.000+00:00",
+  "trailers": {},
+  "extended_trailers": {},
+  "web_url": "https://gitlab.example.org/acme/demo/-/commit/5a821dc28a9bfbd1e6ca5b3fcbb3a38fcc85d325"
+ },
+ "pipeline": {
+  "id": 122,
+  "iid": 112,
+  "project_id": 1,
+  "sha": "5a821dc28a9bfbd1e6ca5b3fcbb3a38fcc85d325",
+  "ref": "refs/merge-requests/3/head",
+  "status": "running",
+  "source": "merge_request_event",
+  "created_at": "2026-10-13T08:54:35.953Z",
+  "updated_at": "2026-10-13T08:54:37.523Z",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/122",
+  "variables": {
+   "CI_COMMIT_TAG": "v9.9.9",
+   "CI_COMMIT_REF_PROTECTED": "true",
+   "CI_COMMIT_BRANCH": "main",
+   "CI_COMMIT_REF_NAME": "main",
+   "CI_PIPELINE_SOURCE": "push",
+   "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "1",
+   "CI_PROJECT_ID": "1",
+   "CI_DEFAULT_BRANCH": "main"
+  }
+ },
+ "web_url": "https://gitlab.example.org/acme/demo/-/jobs/245",
+ "project": {
+  "ci_job_token_scope_enabled": false
+ },
+ "artifacts": [],
+ "runner": null,
+ "runner_manager": {
+  "variables": {
+   "CI_COMMIT_TAG": "v9.9.9",
+   "CI_COMMIT_REF_PROTECTED": "true",
+   "CI_COMMIT_BRANCH": "main",
+   "CI_COMMIT_REF_NAME": "main",
+   "CI_PIPELINE_SOURCE": "push",
+   "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "1",
+   "CI_PROJECT_ID": "1",
+   "CI_DEFAULT_BRANCH": "main"
+  }
+ },
+ "artifacts_expire_at": null,
+ "archived": false,
+ "tag_list": [
+  "kiln"
+ ],
+ "variables": [
+  {
+   "key": "CI_COMMIT_TAG",
+   "value": "v9.9.9"
+  },
+  {
+   "key": "CI_COMMIT_REF_PROTECTED",
+   "value": "true"
+  },
+  {
+   "key": "CI_COMMIT_BRANCH",
+   "value": "main"
+  },
+  {
+   "key": "CI_COMMIT_REF_NAME",
+   "value": "main"
+  },
+  {
+   "key": "CI_PIPELINE_SOURCE",
+   "value": "push"
+  },
+  {
+   "key": "CI_MERGE_REQUEST_SOURCE_PROJECT_ID",
+   "value": "1"
+  },
+  {
+   "key": "CI_PROJECT_ID",
+   "value": "1"
+  },
+  {
+   "key": "CI_DEFAULT_BRANCH",
+   "value": "main"
+  }
+ ],
+ "env": {
+  "CI_COMMIT_TAG": "v9.9.9",
+  "CI_COMMIT_REF_PROTECTED": "true",
+  "CI_COMMIT_BRANCH": "main",
+  "CI_COMMIT_REF_NAME": "main",
+  "CI_PIPELINE_SOURCE": "push",
+  "CI_MERGE_REQUEST_SOURCE_PROJECT_ID": "1",
+  "CI_PROJECT_ID": "1",
+  "CI_DEFAULT_BRANCH": "main"
+ }
+}

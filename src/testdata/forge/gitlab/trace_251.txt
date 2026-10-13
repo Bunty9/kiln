@@ -1,0 +1,5 @@
+Running with gitlab-runner 18.4.0 (abc)
+[0K[36;1msection_start:1760000000:step_script[0K[36;1m$ make test[0;m
+ok
+section_end:1760000001:step_script[0K
+[32;1mJob succeeded[0;m

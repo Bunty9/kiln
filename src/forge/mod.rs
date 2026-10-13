@@ -446,6 +446,28 @@ pub struct LogPage {
     pub truncated: bool,
 }
 
+/// Most log bytes returned per request (the caller continues from `next`), and most read from a forge.
+pub const LOG_CAP: usize = 1 << 20;
+pub const LOG_DOWNLOAD_CAP: usize = 16 << 20;
+
+impl LogPage {
+    /// The page of `body` from byte `from`, never cutting a UTF-8 sequence in half. `truncated`:
+    /// the download hit `LOG_DOWNLOAD_CAP`, so there is more than `body`.
+    pub fn slice(body: &[u8], from: usize, truncated: bool) -> Self {
+        let start = from.min(body.len());
+        let mut end = (start + LOG_CAP).min(body.len());
+        while end > start && end < body.len() && body[end] & 0xC0 == 0x80 {
+            end -= 1;
+        }
+        Self {
+            text: String::from_utf8_lossy(&body[start..end]).into_owned(),
+            next: end,
+            complete: end == body.len() && !truncated,
+            truncated: truncated && end == body.len(),
+        }
+    }
+}
+
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
 pub struct Workflow {
     pub id: u64,
@@ -527,49 +549,49 @@ impl Forge {
     pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
         match self {
             Self::GitHub(g) => g.runs(repo, q).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.runs(repo, q).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
         match self {
             Self::GitHub(g) => g.run(repo, id).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.run(repo, id).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
         match self {
             Self::GitHub(g) => g.job_log(repo, id, from).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.job_log(repo, id, from).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
         match self {
             Self::GitHub(g) => g.workflows(repo).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.workflows(repo).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
         match self {
             Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.rerun(repo, id, failed_only).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         match self {
             Self::GitHub(g) => g.cancel(repo, id).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.cancel(repo, id).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
@@ -665,7 +687,7 @@ impl Forge {
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
         match self {
             Self::GitHub(g) => g.cache_trust(job, writers).await,
-            Self::GitLab(_) => bail!(gitlab::NOT_YET),
+            Self::GitLab(g) => g.cache_trust(job, writers).await,
             Self::Gitea(_) => bail!("Gitea cache trust is not implemented yet"),
         }
     }
@@ -696,10 +718,10 @@ impl Forge {
         }
     }
     /// What the API says about `job_id`, for `decide`. Never a `CI_*` value or anything the guest sent.
-    pub async fn verdict_facts(&self, _repo: &RepoRef, _job_id: &str) -> Result<VerdictFacts> {
+    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
-            Self::GitLab(_) => bail!(gitlab::LATER),
+            Self::GitLab(g) => g.verdict_facts(repo, job_id).await,
             Self::Gitea(_) => bail!("Gitea verdict facts are not implemented yet"),
         }
     }

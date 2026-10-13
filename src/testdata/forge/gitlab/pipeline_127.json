@@ -1,0 +1,22 @@
+{
+ "id": 127,
+ "iid": 116,
+ "project_id": 1,
+ "status": "running",
+ "source": "push",
+ "ref": "long",
+ "sha": "81649bffaa8957bc0ef1b1e8fce9d74ef1f6490b",
+ "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/127",
+ "created_at": "2026-10-13T08:55:56.414Z",
+ "updated_at": "2026-10-13T08:56:01.266Z",
+ "tag": false,
+ "user": {
+  "id": 1,
+  "username": "root",
+  "name": "Administrator"
+ },
+ "started_at": "2026-10-13T08:56:01.000Z",
+ "finished_at": null,
+ "duration": null,
+ "before_sha": "0000000000000000000000000000000000000000"
+}
