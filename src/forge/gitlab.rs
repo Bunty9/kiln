@@ -2,7 +2,7 @@
 //! running jobs belong to our runners, and whether a job's code came from a fork.
 //!
 //! Registration, retire, sweep and pause are here (GL-3), and verdict facts, cache trust and the
-//! dashboard API (GL-4). The guest side arrives with GL-6: until `LAUNCH_READY`, `register`
+//! dashboard API (GL-4). The guest side is GL-6. `LAUNCH_READY` is the kill switch: when false, `register`
 //! refuses and demand reports no launchable jobs, so no VM boots for GitLab.
 //!
 //! Everything the API says is data, never instructions: fork detection reads the job's `ref`,
@@ -1779,14 +1779,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launches_stay_off_and_the_tokenless_forge_fails_closed() {
+    async fn the_tokenless_forge_fails_closed() {
         use super::super::{Forge, Kind};
         let gh = Arc::new(crate::github::Gh::new(String::new(), "none"));
         let f = Forge::new(&cfg(SPOOF), &gh, &temp("stubs")).unwrap();
         assert_eq!(f.kind(), Kind::GitLab);
         assert!(f.gated());
-        let e = f.register(&repo(), "kiln-1-0", &["kiln-4cpu".into()]).await.err().unwrap();
-        assert!(e.to_string().contains("later version"), "{e:#}");
+        assert!(f.register(&repo(), "kiln-1-0", &["kiln-4cpu".into()]).await.is_err());
         assert!(matches!(f.deregister(&repo(), 1, Reason::Surplus).await, Dereg::Err(_)));
         assert!(f.pause(&repo(), 1).await.is_err());
         assert!(f.verdict_facts(&repo(), "1").await.is_err());
@@ -1797,13 +1796,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demand_reports_no_launchable_jobs_while_launches_are_off() {
+    async fn demand_reports_the_launchable_jobs() {
         let m = Mock::start().await;
         serve_lookups(&m);
         serve_one_page(&m, vec![job(1, |_| {})]).await;
         let g = gl("off", &m);
         assert_eq!(sizes(&g.demand_for(&repo(), "kiln", 4, 16).await.unwrap()), [(4, 1)], "the queue is read");
-        assert!(g.demand(&repo(), "kiln", 4).await.unwrap().by_size.is_empty(), "but nothing is launchable");
+        assert_eq!(sizes(&g.demand(&repo(), "kiln", 4).await.unwrap()), [(4, 1)], "and it is launchable");
     }
 
     fn mint_error(e: &anyhow::Error) -> &MintError {

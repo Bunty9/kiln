@@ -664,7 +664,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let mut secrets = Vec::new();
     for line in reg.guest_secret.lines() {
         let key = line.strip_prefix("kiln.").and_then(|l| l.split_once('=')).map(|(k, _)| k);
-        let key = key.filter(|k| !k.is_empty() && k.bytes().all(|c| c.is_ascii_lowercase())).context("guest secret line without a kiln.<key>= name")?;
+        let key = key
+            .filter(|k| !k.is_empty() && k.bytes().all(|c| c.is_ascii_lowercase()))
+            .context("guest secret line without a kiln.<key>= name")?;
         write_secret(&q.join(key), line).await?;
         secrets.push(key.to_string());
     }

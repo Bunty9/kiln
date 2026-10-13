@@ -4,9 +4,18 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- GitLab job VMs never read their secret on x86: QEMU's SMBIOS `path=` turns a multi-line file into one string, so the forge, address and runner token arrived glued together and the guest powered off with "unknown forge". Each `kiln.<key>=` line is now its own file and string.
+- GitLab jobs in a VM could not start: the guest executor's state directory `/run/kiln-exec` is now created for the `runner` user (found by the end-to-end test; existing installs rebake with the unreleased `RECIPE` 10).
+
+### Changed
+
+- GitLab launches are on. A GitLab project served by kiln now gets runners and VMs (end-to-end tested against GitLab CE 19.4: plain, `image:`, `services:`, tag, fork merge request, child and downstream pipeline, cancel, runner cleanup).
+
 ### Security
 
-- GitLab (not launched yet): multi-project downstream pipelines (source `pipeline`) are refused, like Gitea's `workflow_run`; child pipelines run only through the ref rules and never save the cache; merge-train refs run cold; a dashboard cancel stops the pipeline's VMs first (also those whose job started since the last poll) and then asks GitLab, so it works without the `api` scope; the cache is saved only for a job the project's job API reports as `success` on the VM's own runner, with a recorded `ok` verdict for that exact job (any gated forge); runners of ended VMs are deleted at startup and GitLab and Gitea runners are swept hourly.
+- GitLab (not launched yet): multi-project downstream pipelines (source `pipeline`) are refused, like Gitea's `workflow_run`; child pipelines run only through the ref rules and never save the cache; merge-train refs run cold; a dashboard cancel stops the pipeline's VMs first (also those whose job started since the last poll) and then asks GitLab; without the `api` scope the VMs still stop and the request answers that the scope is missing; the cache is saved only for a job the project's job API reports as `success` on the VM's own runner, with a recorded `ok` verdict for that exact job (any gated forge); runners of ended VMs are deleted at startup and GitLab and Gitea runners are swept hourly.
 - Verdict gate review fixes (GitLab and Gitea paths, not launched yet): a GitLab runner is never unpaused, so a retire can no longer undo the gate's pause; the forge runner is always deleted when a gated forge's VM ends; the API can only compare a gated job's id, never bind it; a refused job gets about 10 s to fail cleanly before the VM is killed; `kiln-exec` is one-shot and checks the verdict against the runner's job response (`RECIPE` is 10, so existing installs rebake once); a cold verdict discards the cache overlay on the host; a job named like the host-key marker still starts the gate; a GitLab dashboard cancel also kills the VM.
 - Outbound alert and forge requests now refuse the host's own addresses in every mode (previously only on `internal` forges), plus 100.100.100.100/200, 168.63.129.16, fd7a:115c:a1e0::53, fd00:ec2::/32 and ISATAP-embedded private addresses, including for tailnet destinations. A forge `url` must now be written in its canonical form (lowercase host, no default port, no `0x7f.1`-style or percent-encoded hosts), so every parser reads the same host.
 - A forge's saved token is now deleted whenever the forge is removed or added again, whether through the forge routes or a settings save, and a token whose check overlapped a removal is not saved, so a token can never be sent to an address other than the one it was saved for. Setting or testing a forge token is recorded in the audit log.

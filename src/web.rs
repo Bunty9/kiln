@@ -2497,7 +2497,7 @@ mod tests {
             f["caps"],
             json!({ "rerun": false, "rerun_failed": false, "cancel": false, "dispatch": false, "workflows": false, "live_steps": false })
         );
-        assert_eq!((f["launches"].clone(), f["network"].clone()), (json!(false), json!("public")));
+        assert_eq!((f["launches"].clone(), f["network"].clone()), (json!(true), json!("public")));
         assert!(!f.to_string().contains("glpat") && !r.to_string().contains("glpat"));
         // The rerun route says why it is refused.
         let e =
