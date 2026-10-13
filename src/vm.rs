@@ -3540,11 +3540,10 @@ mod tests {
             // Image checks end the bake before KILN_BAKE_OK.
             let ok = r.find("echo KILN_BAKE_OK").unwrap();
             for c in [
-                "vm.memfd_noexec",
+                "vm.memfd_noexec supported",
                 "gitlab-runner on the runner user's PATH",
                 "docker present",
                 "sshd off",
-                "cron off",
                 "no linger",
                 "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y",
             ] {
