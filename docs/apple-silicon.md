@@ -1,12 +1,12 @@
 # kiln on Apple Silicon (macOS)
 
-> **Status: untested on a real Mac.** Lint and unit tests pass on a GitHub-hosted `macos-14` (Apple Silicon) runner, including real `sysctl`, `vm_stat` and `ps` readings. The arm64 guest path was run end to end on x86 Linux under emulation: the arm64 recipe baked under QEMU TCG, and an aarch64 kiln (under `qemu-user`, with a shim swapping `accel=kvm` for TCG) booted a warm VM from it that registered an `ARM64`/`kiln-arm64` runner, reached "Listening for Jobs" and was released over `ttyAMA0`; a hold with fw_cfg SSH keys worked too. But kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it. Release builds for macOS stay off until then (see [Releases](#releases)).
+> **Status: untested on a real Mac.** Lint and unit tests pass on a GitHub-hosted `macos-14` (Apple Silicon) runner, including real `sysctl`, `vm_stat` and `ps` readings. The arm64 guest path was run end to end on x86 Linux under emulation: the arm64 recipe baked under QEMU TCG, and an aarch64 kiln (under `qemu-user`, with a shim swapping `accel=kvm` for TCG) booted a warm VM from it that registered an `ARM64`/`kiln-arm64` runner, reached "Listening for Jobs" and was released over `ttyAMA0`; a hold with fw_cfg SSH keys worked too. But kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it.
 
 On a Mac with Apple Silicon, kiln runs **native linux/arm64 job VMs**: one fresh Ubuntu 24.04 arm64 VM per job, booted by QEMU with Apple's Hypervisor.framework (HVF). It is the same kiln as on Linux, with the differences listed below.
 
 ## Design
 
-The guest always has the host's architecture (`std::env::consts::ARCH`), so an aarch64 host runs arm64 guests. That also makes an aarch64 Linux host with KVM work (`qemu-system-aarch64 -accel kvm`), as a bonus; it is not a release target.
+The guest always has the host's architecture (`std::env::consts::ARCH`), so an aarch64 host runs arm64 guests. That also makes an aarch64 Linux host with KVM work (`qemu-system-aarch64 -accel kvm`), as a bonus; its release tarballs are `aarch64-linux` and `aarch64-linux-musl`.
 
 | | x86_64 Linux | Apple Silicon macOS |
 |---|---|---|
@@ -43,10 +43,10 @@ Requirements: an Apple Silicon Mac on macOS 13 or newer (macOS 14 or newer recom
 brew install qemu xorriso          # qemu-system-aarch64, qemu-img; xorriso builds the bake's seed ISO
 ```
 
-Install kiln (a release build once macOS releases are on, or from source):
+Install kiln (a release build or from source):
 
 ```sh
-v=0.3.0                                           # once a release ships an aarch64-macos tarball
+v=0.3.0                                           # the release to install
 f=kiln-$v-aarch64-macos.tar.gz url=https://github.com/Bunty9/kiln/releases/download/v$v
 cd "$(mktemp -d)"
 curl -fLO "$url/$f" -fLO "$url/$f.sha256"
@@ -92,11 +92,7 @@ The matching rules are the same as on x64 (exactly one kiln label, sizes 2, 4, 8
 
 ## Releases
 
-`release.yml` has a `build-macos` job on a GitHub-hosted `macos-14` (Apple Silicon) runner that tests, builds and packages `kiln-X.Y.Z-aarch64-macos.tar.gz`; the `sign` job signs and publishes it with the Linux tarballs. It runs only while the repository variable `KILN_MACOS_RELEASE` is `true`; until then releases are Linux-only and `sign` does not wait for it. A macOS kiln updates itself only from `aarch64-macos` tarballs. Turn the variable on once the checklist below passes:
-
-```sh
-gh variable set KILN_MACOS_RELEASE -R Bunty9/kiln --body true
-```
+`release.yml` has a `build-macos` job on a GitHub-hosted `macos-14` (Apple Silicon) runner that tests, builds and packages `kiln-X.Y.Z-aarch64-macos.tar.gz` for every release; the `sign` job signs it with the same Ed25519 key as the Linux tarballs and publishes it. The job fails if the binary lacks the linker's ad-hoc code signature, which Apple Silicon requires to run it. There is no Apple Developer ID signature or notarization: a binary fetched with curl (or by kiln's own updater) is not quarantined, so it runs, but one downloaded in a browser needs `xattr -d com.apple.quarantine kiln`. A macOS kiln updates itself only from `aarch64-macos` tarballs. Intel Macs have no build.
 
 `.github/workflows/macos.yml` runs `cargo clippy` and `cargo test` on `macos-14`, from the Actions tab or on pull requests labelled `macos` (hosted macOS minutes are expensive). It cannot boot VMs: hosted runners have no nested virtualization.
 
@@ -115,4 +111,4 @@ On the Mac, from a checkout of this branch:
 9. Service: install the LaunchAgent, reboot (with automatic login), check kiln comes back; `launchctl bootout` stops it and its VMs; `kill -9` of kiln is restarted by launchd, and `kiln doctor` reports stray QEMUs only while they live.
 10. Self-update: with a test release that has an `aarch64-macos` tarball, **Update** swaps `~/.local/bin/kiln` and re-execs; a deliberately broken build is rolled back after two failed starts under launchd.
 11. Dashboard: Settings › Network › Serve over HTTPS works with the Tailscale app (the `tailscale serve` doctor check passes) and logs you in without the dashboard key; host memory, load and CPU numbers look right (compare with Activity Monitor); memory gating stops launches when memory runs out.
-12. Then set `KILN_MACOS_RELEASE` (see [Releases](#releases)).
+12. Report anything that fails; releases already ship the macOS build, so fix forward.

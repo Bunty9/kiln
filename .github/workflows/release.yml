@@ -1,14 +1,14 @@
-# Tag vX.Y.Z on a main commit to publish a release. Built on kiln itself (Ubuntu 24.04 VMs):
-# kiln-X.Y.Z-x86_64-linux.tar.gz needs glibc 2.39+ (Ubuntu 24.04, Debian 13 or newer);
-# kiln-X.Y.Z-x86_64-linux-musl.tar.gz is fully static and runs on any x86_64 Linux.
-# kiln-X.Y.Z-aarch64-macos.tar.gz (Apple Silicon) is built on a GitHub-hosted macos-14 runner, only
-# while the repository variable KILN_MACOS_RELEASE is "true" (see docs/apple-silicon.md).
+# Tag vX.Y.Z on a main commit to publish a release. Five tarballs, all Ed25519-signed:
+# kiln-X.Y.Z-x86_64-linux.tar.gz and kiln-X.Y.Z-aarch64-linux.tar.gz need glibc 2.39+ (Ubuntu 24.04,
+# Debian 13 or newer); the -musl variants are fully static and run on any Linux of that CPU;
+# kiln-X.Y.Z-aarch64-macos.tar.gz is for Apple Silicon (ad-hoc signed by the linker, not notarized).
+# x86_64 is built on the kiln box, aarch64 Linux and macOS on GitHub-hosted native runners.
 # Each tarball has a .sha256 and a .sig (raw Ed25519 signature of the tarball's bytes);
 # running kilns install only releases signed with the key whose public half is in src/update.rs.
 #
-# Two jobs, two fresh VMs. `build` (and `build-macos`) compile (build scripts, proc macros, rustup)
-# and never see the key. `sign` runs no project code: it signs the built tarballs with the key from
-# the `release` environment (deployable from v* tags only), verifies them and publishes.
+# Two stages, fresh VMs. The build jobs compile (build scripts, proc macros, rustup) and never see
+# the key. `sign` runs no project code: it signs the built tarballs with the key from the `release`
+# environment (deployable from v* tags only), verifies them and publishes.
 name: release
 on:
   push:
@@ -72,10 +72,60 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-arm:
+    # Native aarch64 Linux on a GitHub-hosted runner (free for public repos), so `ring`'s C code
+    # needs no cross toolchain.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag is on main and matches Cargo.toml
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $want"; exit 1; }
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          rustup target add aarch64-unknown-linux-musl
+          sudo apt-get update -q && sudo apt-get install -y musl-tools
+      - name: Build
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build --release --locked && ./target/release/kiln --version
+          file target/release/kiln | grep -q 'ARM aarch64' || { echo "not an aarch64 binary"; exit 1; }
+          cargo build --release --locked --target aarch64-unknown-linux-musl
+          bin=target/aarch64-unknown-linux-musl/release/kiln
+          "$bin" --version
+          f=$(file "$bin"); l=$(ldd "$bin" 2>&1 || true)
+          echo "$f"; echo "$l"
+          echo "$f" | grep -q 'ARM aarch64' || { echo "musl build is not aarch64"; exit 1; }
+          echo "$f" | grep -Eq 'static(-pie|ally) linked' && ! echo "$f" | grep -q interpreter || { echo "musl build is not static"; exit 1; }
+          echo "$l" | grep -Eq 'not a dynamic executable|statically linked' || { echo "musl build is not static"; exit 1; }
+      - name: Package
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for flavor in ":target/release/kiln" "-musl:target/aarch64-unknown-linux-musl/release/kiln"; do
+            name="kiln-$v-aarch64-linux${flavor%%:*}"
+            mkdir -p "dist/$name"
+            cp "${flavor#*:}" README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "dist/$name/"
+            cp -r deploy "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-arm
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 1
+
   build-macos:
-    # Off until the macOS build is proven on a real Mac: set the repository variable
-    # KILN_MACOS_RELEASE to "true" to publish kiln-X.Y.Z-aarch64-macos.tar.gz with each release.
-    if: vars.KILN_MACOS_RELEASE == 'true'
     runs-on: macos-14 # Apple Silicon
     permissions:
       contents: read
@@ -96,6 +146,9 @@ jobs:
           cargo test --locked
           cargo build --release --locked && ./target/release/kiln --version
           file target/release/kiln | grep -q 'arm64' || { echo "not an arm64 binary"; exit 1; }
+          # Apple Silicon refuses unsigned binaries; the linker adds an ad-hoc signature. Fail if it is missing.
+          codesign --verify --strict target/release/kiln
+          codesign -dv target/release/kiln 2>&1 | grep -q 'Signature=adhoc' || { echo "no ad-hoc code signature"; exit 1; }
       - name: Package
         env:
           COPYFILE_DISABLE: "1" # no AppleDouble ._ files in the tarball
@@ -115,9 +168,8 @@ jobs:
           retention-days: 1
 
   sign:
-    needs: [build, build-macos]
-    # build-macos is skipped unless KILN_MACOS_RELEASE is on; a failed or cancelled build never publishes.
-    if: always() && needs.build.result == 'success' && (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
+    # Runs only if every build succeeded: a release is all five platforms or nothing.
+    needs: [build, build-arm, build-macos]
     runs-on: [self-hosted, kiln]
     environment: release
     permissions:
@@ -131,10 +183,21 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          # dist (Linux) and, when built, dist-macos.
+          # dist (x86_64 Linux), dist-arm (aarch64 Linux), dist-macos.
           pattern: dist*
           merge-multiple: true
           path: dist
+      - name: Check all five tarballs are here
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for p in x86_64-linux x86_64-linux-musl aarch64-linux aarch64-linux-musl aarch64-macos; do
+            for ext in "" .sha256; do
+              [ -s "dist/kiln-$v-$p.tar.gz$ext" ] || { echo "missing dist/kiln-$v-$p.tar.gz$ext"; exit 1; }
+            done
+          done
+          [ "$(find dist -name "*.tar.gz" | wc -l)" -eq 5 ] || { echo "unexpected tarballs:"; find dist; exit 1; }
+      - name: Verify the SHA-256 files
+        run: cd dist && sha256sum -c ./*.sha256
       - name: Sign
         env:
           KEY: ${{ secrets.KILN_RELEASE_SIGNING_KEY }}
@@ -164,7 +227,7 @@ jobs:
           done
       - name: Attest build provenance
         # SLSA provenance for the tarballs, signed via Sigstore and stored by GitHub. Verify with:
-        #   gh attestation verify kiln-X.Y.Z-x86_64-linux.tar.gz --repo Bunty9/kiln
+        #   gh attestation verify kiln-X.Y.Z-<platform>.tar.gz --repo Bunty9/kiln
         # Attestations need a public repo (or GHE Cloud), hence the gate while the repo is private.
         if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

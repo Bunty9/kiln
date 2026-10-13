@@ -10,6 +10,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- **Releases for arm64.** Every release now also ships `kiln-X.Y.Z-aarch64-linux.tar.gz` (glibc 2.39+), `kiln-X.Y.Z-aarch64-linux-musl.tar.gz` (static) and `kiln-X.Y.Z-aarch64-macos.tar.gz` (Apple Silicon, ad-hoc signed by the linker, not notarized), built natively on GitHub-hosted runners and signed with the same Ed25519 key as the x86_64 tarballs (names unchanged). kiln updates itself from the tarball for its own OS, CPU and libc, and refuses to update on a platform with no build (Intel Mac, other CPUs) instead of fetching another platform's binary.
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
 - A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos.
 
@@ -72,7 +73,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
-- Apple Silicon (experimental, untested on a real Mac): on macOS kiln runs native linux/arm64 VMs with QEMU and Hypervisor.framework, advertising `ARM64` runners labelled `<label>-arm64` and `<label>-arm64-<N>cpu` (never the plain label). launchd LaunchAgent (`deploy/kiln.plist`), `aarch64-macos` self-update flavor, a gated macOS release build (`KILN_MACOS_RELEASE`), a `macos` CI workflow and `scripts/macos-smoke.sh`. No filtered egress and no Docker mirror on macOS. aarch64 Linux hosts with KVM work the same way. See [docs/apple-silicon.md](docs/apple-silicon.md).
+- Apple Silicon (experimental, untested on a real Mac): on macOS kiln runs native linux/arm64 VMs with QEMU and Hypervisor.framework, advertising `ARM64` runners labelled `<label>-arm64` and `<label>-arm64-<N>cpu` (never the plain label). launchd LaunchAgent (`deploy/kiln.plist`), `aarch64-macos` self-update flavor, a `macos` CI workflow and `scripts/macos-smoke.sh`. No filtered egress and no Docker mirror on macOS. aarch64 Linux hosts with KVM work the same way. See [docs/apple-silicon.md](docs/apple-silicon.md).
 - **Host graphs on the Overview.** The Host card's CPU and memory bars are split by job VM, one colour per VM (the same colour marks its tile under Now running), with grey for the rest of the host. Opening the card shows stacked area charts of both over the last 5 minutes, 15 minutes or an hour, scrolling continuously, with a crosshair readout per VM. kiln samples `/proc` every 2 s and keeps an hour in memory (`GET /api/host`).
 - **On crates.io as `kiln-ci`:** `cargo install kiln-ci --locked --root ~/.local` installs the `kiln` binary. Every `v*` tag publishes there after the GitHub release.
 

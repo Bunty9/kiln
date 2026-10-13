@@ -20,8 +20,8 @@ pub const PUBLIC_KEY: &str = "zOK6AdHJZXwFqAOUApNnaU7r5PZSCjkpAjLRu2w16ZM=";
 const MAX_BOOTS: u32 = 2;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MUSL: bool = cfg!(target_env = "musl");
-/// This build's release flavor: `x86_64-linux`, `x86_64-linux-musl` or `aarch64-macos`.
-const FLAVOR: &str = flavor(cfg!(target_os = "macos"), std::env::consts::ARCH, MUSL);
+/// This build's release flavor (see `flavor`); `None` on a platform releases are not built for.
+const FLAVOR: Option<&str> = flavor(cfg!(target_os = "macos"), std::env::consts::ARCH, MUSL);
 
 #[derive(Clone)]
 struct Release {
@@ -392,7 +392,8 @@ async fn apply(app: &Arc<App>, manual: bool) -> Result<()> {
     if !manual && !auto_apply(Some(&rel.version), VERSION, skip.as_deref()) {
         bail!("kiln {} was rolled back: auto_update skips it (apply it by hand to retry)", rel.version);
     }
-    let name = asset_name(&rel.version, FLAVOR);
+    let flavor = FLAVOR.with_context(|| format!("no kiln release is built for {} {}", std::env::consts::OS, std::env::consts::ARCH))?;
+    let name = asset_name(&rel.version, flavor);
     let [tgz, sha, sig] =
         pick_assets(&rel.assets, &name).with_context(|| format!("release {} has no signed {name} (with .sha256 and .sig)", rel.version))?;
     let (tgz, sha, sig) = (download(app, &repo, tgz).await?, download(app, &repo, sha).await?, download(app, &repo, sig).await?);
@@ -625,15 +626,18 @@ fn auto_apply(latest: Option<&str>, current: &str, skip: Option<&str>) -> bool {
     latest.is_some_and(|l| newer(l, current) && skip.is_none_or(|s| newer(l, s)))
 }
 
-/// `<arch>-macos`, or `<arch>-linux` with a `-musl` suffix for the static build.
-const fn flavor(macos: bool, arch: &str, musl: bool) -> &'static str {
-    match (macos, arch.as_bytes(), musl) {
-        (true, b"aarch64", _) => "aarch64-macos",
+/// Release flavor, which names the tarball: `x86_64-linux`, `x86_64-linux-musl` (static),
+/// `aarch64-linux`, `aarch64-linux-musl` or `aarch64-macos`. `None` elsewhere (Intel Macs, other
+/// CPUs): an update must never fetch a binary for another platform.
+const fn flavor(macos: bool, arch: &str, musl: bool) -> Option<&'static str> {
+    Some(match (macos, arch.as_bytes(), musl) {
+        (true, b"aarch64", false) => "aarch64-macos",
         (false, b"aarch64", false) => "aarch64-linux",
         (false, b"aarch64", true) => "aarch64-linux-musl",
-        (_, _, true) => "x86_64-linux-musl",
-        _ => "x86_64-linux",
-    }
+        (false, b"x86_64", false) => "x86_64-linux",
+        (false, b"x86_64", true) => "x86_64-linux-musl",
+        _ => return None,
+    })
 }
 
 /// Tarball of `version` for this build's flavor.
@@ -715,15 +719,25 @@ mod tests {
 
     #[test]
     fn assets_by_flavor() {
-        assert_eq!(asset_name("0.2.0", flavor(false, "x86_64", false)), "kiln-0.2.0-x86_64-linux.tar.gz");
-        assert_eq!(asset_name("0.2.0", flavor(false, "x86_64", true)), "kiln-0.2.0-x86_64-linux-musl.tar.gz");
-        assert_eq!(asset_name("0.2.0", flavor(true, "aarch64", false)), "kiln-0.2.0-aarch64-macos.tar.gz");
-        assert_eq!(flavor(false, "aarch64", false), "aarch64-linux");
+        // (macos, arch, musl) -> tarball. The x86_64 Linux names must never change: installed kilns fetch them.
+        for (m, arch, musl, want) in [
+            (false, "x86_64", false, "kiln-0.2.0-x86_64-linux.tar.gz"),
+            (false, "x86_64", true, "kiln-0.2.0-x86_64-linux-musl.tar.gz"),
+            (false, "aarch64", false, "kiln-0.2.0-aarch64-linux.tar.gz"),
+            (false, "aarch64", true, "kiln-0.2.0-aarch64-linux-musl.tar.gz"),
+            (true, "aarch64", false, "kiln-0.2.0-aarch64-macos.tar.gz"),
+        ] {
+            assert_eq!(asset_name("0.2.0", flavor(m, arch, musl).unwrap()), want);
+        }
+        // no release for these: fail rather than fetch another platform's binary
+        for (m, arch, musl) in [(true, "x86_64", false), (true, "aarch64", true), (false, "riscv64", false), (false, "arm", true)] {
+            assert_eq!(flavor(m, arch, musl), None, "{m} {arch} {musl}");
+        }
         if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) {
-            assert_eq!(FLAVOR, "x86_64-linux");
+            assert_eq!(FLAVOR, Some("x86_64-linux"));
         }
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            assert_eq!(FLAVOR, "aarch64-macos");
+            assert_eq!(FLAVOR, Some("aarch64-macos"));
         }
         let a = json!([
             { "id": 1, "name": "kiln-0.2.0-x86_64-linux.tar.gz" },
