@@ -53,4 +53,22 @@ assert(!can(gl, 'workflows') && can(gl, 'dispatch') && !can(undefined, 'rerun'))
 assert.equal(forgeUrl(gh, 'https://github.com/acme/demo/pull/1'), 'https://github.com/acme/demo/pull/1');
 assert.equal(forgeUrl(gh, 'https://github.com.evil.example/x'), '#', 'only the forge own origin');
 assert.equal(forgeUrl(gh, 'javascript:alert(1)'), '#'); assert.equal(forgeUrl(undefined, 'https://github.com/x'), '#');
+// GitLab: what the token's scopes mean, expiry in days, free forge ids, project paths.
+const { glScopes, daysLeft, nextForgeId, repoPath } = new Function(['GL_SCOPES', 'glScopes', 'daysLeft', 'nextForgeId', 'repoPath'].map(grab).join('\n') +
+  '\nreturn { glScopes, daysLeft, nextForgeId, repoPath };')();
+assert.equal(glScopes({}), null, 'scopes not read yet'); assert.equal(glScopes({ scopes: null }), null);
+assert.deepEqual(glScopes({ scopes: ['create_runner', 'manage_runner', 'read_api'] }), { full: false, missing: [] });
+assert.deepEqual(glScopes({ scopes: ['read_api'] }), { full: false, missing: ['create_runner', 'manage_runner'] });
+assert.deepEqual(glScopes({ scopes: ['api'] }), { full: true, missing: [] }, 'api covers the runner scopes');
+assert.deepEqual(glScopes({ scopes: [] }).missing.length, 3);
+const T = Date.UTC(2027, 9, 11, 12) / 1000;
+assert.equal(daysLeft('2027-10-11', T), 0, 'valid through the day'); assert.equal(daysLeft('2027-10-12', T), 1);
+assert.equal(daysLeft('2027-10-10', T), -1); assert.equal(daysLeft(null, T), null); assert.equal(daysLeft('soon', T), null);
+assert.equal(nextForgeId('gitlab', []), 'gitlab'); assert.equal(nextForgeId('gitlab', ['gitlab']), 'gitlab-2');
+assert.equal(nextForgeId('gitlab', ['gitlab', 'gitlab-2']), 'gitlab-3');
+assert.equal(repoPath('gl', 'gl:g/s/p'), 'g/s/p'); assert.equal(repoPath('gl', 'o/n'), 'o/n');
+assert.equal(repoPath('gl', 'gl2:g/p'), 'gl2:g/p', 'only this forge prefix');
+// A GitLab forge whose token has no `api` scope shows no Rerun, Cancel or Run pipeline (the server's caps say so).
+const glNoApi = { id: 'gl', url: 'https://gitlab.example', repos: ['gl:g/p'], caps: { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false } };
+assert.deepEqual(runActs(true, glNoApi), []); assert.deepEqual(runActs(false, glNoApi), []); assert(!can(glNoApi, 'dispatch'));
 console.log('dashboard analytics ok');

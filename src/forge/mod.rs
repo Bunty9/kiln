@@ -123,6 +123,14 @@ pub fn unknown_keys(old: &[ForgeCfg], new: &[ForgeCfg]) -> Vec<String> {
     out
 }
 
+/// Forges in `new` whose address, kind, credential source or network differ from the stored one
+/// of the same id. The token file belongs to the forge id, so changing where it is sent would
+/// hand a saved token to a new origin: such a change is a remove and an add (the token goes).
+pub fn moved(old: &[ForgeCfg], new: &[ForgeCfg]) -> Vec<String> {
+    let key = |f: &ForgeCfg| (f.kind, f.url.clone(), f.credential, f.network);
+    new.iter().filter(|f| old.iter().any(|o| o.id == f.id && key(o) != key(f))).map(|f| f.id.as_str().to_string()).collect()
+}
+
 /// `[a-z][a-z0-9-]{0,23}`; part of cache filenames, so effectively immutable.
 #[derive(Serialize, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ForgeId(String);
@@ -523,7 +531,7 @@ impl Forge {
     pub fn caps(&self) -> Caps {
         match self {
             Self::GitHub(_) => github::CAPS,
-            Self::GitLab(_) => gitlab::CAPS,
+            Self::GitLab(g) => g.caps(),
             Self::Gitea(g) => g.caps(),
         }
     }
@@ -592,6 +600,14 @@ impl Forge {
             Self::Gitea(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
         }
     }
+    /// Whether kiln starts VMs for this forge yet (GitLab and Gitea are in preview until it does).
+    pub fn launches(&self) -> bool {
+        match self {
+            Self::GitHub(_) => true,
+            Self::GitLab(_) => gitlab::LAUNCH_READY,
+            Self::Gitea(_) => gitea::LAUNCH_READY,
+        }
+    }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
@@ -632,7 +648,7 @@ impl Forge {
     pub async fn refresh(&self) {
         match self {
             Self::GitHub(g) => g.gh.refresh_latest().await,
-            Self::GitLab(_) => {}
+            Self::GitLab(g) => g.refresh().await,
             Self::Gitea(g) => g.refresh().await,
         }
     }

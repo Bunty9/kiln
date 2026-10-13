@@ -667,6 +667,7 @@ const HELP = {
   runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when GitHub hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
   failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes. The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
   webhooks: ["Webhooks", "This box sends alerts to Slack, Discord, ntfy or any https URL, with no dashboard open. Each destination picks job, health and security alerts, and workflow rules add the successes you choose. A URL is a secret: it is never shown again after saving.", "alerts"],
+  gitlab: ["GitLab", "kiln serves a GitLab project with a bot account's access token (`create_runner`, `manage_runner`, `read_api`). For each job it makes a one-job runner in the project, boots a VM for it and deletes both afterwards. GitLab support is in preview: jobs will not run until enabled.", "gitlab"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -1581,6 +1582,78 @@ const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
 const fld = (id, label, ctl, hint, help, t) => `<div class="fld"><div><label for="${id}"${tip(t)}>${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
 const num = (k, v, step = 1) => `<input type="number" id="f-${k}" data-k="${k}" value="${esc(v)}" min="0" step="${step}">`;
+/* ---------- forges: adding one, the GitLab card ---------- */
+const GL_SCOPES = ['create_runner', 'manage_runner', 'read_api'];
+// What a GitLab token's scopes (auth.scopes from /api/forges) mean for kiln; null until they are known.
+function glScopes(auth) {
+  const s = auth?.scopes; if (!Array.isArray(s)) return null;
+  const full = s.includes('api');
+  return { full, missing: full ? [] : GL_SCOPES.filter(x => !s.includes(x)) };
+}
+// Whole days until a token's expiry date (YYYY-MM-DD, valid through that day, UTC); null when it never expires.
+function daysLeft(date, t) {
+  const e = Date.parse(date + 'T23:59:59Z');
+  return isNaN(e) ? null : Math.floor((e - t * 1000) / 86400000);
+}
+// A free id for a new forge: gitlab, gitlab-2, ...
+function nextForgeId(base, used) {
+  let id = base, n = 2;
+  while (used.includes(id)) id = `${base}-${n++}`;
+  return id;
+}
+// A project's path inside forge `id`, from the canonical key kiln lists (`gl:group/proj`).
+const repoPath = (id, key) => String(key).startsWith(id + ':') ? String(key).slice(id.length + 1) : String(key);
+const FC = {}, FB = {}; // forge id -> last setup check; forge id -> { busy } or { err } for the card
+// Redraw whatever shows forges: Settings › Forges, or the setup steps.
+const forgeUI = () => { if (cur === pages.settings && pages.settings.g === 'forges') pages.settings.live(); else if (cur === pages.setup) pages.setup.update(); };
+// Replaces a forge's project list with what `edit` makes of the current one, then reloads state.
+async function forgeRepos(id, edit) {
+  const f = (F || []).find(x => x.id === id); if (!f) return;
+  await post(`/api/forges/${encodeURIComponent(id)}/repos`, { repos: edit(f) }); await poll();
+}
+// Asks GitLab about the saved token and the bot's role on each project.
+async function forgeTest(id) {
+  FB[id] = { busy: 1 }; forgeUI();
+  try { FC[id] = await post(`/api/forges/${encodeURIComponent(id)}/check`); FB[id] = null; } catch (e) { FB[id] = { err: e.message }; }
+  await poll(); forgeUI();
+}
+const glTokenUrl = f => forgeUrl(f, `${f.url}/-/user_settings/personal_access_tokens?name=kiln&scopes=${GL_SCOPES.join(',')}`);
+const glPreview = f => f.launches ? '' : `<div class="cal w" style="margin:0 0 16px"><b>GitLab support is in preview:</b> jobs will not run until enabled. kiln reads this project's queue and pipelines, but starts no VMs for GitLab yet.</div>`;
+const glTokenForm = f => `<form data-form="forgetoken" data-id="${esc(f.id)}" class="bar" style="margin:0"><label class="sr" for="ft-${esc(f.id)}">GitLab access token</label><input type="password" id="ft-${esc(f.id)}" placeholder="glpat-…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
+  <p class="fg2 sm" style="margin-top:8px">Scopes: <code>create_runner</code>, <code>manage_runner</code>, <code>read_api</code>. <a href="${glTokenUrl(f)}" target="_blank" rel="noopener">Create it ↗</a> opens GitLab with those filled in; sign in as the bot user first. kiln tries the token before saving it, stores it on this box only and never shows it again.</p>`;
+const glRepoForm = f => `<form data-form="forgerepo" data-id="${esc(f.id)}" class="bar" style="margin:12px 0 0"><label class="sr" for="fr-${esc(f.id)}">GitLab project</label><input type="text" id="fr-${esc(f.id)}" placeholder="group/project or paste its URL" autocomplete="off" spellcheck="false" required style="width:320px"><button class="btn pri">Add project</button></form>`;
+const glWhy403 = `<details style="margin-top:12px"><summary>Creating a runner fails with 403?</summary><p class="fg2 sm" style="margin-top:8px">GitLab gives the same answer for three different causes. Check each: (1) the bot's role on the project is below Maintainer; (2) the instance setting <b>valid_runner_registrars</b> (Admin › Settings › CI/CD › Runner registration) does not include <i>project</i>; (3) runner registration is switched off for the project or its group (Settings › CI/CD › Runners; there is no API for it, so kiln cannot check). A token without the right scope gets a different error, which kiln names.</p></details>`;
+const glPower = () => `<details style="margin-top:16px"><summary>Token power: what this token can do</summary><div class="fg2 sm" style="margin-top:8px">
+  <p><code>create_runner</code> and <code>manage_runner</code> let kiln make a one-job runner for each VM, pause it and delete it. <code>read_api</code> lets it see queued jobs, pipelines and logs.</p>
+  <p><b>The catch:</b> with <code>read_api</code>, a token whose user is a Maintainer can also read the project's CI/CD variables, values included, even the masked and protected ones. GitHub never allows that. So use a <b>dedicated bot account</b> that belongs to only the projects kiln serves, never your own account, and keep the token out of anything else.</p>
+  <p>Rerun, Cancel and Run pipeline in this dashboard need the wider <code>api</code> scope. kiln recommends against it, and hides those buttons unless the token has it.</p>
+  <p>A job VM never gets this token. It gets a runner credential that works for one project, which kiln deletes when the job ends.</p></div></details>`;
+// One GitLab project row: its role on the project (from the last Test), and a way to drop it.
+function glRepoRow(f, key) {
+  const r = FC[f.id]?.repos?.find(x => x.repo === key), path = repoPath(f.id, key);
+  const st = r ? badge(r.role || 'no access', r.ok ? 'passed' : 'failed', r.ok ? 'Maintainer or above: kiln can create runners in this project' : r.message) : badge('not checked', 'queued', "Press Test to check the bot's role on this project");
+  return `<li><div class="row flat bf" style="grid-template-columns:132px minmax(0,1fr) auto"><span>${st}</span><span>${esc(path)}${r && !r.ok ? ` <span class="fail sm">${esc(r.message)}</span>` : ''}</span>
+    <button class="btn" data-act="forgerepormv" data-id="${esc(f.id)}" data-repo="${esc(key)}" aria-label="Remove ${esc(path)}"${tip('Stop serving this project. Running jobs finish.')}>${ic('x')}</button></div></li>`;
+}
+// What the last Test or token save found, or why it failed.
+function glCheckHTML(f) {
+  const c = FC[f.id], b = FB[f.id];
+  if (b?.busy) return '<p class="fg2 sm">Checking with GitLab…</p>';
+  if (b?.err) return `<div class="cal" role="alert">${esc(b.err)}</div>`;
+  if (!c) return '';
+  return (c.problems || []).map(p => `<div class="cal">${esc(p)}</div>`).join('') || (c.ok ? `<div class="cal o">Everything kiln needs is in place${c.version ? ` (GitLab ${esc(c.version)})` : ''}.</div>` : '');
+}
+// The Add forge form, shared by Settings › Forges and the setup wizard. Gitea joins the kind list with its own task.
+function addForgeForm(used) {
+  const L = (id, t) => `<label for="af-${id}" style="font-size:14px;font-weight:500">${t}</label>`, col = 'display:grid;gap:4px', nid = esc(nextForgeId('gitlab', used));
+  return `<form data-form="addforge" style="display:grid;gap:12px;max-width:460px">
+    <div style="${col}">${L('kind', 'Forge')}<select id="af-kind"><option value="gitlab">GitLab</option></select></div>
+    <div style="${col}">${L('url', 'Address')}<input type="text" id="af-url" placeholder="https://gitlab.example.com" autocomplete="off" spellcheck="false" required><span class="fg2 sm">The address of the site, not of a project. https, unless the network is internal.</span></div>
+    <div style="${col}">${L('id', 'Name')}<input type="text" id="af-id" value="${nid}" pattern="[a-z][a-z0-9\\-]{0,23}" autocomplete="off" spellcheck="false" required><span class="fg2 sm">Lowercase letters, digits and dashes. It prefixes this forge's project names (<code>${nid}:group/project</code>) and cannot change later.</span></div>
+    <div style="${col}">${L('net', 'Network')}<select id="af-net"><option value="public">Public: https over the internet</option><option value="internal">Internal: LAN or tailnet, http allowed</option></select><span class="fg2 sm">Internal opens job VMs' network to this forge's address and port, and to every site behind a reverse proxy on it. Loopback and this machine's own address are refused.</span></div>
+    <div style="${col}">${L('repo', 'First project (optional)')}<input type="text" id="af-repo" placeholder="group/project or paste its URL" autocomplete="off" spellcheck="false"></div>
+    <div><button class="btn pri">Add GitLab</button></div></form>`;
+}
 const G = {
   capacity: {
     html() {
@@ -1638,9 +1711,44 @@ const G = {
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
     },
   },
+  gitlab: {
+    html(f) {
+      const id = esc(f.id);
+      return `<div class="card" id="fc-${id}"><h2>GitLab <span class="fg2 sm" style="font-weight:400">${id}</span>${hq('gitlab')}</h2>
+        <div id="fc-${id}-pv"></div><div id="fc-${id}-st"></div>
+        ${glTokenForm(f)}${glPower()}
+        <h3 style="font-size:15px;margin:24px 0 8px">Projects</h3>
+        <div id="fc-${id}-rp"></div>${glRepoForm(f)}${glWhy403}
+        <div class="bar" style="margin:20px 0 0"><button class="btn" data-act="forgetest" data-id="${id}"${tip('Ask GitLab who the token is, what it can do, and its role on each project. Creates nothing.')}>${ic('pulse')}Test</button>
+          <span class="sp"></span><button class="btn dng" data-act="forgerm" data-id="${id}"${tip('Stop serving this forge and delete its saved token')}>${ic('trash')}Remove forge</button></div>
+        <div id="fc-${id}-ck" style="margin-top:12px"></div>
+        <details style="margin-top:12px"><summary>A .gitlab-ci.yml that uses kiln</summary>${cb(`build:\n  tags: [${JL()}]\n  script:\n    - echo hello from kiln\n`)}<p class="fg2 sm">Use <code>${esc(JL())}-4cpu</code> and the other size labels like the GitHub ones. Jobs without the tag are left to your other runners.</p></details></div>`;
+    },
+    live(f) {
+      const id = f.id, at = f.auth || {}, sc = glScopes(at), set = at.source && at.source !== 'none', dl = at.expires ? daysLeft(at.expires, now()) : null;
+      const q = k => $(`#fc-${id}-${k}`);
+      setHTML(q('pv'), glPreview(f));
+      const note = [];
+      if (!set) note.push('<div class="cal w">No token yet, so kiln cannot see this forge\'s queue. Paste one below.</div>');
+      else if (f.health) note.push(`<div class="cal w">${esc(f.health)}</div>`);
+      if (sc?.missing.length) note.push(`<div class="cal">The token lacks ${sc.missing.map(x => `<code>${esc(x)}</code>`).join(', ')}. Create it again with <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>.</div>`);
+      else if (sc?.full) note.push('<div class="cal w">This token has the full <code>api</code> scope, which is more than kiln needs: anyone who gets it can change your projects. It is what turns on Rerun, Cancel and Run pipeline here. Prefer the three runner scopes unless you want those buttons.</div>');
+      else if (sc) note.push('<div class="cal neu">Least privilege: the runner scopes only. Rerun, Cancel and Run pipeline are hidden, because they need the <code>api</code> scope.</div>');
+      if (dl !== null && dl <= 14) note.push(`<div class="cal${dl <= 7 ? '' : ' w'}">The token ${dl < 0 ? 'has expired' : dl === 0 ? 'expires today' : `expires in ${dl} day${dl > 1 ? 's' : ''}`}. Create a new one and save it here before then.</div>`);
+      setHTML(q('st'), `<dl class="kv" style="margin-bottom:16px"><dt>Address</dt><dd><a href="${forgeUrl(f, f.url + '/')}" target="_blank" rel="noopener">${esc(f.url)}</a></dd>
+        <dt>Network</dt><dd>${f.network === 'internal' ? '<span class="warn">internal</span> <span class="fg2">(job VMs can reach this address and port)</span>' : 'public'}</dd>
+        <dt>Token</dt><dd>${set ? `<span class="ok">Set</span> <span class="fg2">(${at.source === 'env' ? 'environment variable' : 'saved file'})</span>` : '<span class="fail">Not set</span>'}</dd>
+        ${at.login ? `<dt>Signed in as</dt><dd>${esc(at.login)}</dd>` : ''}
+        <dt>Scopes</dt><dd>${sc ? at.scopes.map(x => `<code>${esc(x)}</code>`).join(' ') : set ? '<span class="fg2">not read yet</span>' : '—'}</dd>
+        <dt>Expires</dt><dd>${at.expires ? esc(at.expires) : set && sc ? 'never' : '—'}</dd></dl>${note.join('')}`);
+      setHTML(q('rp'), f.repos.length ? `<ul class="list">${f.repos.map(k => glRepoRow(f, k)).join('')}</ul>` : '<p class="fg2 sm">No project yet. kiln serves only the projects listed here.</p>');
+      setHTML(q('ck'), glCheckHTML(f));
+    },
+  },
   forges: {
-    // One card set per configured forge (GET /api/forges), by kind. GitLab and Gitea slot in as G.gitlab / G.gitea.
-    html: () => !F ? '' : F.map(f => G[f.kind]?.html(f) ?? '').join('') || '<p class="fg2">No forge is configured.</p>',
+    // One card per configured forge (GET /api/forges), by kind: G.github, G.gitlab (Gitea joins as G.gitea), then the Add forge control.
+    html: () => !F ? '' : (F.map(f => G[f.kind]?.html(f) ?? '').join('') || '<p class="fg2">No forge is configured.</p>')
+      + `<details class="card" id="af-d"><summary><b>Add a forge</b> <span class="fg2 sm">· GitLab, on your own server or gitlab.com</span></summary><div style="margin-top:16px">${addForgeForm(F.map(f => f.id))}</div></details>`,
     live() { for (const f of F || []) G[f.kind]?.live?.(f); },
   },
   image: {
@@ -1977,7 +2085,7 @@ function renderTs() {
 }
 
 /* ---------- test PR + onboarding ---------- */
-let setupOpen = null, setupRepo = null, setupSnip = false, hello = lsJ('kiln-hello', {});
+let setupOpen = null, setupRepo = null, setupSnip = false, setupForge = null, hello = lsJ('kiln-hello', {});
 const helloSt = {}, helloErr = {};
 async function loadHello() {
   try {
@@ -2003,6 +2111,7 @@ pages.setup = {
     $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › Forges.')}>Skip for now</button></div>
       <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div id="su-consent" style="margin-bottom:16px"></div><div class="card" id="su"></div>`;
     setupOpen = null;
+    if (!F) loadForges().then(() => cur === this && this.update());
   },
   update() {
     const sc = $('#su-consent'); sc.hidden = !consentUnset(); if (sc.hidden) sc.innerHTML = ''; else if (!sc.firstChild) sc.innerHTML = consentHTML();
@@ -2017,9 +2126,24 @@ pages.setup = {
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin:16px 0"><a class="btn pri" href="#/jobs/${encodeURIComponent(first.id)}">View the job</a><a class="btn" href="#/" data-act="finish">Go to overview</a></div>
         <p class="fg2">${ok ? 'Next: close or merge the test PR, then <a href="#/guides/move">move a real workflow →</a>' : 'kiln worked; the workflow failed. <a href="#/guides/debug">Debug a failed job →</a>'}</p>`);
     }
-    const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
-    const sum = [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
+    const gl = (F || []).find(f => f.kind === 'gitlab');
+    if (setupForge === null && F) setupForge = gl && !S.token_set && !S.app ? 'gitlab' : 'github';
+    const useGl = setupForge === 'gitlab', ran = S.vms.some(v => v.busy_since);
+    const done = useGl ? [!!gl && gl.auth?.source !== 'none' && glScopes(gl.auth)?.missing.length === 0, !!gl?.repos.length, ran] : [S.token_set, rs.length > 0, ran];
+    const open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
+    const pick = `<div class="seg" role="radiogroup" aria-label="Forge">${[['github', 'GitHub'], ['gitlab', 'GitLab']].map(([k, l]) => `<button role="radio" aria-checked="${(setupForge || 'github') === k}" data-act="sufg" data-id="${k}">${l}</button>`).join('')}</div>`;
+    const sum = useGl ? [`GitLab <b>${esc(gl?.id)}</b>${gl?.auth?.login ? ` as <b>${esc(gl.auth.login)}</b>` : ''}`, (gl?.repos || []).map(k => esc(repoPath(gl.id, k))).join(', '), ''] : [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
       S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+    const prev = '<div class="cal w" style="margin:0">GitLab support is in preview: jobs will not run until enabled. You can set everything up now.</div>';
+    const glB = [
+      `${pick}${gl?.launches ? '' : prev}<p class="fg2">Use a separate GitLab user for kiln, a <b>bot account</b> such as <code>kiln-bot</code>, not yours. Add it as <b>Maintainer</b> to only the projects kiln should serve. Maintainer is what creating runners needs, and a Maintainer's token with <code>read_api</code> can read the project's CI/CD variables, so the bot should have nothing else to read.</p>`
+        + (gl ? `<p class="fg2">Sign in as the bot and create its access token with exactly <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>. Leave <code>api</code> off: it only adds Rerun and Cancel buttons, and lets the token change your projects.</p>${glTokenForm(gl)}${glCheckHTML(gl)}`
+          : `<p class="fg2">Then tell kiln where your GitLab is. The next thing you do is paste the token.</p>${addForgeForm([])}`),
+      gl ? `<p class="fg2">Which project should kiln take jobs from? Paste its URL or <code>group/project</code>. The bot must be Maintainer on it.</p>${gl.repos.length ? `<ul class="list" style="width:100%">${gl.repos.map(k => glRepoRow(gl, k)).join('')}</ul>` : ''}${glRepoForm(gl)}
+        <button class="btn" data-act="forgetest" data-id="${esc(gl.id)}"${tip("Check the bot's role on each project")}>${ic('pulse')}Test</button>${glCheckHTML(gl)}${glWhy403}` : '<p class="fg2">Connect GitLab first.</p>',
+      gl ? `<p class="fg2">Add this to <code>.gitlab-ci.yml</code> in the project and push. A job tagged <code>${esc(JL())}</code>, or a size such as <code>${esc(JL())}-4cpu</code>, is for kiln.</p>${cb(`build:\n  tags: [${JL()}]\n  script:\n    - echo hello from kiln\n`)}
+        ${gl.launches ? '' : '<div class="cal w" style="margin:0">GitLab support is in preview: jobs will not run until enabled. kiln will see the job waiting, but starts no VM for it yet, so it stays pending in GitLab.</div>'}` : '',
+    ];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
       const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
@@ -2034,21 +2158,23 @@ pages.setup = {
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
     const B = S.app ? [
-      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/forges">Settings › Forges</a>.</p>`,
+      `${pick}<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/forges">Settings › Forges</a>.</p>`,
       `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 30 seconds, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
       test(),
     ] : [
-      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
+      `${pick}<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
        <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
        <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}
        <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/forges">Create one in Settings › Forges</a>.</p>`,
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    setHTML($('#su'), strip + `<ol class="stp">${['Connect a forge', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
+    const BB = useGl ? glB : B, titles = ['Connect a forge', useGl ? 'Add the project' : S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'];
+    setHTML($('#su'), strip + `<ol class="stp">${titles.map((t, i) => {
       const d = done[i] && i !== open;
-      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
+      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${BB[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
+    rove($('#su'));
   },
 };
 
@@ -2058,9 +2184,21 @@ const GUIDES = [
     <p>When GitHub queues a job whose <code>runs-on</code> names kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
     <p>You need three things:</p>
     <ol><li><b>A GitHub token</b> (Settings › Forges), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
-    <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
+    <p>Setup walks you through all three and can open a test pull request for you. Using GitLab? <a href="#/guides/gitlab">Use GitLab</a> says what to set up (it is in preview).</p><p><a class="btn" href="#/setup">Open setup</a></p>
     <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
     <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
+  ['gitlab', 'Use GitLab', L => `<h2>Use GitLab</h2>
+    <p><b>GitLab support is in preview:</b> jobs will not run until enabled. You can connect a forge and check every step now. kiln sees a project's waiting jobs, but starts no VM for them yet.</p>
+    <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need a GitLab 16.0 or newer, on your own server or gitlab.com.</p>
+    <ol><li><b>Make a bot account.</b> A separate GitLab user, such as <code>kiln-bot</code>, added as <b>Maintainer</b> to only the projects kiln serves. Not your own account.</li>
+    <li><b>Create its access token</b> (signed in as the bot: Preferences › Access tokens) with exactly <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>. Give it an expiry; kiln warns two weeks before.</li>
+    <li><b>Add the forge</b> with its address, then paste the token. kiln tries the token before it saves it and says what is wrong, for example <i>the token lacks create_runner</i>, or <i>Developer is below Maintainer</i> for a project.</li>
+    <li><b>Add the project</b> by its <code>group/project</code> path or by pasting its URL. Press <b>Test</b> to see the bot's role on each project.</li>
+    <li><b>Tag the job</b> in <code>.gitlab-ci.yml</code>:${cb(`build:\n  tags: [${L}]\n  script:\n    - make test`)}Use <code>${L}-4cpu</code> and the other size labels like the GitHub ones. Untagged jobs are left to your other runners.</li></ol>
+    <p><b>Token power.</b> With <code>read_api</code>, a Maintainer's token can read the project's CI/CD variables, values included, masked and protected ones too. GitHub never allows that. So the bot should belong only to the projects kiln serves, and the token should be used for nothing else. A job VM never receives it: it gets a runner credential for one project, and kiln deletes that runner when the job ends.</p>
+    <p><b>Rerun, Cancel and Run pipeline</b> need the wider <code>api</code> scope. kiln recommends leaving it off, and hides those buttons unless the token has it. Without them you still rerun and cancel in GitLab itself.</p>
+    <p><b>A 403 when kiln creates a runner</b> has three causes that GitLab does not tell apart: the bot's role is below Maintainer; the instance setting <i>valid_runner_registrars</i> (Admin › Settings › CI/CD › Runner registration) does not include <i>project</i>; or runner registration is turned off for the project or its group. Check each. A missing scope gets a different error, which kiln names.</p>
+    <p><b>Forks.</b> kiln never runs a job from a fork's merge request. GitLab can also run a fork's pipeline <i>in your project</i> when someone with access clicks Run pipeline, and that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave <i>Run pipelines in the parent project for merge requests from forks</i> off, or do not run them.</p>`],
   ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
     ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
     <p>For another size, use exactly one size label:</p>
@@ -2120,7 +2258,7 @@ const GUIDES = [
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', gitlab: 'key', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
     $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
       <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
@@ -2144,6 +2282,15 @@ const ACT = {
     const i = document.createElement('input'); i.name = 'manifest'; i.value = JSON.stringify(m.manifest); f.append(i);
     document.body.append(f); f.submit();
   },
+  forgetest: b => forgeTest(b.dataset.id),
+  async forgerm(b) {
+    const id = b.dataset.id;
+    if (!await ask({ title: `Remove forge ${id}?`, body: 'kiln stops serving its projects and deletes its saved token. Its running jobs must finish first. Its cache disks stay until you clear them.', action: 'Remove', danger: 1 })) return;
+    await api(`/api/forges/${encodeURIComponent(id)}`, { method: 'DELETE' }); delete FC[id]; delete FB[id]; toast(`Forge ${id} removed`); await poll();
+    if (cur === pages.settings) pages.settings.render(); else forgeUI();
+  },
+  forgerepormv: b => forgeRepos(b.dataset.id, f => f.repos.filter(k => k !== b.dataset.repo)).then(() => toast('Project removed')),
+  sufg(b) { setupForge = b.dataset.id; pages.setup.update(); },
   async rmapp() {
     if (!await ask({ title: 'Remove the GitHub App?', body: 'kiln goes back to token auth. The App itself stays on GitHub; delete it there if you no longer need it.', action: 'Remove', danger: 1 })) return;
     await api('/api/app', { method: 'DELETE' }); toast('GitHub App removed'); await poll();
@@ -2428,6 +2575,21 @@ document.addEventListener('submit', async e => {
     }
     else if (k === 'notify') await ACT.nsave();
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
+    else if (k === 'addforge') {
+      const v = n => $('#af-' + n, f).value.trim(), repo = v('repo'), id = v('id');
+      await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] });
+      toast('GitLab added. Now give it a token.'); await poll();
+      if (cur === pages.settings) { pages.settings.render(); $(`#fc-${id}`)?.scrollIntoView({ block: 'start' }); } else forgeUI();
+    }
+    else if (k === 'forgetoken') {
+      const id = f.dataset.id; FB[id] = { busy: 1 }; forgeUI();
+      try { FC[id] = await post(`/api/forges/${encodeURIComponent(id)}/token`, { token: inp.value.trim() }); FB[id] = null; inp.value = ''; toast('Token saved'); } catch (err) { FB[id] = { err: err.message }; }
+      await poll(); forgeUI();
+    }
+    else if (k === 'forgerepo') {
+      const id = f.dataset.id; await forgeRepos(id, x => [...x.repos, inp.value.trim()]); inp.value = ''; toast('Project added');
+      if ((F || []).find(x => x.id === id)?.auth?.source !== 'none') await forgeTest(id); else forgeUI();
+    }
     else if (k === 'token') {
       tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();
       if (cur === pages.settings) $('#tok-res').innerHTML = tokHTML(); else cur.update();
