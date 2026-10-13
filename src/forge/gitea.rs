@@ -4,7 +4,9 @@
 //! network mode. Registration, retire, sweep, verdict facts and logs arrive with GT-2/GT-3 and
 //! fail closed until then.
 
-use super::{Caps, Credential, Demand, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, net};
+use super::{
+    Caps, Credential, Demand, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, env_name, net, read_token_file,
+};
 use anyhow::{Context, Result, bail};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use serde_json::{Value, json};
@@ -154,15 +156,7 @@ impl Gitea {
         if self.cred != Credential::File {
             return;
         }
-        let t = match std::fs::read_to_string(data.join("forges").join(format!("{}.token", self.id.as_str()))) {
-            Ok(t) => Some(t),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                tracing::warn!("forge {}: reading the token file: {e}", self.id.as_str());
-                None
-            }
-        };
-        *self.token.write().unwrap() = t;
+        *self.token.write().unwrap() = read_token_file(data, &self.id);
     }
 
     /// What keeps this forge from polling: no credential, or a server older than 1.25.
@@ -322,10 +316,6 @@ impl Gitea {
         }
         Ok(d)
     }
-}
-
-fn env_name(id: &ForgeId) -> String {
-    format!("KILN_FORGE_{}_TOKEN", id.as_str().to_ascii_uppercase().replace('-', "_"))
 }
 
 fn unsupported(v: Ver) -> String {

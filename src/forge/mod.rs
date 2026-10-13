@@ -7,6 +7,7 @@
 pub mod console;
 pub mod gitea;
 pub mod github;
+pub mod gitlab;
 pub mod net;
 
 use anyhow::{Result, bail};
@@ -460,26 +461,50 @@ pub struct RunQuery {
     pub page: u32,
 }
 
+/// `gl` -> `KILN_FORGE_GL_TOKEN`: the environment variable of a forge's `env` credential.
+pub fn env_name(id: &ForgeId) -> String {
+    format!("KILN_FORGE_{}_TOKEN", id.as_str().to_ascii_uppercase().replace('-', "_"))
+}
+
+/// Where a forge's `file` credential lives.
+pub fn token_path(data: &std::path::Path, id: &ForgeId) -> std::path::PathBuf {
+    data.join("forges").join(format!("{}.token", id.as_str()))
+}
+
+/// The raw `file` credential; a missing file is no credential, an unreadable one is logged (never its content).
+pub fn read_token_file(data: &std::path::Path, id: &ForgeId) -> Option<String> {
+    match std::fs::read_to_string(token_path(data, id)) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            tracing::warn!("forge {}: reading the token file: {e}", id.as_str());
+            None
+        }
+    }
+}
+
 /// What a Gitea call says until its task lands (GT-2/GT-3 and the dashboard actions).
 const NOT_YET: &str = "not implemented for Gitea yet";
 
-/// A configured forge. GitLab arrives with its own variant; `Forge::new` refuses its config until then.
+/// A configured forge.
 pub enum Forge {
     GitHub(github::GitHub),
     Gitea(Box<gitea::Gitea>),
+    GitLab(Box<gitlab::GitLab>),
 }
 
 impl Forge {
-    pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>) -> Result<Self> {
+    pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>, data: &std::path::Path) -> Result<Self> {
         match cfg.kind {
             Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
+            Kind::GitLab => Ok(Self::GitLab(Box::new(gitlab::GitLab::new(cfg, data)?))),
             Kind::Gitea => Ok(Self::Gitea(Box::new(gitea::Gitea::new(cfg)?))),
-            k => bail!("forge {:?}: {k:?} is not yet supported", cfg.id.as_str()),
         }
     }
     pub fn caps(&self) -> Caps {
         match self {
             Self::GitHub(_) => github::CAPS,
+            Self::GitLab(_) => gitlab::CAPS,
             Self::Gitea(g) => g.caps(),
         }
     }
@@ -487,6 +512,7 @@ impl Forge {
     pub fn web_url(&self) -> &str {
         match self {
             Self::GitHub(_) => "https://github.com",
+            Self::GitLab(g) => g.web_url(),
             Self::Gitea(g) => g.web_url(),
         }
     }
@@ -494,66 +520,77 @@ impl Forge {
     pub fn auth(&self) -> Value {
         match self {
             Self::GitHub(g) => g.auth(),
+            Self::GitLab(g) => g.auth(),
             Self::Gitea(g) => g.auth(),
         }
     }
     pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
         match self {
             Self::GitHub(g) => g.runs(repo, q).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
         match self {
             Self::GitHub(g) => g.run(repo, id).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
         match self {
             Self::GitHub(g) => g.job_log(repo, id, from).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
         match self {
             Self::GitHub(g) => g.workflows(repo).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
         match self {
             Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         match self {
             Self::GitHub(g) => g.cancel(repo, id).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
+            Self::GitLab(g) => g.id(),
             Self::Gitea(g) => g.id(),
         }
     }
     pub fn kind(&self) -> Kind {
         match self {
             Self::GitHub(_) => Kind::GitHub,
+            Self::GitLab(_) => Kind::GitLab,
             Self::Gitea(_) => Kind::Gitea,
         }
     }
     pub fn has_credential(&self) -> bool {
         match self {
             Self::GitHub(g) => g.gh.has_token(),
+            Self::GitLab(g) => g.has_credential(),
             Self::Gitea(g) => g.has_credential(),
         }
     }
@@ -561,24 +598,29 @@ impl Forge {
     pub fn health(&self) -> Option<String> {
         match self {
             Self::GitHub(g) => g.health(),
+            Self::GitLab(g) => g.health(),
             Self::Gitea(g) => g.health(),
         }
     }
     /// Re-reads a file credential from the data dir (`<data>/forges/<id>.token`).
     pub fn load_token(&self, data: &std::path::Path) {
-        if let Self::Gitea(g) = self {
-            g.load_token(data);
+        match self {
+            Self::GitHub(_) => {}
+            Self::Gitea(g) => g.load_token(data),
+            Self::GitLab(g) => g.load_token(data),
         }
     }
     pub async fn refresh(&self) {
         match self {
             Self::GitHub(g) => g.gh.refresh_latest().await,
+            Self::GitLab(_) => {}
             Self::Gitea(g) => g.refresh().await,
         }
     }
     pub fn repo_paused(&self, repo: &RepoRef) -> Option<String> {
         match self {
             Self::GitHub(g) => g.gh.repo_paused(&repo.path),
+            Self::GitLab(_) => None,
             Self::Gitea(_) => None,
         }
     }
@@ -586,18 +628,21 @@ impl Forge {
     pub fn rate(&self) -> Option<(u64, u64, u64)> {
         match self {
             Self::GitHub(g) => g.gh.rate(),
+            Self::GitLab(_) => None,
             Self::Gitea(_) => None,
         }
     }
     pub fn repos(&self, cfg: &ForgeCfg) -> Vec<RepoRef> {
         match self {
             Self::GitHub(g) => g.repos(cfg),
+            Self::GitLab(g) => g.repos(cfg),
             Self::Gitea(g) => g.repos(cfg),
         }
     }
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
         match self {
             Self::GitHub(g) => g.demand(repo, label, default_cpus).await,
+            Self::GitLab(g) => g.demand(repo, label, default_cpus).await,
             Self::Gitea(g) => g.demand(repo, label, default_cpus).await,
         }
     }
@@ -605,12 +650,14 @@ impl Forge {
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
         match self {
             Self::GitHub(g) => g.register(repo, name, labels).await,
+            Self::GitLab(g) => g.register(repo, name, labels).await,
             Self::Gitea(_) => bail!("Gitea runner registration is not implemented yet"),
         }
     }
     pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
         match self {
             Self::GitHub(g) => g.deregister(repo, runner_id).await,
+            Self::GitLab(g) => g.deregister(repo, runner_id).await,
             Self::Gitea(_) => Dereg::Err(anyhow::anyhow!("Gitea runner retire is not implemented yet")),
         }
     }
@@ -618,12 +665,14 @@ impl Forge {
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
         match self {
             Self::GitHub(g) => g.cache_trust(job, writers).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
             Self::Gitea(_) => bail!("Gitea cache trust is not implemented yet"),
         }
     }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
         match self {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
+            Self::GitLab(g) => g.sweep(repo).await,
             // kiln registers no Gitea runner yet, so none can be stale.
             Self::Gitea(_) => Ok(0),
         }
@@ -633,6 +682,7 @@ impl Forge {
     pub fn gated(&self) -> bool {
         match self {
             Self::GitHub(_) => false,
+            Self::GitLab(_) => true,
             Self::Gitea(_) => true,
         }
     }
@@ -642,6 +692,7 @@ impl Forge {
     pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
         match self {
             Self::GitHub(_) => Ok(None),
+            Self::GitLab(_) => bail!(gitlab::LATER),
             Self::Gitea(_) => Ok(None),
         }
     }
@@ -649,6 +700,7 @@ impl Forge {
     pub async fn verdict_facts(&self, _repo: &RepoRef, _job_id: &str) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
+            Self::GitLab(_) => bail!(gitlab::LATER),
             Self::Gitea(_) => bail!("Gitea verdict facts are not implemented yet"),
         }
     }
@@ -754,8 +806,8 @@ pub async fn gate(
 pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>);
 
 impl Forges {
-    /// Match the registry to `list`. A forge that cannot be built (unsupported kind) is logged and left out.
-    pub fn sync(&self, list: &[ForgeCfg], gh: &Arc<crate::github::Gh>) {
+    /// Match the registry to `list`. A forge that cannot be built (bad config) is logged and left out.
+    pub fn sync(&self, list: &[ForgeCfg], gh: &Arc<crate::github::Gh>, data: &std::path::Path) {
         let mut m = self.0.write().unwrap();
         m.retain(|id, _| list.iter().any(|c| &c.id == id));
         for c in list {
@@ -765,7 +817,7 @@ impl Forges {
                 continue;
             }
             m.remove(&c.id);
-            match Forge::new(c, gh) {
+            match Forge::new(c, gh, data) {
                 Ok(f) => {
                     m.insert(c.id.clone(), (key, Arc::new(f)));
                 }
