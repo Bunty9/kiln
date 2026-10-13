@@ -2656,4 +2656,59 @@ mod tests {
             q.auth.as_deref().is_none_or(|a| a == "token tok-secret-1" || a == "token tok-secret-2" || a == "token tok-secret-3")
         }));
     }
+    /// X-3: one kiln, three forges. A save keeps every untouched client; a forge can only change by
+    /// being removed and added again, which drops its token, so the new client needs one.
+    #[tokio::test]
+    async fn a_settings_save_keeps_unchanged_forges_and_a_changed_one_starts_without_a_token() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, token_path};
+        let (_m, app) = typed("forge-save-mixed").await;
+        let f = |id: &str, kind: &str, url: &str| -> ForgeCfg {
+            serde_json::from_value(
+                json!({ "id": id, "kind": kind, "url": url, "credential": "file", "network": "public", "repos": ["acme/demo"] }),
+            )
+            .unwrap()
+        };
+        let (gt, gl) = (f("gitea", "gitea", "https://gitea.example.org"), f("gl", "gitlab", "https://gitlab.example.org"));
+        let gh: ForgeCfg = serde_json::from_value(json!({ "id": "github", "kind": "github" })).unwrap();
+        let save = |forges: Vec<ForgeCfg>| {
+            let app = app.clone();
+            async move {
+                let mut c = app.cfg();
+                c.forges = Some(forges);
+                set_config(State(app), Json(c)).await.map(|_| ()).map_err(|e| format!("{:#}", e.0))
+            }
+        };
+        save(vec![gh.clone(), gt.clone(), gl.clone()]).await.unwrap();
+        let id = |s: &str| ForgeId::new(s).unwrap();
+        for i in [id("gitea"), id("gl")] {
+            std::fs::create_dir_all(token_path(&app.data, &i).parent().unwrap()).unwrap();
+            std::fs::write(token_path(&app.data, &i), "tok-secret").unwrap();
+        }
+        app.forges.load_tokens(&app.data);
+        let live = |i: &str| app.forges.get(&id(i)).unwrap();
+        let (a_gh, a_gt, a_gl) = (live("github"), live("gitea"), live("gl"));
+        assert!(a_gt.has_credential() && a_gl.has_credential());
+
+        // Only the repo lists change: every client is the same one, tokens and all.
+        let more = |c: &ForgeCfg| ForgeCfg { repos: vec!["acme/demo".into(), "acme/other".into()], ..c.clone() };
+        save(vec![gh.clone(), more(&gt), more(&gl)]).await.unwrap();
+        assert!(Arc::ptr_eq(&a_gh, &live("github")) && Arc::ptr_eq(&a_gt, &live("gitea")) && Arc::ptr_eq(&a_gl, &live("gl")));
+        assert!(token_path(&app.data, &id("gl")).exists());
+
+        // GitLab pointed somewhere else: refused, and nothing was rebuilt or lost.
+        let moved = f("gl", "gitlab", "https://gitlab.example.com");
+        let e = save(vec![gh.clone(), more(&gt), moved.clone()]).await.unwrap_err();
+        assert!(e.contains("remove the forge and add it again"), "{e}");
+        assert!(Arc::ptr_eq(&a_gl, &live("gl")) && token_path(&app.data, &id("gl")).exists());
+
+        // Removed, its token goes and the others are untouched; added again, it is a new client with no token.
+        save(vec![gh.clone(), more(&gt)]).await.unwrap();
+        assert!(app.forges.get(&id("gl")).is_none() && !token_path(&app.data, &id("gl")).exists());
+        save(vec![gh.clone(), more(&gt), moved]).await.unwrap();
+        let new_gl = live("gl");
+        assert!(!Arc::ptr_eq(&a_gl, &new_gl) && !new_gl.has_credential());
+        assert!(matches!(&*new_gl, Forge::GitLab(_)) && new_gl.health().unwrap().contains("no token"));
+        assert!(Arc::ptr_eq(&a_gh, &live("github")) && Arc::ptr_eq(&a_gt, &live("gitea")));
+        assert!(live("gitea").has_credential() && token_path(&app.data, &id("gitea")).exists());
+    }
 }

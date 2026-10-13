@@ -7,6 +7,8 @@ mod forge_test_mock;
 mod github;
 mod host;
 mod mirror;
+#[cfg(test)]
+mod mixed_tests;
 mod notify;
 mod platform;
 mod telemetry;
@@ -1413,9 +1415,9 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
 
-    /// The seam for tick tests (X-3 extends it): a baked image so the tick runs, `max_vms: 0` so it
+    /// The seam for tick tests (`mixed_tests` builds on it): a baked image so the tick runs, `max_vms: 0` so it
     /// never reaches QEMU. Everything else in `tick` is the real code against the mock forge.
-    fn tick_app(name: &str, m: &forge_test_mock::Mock, forges: Option<Vec<forge::ForgeCfg>>) -> (Arc<App>, Config) {
+    pub(crate) fn tick_app(name: &str, m: &forge_test_mock::Mock, forges: Option<Vec<forge::ForgeCfg>>) -> (Arc<App>, Config) {
         // vm_cpus fits a 3-thread host (a hosted Mac runner), or the fixture's default-size jobs would not count.
         let cfg = Config {
             repos: vec!["acme/demo".into()],
