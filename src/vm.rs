@@ -2027,7 +2027,10 @@ async fn bake_inner(app: &App) -> Result<()> {
     let rel = app.gh.raw(reqwest::Method::GET, "repos/actions/runner/releases/latest", None).await?;
     let tag: serde_json::Value = serde_json::from_slice(&rel.body)?;
     let version = runner_version(tag["tag_name"].as_str().context("runner release tag")?)?;
-    say(format!("actions runner {version}")).await?;
+    // Pins reach the bake's root shell: same strict check as the GitHub tag.
+    runner_version(GITLAB_RUNNER.version)?;
+    runner_version(GITEA_RUNNER.version)?;
+    say(format!("actions runner {version}, gitlab-runner {}, gitea-runner {}", GITLAB_RUNNER.version, GITEA_RUNNER.version)).await?;
 
     let work = img.join("bake");
     let _ = tokio::fs::remove_dir_all(&work).await;
@@ -2103,6 +2106,8 @@ async fn bake_inner(app: &App) -> Result<()> {
         "recipe": RECIPE,
         "baked_at": now(),
         "runner_version": version,
+        "gitlab_runner_version": GITLAB_RUNNER.version,
+        "gitea_runner_version": GITEA_RUNNER.version,
         "node_versions": node,
         "node_wanted": cfg.bake_node_versions,
         "apt_wanted": cfg.bake_apt_packages,
@@ -2133,11 +2138,42 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 4: skipped (an unmerged arm64 build used it for what is now 6, so its images count as stale).
 /// 5: tag and release jobs run without the repo cache; login tokens are scrubbed from it after a job.
 /// 6: secrets also read from fw_cfg; console and steps devices per architecture (arm64 guests).
-const RECIPE: u64 = 6;
+/// 7: GitLab and Gitea runners (pinned below), Docker and guest checks.
+const RECIPE: u64 = 7;
+
+/// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
+/// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
+struct Pin {
+    version: &'static str,
+    amd64: &'static str,
+    arm64: &'static str,
+}
+
+const GITLAB_RUNNER: Pin = Pin {
+    version: "19.4.1",
+    amd64: "5a159b36c5ff54fda9248e00bb0cdfb62c1112ab3741f5282c04a41e94da1306",
+    arm64: "9763a63f7bc2319119f80de41d1d414465b5268d072bcd55266020b989e93ee9",
+};
+const GITEA_RUNNER: Pin = Pin {
+    version: "5.0.0",
+    amd64: "3201f520b48abd353261b723c1e6b9bb3a82a56cabd4063e58d1fa191bbc50b2",
+    arm64: "50de585f1c557aa271b8ea1aad2e1ef31797e2b58c0223d89591c8dc17d900c9",
+};
+
+impl Pin {
+    fn sha256(&self, g: &Guest) -> &'static str {
+        if g.ubuntu == "arm64" { self.arm64 } else { self.amd64 }
+    }
+}
 
 /// guest/user-data.yaml with kiln's values filled in.
 fn recipe(g: &Guest, runner: &str, node: &str, apt: &str) -> String {
     include_str!("../guest/user-data.yaml")
+        .replace("{{GITLAB_RUNNER_VERSION}}", GITLAB_RUNNER.version)
+        .replace("{{GITLAB_RUNNER_SHA256}}", GITLAB_RUNNER.sha256(g))
+        .replace("{{GITEA_RUNNER_VERSION}}", GITEA_RUNNER.version)
+        .replace("{{GITEA_RUNNER_SHA256}}", GITEA_RUNNER.sha256(g))
+        .replace("{{DEB_ARCH}}", g.ubuntu)
         .replace("{{RUNNER_VERSION}}", runner)
         .replace("{{NODE_VERSIONS}}", node)
         .replace("{{APT_PACKAGES}}", apt)
@@ -2317,7 +2353,10 @@ pub fn image_info(data: &Path, latest: Option<String>, cfg: &crate::Config) -> s
     else {
         return serde_json::Value::Null;
     };
-    let (age, stale) = image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
+    let (age, mut stale) =
+        image_age(v["baked_at"].as_u64().unwrap_or(0), v["runner_version"].as_str().unwrap_or(""), latest.as_deref(), now());
+    // The GitHub runner expires with its release; the GitLab and Gitea runners are pinned and never stale by age.
+    stale &= crate::forge::effective(&cfg.forges, &cfg.repos).iter().any(|f| f.kind == crate::forge::Kind::GitHub);
     let rebake = rebake_reason(&v, &cfg.bake_node_versions, &cfg.bake_apt_packages);
     v["runner_latest"] = latest.into();
     v["age_days"] = age.into();
@@ -3471,6 +3510,86 @@ mod tests {
         assert!(a.contains("exec >/dev/virtio-ports/kiln.steps") && a.contains("KILN_BAKE_OK > /dev/ttyAMA0"));
         // The cloud image lacks qemu_fw_cfg: arm64 bakes add it (x86 still has SMBIOS).
         assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
+    }
+
+    #[test]
+    fn recipe_pins_runners() {
+        assert_eq!(RECIPE, 7);
+        for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
+            let r = recipe(g, "2.338.0", "24.2.0", "");
+            assert!(!r.contains("{{"));
+            for (name, pin, url) in [
+                (
+                    "gitlab-runner",
+                    &GITLAB_RUNNER,
+                    format!("gitlab-runner-downloads.s3.amazonaws.com/v{}/binaries/gitlab-runner-linux-{deb}:", GITLAB_RUNNER.version),
+                ),
+                (
+                    "gitea-runner",
+                    &GITEA_RUNNER,
+                    format!("gitea.com/gitea/runner/releases/download/v{0}/gitea-runner-{0}-linux-{deb}:", GITEA_RUNNER.version),
+                ),
+            ] {
+                runner_version(pin.version).unwrap();
+                for h in [pin.amd64, pin.arm64] {
+                    assert!(h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "{name}");
+                }
+                assert!(r.contains(&format!("{name}:https://{url}{}", pin.sha256(g))), "{name} {deb}");
+            }
+            assert!(r.contains("sha256sum --strict -c -") && r.contains("install -m 0755"));
+            // The other architecture's checksum never appears.
+            assert!(!r.contains(if deb == "amd64" { GITLAB_RUNNER.arm64 } else { GITLAB_RUNNER.amd64 }));
+            // Image checks end the bake before KILN_BAKE_OK.
+            let ok = r.find("echo KILN_BAKE_OK").unwrap();
+            for c in [
+                "vm.memfd_noexec supported",
+                "gitlab-runner on the runner user's PATH",
+                "docker present",
+                "sshd off",
+                "no linger",
+                "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y",
+            ] {
+                assert!(r.find(c).unwrap() < ok, "{c}");
+            }
+            assert!(
+                !r.contains("memfd_noexec=2\n")
+                    && r.contains("harden_gitea() { sysctl -w vm.memfd_noexec=2")
+                    && r.contains("/proc/config.gz")
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_bake_script_parses() {
+        let r = recipe(&X64, "2.338.0", "24.2.0", "");
+        let script = r
+            .split("content: |\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .take_while(|l| l.starts_with("      "))
+            .map(|l| &l[6..])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let o = std::process::Command::new("bash").arg("-n").arg("-c").arg(&script).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    #[test]
+    fn only_github_runner_ages() {
+        let d = std::env::temp_dir().join(format!("kiln-test-ages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(images(&d)).unwrap();
+        std::fs::write(
+            images(&d).join("base.json"),
+            serde_json::json!({ "recipe": RECIPE, "baked_at": 1, "runner_version": "2.1.0", "node_wanted": ["24"] }).to_string(),
+        )
+        .unwrap();
+        let mut cfg = crate::Config::default();
+        assert_eq!(image_info(&d, Some("2.2.0".into()), &cfg)["stale"], true);
+        cfg.forges = Some(vec![]);
+        assert_eq!(image_info(&d, Some("2.2.0".into()), &cfg)["stale"], false);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
