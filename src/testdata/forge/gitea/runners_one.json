@@ -1,0 +1,25 @@
+{
+  "runners": [
+    {
+      "id": 52,
+      "name": "a1b2c3-kiln-fx-1",
+      "status": "offline",
+      "busy": false,
+      "disabled": false,
+      "ephemeral": true,
+      "labels": [
+        {
+          "id": 0,
+          "name": "kiln",
+          "type": "custom"
+        },
+        {
+          "id": 1,
+          "name": "kiln-4cpu",
+          "type": "custom"
+        }
+      ]
+    }
+  ],
+  "total_count": 1
+}

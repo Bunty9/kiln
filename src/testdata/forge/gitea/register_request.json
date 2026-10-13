@@ -1,0 +1,10 @@
+{
+  "name": "a1b2c3-kiln-fx-1",
+  "token": "REGISTRATION-TOKEN-REDACTED",
+  "version": "v5.0.0",
+  "labels": [
+    "kiln",
+    "kiln-4cpu"
+  ],
+  "ephemeral": true
+}

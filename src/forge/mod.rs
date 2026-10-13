@@ -498,7 +498,7 @@ impl Forge {
         match cfg.kind {
             Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
             Kind::GitLab => Ok(Self::GitLab(Box::new(gitlab::GitLab::new(cfg, data)?))),
-            Kind::Gitea => Ok(Self::Gitea(Box::new(gitea::Gitea::new(cfg)?))),
+            Kind::Gitea => Ok(Self::Gitea(Box::new(gitea::Gitea::new(cfg, data)?))),
         }
     }
     pub fn caps(&self) -> Caps {
@@ -651,14 +651,14 @@ impl Forge {
         match self {
             Self::GitHub(g) => g.register(repo, name, labels).await,
             Self::GitLab(g) => g.register(repo, name, labels).await,
-            Self::Gitea(_) => bail!("Gitea runner registration is not implemented yet"),
+            Self::Gitea(g) => g.register(repo, name, labels).await,
         }
     }
     pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
         match self {
             Self::GitHub(g) => g.deregister(repo, runner_id).await,
             Self::GitLab(g) => g.deregister(repo, runner_id).await,
-            Self::Gitea(_) => Dereg::Err(anyhow::anyhow!("Gitea runner retire is not implemented yet")),
+            Self::Gitea(g) => g.deregister(repo, runner_id).await,
         }
     }
     /// (event, head branch, default branch, job conclusion) of the job that ran.
@@ -673,8 +673,7 @@ impl Forge {
         match self {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
             Self::GitLab(g) => g.sweep(repo).await,
-            // kiln registers no Gitea runner yet, so none can be stale.
-            Self::Gitea(_) => Ok(0),
+            Self::Gitea(g) => g.sweep(repo).await,
         }
     }
     /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
