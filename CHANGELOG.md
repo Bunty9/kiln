@@ -7,10 +7,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Added
 
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
-- A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos. The dashboard still uses `/api/gh/*`, which goes when it moves over.
+- A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos.
 
 ### Changed
 
+- The dashboard's Repos and Job pages use the forge-neutral API instead of `/api/gh/*`, which is removed. The Job page's log tab is named after the forge, and controls the forge can't do (rerun, cancel, run workflow) are hidden. The forge's job-log download is capped at 16 MiB.
 - QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
 - A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.
 

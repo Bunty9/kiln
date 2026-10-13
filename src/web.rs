@@ -4,12 +4,11 @@ use crate::{App, Config, mirror, now, update, vm};
 use anyhow::{Context, anyhow};
 use axum::{
     Extension, Json, Router,
-    body::Bytes,
     extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -141,7 +140,6 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/tailscale/netcheck", get(ts_netcheck))
         .route("/api/tailscale/ping", post(ts_ping))
         .route("/api/tailscale/serve", post(ts_serve))
-        .route("/api/gh/{*path}", any(gh_proxy))
         .route("/api/forges", get(forges_list))
         .route("/api/runs", get(runs_list))
         .route("/api/runs/{id}", get(run_get))
@@ -1434,52 +1432,6 @@ async fn dispatch(State(app): S, Json(b): Json<DispatchBody>) -> R<Audited> {
     Ok((Extension(crate::audit::Note(note)), StatusCode::NO_CONTENT))
 }
 
-/// GitHub passthrough, restricted to `repos/<configured repo>/actions/...`,
-/// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
-/// or cancel without a dedicated endpoint per call.
-async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: axum::extract::RawQuery, body: Bytes) -> R<Response> {
-    if !proxy_path_ok(&path, &app.repos()) {
-        bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
-    }
-    if method != Method::GET && (method != Method::POST || !proxy_post_ok(&path)) {
-        bail_r("only GET, and POST to rerun or cancel a run or dispatch a workflow, are proxied")?;
-    }
-    let full = match q.0 {
-        Some(q) => format!("{path}?{q}"),
-        None => path,
-    };
-    let json_body = if body.is_empty() { None } else { Some(serde_json::from_slice(&body)?) };
-    let r = app.gh.raw(method, &full, json_body).await?;
-    let mut h = HeaderMap::new();
-    h.insert(header::CONTENT_TYPE, r.content_type.parse().unwrap_or(header::HeaderValue::from_static("text/plain")));
-    Ok((StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_GATEWAY), h, r.body).into_response())
-}
-
-/// Strict allowlist: plain characters only (so nothing like `%2e%2e` can be
-/// re-decoded into `..` by the URL parser), no dot segments, and only the
-/// workflow/run/job APIs — not runners, secrets or variables.
-fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
-    path.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c))
-        && !path.split('/').any(|seg| seg == "." || seg == "..")
-        && repos.iter().any(|r| {
-            path.strip_prefix(&format!("repos/{r}/actions/"))
-                .is_some_and(|rest| rest == "runs" || ["workflows", "runs/", "jobs/"].iter().any(|p| rest.starts_with(p)))
-        })
-}
-
-/// The writes the dashboard makes through the proxy: rerun or cancel a run, dispatch a
-/// workflow. Not run approvals, deployment reviews or log deletion.
-fn proxy_post_ok(path: &str) -> bool {
-    let mut seg = path.split('/').skip(4);
-    match (seg.next(), seg.next(), seg.next(), seg.next()) {
-        (Some("runs"), Some(id), Some("rerun" | "rerun-failed-jobs" | "cancel"), None) => {
-            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
-        }
-        (Some("workflows"), Some(_), Some("dispatches"), None) => true,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,6 +1593,10 @@ mod tests {
         assert_eq!(l, json!({ "text": "héllo\nworld\n", "next": 13, "complete": true }));
         let Json(l) = job_log(State(app.clone()), Path(5001), lq(Some(7))).await.unwrap_or_else(|_| panic!("log"));
         assert_eq!(l["text"], "world\n");
+        // The download itself is bounded, not only the page handed back.
+        let log = "repos/acme/demo/actions/jobs/5001/logs";
+        assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 4).await.is_err());
+        assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 13).await.is_ok());
         // Filters are encoded, not spliced.
         let q = RunsParam { repo: "acme/demo".into(), status: Some("running".into()), branch: Some("a/b".into()), page: Some(1) };
         assert!(runs_list(State(app), Query(q)).await.is_ok());
@@ -1723,30 +1679,31 @@ mod tests {
         assert!(!audited(&Method::GET, "/api/runs", true));
     }
 
+    #[tokio::test]
+    async fn typed_writes_need_the_csrf_header() {
+        let app = App::for_tests();
+        let req = |csrf: bool| {
+            let mut b =
+                Request::builder().method(Method::POST).uri("/api/runs/1/rerun?repo=acme/demo").header(header::HOST, "localhost:7878");
+            if csrf {
+                b = b.header("x-kiln", "1");
+            }
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+        let via = || Via::Tcp("127.0.0.1:5555".parse().unwrap());
+        let (r, _) = admission(&app, via(), req(false)).await;
+        assert_eq!(r.unwrap_err().status(), StatusCode::FORBIDDEN);
+        for p in ["/api/runs/1/cancel", "/api/dispatch"] {
+            let mut q = req(false);
+            *q.uri_mut() = p.parse().unwrap();
+            assert!(admission(&app, via(), q).await.0.is_err(), "{p}");
+        }
+    }
+
     #[test]
     fn dispatch_body_rejects_unknown_fields() {
         assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main","path":"x"}"#).is_err());
         assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main"}"#).is_ok());
-    }
-
-    #[test]
-    fn proxy_writes() {
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun"));
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun-failed-jobs"));
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/cancel"));
-        assert!(proxy_post_ok("repos/o/n/actions/workflows/ci.yml/dispatches"));
-        for p in [
-            "repos/o/n/actions/runs/123/approve",
-            "repos/o/n/actions/runs/123/pending_deployments",
-            "repos/o/n/actions/runs/123/deployment_protection_rule",
-            "repos/o/n/actions/runs/x/cancel",
-            "repos/o/n/actions/runs//cancel",
-            "repos/o/n/actions/runs/123/cancel/x",
-            "repos/o/n/actions/runs",
-            "repos/o/n/actions/workflows/ci.yml/enable",
-        ] {
-            assert!(!proxy_post_ok(p), "{p}");
-        }
     }
 
     #[test]
@@ -1833,22 +1790,6 @@ mod tests {
         // Not logged in: certs are not the problem, let the CLI say what is.
         assert!(!st(r#"{"BackendState":"NeedsLogin","CertDomains":null}"#));
         assert!(!no_certs(&Value::Null));
-    }
-
-    #[test]
-    fn proxy_allowlist() {
-        let repos = vec!["Bunty9/kiln".to_string()];
-        let ok = |p: &str| proxy_path_ok(p, &repos);
-        assert!(ok("repos/Bunty9/kiln/actions/runs"));
-        assert!(ok("repos/Bunty9/kiln/actions/runs/123/jobs"));
-        assert!(ok("repos/Bunty9/kiln/actions/workflows/ci.yml/dispatches"));
-        assert!(ok("repos/Bunty9/kiln/actions/jobs/9/logs"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runners/generate-jitconfig"));
-        assert!(!ok("repos/Bunty9/kiln/actions/secrets"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runs/../../../other/x/actions/runs"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runs/%2e%2e/%2e%2e"));
-        assert!(!ok("repos/Bunty9/kiln-evil/actions/runs"));
-        assert!(!ok("repos/Other/repo/actions/runs"));
     }
 
     #[test]

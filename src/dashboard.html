@@ -628,8 +628,18 @@ function status(v) {
     default: return 'lost';
   }
 }
-const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
-  : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
+// A run or job from the forge API (kiln's status and outcome) as a badge state.
+const runStatus = x => x.status !== 'completed' ? x.status : { Succeeded: 'passed', SucceededWithIssues: 'passed', Canceled: 'cancelled', Abandoned: 'cancelled', Skipped: 'skipped' }[x.outcome] || 'failed';
+// Forges (GET /api/forges) and what each allows: controls the forge can't do stay hidden.
+const forgeOf = (fs, repo) => (fs || []).find(f => f.repos.some(r => r.toLowerCase() === String(repo).toLowerCase()));
+const can = (f, cap) => !!f?.caps?.[cap];
+const runActs = (done, f) => (done ? [can(f, 'rerun') && 'rerun'] : [can(f, 'cancel') && 'cancel']).filter(Boolean);
+const FN = { github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea' };
+const fname = f => FN[f?.kind] || 'the forge';
+// Links only to the forge's own web UI (its url from /api/forges); anything else becomes inert.
+const forgeUrl = (f, u) => f && String(u ?? '').startsWith(f.url + '/') ? esc(u) : '#';
+let F = null;
+const loadForges = async () => { try { F = await api('/api/forges'); } catch { F ||= []; } return F; };
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -697,7 +707,7 @@ async function api(path, o = {}) {
   }
   const r = await fetch(path, init);
   const text = await r.text();
-  // Only kiln's own 401 asks for the dashboard key; a 401 that GitHub sent through the proxy is GitHub's.
+  // Only kiln's own 401 asks for the dashboard key.
   if (r.status === 401 && /dashboard key/i.test(text)) { await askKey(); return api(path, o); }
   if (!r.ok) {
     let m = text; try { m = JSON.parse(text).message || text; } catch { /* plain text */ }
@@ -712,9 +722,8 @@ function ghMsg(m) {
   if (i < 0) return m;
   try { const j = JSON.parse(m.slice(i)); return m.slice(0, i).replace(/^(GET|POST|PUT|DELETE|PATCH) \S+: /, '').trim() + (j.message ? ': ' + j.message : ''); } catch { return m; }
 }
-// A repo from a hash route must not walk the API path elsewhere (`..` segments, `?`).
-const okRepo = r => { const p = String(r).split('/'); return p.length === 2 && p.every(x => /^[\w.-]+$/.test(x) && x !== '.' && x !== '..'); };
-const gh = (repo, rest) => { if (!okRepo(repo)) throw new Error('not a repo name: ' + repo); return `/api/gh/repos/${repo}/actions/${rest}`; };
+// The forge API takes the repo as a query value; kiln checks it against the repos it serves.
+const fq = (path, repo, extra = '') => `/api/${path}?repo=${encodeURIComponent(repo)}${extra}`;
 // Links to GitHub only: a URL from the API that is anything else becomes inert.
 const ghUrl = u => /^https:\/\/github\.com\//.test(String(u ?? '')) ? esc(u) : '#';
 // Served repos: the GitHub App's installations in App mode, else the configured list.
@@ -957,16 +966,18 @@ const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !
 
 /* ---------- overview ---------- */
 // Job page: the same, linked to GitHub.
-function runMeta(v) {
+function runMeta(v, f, L) {
   const r = v.run; if (!r) return '';
-  const gh = `https://github.com/${v.repo}`;
-  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? `<a href="${ghUrl(`${gh}/pull/${+r.pr}`)}" target="_blank" rel="noopener"${kt('Pull request')}>PR #${+r.pr}</a>` : ''}${r.sha ? `<a class="mono" href="${ghUrl(`${gh}/commit/${encodeURIComponent(r.sha)}`)}" target="_blank" rel="noopener"${kt('Commit')}>${esc(r.sha.slice(0, 7))}</a>` : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
+  L = { ...r.links, ...L };
+  const a = (u, cls, t, body) => u && forgeUrl(f, u) !== '#' ? `<a${cls} href="${forgeUrl(f, u)}" target="_blank" rel="noopener"${kt(t)}>${body}</a>` : `<span${cls}${kt(t)}>${body}</span>`;
+  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? a(L.pr, '', 'Pull request', `PR #${+r.pr}`) : ''}${r.sha ? a(L.commit, ' class="mono"', 'Commit', esc(r.sha.slice(0, 7))) : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
 }
 // Where the job's code came from: branch, PR, commit, and the run's title.
 const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', schedule: 'scheduled' };
+const EVK = { push: '', pull_request: '', manual: 'manual', schedule: 'scheduled' };
 function gitLine(v) {
   const r = v.run; if (!r) return '';
-  const ev = r.event in EV ? EV[r.event] : r.event;
+  const ev = r.kind && r.kind !== 'other' ? (EVK[r.kind] ?? r.kind) : r.event in EV ? EV[r.event] : r.event;
   return `<span class="g">${ic('branch')}<span>${esc(r.branch)}</span>${r.pr ? `<span>#${+r.pr}</span>` : ''}${r.sha ? `<span class="mono">${esc(r.sha.slice(0, 7))}</span>` : ''}${ev ? `<span>${esc(ev)}</span>` : ''}${r.title ? `<span class="gt">${esc(r.title)}</span>` : ''}</span>`;
 }
 function jobRow(v) {
@@ -1281,6 +1292,7 @@ pages.job = {
   mount(r) {
     this.id = r.seg[0]; this.lv = null;
     $('#app').innerHTML = `<div id="jd"></div><div id="jd-log"></div>`;
+    if (!F) loadForges().then(() => cur === this && this.update());
   },
   update() {
     const v = S.vms.find(x => x.id === this.id), box = $('#jd');
@@ -1290,33 +1302,54 @@ pages.job = {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
+    const fg = forgeOf(F, v.repo), L = jl.get(v.id), jobUrl = L?.job || v.run?.links?.job || v.job_url;
+    if (F && v.job_url && !jl.has(v.id)) loadLinks(v);
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v)}${v.run ? hq('runinfo') : ''}</div>
+      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id ' + fname(fg) + ' gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
-    if (!this.lv) {
+    if (!this.lv && F) {
       const id = v.id;
       this.lv = new Log($('#jd-log'), { id, live: () => ACTIVE(S.vms.find(x => x.id === id) || {}), sources: [
-        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, { k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' },
-        { k: 'gh', label: 'GitHub', off: true, tip: "GitHub's final log for this job", gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
+        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, ...(can(fg, 'live_steps') ? [{ k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' }] : []),
+        { k: 'forge', label: fname(fg), off: true, tip: `${fname(fg)}'s final log for this job`, forge: () => forgeLog(S.vms.find(x => x.id === id)) }] });
     }
-    this.lv.setOff('gh', ACTIVE(v) || !v.ended);
+    this.lv?.setOff('forge', ACTIVE(v) || !v.ended);
   },
   unmount() { this.lv?.destroy(); this.lv = null; },
 };
-async function ghLog(v) {
-  const jm = /\/job\/(\d+)/.exec(v.job_url || '');
-  if (jm) { try { return await api(gh(v.repo, `jobs/${jm[1]}/logs`), { text: true }); } catch (e) { if (e.status === 404) throw e; } }
-  const runs = (await api(gh(v.repo, 'runs?per_page=5'))).workflow_runs || [];
-  for (const run of runs) {
-    const j = ((await api(gh(v.repo, `runs/${run.id}/jobs`))).jobs || []).find(x => x.runner_name === v.id);
-    if (j) return api(gh(v.repo, `jobs/${j.id}/logs`), { text: true });
+// Run links per VM id, from the API (null if the run can't be read).
+const jl = new Map();
+async function loadLinks(v) {
+  jl.set(v.id, null);
+  const m = /\/runs\/(\d+)(?:\/job\/(\d+))?/.exec(v.job_url || ''); if (!m) return;
+  try {
+    const r = await api(fq('runs/' + m[1], v.repo)), j = r.jobs.find(x => String(x.id) === (m[2] || String(v.job_id)));
+    jl.set(v.id, { ...r.links, job: j?.links.job || r.links.run }); if (cur === pages.job) pages.job.update();
+  } catch { /* the page falls back to the stored job link */ }
+}
+// The forge's own log of a job, all pages (kiln caps each page and the download).
+async function forgeLog(v) {
+  let id = /\/job\/(\d+)/.exec(v.job_url || '')?.[1] || v.job_id;
+  if (!id) {
+    for (const run of (await api(fq('runs', v.repo))).runs.slice(0, 5)) {
+      const j = (await api(fq('runs/' + run.id, v.repo))).jobs.find(x => x.runner === v.id);
+      if (j) { id = j.id; break; }
+    }
+    if (!id) throw new Error("This job is not among the repo's 5 latest runs on the forge.");
   }
-  throw new Error('This job is not among the repo\'s 5 latest runs on GitHub.');
+  let text = '', from = 0;
+  for (let i = 0; i < 20; i++) {
+    const p = await api(fq(`jobs/${id}/log`, v.repo, '&from=' + from));
+    text += p.text;
+    if (p.complete || p.next <= from) break;
+    from = p.next;
+  }
+  return text;
 }
 
 /* ---------- log viewer ---------- */
@@ -1329,7 +1362,7 @@ class Log {
     el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
     const T = (a, i, l, p, t) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}"${tip(t)}>${ic(i)}<span class="lbl">${l}</span></button>`;
     el.innerHTML = `<div class="lt">${o.sources.length > 1 ? `<div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div>` : `<span class="ttl">${o.sources[0].label}</span>`}<span class="sp"></span>
-      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show GitHub's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
+      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show the forge's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
       <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">${ic('down')}Jump to latest</button></div>`;
     this.pre = $('pre', el);
     el.addEventListener('click', e => {
@@ -1353,7 +1386,7 @@ class Log {
       if (this.skipped || this.trimmed) {
         text = ''; try { for (let n = 0;;) { const r = await api(`/api/log?src=${encodeURIComponent(s.src)}&file=${s.file}&from=${n}`); if (!r.data) break; text += r.data; n = r.next; } } catch (e) { return fail(e); }
       }
-      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'github'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
+      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'forge'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
     }
   }
   note(t) { const n = $('[data-note]', this.el); n.textContent = t || ''; n.hidden = !t; }
@@ -1361,14 +1394,14 @@ class Log {
   select(k) {
     this.k = k; this.gen++; clearTimeout(this.timer); this.timer = null; this.next = 0; this.skipped = false; this.clear();
     $$('[data-src]', this.el).forEach(b => b.setAttribute('aria-checked', b.dataset.src === k)); rove(this.el);
-    $('[data-ts]', this.el).hidden = k !== 'gh';
+    $('[data-ts]', this.el).hidden = k !== 'forge';
     const s = this.src(); this.setFollow(true);
-    if (s.gh) this.loadGh(s, this.gen); else this.tick(this.gen);
+    if (s.forge) this.loadForge(s, this.gen); else this.tick(this.gen);
   }
-  async loadGh(s, g) {
-    this.pre.textContent = 'Fetching the log from GitHub…';
-    try { const t = await s.gh(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
-    catch (e) { if (g === this.gen) this.pre.textContent = e.status === 404 ? 'GitHub has no log for this job yet. Logs appear once the job completes.' : e.message; }
+  async loadForge(s, g) {
+    this.pre.textContent = `Fetching the log from ${s.label}…`;
+    try { const t = await s.forge(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
+    catch (e) { if (g === this.gen) this.pre.textContent = /\b404\b/.test(e.message) ? `${s.label} has no log for this job yet. Logs appear once the job completes.` : e.message; }
   }
   async tick(g) {
     this.busy = true; clearTimeout(this.timer); this.timer = null; const s = this.src();
@@ -1385,7 +1418,7 @@ class Log {
     if (!this.pre.isConnected) return this.destroy();
     if (g === this.gen && this.o.live() && !document.hidden) this.timer = setTimeout(() => this.tick(g), 1000);
   }
-  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().gh && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
+  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().forge && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
   big(t, g) { // render big logs in slices so the page stays responsive
     const lines = t.split('\n'); let i = 0;
     const step = () => { if (g !== this.gen) return; this.add(lines.slice(i, i + 2500).join('\n') + '\n', true); i += 2500; if (i < lines.length) setTimeout(step); };
@@ -1430,8 +1463,8 @@ class Log {
 /* ---------- repos ---------- */
 const lastRun = {};
 const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
-const repoErr = e => e.status === 404 ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
-  : e.status === 401 ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
+const repoErr = e => /\b404\b/.test(e.message) ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
+  : /\b401\b/.test(e.message) ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
 function addRepo(raw) {
   const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
@@ -1448,9 +1481,10 @@ const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs
 pages.repos = {
   mount(r) {
     this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null; this.app = !!S.app;
+    if (!F) loadForges().then(() => cur === this && this.update());
     if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
-    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
+    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><span id="rd-ext"></span></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
       ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div></div>`}`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
@@ -1459,14 +1493,14 @@ pages.repos = {
   async load() {
     const repo = this.r;
     this.loadRuns();
-    try { const w = await api(gh(repo, 'workflows')); if (repo === rd.repo) { rd.wfs = w.workflows || []; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
+    try { const w = await api(fq('workflows', repo)); if (repo === rd.repo) { rd.wfs = w; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
   },
   async loadRuns() {
     const repo = this.r; if (!repo || document.hidden) return;
     try {
-      const r = (await api(gh(repo, 'runs?per_page=15'))).workflow_runs || [];
+      const r = (await api(fq('runs', repo))).runs.slice(0, 15);
       if (repo !== rd.repo) return; rd.runs = r; rd.err = null;
-      await Promise.all([...rd.open].map(id => api(gh(repo, `runs/${id}/jobs`)).then(j => rd.jobs.set(id, j.jobs || [])).catch(() => {})));
+      await Promise.all([...rd.open].map(id => api(fq('runs/' + id, repo)).then(j => rd.jobs.set(id, j.jobs)).catch(() => {})));
     } catch (e) { rd.err = repoErr(e); }
     if (repo === rd.repo) this.update();
   },
@@ -1478,7 +1512,7 @@ pages.repos = {
         const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
         return `<li><div class="row rr"><a class="nm" href="#/repos/${esc(r)}">${esc(r)}</a>
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
-          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
+          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from the forge")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
       }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 30 seconds until it serves one.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
         : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
@@ -1490,24 +1524,33 @@ pages.repos = {
     const cg = ciGet(S.config.repo_cache_gb, this.r);
     setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
-    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button></div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>'));
-    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
+    const f = forgeOf(F, this.r);
+    setHTML($('#rd-ext'), f ? `<a class="btn" href="${esc(f.url)}/${esc(this.r.replace(/^[^:/]+:/, ''))}" target="_blank" rel="noopener"${tip('Open this repo on ' + fname(f))}>${fname(f)}${ic('ext')}</a>` : '');
+    const runBtn = w => can(f, 'dispatch') ? `<button class="btn" data-act="runwf" data-id="${esc(w)}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button>` : '';
+    setHTML($('#rd-wf'), can(f, 'workflows') ? `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.file)}</span></span>${runBtn(w.file)}</div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>')
+      : can(f, 'dispatch') ? `<h2>Pipelines</h2><div class="card">${runBtn('')}</div>` : '');
+    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(x => runHTML(x, f)).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
   },
 };
-function runHTML(run) {
-  const st = ghStatus(run.status, run.conclusion), open = rd.open.has(run.id), done = run.status === 'completed';
+function runHTML(run, f) {
+  const st = runStatus(run), open = rd.open.has(run.id), done = run.status === 'completed', fn = fname(f);
   const jobs = open ? (rd.jobs.get(run.id) || null) : null;
   const jh = !open ? '' : !jobs ? '<div class="sn fg2 sm">Loading jobs…</div>' : `<div class="sn" style="padding-top:0">${jobs.map(j => {
-    const vm = S.vms.find(v => v.id === j.runner_name), t0 = iso(j.started_at), t1 = iso(j.completed_at);
-    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(ghStatus(j.status, j.conclusion))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
-      ${j.runner_name ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner_name)}</span>` : ''}</div>`;
+    const vm = S.vms.find(v => v.id === j.runner), t0 = iso(j.started_at), t1 = iso(j.completed_at);
+    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(runStatus(j))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
+      ${j.runner ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner)}</span>` : ''}</div>`;
   }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
+  const btn = {
+    rerun: `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip(`Ask ${fn} to run this workflow run again`)}>${ic('rerun')}Rerun</button>`,
+    cancel: `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip(`Ask ${fn} to cancel this run`)}>${ic('cancel')}Cancel</button>`,
+  };
+  const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
-    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn ic" href="${ghUrl(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
+    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
+    <span style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
-  try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
+  try { const x = (await api(fq('runs', r))).runs[0]; lastRun[r] = x ? runStatus(x) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
   if (cur === pages.repos && !pages.repos.r) pages.repos.update();
 }
 
@@ -2159,14 +2202,14 @@ const ACT = {
     await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: ciPut(S.config.warm, r), cache_branches: ciPut(S.config.cache_branches, r), repo_cache_gb: ciPut(S.config.repo_cache_gb, r) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
-  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
+  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${esc(b.dataset.id)}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
   async run(b) {
     const id = +b.dataset.id;
-    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(gh(rd.repo, `runs/${id}/jobs`)).then(j => { rd.jobs.set(id, j.jobs || []); pages.repos.update(); }).catch(fail); }
+    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(fq('runs/' + id, rd.repo)).then(j => { rd.jobs.set(id, j.jobs); pages.repos.update(); }).catch(fail); }
     pages.repos.update();
   },
-  async rerun(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
-  async cancel(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async rerun(b) { await post(fq(`runs/${+b.dataset.id}/rerun`, rd.repo, b.dataset.failed ? '&failed=1' : '')); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async cancel(b) { await post(fq(`runs/${+b.dataset.id}/cancel`, rd.repo)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
   gsel: s => (location.hash = '#/settings/' + s.value),
   discard() { draft = JSON.parse(JSON.stringify(S.config)); pages.settings.render(); },
   async save() {
@@ -2354,7 +2397,7 @@ document.addEventListener('submit', async e => {
   e.preventDefault(); const inp = $('input', f), btn = k === 'notify' ? $('button.pri', f) : $('button', f); btn.disabled = true;
   try {
     if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast(myRate() ? 'Rate saved' : 'Using GitHub-hosted rates'); }
-    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
+    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post('/api/dispatch', { repo: rd.repo, workflow: f.dataset.id || undefined, ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
     else if (k === 'warm') {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), r = pages.repos.r;
       await saveCfg({ ...S.config, warm: ciPut(S.config.warm, r, n || null) }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
