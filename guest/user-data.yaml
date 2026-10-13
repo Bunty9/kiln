@@ -284,6 +284,100 @@ write_files:
       done
       echo refuse
       exit 1
+  - path: /usr/local/bin/kiln-exec
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # kiln-exec <stage> [script substage]: the GitLab custom executor (gitlab-runner run-single) in a kiln VM.
+      # Stages: config | prepare | run <script> <substage> | cleanup.
+      #
+      # Trust: everything in CUSTOM_ENV_* is job-controlled data (a job's `variables:` can set any of it,
+      # CI_JOB_ID and CI_JOB_IMAGE included). It is quoted everywhere, never eval'd, never used for a gate
+      # decision, and names go to docker after `--`. The gate reads only the verdict file, via
+      # kiln-verdict-wait, and the job id used for container names comes from that file, not from the job.
+      #
+      # Exit codes (SP-8): BUILD_FAILURE_EXIT_CODE (1) = the job failed, one attempt, no runner retry.
+      # SYSTEM_FAILURE_EXIT_CODE (2) = kiln infrastructure broke; the runner retries prepare 3 times.
+      # So refuse, timeout and a garbage verdict exit 1 (never 2), and any non-zero script exit maps to 1.
+      #
+      # Limits: the image's `entrypoint` and `pull_policy` are not exposed to a custom executor (only the
+      # image name is), so the container runs `tail -f /dev/null` with the entrypoint cleared and the image
+      # is pulled if missing. Service `entrypoint` and `command` are honoured. Services run privileged (dind);
+      # the VM is the isolation boundary. A cancel is noticed by the runner after up to 60 s, then it sends
+      # SIGTERM to the running stage, which is forwarded; after_script still runs.
+      BFEC=${BUILD_FAILURE_EXIT_CODE:-1}
+      SFEC=${SYSTEM_FAILURE_EXIT_CODE:-2}
+      S=/run/kiln-exec                 # per-VM state: the gate marker "<verdict> <job id>"
+      B=$HOME/.cache/gitlab            # builds and cache dirs: on the repo cache disk, after a cold run's detach it is plain disk
+      IMG=${CUSTOM_ENV_CI_JOB_IMAGE:-}
+      say() { echo "kiln-exec: $*" >&2; }
+      refuse() { say "$*"; exit "$BFEC"; }
+      NAME='^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'    # image, service and alias names: no leading '-', no shell or docker option syntax
+      gate() {
+        local v id
+        v=$(/usr/local/sbin/kiln-verdict-wait) || refuse "kiln did not allow this job (refused, or no verdict from the kiln host in time). No job code was run."
+        case $v in ok | cold) ;; *) refuse "unreadable verdict, job not run" ;; esac
+        read -r _ id _ < /run/kiln/verdict
+        [[ $id =~ ^[0-9]+$ ]] || refuse "unreadable verdict, job not run"
+        if [ "$v" = cold ]; then
+          say "cold run: detaching the cache disk"
+          sudo /usr/local/sbin/kiln-cache detach >&2 || refuse "cache detach failed, job not run"
+          sudo systemctl restart docker.service >&2 || refuse "docker restart failed, job not run"
+        fi
+        mkdir -p "$S" && echo "$v $id" > "$S/gate-ok" || exit "$SFEC"
+      }
+      load() { read -r _ J < "$S/gate-ok" 2> /dev/null && [[ $J =~ ^[0-9]+$ ]]; }   # J: the verdict's job id, trusted
+      prepare() {
+        gate; load || exit "$SFEC"
+        [[ -z $IMG || $IMG =~ $NAME ]] || refuse "invalid image name, job not run"
+        mkdir -p "$B/builds" "$B/cache" || exit "$SFEC"
+        [ -n "$IMG" ] || return 0     # no image: the job runs directly in the VM
+        docker network create "kiln-$J" > /dev/null && docker volume create "kiln-certs-$J" > /dev/null || exit "$SFEC"
+        local i=0 svc name alias base tls
+        while read -r svc; do   # one service per line; fields come out of jq as data, never through eval
+          i=$((i + 1))
+          name=$(jq -r '.name // empty' <<< "$svc"); alias=$(jq -r '.alias // empty' <<< "$svc")
+          [[ $name =~ $NAME ]] || refuse "invalid service name, job not run"
+          [[ -z $alias || $alias =~ $NAME ]] || refuse "invalid service alias, job not run"
+          base=${name%%:*}; base=${base%@*}
+          local a=(--network-alias "${base//\//__}" --network-alias "${base//\//-}") ep=() cmd=()
+          [ -n "$alias" ] && a+=(--network-alias "$alias")
+          mapfile -t ep < <(jq -r '.entrypoint // [] | .[]' <<< "$svc"); mapfile -t cmd < <(jq -r '.command // [] | .[]' <<< "$svc")
+          local e=(); [ ${#ep[@]} -gt 0 ] && e=(--entrypoint "${ep[0]}") && cmd=("${ep[@]:1}" "${cmd[@]}")
+          tls=${CUSTOM_ENV_DOCKER_TLS_CERTDIR-/certs}
+          say "service $name"
+          docker run -q -d --name "kiln-svc-$J-$i" --network "kiln-$J" "${a[@]}" --privileged -v "kiln-certs-$J:/certs" \
+            -e "DOCKER_TLS_CERTDIR=$tls" "${e[@]}" -- "$name" "${cmd[@]}" > /dev/null || exit "$SFEC"
+        done < <(jq -c '.[]' <<< "${CUSTOM_ENV_CI_JOB_SERVICES:-[]}")
+        say "image $IMG"
+        docker run -q -d --name "kiln-job-$J" --network "kiln-$J" -v "$B:$B" -v "kiln-certs-$J:/certs:ro" -w "$B" --entrypoint '' -- "$IMG" tail -f /dev/null > /dev/null || exit "$SFEC"
+      }
+      run() {   # $1 script file, $2 sub-stage
+        [ -e "$S/gate-ok" ] && load || refuse "gate not passed, job not run"
+        local rc pid
+        trap '[ -n "$pid" ] && kill "$pid" 2> /dev/null' TERM   # the runner's cancel: pass it on, then fall through
+        if [ -n "$IMG" ] && { [ "$2" = build_script ] || [ "$2" = after_script ]; }; then
+          docker exec -i "kiln-job-$J" sh -c 'if command -v bash > /dev/null; then exec bash; else exec sh; fi' < "$1" & pid=$!; wait $pid; rc=$?
+          # Files the container made as root would stop the next stage's git clean as `runner`.
+          docker exec -u 0 "kiln-job-$J" chown -R "$(id -u):$(id -g)" "$B/builds" > /dev/null 2>&1
+          [ $rc -ne 0 ] && [ -z "$(docker ps -q --filter "name=^kiln-job-$J\$" 2> /dev/null)" ] && exit "$SFEC"   # the container died: infrastructure
+        else
+          bash "$1" & pid=$!; wait $pid; rc=$?
+        fi
+        [ $rc -eq 0 ] || exit "$BFEC"
+      }
+      cleanup() {   # the VM is thrown away; this keeps a reused VM (laptop tests) tidy
+        load || return 0
+        docker rm -f $(docker ps -aq --filter "name=^kiln-(job|svc)-$J(-|\$)") > /dev/null 2>&1
+        docker network rm "kiln-$J" > /dev/null 2>&1; docker volume rm "kiln-certs-$J" > /dev/null 2>&1
+        true
+      }
+      case ${1:-} in
+        config) printf '{"builds_dir":"%s/builds","cache_dir":"%s/cache","builds_dir_is_shared":false}\n' "$B" "$B" ;;
+        prepare) prepare ;;
+        run) shift; run "$@" ;;
+        cleanup) cleanup ;;
+      esac
   - path: /usr/local/sbin/kiln-cache
     permissions: "0755"
     content: |
