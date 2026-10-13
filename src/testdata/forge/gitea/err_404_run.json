@@ -1,0 +1,4 @@
+{
+  "message": "run with id 999999: resource does not exist",
+  "url": "https://gitea.example.org/api/swagger"
+}

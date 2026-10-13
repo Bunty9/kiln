@@ -5,6 +5,7 @@
 #![allow(dead_code)] // the call sites arrive with the later forge tasks
 
 pub mod console;
+pub mod gitea;
 pub mod github;
 pub mod net;
 
@@ -348,6 +349,7 @@ pub enum Dereg {
 }
 
 /// One poll's view of a repo's queue.
+#[derive(Default, Debug)]
 pub struct Demand {
     /// Queued jobs of ours per VM size.
     pub by_size: HashMap<u32, usize>,
@@ -355,6 +357,9 @@ pub struct Demand {
     pub claimed: HashMap<String, JobInfo>,
     /// Queued fork jobs kiln refuses (never counted in `by_size`).
     pub refused_forks: usize,
+    /// Gitea: a queued (not `waiting`) fork job with our labels exists. A fork job runs on any
+    /// matching runner, warm ones included, so kiln launches nothing for the repo meanwhile.
+    pub fork_queued: bool,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.
@@ -455,138 +460,172 @@ pub struct RunQuery {
     pub page: u32,
 }
 
-/// A configured forge. Only GitHub exists so far; Gitea and GitLab arrive with their own variants,
-/// and `Forge::new` refuses their config until then.
+/// What a Gitea call says until its task lands (GT-2/GT-3 and the dashboard actions).
+const NOT_YET: &str = "not implemented for Gitea yet";
+
+/// A configured forge. GitLab arrives with its own variant; `Forge::new` refuses its config until then.
 pub enum Forge {
     GitHub(github::GitHub),
+    Gitea(Box<gitea::Gitea>),
 }
 
 impl Forge {
     pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>) -> Result<Self> {
         match cfg.kind {
             Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
+            Kind::Gitea => Ok(Self::Gitea(Box::new(gitea::Gitea::new(cfg)?))),
             k => bail!("forge {:?}: {k:?} is not yet supported", cfg.id.as_str()),
         }
     }
     pub fn caps(&self) -> Caps {
         match self {
             Self::GitHub(_) => github::CAPS,
+            Self::Gitea(g) => g.caps(),
         }
     }
     /// Where the forge's own web UI lives.
-    pub fn web_url(&self) -> &'static str {
+    pub fn web_url(&self) -> &str {
         match self {
             Self::GitHub(_) => "https://github.com",
+            Self::Gitea(g) => g.web_url(),
         }
     }
     /// Which credential is in use and when it expires; never the credential.
     pub fn auth(&self) -> Value {
         match self {
             Self::GitHub(g) => g.auth(),
+            Self::Gitea(g) => g.auth(),
         }
     }
     pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
         match self {
             Self::GitHub(g) => g.runs(repo, q).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
         match self {
             Self::GitHub(g) => g.run(repo, id).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
         match self {
             Self::GitHub(g) => g.job_log(repo, id, from).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
         match self {
             Self::GitHub(g) => g.workflows(repo).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
         match self {
             Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         match self {
             Self::GitHub(g) => g.cancel(repo, id).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
+            Self::Gitea(_) => bail!(NOT_YET),
         }
     }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
+            Self::Gitea(g) => g.id(),
         }
     }
     pub fn kind(&self) -> Kind {
         match self {
             Self::GitHub(_) => Kind::GitHub,
+            Self::Gitea(_) => Kind::Gitea,
         }
     }
     pub fn has_credential(&self) -> bool {
         match self {
             Self::GitHub(g) => g.gh.has_token(),
+            Self::Gitea(g) => g.has_credential(),
         }
     }
     /// What keeps this forge from polling (no credential, rate limited), if anything.
     pub fn health(&self) -> Option<String> {
         match self {
             Self::GitHub(g) => g.health(),
+            Self::Gitea(g) => g.health(),
+        }
+    }
+    /// Re-reads a file credential from the data dir (`<data>/forges/<id>.token`).
+    pub fn load_token(&self, data: &std::path::Path) {
+        if let Self::Gitea(g) = self {
+            g.load_token(data);
         }
     }
     pub async fn refresh(&self) {
         match self {
             Self::GitHub(g) => g.gh.refresh_latest().await,
+            Self::Gitea(g) => g.refresh().await,
         }
     }
     pub fn repo_paused(&self, repo: &RepoRef) -> Option<String> {
         match self {
             Self::GitHub(g) => g.gh.repo_paused(&repo.path),
+            Self::Gitea(_) => None,
         }
     }
     /// (remaining, limit, reset) of the tightest rate limit, if any is known.
     pub fn rate(&self) -> Option<(u64, u64, u64)> {
         match self {
             Self::GitHub(g) => g.gh.rate(),
+            Self::Gitea(_) => None,
         }
     }
     pub fn repos(&self, cfg: &ForgeCfg) -> Vec<RepoRef> {
         match self {
             Self::GitHub(g) => g.repos(cfg),
+            Self::Gitea(g) => g.repos(cfg),
         }
     }
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
         match self {
             Self::GitHub(g) => g.demand(repo, label, default_cpus).await,
+            Self::Gitea(g) => g.demand(repo, label, default_cpus).await,
         }
     }
     /// Registers a single-use runner named `name` for `repo`. A refusal is a `github::MintError`.
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
         match self {
             Self::GitHub(g) => g.register(repo, name, labels).await,
+            Self::Gitea(_) => bail!("Gitea runner registration is not implemented yet"),
         }
     }
     pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
         match self {
             Self::GitHub(g) => g.deregister(repo, runner_id).await,
+            Self::Gitea(_) => Dereg::Err(anyhow::anyhow!("Gitea runner retire is not implemented yet")),
         }
     }
     /// (event, head branch, default branch, job conclusion) of the job that ran.
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
         match self {
             Self::GitHub(g) => g.cache_trust(job, writers).await,
+            Self::Gitea(_) => bail!("Gitea cache trust is not implemented yet"),
         }
     }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
         match self {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
+            // kiln registers no Gitea runner yet, so none can be stale.
+            Self::Gitea(_) => Ok(0),
         }
     }
     /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
@@ -594,6 +633,7 @@ impl Forge {
     pub fn gated(&self) -> bool {
         match self {
             Self::GitHub(_) => false,
+            Self::Gitea(_) => true,
         }
     }
     /// Stops the runner taking a second job and lists the jobs it holds. `None`: this forge needs
@@ -602,12 +642,14 @@ impl Forge {
     pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
         match self {
             Self::GitHub(_) => Ok(None),
+            Self::Gitea(_) => Ok(None),
         }
     }
     /// What the API says about `job_id`, for `decide`. Never a `CI_*` value or anything the guest sent.
     pub async fn verdict_facts(&self, _repo: &RepoRef, _job_id: &str) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
+            Self::Gitea(_) => bail!("Gitea verdict facts are not implemented yet"),
         }
     }
 }
@@ -729,6 +771,13 @@ impl Forges {
                 }
                 Err(e) => tracing::warn!("{e:#}"),
             }
+        }
+    }
+
+    /// Reads every forge's file credential from `data`; call after `sync` and when a token is replaced.
+    pub fn load_tokens(&self, data: &std::path::Path) {
+        for f in self.all() {
+            f.load_token(data);
         }
     }
 
