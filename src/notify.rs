@@ -3,11 +3,13 @@
 //! text from a repo format, mention or inject into the target. See the Notifications section
 //! of docs/configuration.md and SECURITY.md.
 
+use crate::forge::net::{self, Mode, allowed, literal_ip};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(test)]
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,86 +23,6 @@ pub enum Kind {
     Slack,
     Discord,
     Ntfy,
-}
-
-/// May an alert connect to `ip`? Public unicast only; with `tailnet`, also the tailnet ranges
-/// (100.64.0.0/10 and fd7a:115c:a1e0::/48). The same private ranges job egress filtering drops,
-/// plus the IPv6 translation prefixes (local-use NAT64, SIIT, Teredo), discard (100::/64),
-/// the deprecated site-local fec0::/10 and the documentation prefixes 2001:db8::/32 and 3fff::/20.
-pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
-    match ip {
-        IpAddr::V4(v4) => allowed_v4(v4, tailnet),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = embedded_v4(v6) {
-                return allowed_v4(v4, tailnet);
-            }
-            let s = v6.segments();
-            if v6.is_unspecified() || v6.is_loopback() {
-                return false;
-            }
-            // Translation and discard prefixes whose target kiln cannot judge: refused outright.
-            if s[..3] == [0x64, 0xff9b, 1] // 64:ff9b:1::/48, local-use NAT64
-                || s[..6] == [0, 0, 0, 0, 0xffff, 0] // ::ffff:0:0:0/96, SIIT
-                || s[..2] == [0x2001, 0] // 2001::/32, Teredo
-                || s[..4] == [0x100, 0, 0, 0]
-            // 100::/64, discard
-            {
-                return false;
-            }
-            if s[0] & 0xfe00 == 0xfc00 {
-                return tailnet && s[..3] == [0xfd7a, 0x115c, 0xa1e0];
-            }
-            !(s[0] & 0xffc0 == 0xfe80 // link-local
-                || s[0] & 0xffc0 == 0xfec0 // site-local
-                || s[0] & 0xff00 == 0xff00 // multicast
-                || s[..2] == [0x2001, 0x0db8] // documentation
-                || (s[0] == 0x3fff && s[1] & 0xf000 == 0)) // documentation, 3fff::/20
-        }
-    }
-}
-
-/// The IPv4 address an IPv6 one stands for (mapped, compatible, NAT64, 6to4), if any:
-/// such an address reaches that IPv4 host, so it is judged as one.
-fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
-    let s = v6.segments();
-    let v4 = |hi: u16, lo: u16| Some(Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8));
-    if let Some(m) = v6.to_ipv4_mapped() {
-        return Some(m);
-    }
-    if s[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback() {
-        return v4(s[6], s[7]);
-    }
-    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return v4(s[6], s[7]);
-    }
-    if s[0] == 0x2002 {
-        return v4(s[1], s[2]);
-    }
-    None
-}
-
-fn allowed_v4(ip: Ipv4Addr, tailnet: bool) -> bool {
-    let [a, b, c, _] = ip.octets();
-    if a == 100 && b & 0xc0 == 64 {
-        return tailnet;
-    }
-    !(a == 0
-        || a == 10
-        || a == 127
-        || (a == 169 && b == 254)
-        || (a == 172 && b & 0xf0 == 16)
-        || (a == 192 && b == 0 && (c == 0 || c == 2))
-        || (a == 192 && b == 168)
-        || (a == 198 && b & 0xfe == 18)
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224)
-}
-
-/// The host of `u` when it is an IP literal. Requests to a literal skip DNS, and so the
-/// resolver's check, so callers check it themselves.
-pub fn literal_ip(u: &reqwest::Url) -> Option<IpAddr> {
-    u.host_str()?.trim_start_matches('[').trim_end_matches(']').parse().ok()
 }
 
 /// Validate a destination URL for its kind; Err is a message for the dashboard.
@@ -217,9 +139,22 @@ pub struct Rendered {
     pub body: Vec<u8>,
 }
 
-/// `url` if it is a plain https://github.com/ URL with nothing that could break out of a link.
-pub fn github_link(url: &str) -> Option<&str> {
-    (url.starts_with("https://github.com/") && url.len() <= 300 && !url.contains(['|', '>', '<', ' ', '"', '\'', '\n'])).then_some(url)
+/// `url` if it is on one of `origins` (`scheme://host[:port]`, no trailing slash) and has nothing
+/// that could break out of a link.
+pub fn forge_link<'a>(url: &'a str, origins: &[String]) -> Option<&'a str> {
+    let on_origin = origins.iter().any(|o| url.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('/')));
+    (on_origin && net::link_safe(url)).then_some(url)
+}
+
+/// Origins job links may point to: github.com and every configured forge's own URL.
+fn link_origins(cfg: &crate::Config) -> Vec<String> {
+    let mut o = vec!["https://github.com".to_string()];
+    for f in crate::forge::effective(&cfg.forges, &cfg.repos) {
+        if let Some(u) = f.url.as_deref().and_then(|u| net::check_forge_url(u, f.network.unwrap_or(crate::forge::Network::Public)).ok()) {
+            o.push(u.origin().ascii_serialization());
+        }
+    }
+    o
 }
 
 fn dur(s: u64) -> String {
@@ -320,7 +255,7 @@ pub fn render(
     link: Option<&str>,
 ) -> Result<Rendered, String> {
     let job_url = match &e.detail {
-        Detail::Job(j) => j.url.as_deref().and_then(github_link),
+        Detail::Job(j) => j.url.as_deref().filter(|u| net::link_safe(u)),
         _ => None,
     };
     let json_h = ("Content-Type", "application/json".to_string());
@@ -567,43 +502,32 @@ pub fn health(app: &crate::App, now_list: Vec<(String, String)>, now: u64) {
     }
 }
 
-/// DNS for alert requests: system resolution, then only addresses `allowed` may pass. The
-/// connection uses exactly these, so there is no gap for a rebind between check and connect.
+/// DNS for alert requests: `net::Guard` with this destination's tailnet choice. `net::builder`
+/// installs the real one; this keeps the resolver tests' shape.
+#[cfg(test)]
 struct Guard {
     tailnet: bool,
 }
 
+#[cfg(test)]
 impl reqwest::dns::Resolve for Guard {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let tailnet = self.tailnet;
-        Box::pin(async move {
-            let host = name.as_str().to_string();
-            let addrs = keep_allowed(tokio::net::lookup_host((host.as_str(), 0)).await?, tailnet);
-            if addrs.is_empty() {
-                return Err(format!("{host} resolves only to internal addresses").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
+        net::Guard(Mode::public(self.tailnet)).resolve(name)
     }
 }
 
 /// Only the addresses an alert may connect to.
+#[cfg(test)]
 fn keep_allowed(addrs: impl Iterator<Item = SocketAddr>, tailnet: bool) -> Vec<SocketAddr> {
-    addrs.filter(|a| allowed(a.ip(), tailnet)).collect()
+    net::keep(addrs, Mode::public(tailnet), &[])
 }
 
 /// The client for one destination. `open_for_tests` allows plain HTTP to the loopback
 /// receiver, and only in test builds: a release build ignores it.
 fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
-    let b = reqwest::Client::builder()
-        .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10));
     let open = open_for_tests && cfg!(test);
-    let b = if open { b } else { b.https_only(true).dns_resolver(Arc::new(Guard { tailnet: d.tailnet })) };
-    b.build().expect("notify http client")
+    let b = if open { net::base() } else { net::builder(Mode::public(d.tailnet)) };
+    b.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(10)).build().expect("notify http client")
 }
 
 #[derive(Debug)]
@@ -655,6 +579,12 @@ fn action_for(path: &str) -> Option<&'static str> {
     match path {
         "/api/config" => Some("settings changed"),
         "/api/token" => Some("GitHub token replaced"),
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/token") && r.matches('/').count() == 1) => {
+            Some("forge token replaced")
+        }
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/onboard") && r.matches('/').count() == 1) => {
+            Some("forge onboarded")
+        }
         // Every write to /api/app is a real change (create or remove); refresh and manifest are not.
         "/api/app" | "/api/app/convert" => Some("GitHub App changed"),
         _ => None,
@@ -1033,7 +963,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         outcome: oc.to_string(),
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
-        url: v.job_url.clone(),
+        url: v.job_url.as_deref().and_then(|u| forge_link(u, &link_origins(&app.cfg()))).map(String::from),
         vm_id: v.id.clone(),
     };
     let (ty, class) = if ok { ("job.finished", Class::Direct) } else { ("job.failed", Class::Job) };
@@ -1813,11 +1743,25 @@ mod tests {
     }
 
     #[test]
-    fn links_only_to_github() {
-        assert!(github_link("https://github.com/acme/kiln/actions/runs/1/job/2").is_some());
+    fn links_only_to_forge_origins() {
+        // github_link became forge_link(url, origins) (forge support P0-8); github.com is one origin.
+        let gh = ["https://github.com".to_string()];
+        assert!(forge_link("https://github.com/acme/kiln/actions/runs/1/job/2", &gh).is_some());
         for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://github.com/x|y>", "javascript:alert(1)"] {
-            assert!(github_link(bad).is_none(), "{bad}");
+            assert!(forge_link(bad, &gh).is_none(), "{bad}");
         }
+        let more = ["https://github.com".to_string(), "http://10.1.2.3:3000".to_string()];
+        assert!(forge_link("http://10.1.2.3:3000/acme/demo/actions/runs/4", &more).is_some());
+        assert!(forge_link("http://10.1.2.3:30001/x", &more).is_none(), "a longer port is another origin");
+        assert!(forge_link("http://10.1.2.3:3000.evil.example/x", &more).is_none());
+    }
+
+    #[test]
+    fn forge_routes_are_audited() {
+        assert_eq!(action_for("/api/forges/gl/token"), Some("forge token replaced"));
+        assert_eq!(action_for("/api/forges/gl/onboard"), Some("forge onboarded"));
+        assert_eq!(action_for("/api/forges/gl/other"), None);
+        assert_eq!(action_for("/api/forges/a/b/token"), None);
     }
 
     fn dest(kind: Kind, url: &str) -> Dest {

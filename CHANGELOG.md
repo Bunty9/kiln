@@ -8,6 +8,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
 
+### Changed
+
+- QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
+- A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.
+
 ### Fixed
 
 - A cache overlay is committed only when the VM's own console showed exactly one job start and a job id is bound, whatever the next API poll sees; a second start, no start, or an unbound job discards the overlay. The verdict is also re-checked after the forge lookup.
