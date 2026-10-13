@@ -6,6 +6,7 @@
 
 pub mod console;
 pub mod github;
+pub mod gitlab;
 pub mod net;
 
 use anyhow::{Result, bail};
@@ -455,138 +456,163 @@ pub struct RunQuery {
     pub page: u32,
 }
 
-/// A configured forge. Only GitHub exists so far; Gitea and GitLab arrive with their own variants,
-/// and `Forge::new` refuses their config until then.
+/// A configured forge. GitHub and GitLab (demand only so far) exist; Gitea arrives with its own
+/// variant, and `Forge::new` refuses its config until then.
 pub enum Forge {
     GitHub(github::GitHub),
+    GitLab(Box<gitlab::GitLab>),
 }
 
 impl Forge {
-    pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>) -> Result<Self> {
+    pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>, data: &std::path::Path) -> Result<Self> {
         match cfg.kind {
             Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
+            Kind::GitLab => Ok(Self::GitLab(Box::new(gitlab::GitLab::new(cfg, data)?))),
             k => bail!("forge {:?}: {k:?} is not yet supported", cfg.id.as_str()),
         }
     }
     pub fn caps(&self) -> Caps {
         match self {
             Self::GitHub(_) => github::CAPS,
+            Self::GitLab(_) => gitlab::CAPS,
         }
     }
     /// Where the forge's own web UI lives.
-    pub fn web_url(&self) -> &'static str {
+    pub fn web_url(&self) -> &str {
         match self {
             Self::GitHub(_) => "https://github.com",
+            Self::GitLab(g) => g.web_url(),
         }
     }
     /// Which credential is in use and when it expires; never the credential.
     pub fn auth(&self) -> Value {
         match self {
             Self::GitHub(g) => g.auth(),
+            Self::GitLab(g) => g.auth(),
         }
     }
     pub async fn runs(&self, repo: &RepoRef, q: &RunQuery) -> Result<RunPage> {
         match self {
             Self::GitHub(g) => g.runs(repo, q).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn run(&self, repo: &RepoRef, id: u64) -> Result<RunDetail> {
         match self {
             Self::GitHub(g) => g.run(repo, id).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
         match self {
             Self::GitHub(g) => g.job_log(repo, id, from).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
         match self {
             Self::GitHub(g) => g.workflows(repo).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn rerun(&self, repo: &RepoRef, id: u64, failed_only: bool) -> Result<()> {
         match self {
             Self::GitHub(g) => g.rerun(repo, id, failed_only).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         match self {
             Self::GitHub(g) => g.cancel(repo, id).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         match self {
             Self::GitHub(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
+            Self::GitLab(g) => g.id(),
         }
     }
     pub fn kind(&self) -> Kind {
         match self {
             Self::GitHub(_) => Kind::GitHub,
+            Self::GitLab(_) => Kind::GitLab,
         }
     }
     pub fn has_credential(&self) -> bool {
         match self {
             Self::GitHub(g) => g.gh.has_token(),
+            Self::GitLab(g) => g.has_credential(),
         }
     }
     /// What keeps this forge from polling (no credential, rate limited), if anything.
     pub fn health(&self) -> Option<String> {
         match self {
             Self::GitHub(g) => g.health(),
+            Self::GitLab(g) => g.health(),
         }
     }
     pub async fn refresh(&self) {
         match self {
             Self::GitHub(g) => g.gh.refresh_latest().await,
+            Self::GitLab(g) => g.refresh(),
         }
     }
     pub fn repo_paused(&self, repo: &RepoRef) -> Option<String> {
         match self {
             Self::GitHub(g) => g.gh.repo_paused(&repo.path),
+            Self::GitLab(_) => None,
         }
     }
     /// (remaining, limit, reset) of the tightest rate limit, if any is known.
     pub fn rate(&self) -> Option<(u64, u64, u64)> {
         match self {
             Self::GitHub(g) => g.gh.rate(),
+            Self::GitLab(_) => None,
         }
     }
     pub fn repos(&self, cfg: &ForgeCfg) -> Vec<RepoRef> {
         match self {
             Self::GitHub(g) => g.repos(cfg),
+            Self::GitLab(g) => g.repos(cfg),
         }
     }
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
         match self {
             Self::GitHub(g) => g.demand(repo, label, default_cpus).await,
+            Self::GitLab(g) => g.demand(repo, label, default_cpus).await,
         }
     }
     /// Registers a single-use runner named `name` for `repo`. A refusal is a `github::MintError`.
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
         match self {
             Self::GitHub(g) => g.register(repo, name, labels).await,
+            Self::GitLab(g) => g.register(repo, name, labels).await,
         }
     }
     pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
         match self {
             Self::GitHub(g) => g.deregister(repo, runner_id).await,
+            Self::GitLab(g) => g.deregister(repo, runner_id).await,
         }
     }
     /// (event, head branch, default branch, job conclusion) of the job that ran.
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
         match self {
             Self::GitHub(g) => g.cache_trust(job, writers).await,
+            Self::GitLab(_) => bail!(gitlab::NOT_YET),
         }
     }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
         match self {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
+            Self::GitLab(g) => g.sweep(repo).await,
         }
     }
     /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
@@ -594,6 +620,7 @@ impl Forge {
     pub fn gated(&self) -> bool {
         match self {
             Self::GitHub(_) => false,
+            Self::GitLab(_) => true,
         }
     }
     /// Stops the runner taking a second job and lists the jobs it holds. `None`: this forge needs
@@ -602,12 +629,14 @@ impl Forge {
     pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
         match self {
             Self::GitHub(_) => Ok(None),
+            Self::GitLab(_) => bail!(gitlab::LATER),
         }
     }
     /// What the API says about `job_id`, for `decide`. Never a `CI_*` value or anything the guest sent.
     pub async fn verdict_facts(&self, _repo: &RepoRef, _job_id: &str) -> Result<VerdictFacts> {
         match self {
             Self::GitHub(_) => bail!("GitHub has no verdict gate"),
+            Self::GitLab(_) => bail!(gitlab::LATER),
         }
     }
 }
@@ -713,7 +742,7 @@ pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>);
 
 impl Forges {
     /// Match the registry to `list`. A forge that cannot be built (unsupported kind) is logged and left out.
-    pub fn sync(&self, list: &[ForgeCfg], gh: &Arc<crate::github::Gh>) {
+    pub fn sync(&self, list: &[ForgeCfg], gh: &Arc<crate::github::Gh>, data: &std::path::Path) {
         let mut m = self.0.write().unwrap();
         m.retain(|id, _| list.iter().any(|c| &c.id == id));
         for c in list {
@@ -723,7 +752,7 @@ impl Forges {
                 continue;
             }
             m.remove(&c.id);
-            match Forge::new(c, gh) {
+            match Forge::new(c, gh, data) {
                 Ok(f) => {
                     m.insert(c.id.clone(), (key, Arc::new(f)));
                 }

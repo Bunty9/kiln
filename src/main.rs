@@ -455,7 +455,7 @@ impl App {
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
         let gh = Arc::new(gh);
         let forges = forge::Forges::default();
-        forges.sync(&forge::effective(&cfg.forges, &cfg.repos), &gh);
+        forges.sync(&forge::effective(&cfg.forges, &cfg.repos), &gh, &data);
         App {
             gh,
             forges,
@@ -485,7 +485,7 @@ impl App {
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
         *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
-        self.forges.sync(&forge::effective(&c.forges, &c.repos), &self.gh);
+        self.forges.sync(&forge::effective(&c.forges, &c.repos), &self.gh, &self.data);
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
@@ -1360,7 +1360,7 @@ mod tests {
     async fn a_tick_reports_backoff_per_forge_and_unsupported_forges() {
         let m = forge_test_mock::Mock::github().await;
         let forges: Vec<forge::ForgeCfg> = serde_json::from_str(
-            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.org","repos":["x/y"]}]"#,
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitea","url":"https://gitea.example.org","repos":["x/y"]}]"#,
         )
         .unwrap();
         let (app, cfg) = tick_app("tick-backoff", &m, Some(forges));
@@ -1796,14 +1796,20 @@ mod tests {
         c.repos = vec!["acme/demo".into()];
         c.forges = Some(vec![
             serde_json::from_str(r#"{"id":"github","kind":"github"}"#).unwrap(),
+            serde_json::from_str(r#"{"id":"gt","kind":"gitea","url":"https://gitea.example.com"}"#).unwrap(),
             serde_json::from_str(r#"{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}"#).unwrap(),
         ]);
         app.save_cfg(c).unwrap();
         // Same client (ETags, rate limits, App tokens) after a save that changed repos and added a forge.
         assert!(Arc::ptr_eq(&before, &app.forges.get(&forge::ForgeId::github()).unwrap()));
-        // GitLab is declared but refused for now: no forge is built.
-        assert!(app.forges.get(&forge::ForgeId::new("gl").unwrap()).is_none());
-        assert_eq!(app.forges.all().len(), 1);
+        // Gitea is declared but refused for now: no forge is built. GitLab is built.
+        assert!(app.forges.get(&forge::ForgeId::new("gt").unwrap()).is_none());
+        let gl = app.forges.get(&forge::ForgeId::new("gl").unwrap()).unwrap();
+        assert_eq!(app.forges.all().len(), 2);
+        // A save that leaves it alone keeps the same client (its project-id and fork caches).
+        let c = app.cfg();
+        app.save_cfg(c).unwrap();
+        assert!(Arc::ptr_eq(&gl, &app.forges.get(&forge::ForgeId::new("gl").unwrap()).unwrap()));
         let mut c = app.cfg();
         c.forges = None;
         app.save_cfg(c).unwrap();

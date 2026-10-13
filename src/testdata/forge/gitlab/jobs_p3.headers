@@ -1,0 +1,2 @@
+Link: <https://gitlab.example.org/api/v4/projects/1/jobs?cursor=eyJpZCI6IjIyMCIsIl9rZCI6Im4ifQ%3D%3D&id=1&page=1&pagination=keyset&per_page=5&scope%5B%5D=pending&scope%5B%5D=running>; rel="next"
+X-Next-Cursor: eyJpZCI6IjIyMCIsIl9rZCI6Im4ifQ==

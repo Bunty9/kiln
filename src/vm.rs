@@ -2406,6 +2406,8 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     for f in app.forges.all() {
         match &*f {
             crate::forge::Forge::GitHub(g) => doctor_github(app, &g.gh, &mut out).await,
+            // The credential and role checks arrive with GL-3.
+            crate::forge::Forge::GitLab(_) => {}
         }
     }
 

@@ -1,0 +1,29 @@
+{
+ "name": "ci",
+ "commit": {
+  "id": "e1b1292b52d01248b5fd732b24ce972c7aa17656",
+  "short_id": "e1b1292b",
+  "created_at": "2026-10-13T08:53:10.000+00:00",
+  "parent_ids": [
+   "43c1d2aa51a86719d5b48392b5ec52df3720addf"
+  ],
+  "title": "fix ci",
+  "message": "fix ci",
+  "author_name": "Administrator",
+  "author_email": "admin@example.com",
+  "authored_date": "2026-10-13T08:53:10.000+00:00",
+  "committer_name": "Administrator",
+  "committer_email": "admin@example.com",
+  "committed_date": "2026-10-13T08:53:10.000+00:00",
+  "trailers": {},
+  "extended_trailers": {},
+  "web_url": "https://gitlab.example.org/acme/demo/-/commit/e1b1292b52d01248b5fd732b24ce972c7aa17656"
+ },
+ "merged": false,
+ "protected": false,
+ "developers_can_push": false,
+ "developers_can_merge": false,
+ "can_push": true,
+ "default": false,
+ "web_url": "https://gitlab.example.org/acme/demo/-/tree/ci"
+}
