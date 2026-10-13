@@ -659,7 +659,15 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
     // Handed over as a file QEMU reads at start (fw_cfg on arm64, SMBIOS on x86: see job_args);
     // `path=`/`file=` keep it out of `ps`.
-    write_secret(&q.join("jit"), &reg.guest_secret).await?;
+    // QEMU's SMBIOS `path=` makes ONE string of a whole file (newlines become dots), so each
+    // `kiln.<key>=` line is its own file, which is also its fw_cfg entry name on arm64.
+    let mut secrets = Vec::new();
+    for line in reg.guest_secret.lines() {
+        let key = line.strip_prefix("kiln.").and_then(|l| l.split_once('=')).map(|(k, _)| k);
+        let key = key.filter(|k| !k.is_empty() && k.bytes().all(|c| c.is_ascii_lowercase())).context("guest secret line without a kiln.<key>= name")?;
+        write_secret(&q.join(key), line).await?;
+        secrets.push(key.to_string());
+    }
 
     let base = images(&app.data).join("base.qcow2");
     let disk = q.join("disk.qcow2");
@@ -704,6 +712,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 fwd = format!(",hostfwd=tcp::{port}-:22");
             }
             write_secret(&q.join("ssh"), &format!("kiln.ssh={}", b64(cfg.debug_ssh_keys.join("\n").as_bytes()))).await?;
+            secrets.push("ssh".into());
             ssh_host = Some((ip, port));
         } else {
             note(app, id, "no free ssh port (2200-2299): this VM will not be held");
@@ -719,7 +728,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // Direct kernel boot without initrd: virtio + ext4 are built into the
     // Ubuntu kernel, which brings boot-to-runner down to ~4s.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
-    cmd.args(job_args(&GUEST, &q, ssh_host.is_some(), now_us()));
+    cmd.args(job_args(&GUEST, &q, &secrets, now_us()));
     if ssh_host.is_some() && publish == Publish::Monitor {
         cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", q.join("mon.sock").display()));
     }
@@ -809,8 +818,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 if first {
                     // QEMU read the secret files at start, before the guest printed anything.
                     first = false;
-                    let _ = tokio::fs::remove_file(q.join("jit")).await;
-                    let _ = tokio::fs::remove_file(q.join("ssh")).await;
+                    for k in &secrets {
+                        let _ = tokio::fs::remove_file(q.join(k)).await;
+                    }
                 }
                 if logged < LOG_CAP {
                     log.write_all(&buf).await?;
@@ -1721,10 +1731,10 @@ fn now_us() -> u128 {
 /// keys) and the serial channels. Secrets go in as fw_cfg files on arm64 (bakes install the
 /// qemu_fw_cfg module) and as SMBIOS OEM strings on x86 (its command line is unchanged); `path=`/`file=` keep them out of `ps`.
 /// panic=1 + -no-reboot make a kernel panic end the VM instead of hanging until the timeout.
-fn job_args(g: &Guest, dir: &Path, ssh: bool, now_us: u128) -> Vec<String> {
+fn job_args(g: &Guest, dir: &Path, secrets: &[String], now_us: u128) -> Vec<String> {
     let base = format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console);
     let mut a = vec!["-append".into(), cmdline(g, &base, now_us)];
-    for s in if ssh { &["jit", "ssh"][..] } else { &["jit"] } {
+    for s in secrets {
         let f = dir.join(s).display().to_string();
         if g.smbios {
             a.extend(["-smbios".into(), format!("type=11,path={f}")]);
@@ -3903,15 +3913,18 @@ mod tests {
         let d = Path::new("/d/vm");
         // x86: unchanged SMBIOS path, ttyS0 console, ttyS1 steps.
         // x86 has an RTC (rtc_cmos is built in), so its command line carries no clock.
-        let x = job_args(&X64, d, true, 1_791_740_492_019_978);
+        let x = job_args(&X64, d, &["jit".into(), "ssh".into()], 1_791_740_492_019_978);
         assert!(has(&x, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"));
         assert!(has(&x, "-smbios", "type=11,path=/d/vm/jit") && has(&x, "-smbios", "type=11,path=/d/vm/ssh"));
         assert!(!x.iter().any(|s| s == "-fw_cfg"), "x86 command line has no fw_cfg");
+        // One SMBIOS string per file: `path=` turns a multi-line file into a single string.
+        let g = job_args(&X64, d, &["forge".into(), "url".into(), "cred".into()], 0);
+        assert_eq!(g.iter().filter(|s| s.starts_with("type=11,path=/d/vm/")).count(), 3);
         assert!(has(&x, "-serial", "stdio") && has(&x, "-chardev", "socket,id=s1,path=/d/vm/steps.sock,server=on,wait=off"));
         assert!(has(&x, "-serial", "chardev:s1"));
         // arm64: no SMBIOS without UEFI; PL011 console; steps on a virtio-serial port.
         // arm64: no RTC driver in the image, so the host's time goes in for systemd.
-        let a = job_args(&ARM64, d, false, 1_791_740_492_019_978);
+        let a = job_args(&ARM64, d, &["jit".into()], 1_791_740_492_019_978);
         assert!(has(&a, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyAMA0 quiet panic=1 systemd.clock_usec=1791740492019978"));
         assert!(!a.iter().any(|s| s == "-smbios" || s.contains("opt/kiln/ssh")));
         assert!(has(&a, "-fw_cfg", "name=opt/kiln/jit,file=/d/vm/jit") && has(&a, "-serial", "stdio"));
