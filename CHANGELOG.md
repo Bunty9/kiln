@@ -6,7 +6,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Security
 
-- Outbound alert and forge requests now refuse the host's own addresses in every mode (previously only on `internal` forges), plus 100.100.100.100/200, 168.63.129.16, fd7a:115c:a1e0::53, fd00:ec2::/32 and ISATAP-embedded private addresses, including for tailnet destinations.
+- Outbound alert and forge requests now refuse the host's own addresses in every mode (previously only on `internal` forges), plus 100.100.100.100/200, 168.63.129.16, fd7a:115c:a1e0::53, fd00:ec2::/32 and ISATAP-embedded private addresses, including for tailnet destinations. A forge `url` must now be written in its canonical form (lowercase host, no default port, no `0x7f.1`-style or percent-encoded hosts), so every parser reads the same host.
 
 ### Added
 

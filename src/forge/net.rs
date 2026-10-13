@@ -201,6 +201,12 @@ pub fn check_forge_url(url: &str, network: Network) -> Result<reqwest::Url> {
     if u.host_str().is_none() {
         bail!("forge url has no host");
     }
+    // The stored string, not this Url, is what later code templates into guest config, so it must
+    // be exactly what the parser would write: no 0x7f.1 / 2130706433 / %31%32%37 hosts, no
+    // uppercase, no default port, no dot segments, where another parser could read another host.
+    if u.as_str().trim_end_matches('/') != url.trim_end_matches('/') {
+        bail!("forge url must be written in canonical form: {}", u.as_str().trim_end_matches('/'));
+    }
     if let Some(ip) = literal_ip(&u)
         && !Mode::from(network).permits(ip, &own_addrs()?)
     {
@@ -306,9 +312,15 @@ fn allowed_v4(ip: Ipv4Addr, tailnet: bool) -> bool {
 /// The host of `u` when it is an IP literal. Requests to a literal skip DNS, and so the
 /// resolver's check, so callers check it themselves.
 pub fn literal_ip(u: &reqwest::Url) -> Option<IpAddr> {
-    // The parser already turned every IPv4 spelling (decimal, hex, octal, short, trailing dot) into
-    // dotted form; the trailing-dot trim is belt and braces.
-    u.host_str()?.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').parse().ok()
+    // `Url::host()` is the host exactly as the parser (and so reqwest/hyper, which get this same
+    // Url) will dial it. The parser has already turned every IPv4 spelling (decimal, hex, octal,
+    // short, percent-encoded, trailing dot) into `Ipv4`, so a `Domain` is a real name; the parse
+    // is belt and braces.
+    match u.host()? {
+        url::Host::Ipv4(v4) => Some(v4.into()),
+        url::Host::Ipv6(v6) => Some(v6.into()),
+        url::Host::Domain(d) => d.trim_end_matches('.').parse().ok(),
+    }
 }
 
 #[cfg(test)]
@@ -527,7 +539,8 @@ mod tests {
         }
         // The scheme is case-insensitive, so an uppercase one is still held to the https rule.
         assert!(check_forge_url("HTTP://gitea.example.com", Public).is_err());
-        assert!(check_forge_url("HTTPS://gitea.example.com", Public).is_ok());
+        assert!(check_forge_url("HTTPS://gitea.example.com", Public).is_err(), "only the canonical spelling is stored");
+        assert!(check_forge_url("https://gitea.example.com/", Public).is_ok());
     }
 
     #[tokio::test]
@@ -564,5 +577,41 @@ mod tests {
             assert!(!same_origin("https://git.example.com", bad), "{bad}");
         }
         assert!(!same_origin("file:///a", "file:///a"), "opaque origins never match");
+    }
+
+    #[test]
+    fn check_and_connect_read_the_same_host() {
+        // (input, host the parser dials). Stored forge urls must already be the parser's own text.
+        for (raw, dialled) in [
+            ("http://0x7f.1/", "127.0.0.1"),
+            ("http://2130706433/", "127.0.0.1"),
+            ("http://017700000001/", "127.0.0.1"),
+            ("http://127.1/", "127.0.0.1"),
+            ("http://%31%32%37.0.0.1/", "127.0.0.1"),
+            ("http://127.0.0.1./", "127.0.0.1"),
+            ("http://[::ffff:7f00:1]/", "[::ffff:7f00:1]"),
+            ("http://[::ffff:127.0.0.1]/", "[::ffff:7f00:1]"),
+            ("http://a@127.0.0.1/", "127.0.0.1"),
+            ("http://127.0.0.1\\@evil.example/", "127.0.0.1"),
+            ("http://evil.example\\@127.0.0.1/", "evil.example"),
+            ("http://GIT.Example.com/", "git.example.com"),
+        ] {
+            let u = reqwest::Url::parse(raw).unwrap();
+            assert_eq!(u.host_str(), Some(dialled), "{raw}");
+            // The literal check sees the very host reqwest is handed: loopback, however spelled.
+            if dialled.starts_with("127.") || dialled.starts_with("[::ffff") {
+                assert!(!Mode::Internal.permits(literal_ip(&u).unwrap(), &[]), "{raw}");
+            }
+            // Non-canonical spellings are refused at save, even when the host would be allowed.
+            if raw != u.as_str() {
+                assert!(check_forge_url(raw, Network::Internal).is_err(), "{raw}");
+            }
+        }
+        // A public host in a non-canonical spelling is refused too: one spelling, one parser.
+        for raw in ["https://GIT.example.com", "https://git.example.com:443", "https://git.example.com/a/../b", "https://%67it.example.com"]
+        {
+            assert!(check_forge_url(raw, Network::Public).is_err(), "{raw}");
+        }
+        assert!(check_forge_url("https://git.example.com:8443/gitea", Network::Public).is_ok());
     }
 }
