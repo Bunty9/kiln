@@ -595,6 +595,12 @@ fn action_for(path: &str) -> Option<&'static str> {
         p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/onboard") && r.matches('/').count() == 1) => {
             Some("forge onboarded")
         }
+        // Adding, removing or re-pointing a forge's repos: where kiln sends a token, and what it serves.
+        "/api/forges" => Some("forge added"),
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/repos") && r.matches('/').count() == 1) => {
+            Some("forge repos changed")
+        }
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| !r.is_empty() && !r.contains('/')) => Some("forge removed"),
         // Every write to /api/app is a real change (create or remove); refresh and manifest are not.
         "/api/app" | "/api/app/convert" => Some("GitHub App changed"),
         _ => None,
@@ -1789,6 +1795,10 @@ mod tests {
     #[test]
     fn forge_routes_are_audited() {
         assert_eq!(action_for("/api/forges/gl/token"), Some("forge token replaced"));
+        assert_eq!(action_for("/api/forges"), Some("forge added"));
+        assert_eq!(action_for("/api/forges/gl"), Some("forge removed"));
+        assert_eq!(action_for("/api/forges/gl/repos"), Some("forge repos changed"));
+        assert_eq!(action_for("/api/forges/gl/check"), None);
         assert_eq!(action_for("/api/forges/gl/onboard"), Some("forge onboarded"));
         assert_eq!(action_for("/api/forges/gl/other"), None);
         assert_eq!(action_for("/api/forges/a/b/token"), None);

@@ -20,6 +20,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 |---|---|---|---|---|---|
 | `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. After saving a new address the Overview shows "Restart needed to apply: listen" with **Restart when idle** (see [Restarting kiln](#restarting-kiln)). kiln test-binds a new address before saving it and again before a restart, and refuses one it could not serve on (not an address of this machine, a port below 1024, a port another program holds). If the configured address still cannot be bound at startup (an interface that went away, a hand edit), kiln serves on the last address that worked (`<data>/listen.last`) or else `127.0.0.1:7878`, logs it, and shows "listen X could not be bound (...); serving on Y" on the Overview. |
 | `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
+| `forges` | object array | absent | each `{id, kind, url, credential, network, repos}`; see [Forges](#forges) | live | Other forges kiln serves besides GitHub (GitLab; Gitea is not set up from the dashboard yet). Absent means GitHub only, from `repos`. Set it from Settings › Forges rather than by hand. |
 | `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. On an arm64 host (Apple Silicon) VMs register `<label>-arm64` and `<label>-arm64-<N>cpu` instead, never the plain label. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
 
@@ -199,6 +200,56 @@ A GitHub App is the recommended way to authenticate. kiln holds only the App's p
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
 
+## Forges
+
+`repos` and the GitHub token above are kiln's GitHub setup. Other forges live in the `forges` list, one entry each:
+
+```json
+{ "repos": ["acme/demo"],
+  "forges": [
+    { "id": "github", "kind": "github" },
+    { "id": "gitlab", "kind": "gitlab", "url": "https://gitlab.example.com",
+      "credential": "file", "network": "public", "repos": ["acme/platform/api"] } ] }
+```
+
+- `id`: `[a-z][a-z0-9-]{0,23}`, unique, and part of cache file names, so it cannot change. `github` is reserved for the GitHub entry (which has no `url` or `repos`: GitHub repos stay in the top-level `repos`).
+- `url`: the address of the site, ASCII, no credentials, https (http only with `network: "internal"`). The dashboard rewrites a pasted address into canonical form (lowercase host, no default port, no trailing slash).
+- `credential`: `file` (the default, `<data>/forges/<id>.token`, mode 0600) or `env` (`KILN_FORGE_<ID>_TOKEN`, id upper-cased with `-` as `_`). The dashboard writes the file; it cannot set an `env` token.
+- `network`: `public` (default) or `internal`. `internal` allows http and addresses on your LAN or tailnet, and opens each job VM's network to that address and port: a reverse proxy there exposes every site behind it. Loopback, this machine's own addresses and link-local addresses are refused whatever the mode, so bind the forge to a non-loopback address.
+- `repos`: the projects kiln serves on that forge, as paths (`group/subgroup/project` on GitLab). Elsewhere in the config (`warm`, `cache_branches`, `notify_rules[].repo`) such a repo is written `<id>:<path>`; GitHub repos stay bare `owner/name`.
+
+A forge's address, kind, token source and network cannot be changed by a settings save, because its saved token would go to the new address: remove the forge and add it again (removing deletes the token file). Only `repos` can change in place.
+
+**Rolling back.** A kiln release that has the `extra` catch-all keeps `forges` it does not understand when it saves settings, so a downgrade still starts and the entry comes back on the next upgrade. Remove `notify_rules` that name a `<id>:<path>` repo before downgrading: an older kiln refuses them. Releases before that one drop `forges` on a settings save.
+
+### From the dashboard
+
+Settings › Forges › **Add a forge** takes the kind (GitLab), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab is chosen. Then the forge's card takes its token and projects:
+
+- `POST /api/forges` adds the forge with no token. `POST /api/forges/{id}/token` tries the token against the forge and saves it only if it works, with the scopes kiln needs. The token is never returned or logged; the audit log says which forge got a new token. `POST /api/forges/{id}/repos` replaces the project list (paths, `<id>:<path>`, or a project URL on that forge). `DELETE /api/forges/{id}` removes the forge and its token file, and is refused while it has running VMs. `POST /api/forges/{id}/check` is the card's **Test**. All of them need the `x-kiln` header like every write, and are audited.
+
+### GitLab
+
+**GitLab support is in preview: jobs will not run until enabled.** kiln reads a GitLab project's queue and pipelines and can check its setup, but starts no VM for GitLab yet; the card, setup wizard and **Use GitLab** guide say so until launches are on.
+
+kiln needs GitLab 16.0 or newer. Create a **bot account** (a user dedicated to kiln) and add it as **Maintainer** to only the projects kiln serves; Maintainer is what creating a project runner needs. Create a personal access token for it with exactly:
+
+| Scope | Why |
+|---|---|
+| `create_runner` | make a one-job runner for each VM |
+| `manage_runner` | pause it and delete it |
+| `read_api` | queued jobs, pipelines, job logs, merge request lookups |
+
+Give it an expiry; the dashboard warns 14 days before. Project and group access tokens work too where your GitLab tier offers them. Save it under Settings › Forges (or write it to `<data>/forges/<id>.token`).
+
+**Rerun, Cancel and Run pipeline** (Repos page) need the wider `api` scope, which kiln does not recommend. kiln reads the token's scopes (`GET /personal_access_tokens/self`, every 10 minutes and whenever a token is saved) and shows those three controls only when the token has `api`; the server refuses them otherwise ("needs the api scope"). With only the three runner scopes, rerun and cancel pipelines in GitLab itself.
+
+**What the token can do.** With `read_api`, a token whose user is Maintainer or Owner on a project can read that project's CI/CD variables with their values, masked and protected ones included (`GET /projects/:id/variables`); GitHub's API never returns secret values. Group and instance variables are not readable by a project member. That is why the bot must be a dedicated account in only the served projects, with an expiring token, and why the token never enters a job VM, QEMU's environment or an error message. A job VM gets only a runner credential for one project, which kiln pauses before the job's code runs and deletes when it ends. A two-token split (a Maintainer with `create_runner` and `manage_runner` but no `read_api`, and a Reporter with `read_api`) would stop either token reading variables; kiln takes one token today, and the dashboard does not offer the split.
+
+**Setup check** (`kiln doctor`, Settings › Diagnostics, and the card's **Test**, which creates nothing): the GitLab version, who the token belongs to, its scopes and expiry, and its role on each project. Saving a token refuses one that is rejected or lacks a scope, naming it ("the token lacks `create_runner`"). A role below Maintainer is shown on the project's row. When creating a runner still gets **403**, GitLab does not say why; there are three causes: the role is below Maintainer; the instance setting `valid_runner_registrars` (Admin › Settings › CI/CD › Runner registration) lacks `project`; or runner registration is switched off for the project or its group (a toggle with no API, so kiln cannot check it).
+
+**Using it.** Give a job `tags: [kiln]` (or `kiln-4cpu` and the other size labels) in `.gitlab-ci.yml`; jobs with no tag, or other tags, are left to your other runners. Merge request pipelines from forks are never run by kiln (decided by the job's ref, not by its variables). GitLab can also run a fork's pipeline in your project when someone clicks Run pipeline and the project allows it (*Run pipelines in the parent project for merge requests from forks*): that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave that setting off.
+
 ## GitLab jobs
 
 Which GitLab jobs kiln runs is decided from GitLab's API (see [SECURITY.md](../SECURITY.md#fork-pull-requests)). Multi-project downstream pipelines (source `pipeline`) are refused: the upstream project chooses their variables and kiln cannot vouch for them. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request; fork merge requests are refused), and they never save the cache. Merge-train pipelines run without the cache. The cache is saved only after a `push` pipeline on the default or a protected cache branch whose job the API reports as `success`, on this VM's own runner, with exactly one job started and a recorded `ok` verdict for that job. kiln removes the runners of VMs that ended, at startup and about hourly for GitLab and Gitea. Cancelling a pipeline from the dashboard stops its VMs first, even when the token lacks the `api` scope and GitLab refuses the cancel.
@@ -286,6 +337,7 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
 <data>/                          $KILN_DATA or ~/.local/share/kiln; set to mode 0700 at every start
   config.json                    settings
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
+  forges/<id>.token              a GitLab forge's token, mode 0600 in a 0700 directory (only if saved from the dashboard); deleted when the forge is removed
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start

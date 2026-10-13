@@ -42,7 +42,7 @@ const NOT_OWNER: &str =
 /// Registration (GT-2) and the verdict facts (GT-3) work, but no VM launches for Gitea until the
 /// guest side lands (GT-5 `kiln-gate`): demand reports the queue, fork jobs and claims, but no
 /// launchable jobs.
-const LAUNCH_READY: bool = false;
+pub const LAUNCH_READY: bool = false;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]

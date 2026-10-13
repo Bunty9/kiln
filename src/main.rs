@@ -1643,14 +1643,17 @@ mod tests {
         let path = app.data.join("config.json");
         // Filtered egress is refused on macOS, so the round trip uses a value that loads there too.
         let egress = if platform::MACOS { "open" } else { "filtered" };
-        let src = r#"{"egress":"EGRESS","vm_cpus":1,"size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}],"future":true}"#
+        let src = r#"{"egress":"EGRESS","vm_cpus":1,"size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","credential":"file","network":"public","repos":["g/s/p"]}],"future":true}"#
                 .replace("EGRESS", egress);
         std::fs::write(&path, &src).unwrap();
         let c = load_config(&app.data).unwrap();
         assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), (egress, Some(&4096)));
         app.save_cfg(c).unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.com"}]));
+        assert_eq!(
+            saved["forges"],
+            serde_json::json!([{"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.com", "credential": "file", "network": "public", "repos": ["g/s/p"]}])
+        );
         assert_eq!(saved["future"], true);
         assert_eq!(saved["size_mem_mb"], serde_json::json!({"2": 4096}));
         assert_eq!(Config::default().extra.len(), 0);
