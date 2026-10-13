@@ -246,6 +246,11 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/tailscale/netcheck` | `tailscale netcheck` |
 | `POST /api/tailscale/ping` | Ping a peer (`{"peer": "..."}`, restricted characters) |
 | `POST /api/tailscale/serve` | Turn HTTPS serve on or off (port 8443) |
-| `GET, POST /api/gh/{path}` | Allow-listed GitHub proxy: GET of `repos/<configured repo>/actions/` followed by `workflows...`, `runs`, `runs/...` or `jobs/...`; POST only to `runs/<id>/rerun`, `rerun-failed-jobs` or `cancel` and `workflows/<id>/dispatches` |
+| `GET /api/forges` | Each forge: id, kind, web URL, caps, auth source, served repos, health |
+| `GET /api/runs?repo=` | Recent runs of a served repo (`status`, `branch`, `page` filter), in kiln's own shape with server-built links |
+| `GET /api/runs/{id}?repo=` | One run with its jobs |
+| `GET /api/jobs/{id}/log?repo=&from=` | A page of the forge's log for a job (`text`, `next`, `complete`) |
+| `GET /api/workflows?repo=` | The repo's workflows (`[]` where the forge has none) |
+| `POST /api/runs/{id}/rerun?repo=[&failed=1]`, `POST /api/runs/{id}/cancel?repo=`, `POST /api/dispatch` | The only forge writes; each needs the matching cap, `x-kiln` and is audited |
 
-The GitHub proxy is how the dashboard browses workflows and runs and dispatches, reruns or cancels them without a dedicated endpoint per call. Nothing else is written through it: not run approvals, deployment reviews or log deletion.
+These endpoints replace the old `/api/gh/` passthrough. The `repo` must be one kiln serves, ids are numeric, and nothing else is written through them: not run approvals, deployment reviews or log deletion.

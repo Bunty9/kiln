@@ -65,6 +65,7 @@ pub const CAPS: Caps = Caps { rerun: true, rerun_failed: true, cancel: true, dis
 const PER_PAGE: usize = 30;
 /// Most log bytes returned per request; the caller continues from `next`.
 const LOG_CAP: usize = 1 << 20;
+const LOG_DOWNLOAD_CAP: usize = 16 << 20;
 
 impl GitHub {
     pub fn auth(&self) -> Value {
@@ -102,7 +103,9 @@ impl GitHub {
 
     /// GitHub serves a job's log only once the job has finished, so a page is `complete` when it reaches the end.
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
-        let r = self.gh.raw(reqwest::Method::GET, &format!("repos/{}/actions/jobs/{id}/logs", repo.path), None).await?;
+        // The download is bounded too, not only the page handed back.
+        let r =
+            self.gh.raw_max(reqwest::Method::GET, &format!("repos/{}/actions/jobs/{id}/logs", repo.path), None, LOG_DOWNLOAD_CAP).await?;
         if !(200..300).contains(&r.status) {
             bail!("job log: GitHub answered {}", r.status);
         }

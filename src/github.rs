@@ -336,9 +336,14 @@ impl Gh {
         }
     }
 
-    /// Raw call for the dashboard proxy. Follows redirects (job logs redirect
+    /// Raw call, body capped at 8 MiB. Follows redirects (job logs redirect
     /// to a signed blob URL; reqwest drops the auth header cross-origin).
     pub async fn raw(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
+        self.raw_max(method, path, body, 8 << 20).await
+    }
+
+    /// `raw` with the download bounded to `max` bytes: a larger body is an error, not a truncation.
+    pub async fn raw_max(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<Resp> {
         let (mut rb, who) = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
@@ -346,7 +351,7 @@ impl Gh {
         let r = self.exec(rb, who).await?;
         let status = r.status().as_u16();
         let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-        let body = r.bytes().await?;
+        let body = bytes::Bytes::from(crate::forge::net::read_capped(r, max).await?);
         self.note_body(who, status, &String::from_utf8_lossy(&body));
         Ok(Resp { status, content_type, body })
     }
