@@ -265,13 +265,67 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// The job a runner picked up, as the forge lists it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct JobInfo {
+    /// The forge's job id (GitHub: the numeric id, as text). A VM binds to the first one it sees.
+    pub id: String,
+    pub url: String,
+    pub queued_at: u64,
+    /// From a fork pull request, which kiln refuses to run.
+    pub fork: bool,
+    pub run: crate::vm::Run,
+}
+
+/// A job to ask the forge about.
+pub struct JobRef {
+    pub repo: RepoRef,
+    pub id: String,
+}
+
+/// A registered runner: its id and the only thing the guest gets (`kiln.<k>=<v>` lines).
+pub struct RunnerReg {
+    pub runner_id: u64,
+    pub guest_secret: String,
+}
+
+/// Why a runner is being retired; `note` is what the dashboard shows on the VM.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reason {
+    Surplus,
+    Warm,
+    StalePolicy,
+    /// The VM ended without ever running a job.
+    Unused,
+}
+
+impl Reason {
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::Surplus => "no job left for this runner",
+            Self::Warm => "recycled warm VM",
+            Self::StalePolicy => "recycled: security settings changed",
+            Self::Unused => "",
+        }
+    }
+}
+
+/// What deregistering a runner came to.
+#[derive(Debug)]
+pub enum Dereg {
+    /// The runner is gone (or already was): no job can reach it.
+    Gone,
+    /// The forge refuses: the runner has a job.
+    Busy,
+    Err(anyhow::Error),
+}
+
 /// One poll's view of a repo's queue.
 pub struct Demand {
     /// Queued jobs of ours per VM size.
     pub by_size: HashMap<u32, usize>,
-    /// VM id -> (job page, queued-at, from a fork, run) for jobs our runners picked up.
-    /// ponytail: P0-7 swaps this for `JobInfo` with the job id when it adds job-id binding.
-    pub claimed: HashMap<String, (String, u64, bool, crate::vm::Run)>,
+    /// VM id -> the job our runner picked up.
+    pub claimed: HashMap<String, JobInfo>,
     /// Queued fork jobs kiln refuses (never counted in `by_size`).
     pub refused_forks: usize,
 }
@@ -334,6 +388,23 @@ impl Forge {
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
         match self {
             Self::GitHub(g) => g.demand(repo, label, default_cpus).await,
+        }
+    }
+    /// Registers a single-use runner named `name` for `repo`. A refusal is a `github::MintError`.
+    pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
+        match self {
+            Self::GitHub(g) => g.register(repo, name, labels).await,
+        }
+    }
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
+        match self {
+            Self::GitHub(g) => g.deregister(repo, runner_id).await,
+        }
+    }
+    /// (event, head branch, default branch, job conclusion) of the job that ran.
+    pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
+        match self {
+            Self::GitHub(g) => g.cache_trust(job, writers).await,
         }
     }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {

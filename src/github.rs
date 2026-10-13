@@ -1,6 +1,7 @@
 //! Thin GitHub REST client: just the calls the scheduler needs, plus a raw
 //! passthrough the dashboard uses for everything else.
 
+use crate::forge::JobInfo;
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode, header};
 use serde_json::{Value, json};
@@ -436,14 +437,14 @@ impl Gh {
     /// Queued jobs per VM size (see `job_size`), counted once per job id.
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
-    /// runner name -> (job page, queued-at unix time, from a fork, its run), and the
+    /// runner name -> its job, and the
     /// number of queued fork jobs refused (never counted as demand).
     pub async fn queued_jobs(
         &self,
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool, crate::vm::Run)>, usize)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -468,10 +469,14 @@ impl Gh {
                         }
                     }
                     if let Some(name) = j["runner_name"].as_str().filter(|n| n.starts_with("kiln-"))
+                        && let Some(id) = j["id"].as_u64()
                         && let Some(url) = j["html_url"].as_str()
                         && let Some(at) = j["created_at"].as_str().and_then(parse_rfc3339)
                     {
-                        ours.insert(name.to_string(), (url.to_string(), at, fork, run_info(run)));
+                        ours.insert(
+                            name.to_string(),
+                            JobInfo { id: id.to_string(), url: url.to_string(), queued_at: at, fork, run: run_info(run) },
+                        );
                     }
                 }
             }
@@ -755,13 +760,17 @@ impl Gh {
 
     /// Unused JIT registrations linger as offline runners; clean them up.
     pub async fn delete_runner(&self, repo: &str, id: u64) -> Result<()> {
-        let (rb, who) = self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?;
-        let r = self.exec(rb, who).await?;
+        let s = self.delete_runner_status(repo, id).await?;
         // 404 = the ephemeral runner already deregistered itself after its job.
-        if !r.status().is_success() && r.status() != StatusCode::NOT_FOUND {
-            bail!("delete runner {id}: {}", r.status());
+        if !s.is_success() && s != StatusCode::NOT_FOUND {
+            bail!("delete runner {id}: {s}");
         }
         Ok(())
+    }
+
+    pub async fn delete_runner_status(&self, repo: &str, id: u64) -> Result<StatusCode> {
+        let (rb, who) = self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?;
+        Ok(self.exec(rb, who).await?.status())
     }
 }
 
@@ -834,6 +843,7 @@ fn run_info(run: &Value) -> crate::vm::Run {
         workflow: s("name"),
         number: run["run_number"].as_u64().unwrap_or_default(),
         file: file.chars().take(200).collect(),
+        ..Default::default()
     }
 }
 
@@ -1142,7 +1152,7 @@ mod characterization {
         let mut names: Vec<_> = ours.keys().cloned().collect();
         names.sort();
         assert_eq!(names, ["kiln-7-0", "kiln-9-0"]);
-        let (url, at, fork, run) = &ours["kiln-7-0"];
+        let JobInfo { url, queued_at: at, fork, run, .. } = &ours["kiln-7-0"];
         assert_eq!(url, "https://github.com/acme/demo/actions/runs/1004/job/5201");
         assert_eq!((*at, *fork), (parse_rfc3339("2026-10-11T09:00:00Z").unwrap(), false));
         let want = crate::vm::Run {
@@ -1154,10 +1164,11 @@ mod characterization {
             workflow: "Release".into(),
             number: 43,
             file: "release.yml".into(),
+            ..Default::default()
         };
         assert_eq!(run, &want);
         // A fork PR run: null head_branch is an empty branch, no PR number, and the fork flag is set.
-        let (_, _, fork, run) = &ours["kiln-9-0"];
+        let JobInfo { fork, run, .. } = &ours["kiln-9-0"];
         assert!(*fork);
         assert_eq!(
             (run.branch.as_str(), run.pr, run.event.as_str(), run.number, run.file.as_str()),
