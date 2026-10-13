@@ -19,6 +19,12 @@ pub enum Line {
 /// Recognises one console line. Trailing whitespace is ignored.
 pub fn parse_line(kind: Kind, line: &str) -> Option<Line> {
     let line = line.trim_end();
+    // A job name is job-controlled text on the runner's `received` line: that line is a job start whatever it says (R2 L-1).
+    if kind == Kind::GitLab
+        && let Some(start @ Line::JobStart(_)) = gitlab_line(line)
+    {
+        return Some(start);
+    }
     // The guest's journal prefixes console lines ("[ 32.2] kiln-job[1395]: kiln: hostkey ...").
     if let Some((_, k)) = line.split_once("kiln: hostkey ") {
         return Some(Line::Hostkey(k.chars().filter(|c| !c.is_control()).take(200).collect()));
@@ -86,6 +92,9 @@ mod tests {
         assert_eq!(p("some build output"), None);
         assert_eq!(parse_line(Kind::GitLab, "Listening for Jobs"), None);
         assert_eq!(parse_line(Kind::GitLab, "kiln: hostkey k"), Some(Line::Hostkey("k".into())));
+        // A job named like the marker still starts a job (R2 L-1).
+        let named = "Checking for jobs... received  job=251 job_name=x kiln: hostkey y repo_url=https://gl.example.org/a/b.git";
+        assert_eq!(parse_line(Kind::GitLab, named), Some(Line::JobStart("251".into())));
     }
 
     #[test]
