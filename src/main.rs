@@ -1195,38 +1195,58 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
 }
 
 /// Copy job page, queue time and run (branch, commit, PR) onto the VM whose runner picked the job up.
+/// A VM binds to the first job id it is seen with; a second, different id means the runner took a
+/// job it was not minted for: the VM is killed and its cache overlay discarded (trust follows the
+/// job that ran, never a later one).
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool, vm::Run)>) {
-    for (id, _) in runners.iter().filter(|(_, r)| r.2) {
-        let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
-            v.note = Some("refused: pull request from a fork".into());
-            v.fork = true;
-        });
-        if hit.is_some()
-            && let Some(k) = app.kills.lock().unwrap().get(id)
-        {
-            k.notify_one();
-        }
-    }
+fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
+    let mut kill = vec![];
     let changed: Vec<vm::Vm> = app
         .vms
         .lock()
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at, fork, run) = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) && v.run.as_ref() == Some(run) && v.fork == *fork {
+            let job = runners.get(&v.id)?;
+            if v.job_id.as_deref().is_some_and(|id| id != job.id) {
+                if v.cache == vm::CacheUse::Read {
+                    v.cache = vm::CacheUse::Discarded;
+                    v.cache_note = Some("cache not saved: a second job reached this runner".into());
+                }
+                if !v.state.is_active() {
+                    return None;
+                }
+                v.note = Some("killed: a second job reached this runner".into());
+                kill.push(v.id.clone());
+                return Some(v.clone());
+            }
+            if job.fork && v.state.is_active() {
+                v.note = Some("refused: pull request from a fork".into());
+                kill.push(v.id.clone());
+            }
+            if v.job_id.as_deref() == Some(&job.id)
+                && v.job_url.as_deref() == Some(&job.url)
+                && v.queued_at == Some(job.queued_at)
+                && v.run.as_ref() == Some(&job.run)
+                && v.fork == job.fork
+            {
                 return None;
             }
-            v.fork = *fork;
-            v.job_url = Some(url.clone());
-            v.queued_at = Some(*at);
-            v.run = Some(run.clone());
+            v.fork = job.fork;
+            v.job_id = Some(job.id.clone());
+            v.job_url = Some(job.url.clone());
+            v.queued_at = Some(job.queued_at);
+            v.run = Some(job.run.clone());
             Some(v.clone())
         })
         .collect();
+    for id in kill {
+        if let Some(k) = app.kills.lock().unwrap().get(&id) {
+            k.notify_one();
+        }
+    }
     for v in &changed {
         vm::persist(app, v);
     }
@@ -1257,11 +1277,50 @@ mod tests {
         app.vms.lock().unwrap().push(v.clone());
         v.id = "kiln-5-1".into();
         app.vms.lock().unwrap().push(v);
-        let r = |fork| ("https://github.com/acme/kiln/actions/runs/1/job/2".to_string(), 1, fork, vm::Run::default());
+        let r = |fork| forge::JobInfo {
+            id: "2".into(),
+            url: "https://github.com/acme/kiln/actions/runs/1/job/2".to_string(),
+            queued_at: 1,
+            fork,
+            run: vm::Run::default(),
+        };
         attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
         let vms = app.vms.lock().unwrap();
         assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
         assert!(!vms[1].fork && vms[1].note.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_job_id_discards_the_cache_overlay_and_kills_the_vm() {
+        let app = test_app("attach-second-id");
+        let v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read"
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-5-0".into(), kill.clone());
+        let job = |id: &str| forge::JobInfo {
+            id: id.into(),
+            url: format!("https://github.com/acme/kiln/actions/runs/1/job/{id}"),
+            queued_at: 1,
+            fork: false,
+            run: vm::Run::default(),
+        };
+        let attach = |id: &str| attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job(id))]));
+        // The first id binds; repeating it changes nothing.
+        attach("2");
+        attach("2");
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id.as_deref(), v.cache, v.note.as_deref()), (Some("2"), vm::CacheUse::Read, None));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
+        // A second id: the binding and job page stay, the overlay is discarded, the VM is killed.
+        attach("3");
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("2"), vm::CacheUse::Discarded));
+        assert_eq!(v.job_url.as_deref(), Some("https://github.com/acme/kiln/actions/runs/1/job/2"));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
 
     #[tokio::test]

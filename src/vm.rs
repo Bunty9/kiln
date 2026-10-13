@@ -4,6 +4,7 @@
 //! no bridges, no sudo. Each job boots a qcow2 overlay of the baked base image,
 //! so the base never changes and a job's writes vanish with its overlay.
 
+use crate::forge::{Dereg, JobRef, Reason, RepoRef};
 use crate::{App, now};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,14 @@ pub struct Run {
     /// Workflow file name (e.g. `release.yml`), what `notify_rules` match on; empty if unknown.
     #[serde(default)]
     pub file: String,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub kind: crate::forge::EventKind,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub links: crate::forge::Links,
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -106,6 +115,9 @@ pub struct Vm {
     pub result: Option<String>,
     #[serde(default)]
     pub job_url: Option<String>,
+    /// The forge's id of the job this VM ran: set once (4.3 of the forge design); a second id kills the VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     /// When GitHub queued the job this VM's runner picked up.
     #[serde(default)]
     pub queued_at: Option<u64>,
@@ -333,6 +345,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         job: None,
         result: None,
         job_url: None,
+        job_id: None,
         queued_at: None,
         started: now(),
         online_at: None,
@@ -414,10 +427,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 }
             }
             // A JIT runner that never ran a job stays registered (offline) on GitHub.
-            if let (Some(rid), None) = (v.runner_id, &v.job)
-                && let Err(e) = app.gh.delete_runner(&v.repo, rid).await
-            {
-                tracing::warn!("{}: {e:#}", v.id);
+            if let (Some(rid), None) = (v.runner_id, &v.job) {
+                retire(&app, &v.repo, vec![(v.id.clone(), rid)], Reason::Unused).await;
             }
             // A failed mint (or anything else before boot) never made a directory: memory only.
             if dir.exists() {
@@ -445,19 +456,44 @@ fn reap_candidates(vms: &[Vm], repo: &str, cpus: u32, n: usize, t: u64) -> Vec<(
     c.into_iter().take(n).map(|(_, id, rid)| (id, rid)).collect()
 }
 
-/// Kill up to `n` surplus idle VMs. Deregistering the runner is the arbiter:
-/// if GitHub refuses (422), the runner just got a job and must live.
+/// Kill up to `n` surplus idle VMs (see `retire`).
 pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
     let c = reap_candidates(&app.vms.lock().unwrap(), repo, cpus, n, now());
-    drop_idle(app, repo, c, "no job left for this runner").await;
+    retire(app, repo, c, Reason::Surplus).await;
 }
 
-async fn drop_idle(app: &App, repo: &str, c: Vec<(String, u64)>, why: &str) {
+/// The forge and repo ref a VM's repo key stands for.
+fn forge_for(app: &App, repo: &str) -> Result<(Arc<crate::forge::Forge>, RepoRef)> {
+    let rr = RepoRef::parse(repo)?;
+    let f = app.forges.get(&rr.forge).with_context(|| format!("forge {:?} is not configured", rr.forge.as_str()))?;
+    Ok((f, rr))
+}
+
+/// The one way a runner (and so its VM) is dropped: every caller of it goes through here.
+/// Deregistering is the arbiter: if the forge refuses (Busy), the runner just got a job and
+/// its VM must live. Otherwise the VM is killed, except for `Unused` (its VM is already over).
+async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
+    let (forge, rr) = match forge_for(app, repo) {
+        Ok(f) => f,
+        Err(e) => return tracing::warn!("{repo}: {e:#}"),
+    };
     for (id, rid) in c {
-        if app.gh.delete_runner(repo, rid).await.is_err() {
+        match forge.deregister(&rr, rid).await {
+            Dereg::Gone => {}
+            Dereg::Busy if reason != Reason::Unused => continue,
+            Dereg::Busy => {
+                tracing::warn!("{id}: runner {rid} still has a job");
+                continue;
+            }
+            Dereg::Err(e) => {
+                tracing::warn!("{id}: {e:#}");
+                continue;
+            }
+        }
+        if reason == Reason::Unused {
             continue;
         }
-        note(app, &id, why);
+        note(app, &id, reason.note());
         if let Some(k) = app.kills.lock().unwrap().get(&id) {
             k.notify_one();
         }
@@ -511,13 +547,13 @@ fn stale_policy(vms: &[Vm], repo: &str, policy: &str) -> Vec<(String, u64)> {
 
 pub async fn recycle_stale_policy(app: &App, repo: &str, policy: &str) {
     let c = stale_policy(&app.vms.lock().unwrap(), repo, policy);
-    drop_idle(app, repo, c, "recycled: security settings changed").await;
+    retire(app, repo, c, Reason::StalePolicy).await;
 }
 
 pub async fn recycle_warm(app: &App, repo: &str, recycle_mins: u64) {
     let pending = pending_file(&app.data, repo).exists();
     let c = recycle_candidates(&app.vms.lock().unwrap(), repo, recycle_mins * 60, now(), pending);
-    drop_idle(app, repo, c, "recycled warm VM").await;
+    retire(app, repo, c, Reason::Warm).await;
 }
 
 /// A cache commit for `repo` is running or parked: warm VMs wait for it so they boot on the new cache.
@@ -534,7 +570,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let v = update(app, id, |_| {}).context("vm vanished")?;
     let (cpus, mem_mb) = (v.cpus, v.mem_mb);
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
-    let (runner_id, jit) = app.gh.jit_config(repo, id, &cfg.runner_labels(cpus)).await?;
+    let (forge, rr) = forge_for(app, repo)?;
+    let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
+    let runner_id = reg.runner_id;
     {
         let b = app.api_backoff.lock().unwrap().remove(&crate::forge::ForgeId::github());
         if let Some(b) = b.filter(|b| b.fails > 0) {
@@ -542,15 +580,15 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         }
     }
     // Recorded before anything else can fail, so cleanup deregisters it.
-    let reg = update(app, id, |v| v.runner_id = Some(runner_id));
+    let rec = update(app, id, |v| v.runner_id = Some(runner_id));
     let q = qemu_dir(dir);
     tokio::fs::create_dir_all(&q).await?;
-    if let Some(r) = reg {
+    if let Some(r) = rec {
         persist(app, &r);
     }
     // Delivered as an SMBIOS OEM string: works with the stock cloud kernel
     // (fw_cfg needs a module it lacks), and `path=` keeps it out of `ps`.
-    write_secret(&q.join("jit"), &format!("kiln.jit={jit}")).await?;
+    write_secret(&q.join("jit"), &reg.guest_secret).await?;
 
     let base = images(&app.data).join("base.qcow2");
     let disk = q.join("disk.qcow2");
@@ -1178,8 +1216,12 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let writers = cfg.cache_branches(repo);
     let succeeded = done && v.result.as_deref() == Some("Succeeded");
     let trust = if succeeded && cfg.cache {
-        match v.job_url.as_deref().and_then(job_id) {
-            Some(j) => app.gh.cache_trust(repo, j, &writers).await.map_err(|e| format!("{e:#}")),
+        // Records from before `job_id` carry only the job page.
+        match v.job_id.clone().or_else(|| v.job_url.as_deref().and_then(job_id).map(|j| j.to_string())) {
+            Some(id) => match forge_for(app, repo) {
+                Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("{e:#}")),
+            },
             None => Err("no job page".into()),
         }
     } else {
@@ -2461,6 +2503,7 @@ mod tests {
             job: None,
             result: None,
             job_url: None,
+            job_id: None,
             queued_at: None,
             started: 0,
             online_at,
@@ -3065,6 +3108,7 @@ mod tests {
             job: Some("build".into()),
             result: Some("Succeeded".into()),
             job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
+            job_id: None,
             queued_at: Some(1_790_000_000),
             started: 1_790_000_010,
             online_at: Some(1_790_000_020),
@@ -3093,6 +3137,7 @@ mod tests {
                 workflow: "Release".into(),
                 number: 43,
                 file: "release.yml".into(),
+                ..Default::default()
             }),
             fork: false,
         }
@@ -3183,7 +3228,7 @@ mod tests {
         let (a, b) = (waiting(&app, "kiln-1-0", 11), waiting(&app, "kiln-1-1", 12));
         // 11 deregisters (204): its VM is killed. 12 got a job meanwhile (422): it lives.
         m.fail("DELETE", "/repos/acme/demo/actions/runners/12", 422, "Runner is busy");
-        drop_idle(&app, "acme/demo", vec![("kiln-1-0".into(), 11), ("kiln-1-1".into(), 12)], "no job left for this runner").await;
+        retire(&app, "acme/demo", vec![("kiln-1-0".into(), 11), ("kiln-1-1".into(), 12)], Reason::Surplus).await;
         assert!(killed(&a).await && !killed(&b).await);
         let vms = app.vms.lock().unwrap();
         assert_eq!(vms[0].note.as_deref(), Some("no job left for this runner"));
