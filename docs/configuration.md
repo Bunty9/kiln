@@ -20,7 +20,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 |---|---|---|---|---|---|
 | `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. After saving a new address the Overview shows "Restart needed to apply: listen" with **Restart when idle** (see [Restarting kiln](#restarting-kiln)). kiln test-binds a new address before saving it and again before a restart, and refuses one it could not serve on (not an address of this machine, a port below 1024, a port another program holds). If the configured address still cannot be bound at startup (an interface that went away, a hand edit), kiln serves on the last address that worked (`<data>/listen.last`) or else `127.0.0.1:7878`, logs it, and shows "listen X could not be bound (...); serving on Y" on the Overview. |
 | `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
-| `forges` | object array | absent | each `{id, kind, url, credential, network, repos}`; see [Forges](#forges) | live | Other forges kiln serves besides GitHub (GitLab; Gitea is not set up from the dashboard yet). Absent means GitHub only, from `repos`. Set it from Settings › Forges rather than by hand. |
+| `forges` | object array | absent | each `{id, kind, url, credential, network, repos}`; see [Forges](#forges) | live | Other forges kiln serves besides GitHub (GitLab and Gitea). Absent means GitHub only, from `repos`. Set it from Settings › Forges rather than by hand. |
 | `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. On an arm64 host (Apple Silicon) VMs register `<label>-arm64` and `<label>-arm64-<N>cpu` instead, never the plain label. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
 
@@ -209,14 +209,16 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   "forges": [
     { "id": "github", "kind": "github" },
     { "id": "gitlab", "kind": "gitlab", "url": "https://gitlab.example.com",
-      "credential": "file", "network": "public", "repos": ["acme/platform/api"] } ] }
+      "credential": "file", "network": "public", "repos": ["acme/platform/api"] },
+    { "id": "gitea", "kind": "gitea", "url": "https://gitea.example.com",
+      "credential": "file", "network": "public", "repos": ["acme/demo"] } ] }
 ```
 
 - `id`: `[a-z][a-z0-9-]{0,23}`, unique, and part of cache file names, so it cannot change. `github` is reserved for the GitHub entry (which has no `url` or `repos`: GitHub repos stay in the top-level `repos`).
 - `url`: the address of the site, ASCII, no credentials, https (http only with `network: "internal"`). The dashboard rewrites a pasted address into canonical form (lowercase host, no default port, no trailing slash).
 - `credential`: `file` (the default, `<data>/forges/<id>.token`, mode 0600) or `env` (`KILN_FORGE_<ID>_TOKEN`, id upper-cased with `-` as `_`). The dashboard writes the file; it cannot set an `env` token.
 - `network`: `public` (default) or `internal`. `internal` allows http and addresses on your LAN or tailnet, and opens each job VM's network to that address and port: a reverse proxy there exposes every site behind it. Loopback, this machine's own addresses and link-local addresses are refused whatever the mode, so bind the forge to a non-loopback address.
-- `repos`: the projects kiln serves on that forge, as paths (`group/subgroup/project` on GitLab). Elsewhere in the config (`warm`, `cache_branches`, `notify_rules[].repo`) such a repo is written `<id>:<path>`; GitHub repos stay bare `owner/name`.
+- `repos`: the projects kiln serves on that forge, as paths (`group/subgroup/project` on GitLab, `owner/repo` on Gitea). Elsewhere in the config (`warm`, `cache_branches`, `notify_rules[].repo`) such a repo is written `<id>:<path>`; GitHub repos stay bare `owner/name`.
 
 A forge's address, kind, token source and network cannot be changed by a settings save, because its saved token would go to the new address: remove the forge and add it again (removing deletes the token file). Only `repos` can change in place.
 
@@ -224,7 +226,7 @@ A forge's address, kind, token source and network cannot be changed by a setting
 
 ### From the dashboard
 
-Settings › Forges › **Add a forge** takes the kind (GitLab), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab is chosen. Then the forge's card takes its token and projects:
+Settings › Forges › **Add a forge** takes the kind (GitLab or Gitea), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab or Gitea is chosen. Then the forge's card takes its token and projects:
 
 - `POST /api/forges` adds the forge with no token. `POST /api/forges/{id}/token` tries the token against the forge and saves it only if it works, with the scopes kiln needs. The token is never returned or logged; the audit log says which forge got a new token. `POST /api/forges/{id}/repos` replaces the project list (paths, `<id>:<path>`, or a project URL on that forge). `DELETE /api/forges/{id}` removes the forge and its token file, and is refused while it has running VMs. `POST /api/forges/{id}/check` is the card's **Test**. All of them need the `x-kiln` header like every write, and are audited.
 
@@ -249,6 +251,39 @@ Give it an expiry; the dashboard warns 14 days before. Project and group access 
 **Setup check** (`kiln doctor`, Settings › Diagnostics, and the card's **Test**, which creates nothing): the GitLab version, who the token belongs to, its scopes and expiry, and its role on each project. Saving a token refuses one that is rejected or lacks a scope, naming it ("the token lacks `create_runner`"). A role below Maintainer is shown on the project's row. When creating a runner still gets **403**, GitLab does not say why; there are three causes: the role is below Maintainer; the instance setting `valid_runner_registrars` (Admin › Settings › CI/CD › Runner registration) lacks `project`; or runner registration is switched off for the project or its group (a toggle with no API, so kiln cannot check it).
 
 **Using it.** Give a job `tags: [kiln]` (or `kiln-4cpu` and the other size labels) in `.gitlab-ci.yml`; jobs with no tag, or other tags, are left to your other runners. Merge request pipelines from forks are never run by kiln (decided by the job's ref, not by its variables). GitLab can also run a fork's pipeline in your project when someone clicks Run pipeline and the project allows it (*Run pipelines in the parent project for merge requests from forks*): that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave that setting off.
+
+### Gitea
+
+**Gitea support is in preview: jobs will not run until enabled.** kiln reads a Gitea repo's queue and runs and can check its setup, but starts no VM for Gitea yet; the card, setup wizard and **Use Gitea** guide say so until launches are on.
+
+kiln needs Gitea **1.25 or newer** (the jobs listing it reads the queue from does not exist before). 1.26.3 or newer is recommended: before it, approving one fork pull request once trusts that user's later ones, and the Test warns. Rerun and retiring a runner safely need 1.26, Cancel and approving a run need 28; the dashboard hides a button the server cannot do. Versions are compared as numbers: Gitea 28 is newer than 1.26.
+
+Create a **service account** (a user dedicated to kiln) and give it the **Owner** role on every repo kiln serves: it owns the repo (a personal namespace, or an organisation it belongs to as a member of the **Owners** team). Gitea hands the runner registration token to an Owner only, and a collaborator with Admin permission gets 403. Then create an access token for it (Settings › Applications) with exactly:
+
+| Scope | Why |
+|---|---|
+| `write:repository` | the runner registration token, the queue and runs, runner delete, rerun, cancel and dispatch (`write` includes `read`) |
+| `read:user` | `GET /user`, to show who the token is |
+
+Save it under Settings › Forges (or write it to `<data>/forges/<id>.token`). Gitea tokens do not expire unless you remove them, and cannot be read back, so the Test finds a missing scope by trying each call.
+
+**What the account can do.** An Owner can push to the repo, change its settings and, in the worst case, delete it; the registration token it gets is reusable and registers more runners. That is broader than a GitHub App. Use a dedicated account that owns only the repos kiln serves (a personal namespace holding just those, or a small organisation), and use its token for nothing else. kiln keeps the registration token in memory and never gives it to a job VM, which gets only a runner credential for one job, deleted when the job ends.
+
+**Setup check** (`kiln doctor`, Settings › Diagnostics, and the card's **Test**, which creates no runner): the server version, who the token is, and for each repo whether the account can see it, read its jobs and get the registration token. Saving a token refuses one that is rejected or lacks a scope ("the token lacks `write:repository`"). A **403** on the registration token without a scope message means the account is not the repo's owner or in its organisation's Owners team; the repo's row says so with the account's own role. A Gitea older than 1.25 is refused.
+
+**Using it.** Ask for kiln in `.gitea/workflows/ci.yml` (or `.github/workflows`):
+
+```yaml
+name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: [kiln]
+    steps:
+      - run: echo hello from kiln
+```
+
+`kiln-4cpu` and the other size labels work like GitHub's; jobs that do not ask for kiln are left to your other runners. Fork pull requests, `pull_request_target` from a fork and every `workflow_run` are never run by kiln (see [SECURITY.md](../SECURITY.md#fork-pull-requests)).
 
 ## GitLab jobs
 
@@ -337,7 +372,7 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
 <data>/                          $KILN_DATA or ~/.local/share/kiln; set to mode 0700 at every start
   config.json                    settings
   token                          GitHub token, mode 0600 (only if saved from the dashboard)
-  forges/<id>.token              a GitLab forge's token, mode 0600 in a 0700 directory (only if saved from the dashboard); deleted when the forge is removed
+  forges/<id>.token              a GitLab or Gitea forge's token, mode 0600 in a 0700 directory (only if saved from the dashboard); deleted when the forge is removed
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start

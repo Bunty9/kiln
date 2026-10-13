@@ -1541,16 +1541,23 @@ fn canonical_forge_url(input: &str, network: crate::forge::Network) -> anyhow::R
 
 /// A repo as typed or pasted (`group/proj`, `gl:group/proj`, or the project's page or clone URL)
 /// as the path kiln stores. Validation proper is `forge::validate`, on save.
-fn forge_repo_path(url: &str, id: &str, input: &str) -> anyhow::Result<String> {
+fn forge_repo_path(kind: crate::forge::Kind, url: &str, id: &str, input: &str) -> anyhow::Result<String> {
     let s = input.trim();
-    let rest = match (s.strip_prefix(&format!("{url}/")), s.strip_prefix(&format!("{id}:"))) {
-        (Some(r), _) | (_, Some(r)) => r,
+    let (rest, pasted) = match (s.strip_prefix(&format!("{url}/")), s.strip_prefix(&format!("{id}:"))) {
+        (Some(r), _) => (r, true),
+        (_, Some(r)) => (r, false),
         _ if s.starts_with("http://") || s.starts_with("https://") => return Err(anyhow!("{s:?} is not on {url}")),
-        _ => s,
+        _ => (s, false),
     };
     let rest = rest.split(['?', '#']).next().unwrap_or_default();
     let rest = rest.split("/-/").next().unwrap_or_default().trim_matches('/');
-    Ok(rest.strip_suffix(".git").unwrap_or(rest).to_string())
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    // A Gitea page address goes on past `owner/repo` (`/pulls/3`, `/src/branch/main`): a repo is two segments.
+    let rest = match kind {
+        crate::forge::Kind::Gitea if pasted => rest.splitn(3, '/').take(2).collect::<Vec<_>>().join("/"),
+        _ => rest.to_string(),
+    };
+    Ok(rest)
 }
 
 #[derive(Deserialize)]
@@ -1564,11 +1571,11 @@ struct AddForge {
     repos: Vec<String>,
 }
 
-/// Adds a forge with no token yet (the next call sets it). Gitea's card arrives with its own task.
+/// Adds a forge with no token yet (the next call sets it).
 async fn forge_add(State(app): S, Json(b): Json<AddForge>) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
     use crate::forge::{Credential, ForgeCfg, ForgeId, Kind, Network};
-    if b.kind != Kind::GitLab {
-        bail_r("only GitLab forges can be added from the dashboard so far")?;
+    if b.kind == Kind::GitHub {
+        bail_r("GitHub is set up under its own card")?;
     }
     let id = ForgeId::new(&b.id)?;
     let network = b.network.unwrap_or(Network::Public);
@@ -1577,7 +1584,7 @@ async fn forge_add(State(app): S, Json(b): Json<AddForge>) -> R<(Extension<crate
         .repos
         .iter()
         .filter(|r| !r.trim().is_empty())
-        .map(|r| forge_repo_path(&url, id.as_str(), r))
+        .map(|r| forge_repo_path(b.kind, &url, id.as_str(), r))
         .collect::<anyhow::Result<Vec<_>>>()?;
     edit_forges(&app, |list| {
         if list.iter().any(|f| f.id == id) {
@@ -1594,7 +1601,10 @@ async fn forge_add(State(app): S, Json(b): Json<AddForge>) -> R<(Extension<crate
         });
         Ok(())
     })?;
-    Ok((Extension(crate::audit::Note(format!("added gitlab forge {} at {url}", id.as_str()))), Json(json!({ "id": id, "url": url }))))
+    Ok((
+        Extension(crate::audit::Note(format!("added {} forge {} at {url}", format!("{:?}", b.kind).to_lowercase(), id.as_str()))),
+        Json(json!({ "id": id, "url": url })),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1602,31 +1612,38 @@ struct ForgeTokenBody {
     token: String,
 }
 
-/// Tries a token against the forge, and saves it only if GitLab accepts it with the scopes kiln
-/// needs. Written to `<data>/forges/<id>.token` (0600). The token is never sent back or logged.
+/// Tries a token against the forge, and saves it only if the forge accepts it with what kiln
+/// needs (GitLab: the scopes; Gitea: the account is Owner of every served repo). Written to `<data>/forges/<id>.token` (0600). The token is never sent back or logged.
 async fn forge_token(
     State(app): S,
     Path(id): Path<String>,
     Json(b): Json<ForgeTokenBody>,
 ) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
     let (cfg, f) = managed(&app, &id)?;
-    let crate::forge::Forge::GitLab(g) = &*f else {
-        return Err(anyhow!("only GitLab tokens are managed from the dashboard so far").into());
-    };
     if cfg.credential == Some(crate::forge::Credential::Env) {
         bail_r(&format!("this forge reads its token from {}; set it there", crate::forge::env_name(&cfg.id)))?;
     }
     let token = b.token.trim();
     if token.is_empty() || token.len() > 512 || !token.bytes().all(|c| c.is_ascii_graphic()) {
-        bail_r("that does not look like a GitLab token")?;
+        bail_r("that does not look like a token")?;
     }
-    let cand = g.candidate(token);
-    let res = cand.check(&g.repos(&cfg)).await;
+    use crate::forge::Forge;
+    let (res, adopt): (Value, Box<dyn FnOnce() + Send + '_>) = match &*f {
+        Forge::GitLab(g) => {
+            let cand = g.candidate(token);
+            (cand.check(&g.repos(&cfg)).await, Box::new(move || g.adopt(&cand)))
+        }
+        Forge::Gitea(g) => {
+            let cand = g.candidate(token);
+            (cand.check(&g.repos(&cfg)).await, Box::new(move || g.adopt(&cand)))
+        }
+        Forge::GitHub(_) => return Err(anyhow!("GitHub is set up under its own card").into()),
+    };
     let problems: Vec<&str> = res["problems"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if !problems.is_empty() {
         bail_r(&format!("token not saved: {}", problems.join("; ")))?;
     }
-    store_token(&app, &cfg.id, &f, g, &cand, token)?;
+    store_token(&app, &cfg.id, &f, adopt, token)?;
     let note = format!("set the token of forge {id} (login {})", res["login"].as_str().unwrap_or("?"));
     Ok((Extension(crate::audit::Note(note)), Json(res)))
 }
@@ -1638,8 +1655,7 @@ fn store_token(
     app: &App,
     id: &crate::forge::ForgeId,
     f: &Arc<crate::forge::Forge>,
-    g: &crate::forge::gitlab::GitLab,
-    cand: &crate::forge::gitlab::GitLab,
+    adopt: impl FnOnce(),
     token: &str,
 ) -> anyhow::Result<()> {
     let _g = FORGE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
@@ -1655,15 +1671,18 @@ fn store_token(
     }
     crate::app_auth::write_private(&path, token.as_bytes())?;
     f.load_token(&app.data);
-    g.adopt(cand);
+    adopt();
     Ok(())
 }
 
 /// The setup check against the saved token: the same answer a token save gives.
 async fn forge_check(State(app): S, Path(id): Path<String>) -> R<Json<Value>> {
     let (cfg, f) = managed(&app, &id)?;
-    let crate::forge::Forge::GitLab(g) = &*f else { return Err(anyhow!("only GitLab can be checked from the dashboard so far").into()) };
-    let res = g.check(&g.repos(&cfg)).await;
+    let res = match &*f {
+        crate::forge::Forge::GitLab(g) => g.check(&g.repos(&cfg)).await,
+        crate::forge::Forge::Gitea(g) => g.check(&g.repos(&cfg)).await,
+        crate::forge::Forge::GitHub(_) => return Err(anyhow!("GitHub is set up under its own card").into()),
+    };
     Ok(Json(res))
 }
 
@@ -1680,8 +1699,12 @@ async fn forge_repos(
 ) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
     let (cfg, _) = managed(&app, &id)?;
     let url = cfg.url.clone().unwrap_or_default();
-    let repos =
-        b.repos.iter().filter(|r| !r.trim().is_empty()).map(|r| forge_repo_path(&url, &id, r)).collect::<anyhow::Result<Vec<_>>>()?;
+    let repos = b
+        .repos
+        .iter()
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| forge_repo_path(cfg.kind, &url, &id, r))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     edit_forges(&app, |list| {
         list.iter_mut().find(|f| f.id == cfg.id).context("forge vanished")?.repos = repos.clone();
         Ok(())
@@ -2328,14 +2351,20 @@ mod tests {
         ] {
             assert!(canonical_forge_url(u, n).is_err(), "{u} must be refused");
         }
-        let p = |i| forge_repo_path("https://gitlab.example.com", "gl", i).unwrap();
+        let p = |i| forge_repo_path(crate::forge::Kind::GitLab, "https://gitlab.example.com", "gl", i).unwrap();
         assert_eq!(p("group/sub/proj"), "group/sub/proj");
         assert_eq!(p("gl:group/proj"), "group/proj");
         assert_eq!(p("https://gitlab.example.com/group/sub/proj"), "group/sub/proj");
         assert_eq!(p("https://gitlab.example.com/group/proj.git"), "group/proj");
         assert_eq!(p("https://gitlab.example.com/group/proj/-/merge_requests/3?x=1"), "group/proj");
         assert_eq!(p(" group/proj/ "), "group/proj");
-        assert!(forge_repo_path("https://gitlab.example.com", "gl", "https://evil.example.com/group/proj").is_err());
+        let t = |i| forge_repo_path(crate::forge::Kind::Gitea, "https://gitea.example.org", "gt", i).unwrap();
+        assert_eq!(t("https://gitea.example.org/acme/demo/pulls/3"), "acme/demo");
+        assert_eq!(t("https://gitea.example.org/acme/demo/src/branch/main?x=1"), "acme/demo");
+        assert_eq!((t("gt:acme/demo.git"), t("acme/demo")), ("acme/demo".into(), "acme/demo".into()));
+        assert!(
+            forge_repo_path(crate::forge::Kind::GitLab, "https://gitlab.example.com", "gl", "https://evil.example.com/group/proj").is_err()
+        );
     }
 
     #[test]
@@ -2390,13 +2419,13 @@ mod tests {
         // The live registry has it, without a token.
         let live = app.forges.get(&crate::forge::ForgeId::new("gl").unwrap()).unwrap();
         assert!(!live.has_credential() && live.health().is_some());
-        // Refused: a duplicate id, GitHub's id, loopback, plain http, Gitea (not yet), a repo on another host.
+        // Refused: a duplicate id, GitHub's id, loopback, plain http, a GitHub-kind add, a repo on another host.
         for (b, why) in [
             (add("gl", "https://gitlab.example.org"), "exists already"),
             (add("github", "https://gitlab.example.org"), "exists already"),
             (add("x", "https://127.0.0.1"), "not reachable by design"),
             (add("x", "http://gitlab.example.org"), "https"),
-            (AddForge { kind: crate::forge::Kind::Gitea, ..add("x", "https://gitea.example.org") }, "only GitLab"),
+            (AddForge { kind: crate::forge::Kind::GitHub, ..add("x", "https://gitea.example.org") }, "own card"),
             (AddForge { repos: vec!["https://evil.example.org/a/b".into()], ..add("x", "https://gitlab.example.org") }, "is not on"),
             (AddForge { repos: vec!["a".into()], ..add("x", "https://gitlab.example.org") }, "segments"),
         ] {
@@ -2554,7 +2583,7 @@ mod tests {
         assert!(!tok.exists());
         let _ = add("https://gitlab.example.org").await.unwrap_or_else(|e| panic!("{:#}", e.0));
         assert!(
-            store_token(&app, &id, &f_old, g_old, &cand, "tok-b").is_err() && !tok.exists(),
+            store_token(&app, &id, &f_old, || g_old.adopt(&cand), "tok-b").is_err() && !tok.exists(),
             "the old forge's token must not bind to the new address"
         );
         // The same through the settings save: removing a forge there drops its token, and so does adding one by that name.
@@ -2570,5 +2599,61 @@ mod tests {
         assert!(!tok.exists(), "a forge added through /api/config starts without a token");
         assert!(!app.forges.get(&id).unwrap().has_credential());
         let _ = m;
+    }
+
+    #[tokio::test]
+    async fn a_gitea_token_is_tried_against_every_repo_and_only_an_owner_one_is_stored() {
+        let (m, app) = typed("forge-token-gitea").await;
+        let api = "/api/v1";
+        let serve = |login_status: u16, perms: Value, reg: (u16, &str)| {
+            m.route("GET", &format!("{api}/version"), 200, r#"{"version":"28.1.0"}"#);
+            m.route("GET", &format!("{api}/user"), login_status, r#"{"login":"kiln-bot"}"#);
+            m.route("GET", &format!("{api}/repos/acme/demo"), 200, json!({ "id": 1, "permissions": perms }).to_string());
+            m.route("GET", &format!("{api}/repos/acme/demo/actions/jobs?limit=1"), 200, r#"{"jobs":[],"total_count":0}"#);
+            m.route("POST", &format!("{api}/repos/acme/demo/actions/runners/registration-token"), reg.0, reg.1);
+        };
+        let cfg: crate::forge::ForgeCfg = serde_json::from_value(
+            json!({ "id": "gitea", "kind": "gitea", "url": "https://gitea.example.org", "credential": "file", "network": "public", "repos": ["acme/demo"] }),
+        )
+        .unwrap();
+        let mut c = app.cfg();
+        c.forges = Some(vec![serde_json::from_value(json!({ "id": "github", "kind": "github" })).unwrap(), cfg.clone()]);
+        app.save_cfg(c).unwrap();
+        app.forges.insert(
+            cfg.clone(),
+            crate::forge::Forge::Gitea(Box::new(crate::forge::gitea::Gitea::for_mock("https://gitea.example.org", &m.base, ""))),
+        );
+        let body = |t: &str| Json(ForgeTokenBody { token: t.into() });
+        let path = crate::forge::token_path(&app.data, &cfg.id);
+        let write = json!({ "admin": false, "push": true, "pull": true });
+        // A collaborator: saved (the token itself is fine) but the repo row names the failure; the registration token is Owner only.
+        serve(200, write.clone(), (403, r#"{"message":"user should be the owner of the repo"}"#));
+        let (_, Json(r)) =
+            forge_token(State(app.clone()), Path("gitea".into()), body("tok-secret-1")).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert_eq!((r["repos"][0]["role"].clone(), r["repos"][0]["ok"].clone()), (json!("write"), json!(false)), "{r}");
+        assert!(r["repos"][0]["message"].as_str().unwrap().contains("Owners team"), "{r}");
+        assert!(!r.to_string().contains("tok-secret"));
+        // A token without the scope is refused outright.
+        serve(200, write.clone(), (403, r#"{"message":"token does not have at least one of required scope(s): [write:repository]"}"#));
+        std::fs::remove_file(&path).ok();
+        let e = forge_token(State(app.clone()), Path("gitea".into()), body("tok-secret-2")).await.err().unwrap();
+        let msg = format!("{:#}", e.0);
+        assert!(msg.contains("lacks the `write:repository` scope") && !msg.contains("tok-secret"), "{msg}");
+        assert!(!path.exists());
+        // The Owner: stored 0600, the forge list shows who, caps follow the version.
+        serve(200, json!({ "admin": true, "push": true, "pull": true }), (200, r#"{"token":"REG"}"#));
+        let (_, Json(r)) =
+            forge_token(State(app.clone()), Path("gitea".into()), body("tok-secret-3")).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert_eq!((r["ok"].clone(), r["repos"][0]["role"].clone()), (json!(true), json!("Owner")), "{r}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok-secret-3");
+        let Json(f) = forges_list(State(app.clone())).await.unwrap_or_else(|_| panic!("forges"));
+        let f = f.as_array().unwrap().iter().find(|x| x["id"] == "gitea").unwrap().clone();
+        assert_eq!((f["auth"]["login"].clone(), f["auth"]["source"].clone()), (json!("kiln-bot"), json!("file")));
+        assert_eq!((f["caps"]["cancel"].clone(), f["launches"].clone()), (json!(true), json!(false)));
+        assert!(!f.to_string().contains("tok-secret") && !r.to_string().contains("REG"));
+        // The token only ever went to the mock, in the header of Gitea calls.
+        assert!(m.log().iter().all(|q| {
+            q.auth.as_deref().is_none_or(|a| a == "token tok-secret-1" || a == "token tok-secret-2" || a == "token tok-secret-3")
+        }));
     }
 }

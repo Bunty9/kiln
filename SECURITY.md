@@ -34,6 +34,7 @@ The dashboard holds a GitHub token and can kill VMs, so access is checked on eve
 - **Audit log.** Every admitted API write is appended to `<data>/audit.log` (mode 0600, rolled over at 8 MiB, also written to kiln's log); refused writes are logged to kiln's log only, so a job cannot flood the file: when, the tailnet login or `local`, the source address, method, path, status, and what changed (the keys of a config save, the repo of a cache clear). Ship it to your log pipeline if you need it kept.
 - **Bounded identity lookups.** The `tailscale` CLI calls the guard depends on are killed after 20 seconds; a timeout counts as an unknown identity, which is refused, or, when kiln cannot learn its own addresses at all, as local, which needs the dashboard key.
 - The GitHub token is stored with mode 0600 and never included in error messages. A job VM only ever receives a single-use JIT runner configuration, which is deleted from the host as soon as the guest has read it.
+- **A Gitea account is more powerful than a GitHub App** (Gitea, not launched yet). Gitea gives the runner registration token only to a repo's Owner, so kiln's access token (`write:repository` and `read:user`) belongs to an account that owns the repo or sits in its organisation's Owners team. That account can push, change the repo's settings and, in the worst case, delete it, and the registration token it gets is reusable and registers more runners. Use a dedicated service account that owns only the repos kiln serves, and use its token for nothing else. kiln keeps the registration token in memory; a job VM gets a runner credential limited to one job, which the host deletes when the job ends. The setup UI says all of this next to the token field. A Gitea older than 1.25 is refused, and before 1.26.3 approving one fork pull request once trusts that user's later ones (the dashboard warns).
 
 ### VM isolation
 
@@ -126,7 +127,7 @@ kiln is honest about these:
 - **The Docker mirror's `/v2/_catalog` and other reads are visible to every job** and shared between repos. It only caches public images, so this is acceptable, but jobs can learn what other jobs pulled.
 - **The cache can be poisoned by a compromised default branch or cache branch.** The trust rule stops PRs and other branches, not code already merged into a writer branch. Only list branches in `cache_branches` that are as protected as the default.
 - **The base image gives `runner` passwordless sudo,** and bake VMs always use open networking.
-- **Local file secrets.** The GitHub token and dashboard key are plain files readable by the kiln user.
+- **Local file secrets.** The GitHub token, other forges' tokens (`<data>/forges/`, readable only by the kiln user and denied to QEMU by Landlock) and dashboard key are plain files readable by the kiln user.
 - **One host.** There is no tenant separation between repos beyond VM and cache-disk isolation.
 - **Nested virtualization is on.** Guests get `-cpu host` and may use KVM themselves (Android emulators, VM tests), which exposes the host's nested-virtualization code to jobs.
 - **Secrets in cached paths persist.** Apart from the login tokens kiln scrubs, anything a trusted job writes under a cached directory (including Docker images built with secrets in their layers) is visible to later jobs of the repo, pull requests included, exactly as with `actions/cache`.
