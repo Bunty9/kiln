@@ -10,6 +10,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- Groundwork for Gitea: a `gitea` forge entry now builds. kiln reads the server version, the queued-jobs listing (labels matched client-side, each job joined to its run) and flags queued fork, `pull_request_target` and `workflow_run` jobs. It does not register runners or launch VMs for Gitea yet.
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
 - A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos.
 
