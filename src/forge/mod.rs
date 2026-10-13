@@ -5,10 +5,13 @@
 #![allow(dead_code)] // the call sites arrive with the later forge tasks
 
 pub mod console;
+pub mod github;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -260,6 +263,123 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// One poll's view of a repo's queue.
+pub struct Demand {
+    /// Queued jobs of ours per VM size.
+    pub by_size: HashMap<u32, usize>,
+    /// VM id -> (job page, queued-at, from a fork, run) for jobs our runners picked up.
+    /// ponytail: P0-7 swaps this for `JobInfo` with the job id when it adds job-id binding.
+    pub claimed: HashMap<String, (String, u64, bool, crate::vm::Run)>,
+    /// Queued fork jobs kiln refuses (never counted in `by_size`).
+    pub refused_forks: usize,
+}
+
+/// A configured forge. Only GitHub exists so far; Gitea and GitLab arrive with their own variants,
+/// and `Forge::new` refuses their config until then.
+pub enum Forge {
+    GitHub(github::GitHub),
+}
+
+impl Forge {
+    pub fn new(cfg: &ForgeCfg, gh: &Arc<crate::github::Gh>) -> Result<Self> {
+        match cfg.kind {
+            Kind::GitHub => Ok(Self::GitHub(github::GitHub { gh: gh.clone() })),
+            k => bail!("forge {:?}: {k:?} is not yet supported", cfg.id.as_str()),
+        }
+    }
+    pub fn id(&self) -> ForgeId {
+        match self {
+            Self::GitHub(_) => ForgeId::github(),
+        }
+    }
+    pub fn kind(&self) -> Kind {
+        match self {
+            Self::GitHub(_) => Kind::GitHub,
+        }
+    }
+    pub fn has_credential(&self) -> bool {
+        match self {
+            Self::GitHub(g) => g.gh.has_token(),
+        }
+    }
+    /// What keeps this forge from polling (no credential, rate limited), if anything.
+    pub fn health(&self) -> Option<String> {
+        match self {
+            Self::GitHub(g) => g.health(),
+        }
+    }
+    pub async fn refresh(&self) {
+        match self {
+            Self::GitHub(g) => g.gh.refresh_latest().await,
+        }
+    }
+    pub fn repo_paused(&self, repo: &RepoRef) -> Option<String> {
+        match self {
+            Self::GitHub(g) => g.gh.repo_paused(&repo.path),
+        }
+    }
+    /// (remaining, limit, reset) of the tightest rate limit, if any is known.
+    pub fn rate(&self) -> Option<(u64, u64, u64)> {
+        match self {
+            Self::GitHub(g) => g.gh.rate(),
+        }
+    }
+    pub fn repos(&self, cfg: &ForgeCfg) -> Vec<RepoRef> {
+        match self {
+            Self::GitHub(g) => g.repos(cfg),
+        }
+    }
+    pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
+        match self {
+            Self::GitHub(g) => g.demand(repo, label, default_cpus).await,
+        }
+    }
+    pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
+        match self {
+            Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
+        }
+    }
+}
+
+/// The live forges. A settings save keeps the same `Arc<Forge>` for every forge whose config did
+/// not change, so client state (ETags, rate limits, App tokens) survives.
+#[derive(Default)]
+pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>);
+
+impl Forges {
+    /// Match the registry to `list`. A forge that cannot be built (unsupported kind) is logged and left out.
+    pub fn sync(&self, list: &[ForgeCfg], gh: &Arc<crate::github::Gh>) {
+        let mut m = self.0.write().unwrap();
+        m.retain(|id, _| list.iter().any(|c| &c.id == id));
+        for c in list {
+            // The repo list is read per tick; changing it needs no new client.
+            let key = ForgeCfg { repos: vec![], ..c.clone() };
+            if m.get(&c.id).is_some_and(|(k, _)| *k == key) {
+                continue;
+            }
+            m.remove(&c.id);
+            match Forge::new(c, gh) {
+                Ok(f) => {
+                    m.insert(c.id.clone(), (key, Arc::new(f)));
+                }
+                Err(e) => tracing::warn!("{e:#}"),
+            }
+        }
+    }
+
+    pub fn get(&self, id: &ForgeId) -> Option<Arc<Forge>> {
+        self.0.read().unwrap().get(id).map(|(_, f)| f.clone())
+    }
+
+    /// All forges, ordered by id.
+    pub fn all(&self) -> Vec<Arc<Forge>> {
+        let m = self.0.read().unwrap();
+        let mut v: Vec<_> = m.iter().collect();
+        v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        v.into_iter().map(|(_, (_, f))| f.clone()).collect()
+    }
 }
 
 /// Allowed `<label>-<N>cpu` sizes.

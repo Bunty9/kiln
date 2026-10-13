@@ -392,7 +392,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             // GitHub-wide: one warning per backoff step, not one per VM or tick.
             let step = match mint {
                 Some((true, status)) => {
-                    let mut a = app.api_backoff.lock().unwrap();
+                    let mut m = app.api_backoff.lock().unwrap();
+                    let a = m.entry(crate::forge::ForgeId::github()).or_default();
                     a.fail(status, now()).then(|| a.retry_at.saturating_sub(now()).div_ceil(60))
                 }
                 _ => None,
@@ -535,11 +536,10 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // Mint first: a refused registration costs one API call, and leaves no VM directory.
     let (runner_id, jit) = app.gh.jit_config(repo, id, &cfg.runner_labels(cpus)).await?;
     {
-        let mut b = app.api_backoff.lock().unwrap();
-        if b.fails > 0 {
+        let b = app.api_backoff.lock().unwrap().remove(&crate::forge::ForgeId::github());
+        if let Some(b) = b.filter(|b| b.fails > 0) {
             tracing::info!("runner registration works again after {} failed attempt(s): launches resume", b.fails);
         }
-        *b = Default::default();
     }
     // Recorded before anything else can fail, so cleanup deregisters it.
     let reg = update(app, id, |v| v.runner_id = Some(runner_id));
