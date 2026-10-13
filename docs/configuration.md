@@ -324,9 +324,11 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 ]
 ```
 
-`repo` is `owner/name` or `*`; `workflow` is `*` or a file name such as `release.yml`; `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). `repo` must be one of your repos or `*`; `to` is 1–20 destination ids (8 hex characters), and unknown ids are rejected. Removing a destination prunes it from the rules and drops rules left empty. A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
+`repo` is `owner/name` (GitHub), `<forge-id>:<path>` for a GitLab or Gitea project (the same key used elsewhere in the config, e.g. `gl:group/proj`), or `*`; `workflow` is `*` or a file name such as `release.yml` (GitHub and Gitea; GitLab has no workflow file, so a rule on a GitLab repo names the pipeline, which kiln reports as `pipeline`, or `*`); `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). `repo` must be one of the repos you serve (on any forge) or `*`; `to` is 1–20 destination ids (8 hex characters), and unknown ids are rejected. Removing a destination prunes it from the rules and drops rules left empty. A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
 
 ### The generic payload
+
+`job.forge` is the forge's id (`github`, or the id you gave a GitLab or Gitea forge) and `job.forge_kind` is `github`, `gitlab` or `gitea`. For GitLab, `workflow` is `.gitlab-ci.yml` and `workflow_name` is `pipeline`. `job.url` is the forge's own link to the job, sent only if it is on that forge's address. Chat messages for GitLab and Gitea repos add the forge name after the repo, e.g. `gl:group/proj (GitLab)`.
 
 The body is JSON with typed fields and never the actor's IP, logs or secrets:
 
@@ -337,7 +339,8 @@ The body is JSON with typed fields and never the actor's IP, logs or secrets:
   "at": 1791402114,
   "kiln": { "version": "0.2.4", "link": null },
   "job": {
-    "repo": "acme/kiln", "workflow": "release.yml", "workflow_name": "Release",
+    "repo": "acme/kiln", "forge": "github", "forge_kind": "github",
+    "workflow": "release.yml", "workflow_name": "Release",
     "job": "build", "branch": "main", "event": "push", "outcome": "failed",
     "duration_s": 212, "url": "https://github.com/acme/kiln/actions/runs/1/job/2"
   }
@@ -377,7 +380,8 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
-  usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
+  usage.json                     GitHub job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
+  usage-other.json               the same per UTC day and forge id for GitLab and Gitea jobs: counted, never priced (older kiln versions ignore this file)
   notify.json                    notification destinations and their secrets, mode 0600
   telemetry_id                   random install id for usage and crash reports; created at the first send, deleted as soon as both are off
   telemetry_last                 when the last usage report was sent

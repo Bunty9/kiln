@@ -91,9 +91,10 @@ assert.equal(X.ghErr({ error: 'boom' }, null), 'boom');
 assert(X.ciSnippet('gitlab', 'kiln').includes('tags: [kiln]') && X.ciSnippet('gitea', 'kiln').includes('runs-on: [kiln]\n') && X.ciSnippet('github', 'kiln').includes('runs-on: [self-hosted, kiln]'));
 assert(X.sizeNote('gitlab', 'kiln', 2).includes('tags: [kiln-2cpu]') && X.sizeNote('gitea', 'kiln', 2).includes('runs-on: [kiln-2cpu]') && X.sizeNote('github', 'kiln', 4).includes('Default is 4 vCPUs'));
 // Only non-GitHub minutes, this month, by forge name.
-const vm = (repo, a, b) => ({ repo, busy_since: a, done_at: b });
-assert.deepEqual(X.otherMins([vm('acme/demo', 100, 200), vm('gitlab:g/s/p', 100, 161), vm('gitea:o/n', 100, 130), vm('gitlab:g/s/p', 1, 2), { repo: 'gitlab:g/s/p', busy_since: 100 }], FF, 50), { GitLab: 2, Gitea: 1 });
-assert.deepEqual(X.otherMins([vm('acme/demo', 100, 200)], FF, 0), {});
+// Usage-ledger rows [utc day, forge id, jobs, minutes]; the forge id maps to its kind's name, older days are left out.
+assert.deepEqual(X.otherMins([[10, 'gitlab', 1, 2], [11, 'gitlab', 1, 3], [10, 'gitea', 1, 1], [9, 'gitea', 4, 40]], FF, 10), { GitLab: 5, Gitea: 1 });
+assert.deepEqual(X.otherMins([], FF, 0), {});
+assert.deepEqual(X.otherMins(undefined, FF, 0), {});
 // The repo page names the forge in its errors; GitHub's text is unchanged.
 const er = (c, f, app) => X.repoErr(new Error('GET x: ' + c), f, app);
 assert.equal(er('404', gh1, false), 'Repo not found or token lacks access.'); assert.equal(er('404', gh1, true), 'Repo not found, or the GitHub App is not installed on it.');

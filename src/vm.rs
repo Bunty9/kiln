@@ -269,34 +269,57 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
 }
 
 /// Job minutes per UTC day and VM size, kept beyond the VM history so a month's
-/// total survives `prune`: day -> cpus -> [jobs, minutes].
+/// total survives `prune`: day -> cpus -> [jobs, minutes]. GitHub jobs only: this file's
+/// format is what older binaries read, so it never changes (a row they can't parse would
+/// make them start a new ledger and move this one aside).
 type Usage = std::collections::BTreeMap<u64, std::collections::BTreeMap<u32, [u64; 2]>>;
+/// The same for every other forge, in a file older binaries never open: day -> forge id -> [jobs, minutes].
+/// Counted, never priced.
+type UsageOther = std::collections::BTreeMap<u64, std::collections::BTreeMap<String, [u64; 2]>>;
+const USAGE_OTHER: &str = "usage-other.json";
 
-fn read_usage(data: &Path) -> std::io::Result<Usage> {
-    match std::fs::read(data.join("usage.json")) {
+fn read_ledger<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str) -> std::io::Result<T> {
+    match std::fs::read(data.join(name)) {
         Ok(b) => serde_json::from_slice(&b).map_err(std::io::Error::other),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Usage::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e),
     }
 }
 
 /// Add a finished job, counted the way GitHub bills it: from the job starting to its
 /// result, rounded up to the minute. A debug hold after the result is not counted.
+/// GitHub jobs go to `usage.json`, other forges' to `usage-other.json`.
 pub fn record_usage(data: &Path, v: &Vm) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let (Some(from), Some(to)) = (v.busy_since, v.done_at.or(v.ended)) else { return };
     let _g = LOCK.lock().unwrap();
-    let path = data.join("usage.json");
-    let mut u = read_usage(data).unwrap_or_else(|e| {
+    let mins = to.saturating_sub(from).div_ceil(60).max(1);
+    let forge = forge_id(&v.repo);
+    if forge == crate::forge::ForgeId::github() {
+        bump_ledger::<std::collections::BTreeMap<u32, [u64; 2]>>(data, "usage.json", to / 86400, |m| {
+            let e = m.entry(v.cpus).or_default();
+            e[0] += 1;
+            e[1] += mins;
+        });
+    } else {
+        bump_ledger::<std::collections::BTreeMap<String, [u64; 2]>>(data, USAGE_OTHER, to / 86400, |m| {
+            let e = m.entry(forge.as_str().to_string()).or_default();
+            e[0] += 1;
+            e[1] += mins;
+        });
+    }
+}
+
+fn bump_ledger<V: Default + Serialize + serde::de::DeserializeOwned>(data: &Path, name: &str, day: u64, f: impl FnOnce(&mut V)) {
+    let path = data.join(name);
+    let mut u = read_ledger::<std::collections::BTreeMap<u64, V>>(data, name).unwrap_or_else(|e| {
         // Kept for a look, never silently overwritten.
         let aside = path.with_extension("json.corrupt");
         tracing::warn!("{}: {e}; moved to {} and starting a new ledger", path.display(), aside.display());
         let _ = std::fs::rename(&path, &aside);
-        Usage::default()
+        Default::default()
     });
-    let e = u.entry(to / 86400).or_default().entry(v.cpus).or_default();
-    e[0] += 1;
-    e[1] += to.saturating_sub(from).div_ceil(60).max(1);
+    f(u.entry(day).or_default());
     // ponytail: rewrites the whole file per job; ~400 days x 4 sizes stays a few KB.
     while u.len() > 400 {
         u.pop_first();
@@ -307,9 +330,22 @@ pub fn record_usage(data: &Path, v: &Vm) {
     }
 }
 
-/// Usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
+/// GitHub usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
 pub fn usage_since(data: &Path, since: u64) -> Vec<[u64; 4]> {
-    read_usage(data).unwrap_or_default().range(since..).flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n])).collect()
+    read_ledger::<Usage>(data, "usage.json")
+        .unwrap_or_default()
+        .range(since..)
+        .flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n]))
+        .collect()
+}
+
+/// Other forges' usage from UTC day `since` on, as [day, forge id, jobs, minutes] rows.
+pub fn usage_other_since(data: &Path, since: u64) -> Vec<(u64, String, u64, u64)> {
+    read_ledger::<UsageOther>(data, USAGE_OTHER)
+        .unwrap_or_default()
+        .range(since..)
+        .flat_map(|(&d, m)| m.iter().map(move |(f, &[j, n])| (d, f.clone(), j, n)))
+        .collect()
 }
 
 fn update(app: &App, id: &str, f: impl FnOnce(&mut Vm)) -> Option<Vm> {
@@ -2922,6 +2958,30 @@ mod tests {
         seen.sort();
         assert_eq!(seen, ["HOME=/h", "PATH=/usr/bin:/bin"], "only the allow list reaches QEMU");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn other_forges_are_counted_in_their_own_file_and_never_touch_the_github_ledger() {
+        let d = std::env::temp_dir().join(format!("kiln-test-usage-other-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let day = 20_000 * 86400;
+        let job = |repo: &str, secs: u64| Vm {
+            repo: repo.into(),
+            cpus: 4,
+            busy_since: Some(day),
+            done_at: Some(day + secs),
+            ..vm("x", State::Done, None)
+        };
+        record_usage(&d, &job("acme/demo", 61));
+        let github = std::fs::read(d.join("usage.json")).unwrap();
+        record_usage(&d, &job("gl:g/p", 61));
+        record_usage(&d, &job("gl:g/p", 5));
+        record_usage(&d, &job("ge:o/n", 600));
+        assert_eq!(std::fs::read(d.join("usage.json")).unwrap(), github, "an older binary's ledger is untouched");
+        assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 1, 2]]);
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "ge".to_string(), 1, 10), (20_000, "gl".to_string(), 2, 3)]);
+        assert!(usage_other_since(&d, 20_001).is_empty());
     }
 
     #[test]
