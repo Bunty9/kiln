@@ -149,7 +149,7 @@ impl GitLab {
     pub async fn register(&self, _repo: &RepoRef, _name: &str, _labels: &[String]) -> Result<RunnerReg> {
         bail!(LATER)
     }
-    pub async fn deregister(&self, _repo: &RepoRef, _runner_id: u64) -> Dereg {
+    pub async fn deregister(&self, _repo: &RepoRef, _runner_id: u64, _reason: super::Reason) -> Dereg {
         Dereg::Err(anyhow!(LATER))
     }
     /// No runner of ours can exist yet, so there is nothing to sweep.
@@ -976,7 +976,7 @@ mod tests {
         assert!(f.gated());
         let e = f.register(&repo(), "a1b2c3-kiln-1-0", &["kiln-4cpu".into()]).await.err().unwrap();
         assert!(e.to_string().contains("later version"), "{e:#}");
-        assert!(matches!(f.deregister(&repo(), 1).await, Dereg::Err(_)));
+        assert!(matches!(f.deregister(&repo(), 1, crate::forge::Reason::Surplus).await, Dereg::Err(_)));
         assert!(f.pause(&repo(), 1).await.is_err());
         assert!(f.verdict_facts(&repo(), "1").await.is_err());
         assert_eq!(f.sweep(&repo()).await.unwrap(), 0);

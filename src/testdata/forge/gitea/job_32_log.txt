@@ -1,0 +1,27 @@
+2026-10-11T09:14:47.1474627Z sp3-fail(version:v5.0.0)
+2026-10-11T09:14:47.1474894Z ::group::Runner Information
+2026-10-11T09:14:47.1474920Z Runner labels: kiln, kiln-4cpu
+2026-10-11T09:14:47.1474940Z Task: 24
+2026-10-11T09:14:47.1474959Z Job: boom
+2026-10-11T09:14:47.1474977Z Repository: acme/demo
+2026-10-11T09:14:47.1474996Z Triggered by event: workflow_dispatch
+2026-10-11T09:14:47.1475017Z ::endgroup::
+2026-10-11T09:14:47.1475034Z ::group::Operating System
+2026-10-11T09:14:47.1475055Z Ubuntu 26.04.1 LTS
+2026-10-11T09:14:47.1475072Z linux/amd64
+2026-10-11T09:14:47.1475089Z ::endgroup::
+2026-10-11T09:14:47.1477607Z workflow prepared
+2026-10-11T09:14:47.1483085Z Complete job name: boom
+2026-10-11T09:14:47.1486581Z ::group::Run echo before
+2026-10-11T09:14:47.1486787Z echo before
+2026-10-11T09:14:47.1486906Z shell: bash -e {0}
+2026-10-11T09:14:47.1487012Z ::endgroup::
+2026-10-11T09:14:47.1507246Z before
+2026-10-11T09:14:47.1521332Z ::group::Run exit 3
+2026-10-11T09:14:47.1521502Z exit 3
+2026-10-11T09:14:47.1521601Z shell: bash -e {0}
+2026-10-11T09:14:47.1521705Z ::endgroup::
+2026-10-11T09:14:47.1543938Z ##[error]Process completed with exit code 3.
+2026-10-11T09:14:47.1546244Z Cleaning up container for job boom
+2026-10-11T09:14:47.1549307Z Job failed
+2026-10-11T09:14:47.1549481Z job 'boom' failed
