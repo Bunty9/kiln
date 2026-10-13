@@ -8,6 +8,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 - Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
 
+### Changed
+
+- QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
+- A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.
+
 ### Fixed
 
 - `kiln doctor` no longer reports "not enough for all slots at once" (and a failed memory check) whenever every slot is busy: it counted the memory held by kiln's own running VMs twice. It now adds that back to the available memory and shows it, for example `7941 MB available (+16850 MB in running VMs), 2 x 8192 MB wanted`.

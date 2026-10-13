@@ -1450,13 +1450,25 @@ async fn write_secret(path: &Path, s: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drop GitHub tokens from a VM process's environment: kiln may have read its own from there,
-/// and Landlock does not stop QEMU reading `/proc/self/environ`.
-fn no_secrets(c: &mut Command) -> &mut Command {
-    for k in crate::TOKEN_ENV {
-        c.env_remove(k);
+/// The only variables QEMU and its helpers (rootlesskit, slirp4netns) inherit from kiln: no
+/// token, no forge credential, nothing kiln was started with by accident.
+const VM_ENV: [&str; 10] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR", "RUST_LOG"];
+
+/// Clear `c`'s environment, then pass on the `VM_ENV` entries of `vars` (kiln's own environment).
+fn clean_env<I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>>(c: &mut Command, vars: I) -> &mut Command {
+    c.env_clear();
+    for (k, v) in vars {
+        if k.to_str().is_some_and(|k| VM_ENV.contains(&k)) {
+            c.env(k, v);
+        }
     }
     c
+}
+
+/// Drop everything but `VM_ENV` from a VM process's environment: kiln may have read its tokens
+/// from there, and Landlock does not stop QEMU reading `/proc/self/environ`.
+fn no_secrets(c: &mut Command) -> &mut Command {
+    clean_env(c, std::env::vars_os())
 }
 
 /// QEMU's `-sandbox` setting for every VM kiln starts.
@@ -1646,6 +1658,7 @@ async fn egress_probe(app: &App) -> Result<()> {
         .arg(port.to_string())
         .arg(ts.unwrap_or_default())
         .kill_on_drop(true);
+    no_secrets(&mut cmd);
     let o = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     let o = o.context("probe timed out")?.context("running rootlesskit")?;
@@ -2141,6 +2154,76 @@ async fn output(bin: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&o.stdout).to_string())
 }
 
+/// The GitHub forge's doctor checks.
+async fn doctor_github(app: &App, gh: &crate::github::Gh, out: &mut Vec<Check>) {
+    let src = gh.source();
+    if let Some(a) = gh.app() {
+        if let Err(e) = gh.discover().await {
+            out.push(check("app discovery", false, format!("{e:#}")));
+        }
+        out.push(match gh.app_info(&a).await {
+            Ok(v) => check("github app", true, format!("{} (id {})", v["slug"].as_str().unwrap_or("?"), a.id)),
+            Err(e) => check("github app", false, format!("{e:#}")),
+        });
+        let n = a.names.read().unwrap().len();
+        out.push(if n > 0 {
+            check("app installations", true, format!("{n} repo(s)"))
+        } else {
+            check("app installations", false, format!("installed on no repo: {}/installations/new", a.html_url))
+        });
+    } else {
+        out.push(match (gh.has_token(), src) {
+            (false, _) => check("token", false, "no token: set one in the dashboard, KILN_GITHUB_TOKEN, or `gh auth login`"),
+            (true, "gh") => check(
+                "token",
+                true,
+                "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead",
+            ),
+            (true, s) => check("token", true, format!("source: {s}")),
+        });
+    }
+    // A read per permission kiln needs; 403/404 on one names the missing permission
+    // (fine-grained tokens) instead of a generic API failure.
+    const NEEDS: [(&str, &str); 3] = [
+        ("actions/runners?per_page=1", "Administration: write (register runners)"),
+        ("actions/runs?per_page=1", "Actions: read and write (find queued jobs)"),
+        ("commits?per_page=1", "Contents: read (verify cache-writer pushes)"),
+    ];
+    for repo in &app.repos() {
+        let (mut missing, mut errs) = (vec![], vec![]);
+        for (path, perm) in NEEDS {
+            match gh.raw(reqwest::Method::GET, &format!("repos/{repo}/{path}"), None).await {
+                // 409: commits of an empty repo; the permission is there.
+                Ok(r) if r.status == 200 || r.status == 409 => {}
+                Ok(r) if matches!(r.status, 403 | 404) => missing.push(perm),
+                Ok(r) => errs.push(format!("{path} returned {}", r.status)),
+                Err(e) => errs.push(format!("{path}: {e:#}")),
+            }
+        }
+        let mut why = vec![];
+        if !missing.is_empty() {
+            why.push(format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")));
+        }
+        why.extend(errs);
+        // Reads can pass while GitHub refuses to register runners: exercise the write path too.
+        let (reg_ok, reg) = gh.registration_probe(repo).await;
+        if !reg_ok {
+            why.push(reg.clone());
+        }
+        out.push(if why.is_empty() {
+            check(&format!("repo {repo}"), true, format!("runners, actions and contents reachable; {reg}"))
+        } else {
+            check(&format!("repo {repo}"), false, why.join("; "))
+        });
+    }
+    if let Some(t) = *gh.expires.lock().unwrap() {
+        let days = t.saturating_sub(now()) / 86400;
+        let detail =
+            if t <= now() { "expired".to_string() } else { format!("{}expires in {days} days", if days < 14 { "warning: " } else { "" }) };
+        out.push(check("token expiry", days >= 7, detail));
+    }
+}
+
 /// Host prerequisites, for `kiln doctor` and GET /api/doctor.
 /// `cli`: run from `kiln doctor`, where a `kiln serve` may be running next to us.
 pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
@@ -2207,71 +2290,11 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         }
     });
 
-    let src = app.gh.source();
-    if let Some(a) = app.gh.app() {
-        if let Err(e) = app.gh.discover().await {
-            out.push(check("app discovery", false, format!("{e:#}")));
+    // Credential, permissions and expiry, per configured forge.
+    for f in app.forges.all() {
+        match &*f {
+            crate::forge::Forge::GitHub(g) => doctor_github(app, &g.gh, &mut out).await,
         }
-        out.push(match app.gh.app_info(&a).await {
-            Ok(v) => check("github app", true, format!("{} (id {})", v["slug"].as_str().unwrap_or("?"), a.id)),
-            Err(e) => check("github app", false, format!("{e:#}")),
-        });
-        let n = a.names.read().unwrap().len();
-        out.push(if n > 0 {
-            check("app installations", true, format!("{n} repo(s)"))
-        } else {
-            check("app installations", false, format!("installed on no repo: {}/installations/new", a.html_url))
-        });
-    } else {
-        out.push(match (app.gh.has_token(), src) {
-            (false, _) => check("token", false, "no token: set one in the dashboard, KILN_GITHUB_TOKEN, or `gh auth login`"),
-            (true, "gh") => check(
-                "token",
-                true,
-                "from `gh auth token`; a keyring may be locked after a headless reboot, save it from the dashboard instead",
-            ),
-            (true, s) => check("token", true, format!("source: {s}")),
-        });
-    }
-    // A read per permission kiln needs; 403/404 on one names the missing permission
-    // (fine-grained tokens) instead of a generic API failure.
-    const NEEDS: [(&str, &str); 3] = [
-        ("actions/runners?per_page=1", "Administration: write (register runners)"),
-        ("actions/runs?per_page=1", "Actions: read and write (find queued jobs)"),
-        ("commits?per_page=1", "Contents: read (verify cache-writer pushes)"),
-    ];
-    for repo in &app.repos() {
-        let (mut missing, mut errs) = (vec![], vec![]);
-        for (path, perm) in NEEDS {
-            match app.gh.raw(reqwest::Method::GET, &format!("repos/{repo}/{path}"), None).await {
-                // 409: commits of an empty repo; the permission is there.
-                Ok(r) if r.status == 200 || r.status == 409 => {}
-                Ok(r) if matches!(r.status, 403 | 404) => missing.push(perm),
-                Ok(r) => errs.push(format!("{path} returned {}", r.status)),
-                Err(e) => errs.push(format!("{path}: {e:#}")),
-            }
-        }
-        let mut why = vec![];
-        if !missing.is_empty() {
-            why.push(format!("token lacks {} (or the repo is not visible to it)", missing.join(", ")));
-        }
-        why.extend(errs);
-        // Reads can pass while GitHub refuses to register runners: exercise the write path too.
-        let (reg_ok, reg) = app.gh.registration_probe(repo).await;
-        if !reg_ok {
-            why.push(reg.clone());
-        }
-        out.push(if why.is_empty() {
-            check(&format!("repo {repo}"), true, format!("runners, actions and contents reachable; {reg}"))
-        } else {
-            check(&format!("repo {repo}"), false, why.join("; "))
-        });
-    }
-    if let Some(t) = *app.gh.expires.lock().unwrap() {
-        let days = t.saturating_sub(now()) / 86400;
-        let detail =
-            if t <= now() { "expired".to_string() } else { format!("{}expires in {days} days", if days < 14 { "warning: " } else { "" }) };
-        out.push(check("token expiry", days >= 7, detail));
     }
 
     let (ok, detail) = crate::mirror::check(app).await;
@@ -2410,9 +2433,21 @@ mod tests {
         // A planted overlay symlink is refused before qemu-img ever reads it.
         std::os::unix::fs::symlink(d.join("file"), d.join("cache.qcow2")).unwrap();
         assert_eq!(overlay_header(&d.join("cache.qcow2"), &d.join("file")).await, Err("overlay is not a regular file".into()));
-        let mut c = Command::new("true");
-        let envs: Vec<_> = no_secrets(&mut c).as_std().get_envs().map(|(k, v)| (k.to_owned(), v.is_none())).collect();
-        assert!(crate::TOKEN_ENV.iter().all(|k| envs.contains(&(k.into(), true))), "tokens removed from VM processes");
+        // QEMU's whole environment is the allow list: run `env` through the same scrubbing.
+        let os = |s: &str| std::ffi::OsString::from(s);
+        let mut c = Command::new("env");
+        let vars = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/h"),
+            ("KILN_GITHUB_TOKEN", "t1"),
+            ("GITLAB_TOKEN", "t2"),
+            ("AWS_SECRET_ACCESS_KEY", "t3"),
+        ];
+        clean_env(&mut c, vars.map(|(k, v)| (os(k), os(v))));
+        let out = c.output().await.unwrap().stdout;
+        let mut seen: Vec<_> = String::from_utf8(out).unwrap().lines().map(String::from).collect();
+        seen.sort();
+        assert_eq!(seen, ["HOME=/h", "PATH=/usr/bin:/bin"], "only the allow list reaches QEMU");
         let _ = std::fs::remove_dir_all(&d);
     }
 

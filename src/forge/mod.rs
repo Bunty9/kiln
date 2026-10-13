@@ -6,6 +6,7 @@
 
 pub mod console;
 pub mod github;
+pub mod net;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -239,8 +240,11 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
             }
         } else {
             match f.url.as_deref() {
-                Some(u) if u.starts_with("https://") || u.starts_with("http://") => {}
-                _ => bail!("forge {:?} needs an http(s) url", f.id.as_str()),
+                Some(u) => {
+                    net::check_forge_url(u, f.network.unwrap_or(Network::Public))
+                        .map_err(|e| anyhow::anyhow!("forge {:?}: {e:#}", f.id.as_str()))?;
+                }
+                None => bail!("forge {:?} needs an http(s) url", f.id.as_str()),
             }
             for r in &f.repos {
                 let rr = RepoRef::parse(&format!("{}:{r}", f.id.as_str()))?;
