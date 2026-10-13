@@ -1326,7 +1326,7 @@ mod tests {
         m.on("POST", "user/runners", 403, fx("err_403_role.json"));
         let e = mint_err(&g).await;
         let me = mint_error(&e);
-        assert_eq!((me.status, me.github_wide()), (Some(403), false));
+        assert_eq!((me.status, me.wide()), (Some(403), false));
         let s = e.to_string();
         assert!(
             s.contains("GitLab returned HTTP 403")
@@ -1343,7 +1343,7 @@ mod tests {
         assert!(mint_err(&g).await.to_string().contains("rejected"));
         m.on("POST", "user/runners", 502, "<html>bad gateway</html>".into());
         let e = mint_err(&g).await;
-        assert!(mint_error(&e).github_wide());
+        assert!(mint_error(&e).wide());
         // A 201 without a runner token is no registration.
         m.on("POST", "user/runners", 201, r#"{"id":5,"token":"not-a-runner-token"}"#.into());
         let e = mint_err(&g).await;
@@ -1360,7 +1360,7 @@ mod tests {
         g.url = "http://127.0.0.1:1".into();
         let e = g.mint(&repo(), "kiln-5-0", &[]).await.err().unwrap();
         let me = mint_error(&e);
-        assert!(me.status.is_none() && me.github_wide());
+        assert!(me.status.is_none() && me.wide());
         assert!(!e.to_string().contains(TOKEN));
     }
 

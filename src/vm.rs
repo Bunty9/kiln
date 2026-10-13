@@ -384,7 +384,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         let dir = app.data.join("vms").join(&id);
         let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
         // A refused runner registration: no VM was booted and no directory created.
-        let mint = outcome.as_ref().err().and_then(|e| e.downcast_ref::<crate::github::MintError>()).map(|m| (m.github_wide(), m.status));
+        let mint = outcome.as_ref().err().and_then(registration_refusal);
         finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
         // Never leave a big overlay or a credential behind, whatever happened.
         // remove_dir_all never follows symlinks, whatever QEMU left in its directory.
@@ -572,8 +572,13 @@ fn forge_id(repo: &str) -> crate::forge::ForgeId {
     crate::forge::RepoRef::parse(repo).map(|r| r.forge).unwrap_or_else(|_| crate::forge::ForgeId::github())
 }
 
+/// (forge-wide, status) when `e` is a forge refusing a runner registration, whichever forge.
+fn registration_refusal(e: &anyhow::Error) -> Option<(bool, Option<u16>)> {
+    e.downcast_ref::<crate::github::MintError>().map(|m| (m.wide(), m.status))
+}
+
 /// The state the VM ends in (Killed, Failed, Unneeded or Done); Err = infrastructure failure
-/// (a `github::MintError` when GitHub refused the runner registration).
+/// (a `github::MintError` when the forge refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
     let cfg = app.cfg();
     // Checked before registering a runner: QEMU is started through this binary.
@@ -3899,6 +3904,19 @@ mod tests {
         assert_eq!(vms[0].note.as_deref(), Some("no job left for this runner"));
         assert_eq!(vms[1].note, None);
         assert_eq!(m.requests(), ["DELETE /repos/acme/demo/actions/runners/11", "DELETE /repos/acme/demo/actions/runners/12"]);
+    }
+
+    #[test]
+    fn any_forges_registration_refusal_feeds_the_launch_backoff() {
+        use crate::github::MintError;
+        let refusal = |status, forge| MintError { forge, status, endpoint: "x", message: String::new() };
+        let class = |e: anyhow::Error| registration_refusal(&e);
+        let gh = MintError { forge: "GitHub", status: Some(503), endpoint: "generate-jitconfig", message: String::new() };
+        assert_eq!(class(gh.into()), Some((true, Some(503))));
+        assert_eq!(class(refusal(Some(502), "Gitea").into()), Some((true, Some(502))));
+        assert_eq!(class(refusal(None, "GitLab").into()), Some((true, None)));
+        assert_eq!(class(refusal(Some(403), "Gitea").into()), Some((false, Some(403))));
+        assert_eq!(class(anyhow::anyhow!("qemu-img")), None);
     }
 
     #[tokio::test]
