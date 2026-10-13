@@ -2722,6 +2722,113 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A guest script cut out of the recipe, with its fixed paths pointed into `dir`.
+    fn guest_script(path: &str, dir: &std::path::Path) -> String {
+        let yaml = include_str!("../guest/user-data.yaml");
+        let body = yaml.split(&format!("path: {path}\n")).nth(1).unwrap().split_once("content: |\n").unwrap().1;
+        let script: String = body
+            .lines()
+            .take_while(|l| l.is_empty() || l.starts_with("      "))
+            .map(|l| format!("{}\n", l.get(6..).unwrap_or("")))
+            .collect();
+        script.replace("/run/kiln", &dir.to_string_lossy()).replace("/proc/sysrq-trigger", &dir.join("sysrq").to_string_lossy())
+    }
+
+    /// Writes a guest script to a file the test sources (kiln-job only defines functions then).
+    fn source_line(script: &str, name: &str) -> String {
+        let f = std::env::temp_dir().join(format!("{name}-{}.sh", std::process::id()));
+        std::fs::write(&f, script).unwrap();
+        format!("source {}", f.display())
+    }
+
+    fn have_bash() -> bool {
+        std::process::Command::new("bash").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// kiln-job's reader turns the host's `kiln.verdict=` line into the verdict file:
+    /// the first valid line wins, garbage is ignored.
+    #[test]
+    fn guest_verdict_reader() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-vreader-{}", std::process::id()));
+        let job = guest_script("/usr/local/sbin/kiln-job", &dir);
+        let read = |input: &str| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = format!("{}\nprintf '%s' \"$1\" | verdict_reader", source_line(&job, "vreader"));
+            std::process::Command::new("bash").args(["-c", &script, "bash", input]).output().unwrap();
+            std::fs::read_to_string(dir.join("verdict")).ok()
+        };
+        assert_eq!(read("kiln.verdict=ok 12\n").as_deref(), Some("ok 12\n"));
+        assert_eq!(read("kiln.verdict=cold 7\n").as_deref(), Some("cold 7\n"));
+        assert_eq!(read("kiln.verdict=refuse 7\n").as_deref(), Some("refuse 7\n"));
+        assert_eq!(read("noise\nkiln.verdict=bogus 1\nkiln.verdict=ok x\nkiln.verdict=ok\nkiln.verdict=ok 1 2\n"), None);
+        assert_eq!(read("junk\nkiln.verdict=cold 5\nkiln.verdict=ok 5\n").as_deref(), Some("cold 5\n"), "first valid line only");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// kiln-verdict-wait: ok and cold pass, refuse, garbage and a timeout refuse.
+    #[test]
+    fn guest_verdict_wait() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-vwait-{}", std::process::id()));
+        let wait = guest_script("/usr/local/sbin/kiln-verdict-wait", &dir);
+        let run = |content: Option<&str>, secs: &str| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(c) = content {
+                std::fs::write(dir.join("verdict"), c).unwrap();
+            }
+            let o = std::process::Command::new("bash").args(["-c", &wait]).env("KILN_VERDICT_WAIT", secs).output().unwrap();
+            (String::from_utf8_lossy(&o.stdout).trim().to_string(), o.status.code())
+        };
+        assert_eq!(run(Some("ok 3\n"), "1"), ("ok".into(), Some(0)));
+        assert_eq!(run(Some("cold 3\n"), "1"), ("cold".into(), Some(0)));
+        assert_eq!(run(Some("refuse 3\n"), "1"), ("refuse".into(), Some(1)));
+        assert_eq!(run(Some("maybe 3\n"), "1"), ("refuse".into(), Some(1)));
+        assert_eq!(run(Some("ok\n"), "1"), ("refuse".into(), Some(1)), "no job id");
+        assert_eq!(run(Some(""), "1"), ("refuse".into(), Some(1)));
+        let t = std::time::Instant::now();
+        assert_eq!(run(None, "1"), ("refuse".into(), Some(1)), "timeout");
+        assert!(t.elapsed().as_secs() < 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// kiln-job picks the runner by `kiln.forge`; no such string (an older kiln) is github.
+    #[test]
+    fn guest_forge_branch() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-forge-{}", std::process::id()));
+        let job = guest_script("/usr/local/sbin/kiln-job", &dir);
+        let run = |oem: &str| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = format!(
+                "{}\ndmidecode(){{ printf '%s\\n' \"$OEM\"; }}; sync(){{ :; }}\n\
+                 run_github(){{ echo ran github; }}; run_gitlab(){{ echo ran gitlab; }}; run_gitea(){{ echo ran gitea; }}\n\
+                 finish(){{ echo finish; }}\nmain",
+                source_line(&job, "forge")
+            );
+            let o = std::process::Command::new("bash").args(["-c", &script]).env("OEM", oem).output().unwrap();
+            let out = String::from_utf8_lossy(&o.stdout).replace('\n', " ");
+            (out.trim().to_string(), dir.join("sysrq").exists())
+        };
+        let (out, off) = run("  String 1: kiln.jit=abc");
+        assert_eq!((out.as_str(), off), ("ran github finish", true), "only kiln.jit takes github");
+        assert_eq!(run("  String 1: kiln.forge=github\n  String 2: kiln.jit=abc").0, "ran github finish");
+        assert_eq!(run("  String 1: kiln.forge=gitlab").0, "ran gitlab finish");
+        assert_eq!(run("  String 1: kiln.forge=gitea").0, "ran gitea finish");
+        let (out, off) = run("  String 1: kiln.forge=svn");
+        assert_eq!((out.as_str(), off), ("kiln: unknown forge, powering off", true), "unknown forge powers off without a runner");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn clean_exit_without_result() {
         // Online, never handed a job: GitHub gave the job to another runner or it was cancelled.
