@@ -344,6 +344,14 @@ impl Gh {
 
     /// `raw` with the download bounded to `max` bytes: a larger body is an error, not a truncation.
     pub async fn raw_max(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<Resp> {
+        match self.raw_prefix(method, path, body, max).await? {
+            (r, false) => Ok(r),
+            _ => bail!("response larger than {max} bytes"),
+        }
+    }
+
+    /// `raw` keeping only the first `max` bytes; the flag says the body was cut.
+    pub async fn raw_prefix(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<(Resp, bool)> {
         let (mut rb, who) = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
@@ -351,9 +359,10 @@ impl Gh {
         let r = self.exec(rb, who).await?;
         let status = r.status().as_u16();
         let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-        let body = bytes::Bytes::from(crate::forge::net::read_capped(r, max).await?);
+        let (body, cut) = crate::forge::net::read_prefix(r, max).await?;
+        let body = bytes::Bytes::from(body);
         self.note_body(who, status, &String::from_utf8_lossy(&body));
-        Ok(Resp { status, content_type, body })
+        Ok((Resp { status, content_type, body }, cut))
     }
 
     pub(crate) async fn get(&self, path: &str) -> Result<Value> {
@@ -450,17 +459,7 @@ impl Gh {
         label: &str,
         default_cpus: u32,
     ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
-        self.queued_jobs_for(repo, label, default_cpus, crate::platform::ARM64).await
-    }
-
-    /// `queued_jobs` for a host of the given architecture (the mock forge's fixtures are x64).
-    pub(crate) async fn queued_jobs_for(
-        &self,
-        repo: &str,
-        label: &str,
-        default_cpus: u32,
-        arm64: bool,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
+        let arm64 = fixtures_arch_arm64();
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -658,10 +657,7 @@ impl Gh {
     /// host's architecture: a kiln of the other one may serve the same repo, and its
     /// runners are offline while their VMs boot.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
-        self.sweep_runners_for(repo, crate::platform::ARM64).await
-    }
-
-    async fn sweep_runners_for(&self, repo: &str, arm64: bool) -> Result<usize> {
+        let arm64 = fixtures_arch_arm64();
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
@@ -1137,6 +1133,12 @@ mod tests {
     }
 }
 
+/// Whether this host's runners and jobs carry the arm64 labels. Unit tests always run as x64:
+/// the mock forge's fixtures are x64, and the arm64 label rules have their own tests.
+fn fixtures_arch_arm64() -> bool {
+    crate::platform::ARM64 && !cfg!(test)
+}
+
 /// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
 /// the forge refactor (P0-4..P0-11) must keep every assertion here unchanged.
 #[cfg(test)]
@@ -1152,7 +1154,7 @@ mod characterization {
         let m = Mock::github().await;
         let gh = Gh::for_mock(&m.base);
         // Default size 1 (host_threads is at least 1), so `kiln` and `kiln-2cpu` are different sizes.
-        let (by_size, ours, forks) = gh.queued_jobs_for("acme/demo", "kiln", 1, false).await.unwrap();
+        let (by_size, ours, forks) = gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
         // 5001 (kiln) + 5002 (kiln-2cpu) + 5203 (kiln-2cpu, in a running run); 5003 is someone else's
         // self-hosted job, 5004 GitHub-hosted, 5101 a queued fork job (refused, never demand).
         // Run 1001 is listed as queued and as in_progress, so its jobs are read twice but counted once.
@@ -1203,7 +1205,7 @@ mod characterization {
     async fn queued_jobs_errors_surface() {
         let m = Mock::github().await;
         m.fail("GET", &format!("{RUNS}/1002/jobs?per_page=100"), 502, "Bad Gateway");
-        let e = Gh::for_mock(&m.base).queued_jobs_for("acme/demo", "kiln", 1, false).await.unwrap_err();
+        let e = Gh::for_mock(&m.base).queued_jobs("acme/demo", "kiln", 1).await.unwrap_err();
         assert!(e.to_string().starts_with("GET repos/acme/demo/actions/runs/1002/jobs?per_page=100: 502 Bad Gateway"), "{e:#}");
     }
 
@@ -1274,13 +1276,13 @@ mod characterization {
         let m = Mock::github().await;
         let gh = Gh::for_mock(&m.base);
         // 11 and 15: offline, idle, kiln-*. Kept: 12 (busy), 13 (online), 14 (not ours).
-        assert_eq!(gh.sweep_runners_for("acme/demo", false).await.unwrap(), 2);
+        assert_eq!(gh.sweep_runners("acme/demo").await.unwrap(), 2);
         let r = "/repos/acme/demo/actions/runners";
         assert_eq!(m.requests(), [format!("GET {r}?per_page=100"), format!("DELETE {r}/11"), format!("DELETE {r}/15")]);
         // A refused delete (422) stops the sweep with an error.
         m.clear_log();
         m.fail("DELETE", &format!("{r}/11"), 422, "busy");
-        assert!(gh.sweep_runners_for("acme/demo", false).await.is_err());
+        assert!(gh.sweep_runners("acme/demo").await.is_err());
         assert_eq!(m.requests().len(), 2);
     }
 

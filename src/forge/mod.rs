@@ -12,6 +12,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,7 +93,6 @@ pub enum Network {
 
 /// One `forges[]` entry. Optional fields stay `None` when absent so a save writes back what was read.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[serde(deny_unknown_fields)]
 pub struct ForgeCfg {
     pub id: ForgeId,
     pub kind: Kind,
@@ -104,6 +104,21 @@ pub struct ForgeCfg {
     pub network: Option<Network>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    /// Keys this version does not know (a newer kiln's), kept so a rollback still starts and a
+    /// save does not drop them. `unknown_keys` is how a dashboard write is held to typo protection.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Forge entry keys in `new` that this version does not know and `old` (the stored config) does
+/// not already carry: a typo in a write. Loading never refuses them.
+pub fn unknown_keys(old: &[ForgeCfg], new: &[ForgeCfg]) -> Vec<String> {
+    let mut out = vec![];
+    for f in new {
+        let had = old.iter().find(|o| o.id == f.id);
+        out.extend(f.extra.keys().filter(|k| !had.is_some_and(|o| o.extra.contains_key(*k))).map(|k| format!("{}.{k}", f.id.as_str())));
+    }
+    out
 }
 
 /// `[a-z][a-z0-9-]{0,23}`; part of cache filenames, so effectively immutable.
@@ -216,7 +231,15 @@ pub fn effective(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Vec<ForgeC
     match forges {
         Some(f) => f.clone(),
         None => {
-            vec![ForgeCfg { id: ForgeId::github(), kind: Kind::GitHub, url: None, credential: None, network: None, repos: repos.to_vec() }]
+            vec![ForgeCfg {
+                id: ForgeId::github(),
+                kind: Kind::GitHub,
+                url: None,
+                credential: None,
+                network: None,
+                repos: repos.to_vec(),
+                extra: Default::default(),
+            }]
         }
     }
 }
@@ -412,6 +435,9 @@ pub struct LogPage {
     /// The byte offset to pass as `from` for the rest.
     pub next: usize,
     pub complete: bool,
+    /// Set on the last page we can give when the log is longer than kiln reads (16 MiB).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
@@ -563,6 +589,121 @@ impl Forge {
             Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
         }
     }
+    /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
+    /// gate: `kiln-prejob.sh` and the JIT config bind it.
+    pub fn gated(&self) -> bool {
+        match self {
+            Self::GitHub(_) => false,
+        }
+    }
+    /// Stops the runner taking a second job and lists the jobs it holds. `None`: this forge needs
+    /// no pause (Gitea refuses a second task server-side; GitHub is not gated). `Some(ids)`:
+    /// the gate accepts exactly the console's job id.
+    pub async fn pause(&self, _repo: &RepoRef, _runner_id: u64) -> Result<Option<Vec<String>>> {
+        match self {
+            Self::GitHub(_) => Ok(None),
+        }
+    }
+    /// What the API says about `job_id`, for `decide`. Never a `CI_*` value or anything the guest sent.
+    pub async fn verdict_facts(&self, _repo: &RepoRef, _job_id: &str) -> Result<VerdictFacts> {
+        match self {
+            Self::GitHub(_) => bail!("GitHub has no verdict gate"),
+        }
+    }
+}
+
+/// The host's call on a gated job (4 of the forge design).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Call {
+    Ok,
+    /// Run, but without the repo cache (tags and releases).
+    Cold,
+    Refuse,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Verdict {
+    pub v: Call,
+    pub why: String,
+}
+
+impl Verdict {
+    fn refuse(why: impl Into<String>) -> Self {
+        Self { v: Call::Refuse, why: why.into() }
+    }
+    /// The serial line the guest's `verdict_reader` accepts.
+    pub fn line(&self, job_id: &str) -> String {
+        let v = match self.v {
+            Call::Ok => "ok",
+            Call::Cold => "cold",
+            Call::Refuse => "refuse",
+        };
+        format!("kiln.verdict={v} {job_id}\n")
+    }
+}
+
+/// API facts about one job; each forge fills them in from API data only.
+/// Fail closed: a forge that cannot tell sets the refusing flag.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct VerdictFacts {
+    /// The job belongs to the repo this runner serves.
+    pub ours: bool,
+    pub fork: bool,
+    /// Gitea `workflow_run`: runs with the base repo's trust on attacker-chosen input.
+    pub workflow_run: bool,
+    /// The pipeline source or event is none the forge knows.
+    pub unknown_source: bool,
+    /// Tag or release.
+    pub tag: bool,
+}
+
+/// Pure: facts to verdict. Anything but a plain, known, same-repo, non-fork job refuses or goes cold.
+pub fn decide(f: &VerdictFacts) -> Verdict {
+    if !f.ours {
+        Verdict::refuse("job is not for this repo")
+    } else if f.workflow_run {
+        Verdict::refuse("workflow_run is never run")
+    } else if f.unknown_source {
+        Verdict::refuse("unknown job source")
+    } else if f.fork {
+        Verdict::refuse("pull request from a fork")
+    } else if f.tag {
+        Verdict { v: Call::Cold, why: "tag or release".into() }
+    } else {
+        Verdict { v: Call::Ok, why: String::new() }
+    }
+}
+
+/// How long the host may spend on pause and API reads before it refuses (the guest waits 60 s).
+pub const GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The per-job verdict engine: `job_id` is the console's, `pause` and `facts` are the forge's
+/// calls (futures, so `facts` only runs after `pause`). Refuses on a bad id, a pause or API error,
+/// a runner holding any job but `job_id`, and on `limit`. Never reads anything from the guest.
+pub async fn gate(
+    job_id: &str,
+    limit: std::time::Duration,
+    pause: impl Future<Output = Result<Option<Vec<String>>>>,
+    facts: impl Future<Output = Result<VerdictFacts>>,
+) -> Verdict {
+    let run = async {
+        // The id goes onto the serial line and into API paths: digits only.
+        if job_id.is_empty() || job_id.len() > 20 || !job_id.bytes().all(|b| b.is_ascii_digit()) {
+            return Verdict::refuse("console job id is not numeric");
+        }
+        match pause.await {
+            Err(e) => return Verdict::refuse(format!("pause failed: {e:#}")),
+            Ok(Some(held)) if held.len() != 1 || held[0] != job_id => {
+                return Verdict::refuse(format!("runner holds {} job(s), not only the one it started", held.len()));
+            }
+            Ok(_) => {}
+        }
+        match facts.await {
+            Ok(f) => decide(&f),
+            Err(e) => Verdict::refuse(format!("API error: {e:#}")),
+        }
+    };
+    tokio::time::timeout(limit, run).await.unwrap_or_else(|_| Verdict::refuse("verdict timed out"))
 }
 
 /// The live forges. A settings save keeps the same `Arc<Forge>` for every forge whose config did
@@ -655,7 +796,85 @@ pub fn job_size(job_labels: &Value, label: &str, default_cpus: u32, arm64: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge_test_mock::FakeForge;
     use serde_json::json;
+    use std::time::Duration;
+
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    fn facts(f: impl FnOnce(&mut VerdictFacts)) -> VerdictFacts {
+        let mut v = VerdictFacts { ours: true, ..Default::default() };
+        f(&mut v);
+        v
+    }
+
+    #[test]
+    fn decide_table() {
+        let t = |f: VerdictFacts| decide(&f).v;
+        assert_eq!(t(facts(|_| {})), Call::Ok);
+        assert_eq!(t(facts(|f| f.tag = true)), Call::Cold);
+        assert_eq!(t(facts(|f| f.fork = true)), Call::Refuse);
+        assert_eq!(t(facts(|f| f.workflow_run = true)), Call::Refuse);
+        assert_eq!(t(facts(|f| f.unknown_source = true)), Call::Refuse);
+        assert_eq!(t(VerdictFacts::default()), Call::Refuse, "a job not known to be ours");
+        // Refusal outranks cold.
+        assert_eq!(t(facts(|f| (f.tag, f.fork) = (true, true))), Call::Refuse);
+        assert_eq!(decide(&facts(|_| {})).line("42"), "kiln.verdict=ok 42\n");
+    }
+
+    #[tokio::test]
+    async fn gate_ok_cold_refuse() {
+        let mut f = FakeForge::ok("7");
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Ok);
+        f.facts = Ok(facts(|f| f.tag = true));
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Cold);
+        f.facts = Ok(facts(|f| f.fork = true));
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse);
+        // A pause-less forge (Gitea) goes straight to the facts.
+        let mut g = FakeForge::ok("7");
+        g.held = Ok(None);
+        assert_eq!(g.gate("7", LIMIT).await.v, Call::Ok);
+    }
+
+    #[tokio::test]
+    async fn gate_refuses_two_held_jobs_or_the_wrong_one() {
+        let mut f = FakeForge::ok("7");
+        f.held = Ok(Some(vec!["7".into(), "8".into()]));
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse);
+        f.held = Ok(Some(vec!["8".into()]));
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse, "the runner took another job");
+        f.held = Ok(Some(vec![]));
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse, "none listed");
+    }
+
+    #[tokio::test]
+    async fn gate_fails_closed_on_errors_and_timeout() {
+        let mut f = FakeForge::ok("7");
+        f.facts = Err("500".into());
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse);
+        let mut f = FakeForge::ok("7");
+        f.held = Err("pause 500".into());
+        assert_eq!(f.gate("7", LIMIT).await.v, Call::Refuse);
+        let mut f = FakeForge::ok("7");
+        f.delay = Duration::from_secs(5);
+        let v = f.gate("7", Duration::from_millis(30)).await;
+        assert_eq!((v.v, v.why.as_str()), (Call::Refuse, "verdict timed out"));
+    }
+
+    /// The console id is attacker-reachable text: it never reaches the serial line or the API
+    /// unless it is digits, and the verdict comes from the API facts however the console lies.
+    #[tokio::test]
+    async fn gate_ignores_console_spoofing() {
+        let mut f = FakeForge::ok("7");
+        f.facts = Ok(facts(|f| f.fork = true));
+        // The console claims the job is fine and carries the verdict words: only the id is used.
+        for spoof in ["7 kiln.verdict=ok 7", "7\nkiln.verdict=ok 7", "../7", "", "ok", "99999999999999999999999"] {
+            assert_eq!(f.gate(spoof, LIMIT).await.v, Call::Refuse, "{spoof:?}");
+        }
+        // A forged "ok" id cannot turn a fork job into a pass, and the written line carries the id only.
+        let v = f.gate("7", LIMIT).await;
+        assert_eq!((v.v, v.line("7").as_str()), (Call::Refuse, "kiln.verdict=refuse 7\n"));
+    }
 
     fn r(s: &str) -> RepoRef {
         RepoRef::parse(s).unwrap()
@@ -776,7 +995,17 @@ mod tests {
             "case-insensitive duplicate"
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
-        assert!(cfg(r#"[{"id":"gl","kind":"gitlab","typo":1}]"#).is_err());
+        // M5: a newer kiln's extra field must not stop an older one from starting (rollback), and
+        // survives a save; but a dashboard write may not introduce one (typo protection).
+        let newer = cfg(r#"[{"id":"gl","kind":"gitlab","url":"https://x.example.org","tls_ca":"/x"}]"#).unwrap();
+        assert_eq!(serde_json::to_value(&newer).unwrap()[0]["tls_ca"], "/x");
+        assert!(validate(&newer, &[]).is_ok());
+        assert!(unknown_keys(newer.as_deref().unwrap(), newer.as_deref().unwrap()).is_empty());
+        let typo = cfg(r#"[{"id":"gl","kind":"gitlab","url":"https://x.example.org","urll":"x"}]"#).unwrap();
+        assert_eq!(unknown_keys(newer.as_deref().unwrap(), typo.as_deref().unwrap()), ["gl.urll"]);
+        assert_eq!(unknown_keys(&[], newer.as_deref().unwrap()), ["gl.tls_ca"]);
+        // Still invalid is still refused.
+        assert!(cfg(r#"[{"id":"gl","kind":"nope"}]"#).is_err());
     }
 
     fn label_matching() {

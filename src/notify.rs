@@ -3,7 +3,9 @@
 //! text from a repo format, mention or inject into the target. See the Notifications section
 //! of docs/configuration.md and SECURITY.md.
 
-use crate::forge::net::{self, Mode, allowed, literal_ip};
+#[cfg(test)]
+use crate::forge::net::allowed;
+use crate::forge::net::{self, Mode, literal_ip};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -51,7 +53,7 @@ pub fn check_url(kind: Kind, url: &str, tailnet: bool) -> Result<reqwest::Url, S
         _ => {}
     }
     if let Some(ip) = literal_ip(&u)
-        && !allowed(ip, tailnet)
+        && !Mode::public(tailnet).permits(ip, &net::own_addrs().map_err(|e| format!("cannot list host addresses: {e}"))?)
     {
         return Err(format!("{ip} is an internal address{}", if tailnet { "" } else { " (tick \"on my tailnet\" for a tailnet address)" }));
     }
@@ -245,6 +247,7 @@ fn generic_body(e: &Event, id: &str, at: u64, link: Option<&str>) -> Value {
 /// The request for one event to one destination. Repo text was `clean`ed when the event was
 /// built; here it is escaped for the target, and kept out of headers entirely.
 /// Errors only for Generic with no valid signing secret: it fails closed rather than send unsigned.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     kind: Kind,
     secret: Option<&str>,
@@ -253,9 +256,16 @@ pub fn render(
     msg_id: &str,
     at: u64,
     link: Option<&str>,
+    origins: &[String],
 ) -> Result<Rendered, String> {
+    // The sink enforces the link origin, whatever built the event (a job URL is data from a forge).
+    let mut checked = e.clone();
+    if let Detail::Job(j) = &mut checked.detail {
+        j.url = j.url.take().filter(|u| forge_link(u, origins).is_some());
+    }
+    let e = &checked;
     let job_url = match &e.detail {
-        Detail::Job(j) => j.url.as_deref().filter(|u| net::link_safe(u)),
+        Detail::Job(j) => j.url.as_deref(),
         _ => None,
     };
     let json_h = ("Content-Type", "application/json".to_string());
@@ -656,10 +666,10 @@ fn new_msg_id() -> String {
 
 /// One POST. Every message returned is a fixed string: never the URL, path, query or body.
 /// `msg_id` is the event's: the same on every retry, so a receiver can de-duplicate.
-async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool) -> Outcome {
+async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool, origins: &[String]) -> Outcome {
     let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
     let open = open_for_tests && cfg!(test);
-    if !open && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
+    if !open && literal_ip(&u).is_some_and(|ip| net::own_addrs().map_or(true, |own| !Mode::public(d.tailnet).permits(ip, &own))) {
         return Outcome::Permanent("refused: internal address".into());
     }
     // The URL rules again, on every send: a hand-edited notify.json must not get past them.
@@ -670,7 +680,7 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_
         (Detail::Job(j), true) => dashboard_base().map(|b| format!("{b}/#/jobs/{}", j.vm_id)),
         _ => None,
     };
-    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, msg_id, crate::now(), link.as_deref()) {
+    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, msg_id, crate::now(), link.as_deref(), origins) {
         Ok(r) => r,
         Err(m) => return Outcome::Permanent(m),
     };
@@ -760,7 +770,7 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     let waits = [5u64, 30, 120];
     let id = new_msg_id();
     for attempt in 0..=waits.len() {
-        let out = send_once(c, d, e, &id, false).await;
+        let out = send_once(c, d, e, &id, false, &link_origins(&app.cfg())).await;
         let now = crate::now();
         // Record under the lock in its own scope: a guard must not live across the sleep.
         let (m, after) = {
@@ -1607,6 +1617,10 @@ mod tests {
         assert_eq!(check_url(Kind::Ntfy, &long, false).unwrap_err(), "the URL is longer than 2048 characters");
     }
 
+    fn go() -> Vec<String> {
+        vec!["https://github.com".into()]
+    }
+
     fn job(repo: &str, job: &str, branch: &str) -> Event {
         Event {
             ty: "job.failed",
@@ -1643,9 +1657,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sink_drops_job_links_off_the_forge_origins() {
+        for bad in ["javascript:alert(1)", "https://evil.example/x", "https://github.com.evil.example/x"] {
+            let mut e = job("acme/kiln", "t", "main");
+            if let Detail::Job(j) = &mut e.detail {
+                j.url = Some(bad.into());
+            }
+            for k in [Kind::Slack, Kind::Discord, Kind::Ntfy] {
+                let r = render(k, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+                assert!(!String::from_utf8_lossy(&r.body).contains(bad), "{bad}");
+            }
+            let g = render(Kind::Generic, Some("whsec_dGVzdA=="), None, &e, "msg_1", 1, None, &go()).unwrap();
+            assert!(body(&g)["job"]["url"].is_null(), "{bad}");
+        }
+    }
+
+    #[test]
     fn slack_cannot_mention_or_link() {
         let e = job("acme/kiln", "<!channel> <@U123> <https://evil.example|click>", "main & co");
-        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let t = body(&r)["text"].as_str().unwrap().to_string();
         assert!(!t.contains("<!channel>") && !t.contains("<@U123>") && !t.contains("<https://evil"), "{t}");
         assert!(t.contains("&lt;!channel&gt;") && t.contains("main &amp; co"), "{t}");
@@ -1659,7 +1689,7 @@ mod tests {
     #[test]
     fn discord_cannot_ping_or_format() {
         let e = job("acme/kiln", "@everyone **bold** [x](https://evil.example)", "@here");
-        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let v = body(&r);
         let c = v["content"].as_str().unwrap();
         assert!(!c.contains("@everyone") && !c.contains("@here"), "{c}");
@@ -1672,7 +1702,7 @@ mod tests {
     #[test]
     fn discord_escapes_angle_brackets_in_repo_text() {
         let e = job("acme/kiln", "<t:1:R> </cmd:1> <:x:1>", "main");
-        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let c = body(&r)["content"].as_str().unwrap().to_string();
         // The first line is the summary; the kiln link follows on its own line.
         let summary = c.lines().next().unwrap();
@@ -1685,9 +1715,9 @@ mod tests {
     #[test]
     fn chat_targets_do_not_autolink_repo_text() {
         let e = job("acme/kiln", "evil.example", "https://evil.example/login");
-        let s = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
-        let d = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
-        let n = render(Kind::Ntfy, None, None, &e, "msg_1", 1, None).unwrap();
+        let s = render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+        let d = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+        let n = render(Kind::Ntfy, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let slack = body(&s)["text"].as_str().unwrap().to_string();
         let discord = body(&d)["content"].as_str().unwrap().to_string();
         let ntfy = String::from_utf8(n.body.clone()).unwrap();
@@ -1700,7 +1730,7 @@ mod tests {
     #[test]
     fn ntfy_keeps_untrusted_text_out_of_headers() {
         let e = job("acme/kiln", "evil\r\nX-Injected: 1", "main");
-        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None, &go()).unwrap();
         for (k, v) in &r.headers {
             assert!(v.is_ascii() && !v.contains('\n') && !v.contains("evil"), "{k}: {v}");
         }
@@ -1712,9 +1742,9 @@ mod tests {
     #[test]
     fn generic_fails_closed_without_a_valid_secret() {
         let e = job("acme/kiln", "test", "main");
-        assert!(render(Kind::Generic, Some("whsec_!!notbase64"), None, &e, "msg_1", 1, None).is_err());
-        assert!(render(Kind::Generic, None, None, &e, "msg_1", 1, None).is_err());
-        assert!(render(Kind::Slack, None, None, &e, "msg_1", 1, None).is_ok());
+        assert!(render(Kind::Generic, Some("whsec_!!notbase64"), None, &e, "msg_1", 1, None, &go()).is_err());
+        assert!(render(Kind::Generic, None, None, &e, "msg_1", 1, None, &go()).is_err());
+        assert!(render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).is_ok());
     }
 
     #[test]
@@ -1722,7 +1752,7 @@ mod tests {
         let e = job("acme/kiln", "test", "main");
         let s = new_secret();
         assert!(s.starts_with("whsec_") && s.len() > 40);
-        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None).unwrap();
+        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None, &go()).unwrap();
         let v = body(&r);
         assert_eq!((v["type"].as_str(), v["id"].as_str(), v["at"].as_u64()), (Some("job.failed"), Some("msg_1"), Some(1791402114)));
         assert_eq!(v["job"]["workflow"], "ci.yml");
@@ -1887,14 +1917,17 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         let c = client(&d, true);
-        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Ok));
+        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await, Outcome::Ok));
         let (h, b) = got.lock().unwrap()[0].clone();
         let (id, ts) = (h["webhook-id"].to_str().unwrap(), h["webhook-timestamp"].to_str().unwrap().parse().unwrap());
         assert_eq!(h["webhook-signature"].to_str().unwrap(), sign(d.secret.as_deref().unwrap(), id, ts, &b).unwrap());
         assert!(h["user-agent"].to_str().unwrap().starts_with("kiln/"));
         let (url, got) = receiver(302).await;
         d.url = url;
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert_eq!(got.lock().unwrap().len(), 1, "the redirect target was not requested");
     }
 
@@ -1906,7 +1939,7 @@ mod tests {
         let e = job("acme/kiln", "t", "main");
         let id = new_msg_id();
         for _ in 0..2 {
-            assert!(matches!(send_once(&c, &d, &e, &id, true).await, Outcome::Retry(..)));
+            assert!(matches!(send_once(&c, &d, &e, &id, true, &go()).await, Outcome::Retry(..)));
         }
         let got = got.lock().unwrap();
         let ids: Vec<&str> = got.iter().map(|(h, _)| h["webhook-id"].to_str().unwrap()).collect();
@@ -1919,14 +1952,17 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         d.secret = Some("whsec_!!bad".into());
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert!(got.lock().unwrap().is_empty(), "nothing is sent unsigned");
     }
 
     #[tokio::test]
     async fn refuses_literal_internal_address_before_connecting() {
         let d = dest(Kind::Generic, "https://169.254.169.254/latest");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             _ => panic!("must be refused"),
         }
@@ -1949,7 +1985,7 @@ mod tests {
     #[tokio::test]
     async fn name_resolving_inward_is_refused_not_retried() {
         let d = dest(Kind::Generic, "https://localhost/hook");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2210,7 +2246,7 @@ mod tests {
         assert_eq!(d.token, None, "a new host never inherits the token");
         assert_eq!(load(&app.data).unwrap()[0].token, None);
         let e = job("acme/kiln", "t", "main");
-        let h = render(d.kind, d.secret.as_deref(), d.token.as_deref(), &e, "msg_1", 1, None).unwrap().headers;
+        let h = render(d.kind, d.secret.as_deref(), d.token.as_deref(), &e, "msg_1", 1, None, &go()).unwrap().headers;
         assert!(!h.iter().any(|(k, _)| *k == "Authorization"), "{:?}", h);
     }
 
@@ -2270,7 +2306,7 @@ mod tests {
     #[tokio::test]
     async fn stored_url_is_rechecked_on_send() {
         let d = dest(Kind::Slack, "https://evil.example/x");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert_eq!(m, "refused: stored URL no longer allowed"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2280,7 +2316,10 @@ mod tests {
     async fn production_client_refuses_plain_http() {
         let (url, got) = receiver(204).await;
         let d = dest(Kind::Generic, &url);
-        assert!(matches!(send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert!(got.lock().unwrap().is_empty(), "nothing reached the receiver");
     }
 

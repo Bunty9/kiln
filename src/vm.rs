@@ -412,7 +412,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             let step = match mint {
                 Some((true, status)) => {
                     let mut m = app.api_backoff.lock().unwrap();
-                    let a = m.entry(crate::forge::ForgeId::github()).or_default();
+                    let a = m.entry(forge_id(&v.repo)).or_default();
                     a.fail(status, now()).then(|| a.retry_at.saturating_sub(now()).div_ceil(60))
                 }
                 _ => None,
@@ -567,6 +567,11 @@ pub fn cache_busy(app: &App, repo: &str) -> bool {
     pending_file(&app.data, repo).exists() || app.committing.lock().unwrap().contains(&repo.to_ascii_lowercase())
 }
 
+/// The forge a VM's repo key belongs to (GitHub for anything unparsable, as before).
+fn forge_id(repo: &str) -> crate::forge::ForgeId {
+    crate::forge::RepoRef::parse(repo).map(|r| r.forge).unwrap_or_else(|_| crate::forge::ForgeId::github())
+}
+
 /// The state the VM ends in (Killed, Failed, Unneeded or Done); Err = infrastructure failure
 /// (a `github::MintError` when GitHub refused the runner registration).
 async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::sync::Notify, release: &tokio::sync::Notify) -> Result<State> {
@@ -580,7 +585,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let reg = forge.register(&rr, id, &cfg.runner_labels(cpus)).await?;
     let runner_id = reg.runner_id;
     {
-        let b = app.api_backoff.lock().unwrap().remove(&crate::forge::ForgeId::github());
+        let b = app.api_backoff.lock().unwrap().remove(&rr.forge);
         if let Some(b) = b.filter(|b| b.fails > 0) {
             tracing::info!("runner registration works again after {} failed attempt(s): launches resume", b.fails);
         }
@@ -720,6 +725,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // A job is root in its VM and can write anything to the console, so console lines
     // may shape the timeline but never extend the VM's life past this hard cap.
     let hard_cap = start_cap(&cfg, v.warm);
+    // Verdicts of the host gate (gated forges only), written to the guest from this loop.
+    let (verdicts, mut verdict_rx) = tokio::sync::mpsc::channel::<(String, crate::forge::Verdict)>(1);
     loop {
         // Idle VMs are reaped quickly; busy ones get the full job timeout.
         let v = update(app, id, |_| {}).context("vm vanished")?;
@@ -756,6 +763,28 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 }
                 let text = String::from_utf8_lossy(&buf);
                 observe(app, id, &text);
+                if forge.gated()
+                    && let Some(crate::forge::console::Line::JobStart(jid)) = crate::forge::console::parse_line(forge.kind(), &text)
+                {
+                    let mut b = Bound::Repeat;
+                    if let Some(v) = update(app, id, |v| b = bind_job_id(v, &jid)) {
+                        persist(app, &v);
+                    }
+                    match b {
+                        Bound::Repeat => {}
+                        Bound::Second => {
+                            child.kill().await.ok();
+                            return Ok(State::Killed);
+                        }
+                        Bound::First => {
+                            let (forge, rr, tx) = (forge.clone(), rr.clone(), verdicts.clone());
+                            tokio::spawn(async move {
+                                let vd = crate::forge::gate(&jid, crate::forge::GATE_TIMEOUT, forge.pause(&rr, runner_id), forge.verdict_facts(&rr, &jid)).await;
+                                let _ = tx.send((jid, vd)).await;
+                            });
+                        }
+                    }
+                }
                 if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
                     let max_vms = app.cfg().max_vms;
@@ -799,6 +828,23 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         }
                     }
                     send(&mut stdin, &decide_msg(hold)).await;
+                }
+            }
+            Some((jid, vd)) = verdict_rx.recv() => {
+                send(&mut stdin, &vd.line(&jid)).await;
+                if vd.v == crate::forge::Call::Refuse {
+                    let rec = update(app, id, |v| {
+                        v.note = Some(format!("refused: {}", vd.why));
+                        if v.cache == CacheUse::Read {
+                            v.cache = CacheUse::Discarded;
+                            v.cache_note = Some("cache not saved: the job was refused".into());
+                        }
+                    });
+                    if let Some(v) = rec {
+                        persist(app, &v);
+                    }
+                    child.kill().await.ok();
+                    return Ok(State::Killed);
                 }
             }
             _ = release.notified() => send(&mut stdin, "release\n").await,
@@ -1239,10 +1285,14 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         Err(String::new())
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
-    let verdict = if let Err(why) = console {
-        Err(why.to_string())
-    } else if v.job.is_none() {
+    // The plain reasons (no job, a failed job) come before the console evidence, so a reaped warm
+    // VM says "no job ran", not "the console showed no job start".
+    let verdict = if v.job.is_none() {
         Err("no job ran".to_string())
+    } else if !succeeded {
+        cache_verdict(cfg.cache, succeeded, &writers, t)
+    } else if let Err(why) = console {
+        Err(why.to_string())
     } else {
         cache_verdict(cfg.cache, succeeded, &writers, t)
     };
@@ -1468,7 +1518,38 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             v.note = Some("runner self-updating (rebake to avoid)".into());
             false
         }
+        // Gated forges: the run loop binds the id and starts the verdict (`bind_job_id`).
+        Some(Line::JobStart(_)) => false,
         None => false,
+    }
+}
+
+/// What a console job-start line did to a VM's bound job id.
+#[derive(PartialEq, Eq, Debug)]
+enum Bound {
+    /// The first id: it is now `v.job_id` and the verdict is due.
+    First,
+    Repeat,
+    /// A different id: the runner took two jobs. The overlay is discarded; the caller kills the VM.
+    Second,
+}
+
+/// Binds the console's job id once, forward only (4.3 of the forge design).
+fn bind_job_id(v: &mut Vm, id: &str) -> Bound {
+    match v.job_id.as_deref() {
+        None => {
+            v.job_id = Some(id.into());
+            Bound::First
+        }
+        Some(j) if j == id => Bound::Repeat,
+        Some(_) => {
+            if v.cache == CacheUse::Read {
+                v.cache = CacheUse::Discarded;
+                v.cache_note = Some("cache not saved: a second job reached this runner".into());
+            }
+            v.note = Some("killed: a second job reached this runner".into());
+            Bound::Second
+        }
     }
 }
 
@@ -2471,6 +2552,27 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn job_id_binds_once_and_a_second_id_discards_the_overlay() {
+        let mut v: Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read"
+        }))
+        .unwrap();
+        assert_eq!(bind_job_id(&mut v, "7"), Bound::First);
+        assert_eq!(bind_job_id(&mut v, "7"), Bound::Repeat);
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("7"), CacheUse::Read));
+        assert_eq!(bind_job_id(&mut v, "8"), Bound::Second);
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("7"), CacheUse::Discarded), "the first id stays");
+        assert_eq!(v.note.as_deref(), Some("killed: a second job reached this runner"));
+    }
+
+    #[test]
+    fn registration_backoff_is_keyed_by_the_vms_forge() {
+        assert_eq!(super::forge_id("acme/demo").as_str(), "github");
+        assert_eq!(super::forge_id("gl:acme/demo").as_str(), "gl");
+    }
+
     #[test]
     fn memory_check_counts_running_vms_once() {
         // Both slots busy on a 32 GB box: 8 GB free plus 16 GB in the two VMs is enough.
@@ -3601,7 +3703,8 @@ mod tests {
         cache_vm(&app, "c5", 6001, 2001);
         assert_eq!(settle("c5", false).await.1, "cache not saved: job did not succeed");
         assert!(m.log().is_empty());
-        // No job page recorded.
+        // No job page recorded. This used to read "no job page"; the console check (exactly one job
+        // start and a bound id) now runs before the API is asked, and says it in its own words.
         cache_vm(&app, "c6", 6001, 2001);
         app.vms.lock().unwrap().last_mut().unwrap().job_url = None;
         assert_eq!(settle("c6", true).await.1, "cache not saved: a job started but no job id is bound");

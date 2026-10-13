@@ -103,9 +103,11 @@ impl GitHub {
 
     /// GitHub serves a job's log only once the job has finished, so a page is `complete` when it reaches the end.
     pub async fn job_log(&self, repo: &RepoRef, id: u64, from: usize) -> Result<LogPage> {
-        // The download is bounded too, not only the page handed back.
-        let r =
-            self.gh.raw_max(reqwest::Method::GET, &format!("repos/{}/actions/jobs/{id}/logs", repo.path), None, LOG_DOWNLOAD_CAP).await?;
+        // The download is bounded too, not only the page handed back; a longer log is cut, not refused.
+        let (r, truncated) = self
+            .gh
+            .raw_prefix(reqwest::Method::GET, &format!("repos/{}/actions/jobs/{id}/logs", repo.path), None, LOG_DOWNLOAD_CAP)
+            .await?;
         if !(200..300).contains(&r.status) {
             bail!("job log: GitHub answered {}", r.status);
         }
@@ -116,7 +118,12 @@ impl GitHub {
         while end > start && end < b.len() && b[end] & 0xC0 == 0x80 {
             end -= 1;
         }
-        Ok(LogPage { text: String::from_utf8_lossy(&b[start..end]).into_owned(), next: end, complete: end == b.len() })
+        Ok(LogPage {
+            text: String::from_utf8_lossy(&b[start..end]).into_owned(),
+            next: end,
+            complete: end == b.len() && !truncated,
+            truncated: truncated && end == b.len(),
+        })
     }
 
     pub async fn workflows(&self, repo: &RepoRef) -> Result<Vec<Workflow>> {
@@ -209,7 +216,8 @@ fn run_links(repo: &str, run: u64, job: Option<u64>, sha: &str, branch: &str, pr
         job: job.map(|j| format!("{base}/actions/runs/{run}/job/{j}")),
         commit: sha.chars().all(|c| c.is_ascii_hexdigit()).then(|| format!("{base}/commit/{sha}")).filter(|_| !sha.is_empty()),
         pr: pr.map(|n| format!("{base}/pull/{n}")),
-        branch: plain(branch, "/").then(|| format!("{base}/tree/{branch}")),
+        branch: (plain(branch, "/") && !branch.split('/').any(|p| p == "." || p == ".." || p.is_empty()))
+            .then(|| format!("{base}/tree/{branch}")),
     }
 }
 
@@ -260,4 +268,18 @@ fn job_summary(repo: &str, run: u64, j: &Value) -> Option<JobSummary> {
         steps,
         links: Links { job: run_links(repo, run, Some(id), "", "", None).job, ..Links::default() },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_links;
+
+    #[test]
+    fn branch_links_cannot_climb_out_of_the_repo() {
+        let tree = |b| run_links("o/r", 1, None, "", b, None).branch;
+        assert_eq!(tree("feat/x").as_deref(), Some("https://github.com/o/r/tree/feat/x"));
+        for bad in ["a/../../../x", "..", "a/./b", "a//b"] {
+            assert_eq!(tree(bad), None, "{bad}");
+        }
+    }
 }
