@@ -4,12 +4,11 @@ use crate::{App, Config, mirror, now, platform, update, vm};
 use anyhow::{Context, anyhow};
 use axum::{
     Extension, Json, Router,
-    body::Bytes,
     extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,10 +36,76 @@ type R<T> = Result<T, Error>;
 
 /// The address actually bound; a config change to `listen` needs a restart.
 static RUNNING_LISTEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Set when the configured listen could not be bound and kiln serves elsewhere (banner).
+static LISTEN_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Where kiln serves when neither the configured nor the last working listen binds.
+const LOCAL_LISTEN: &str = "127.0.0.1:7878";
+
+/// Why kiln could not serve on `new` once restarted, from a test bind's error (`e`, None if
+/// it bound); None if it can. `AddrInUse` on the port of `running` (the listener this
+/// process holds) is expected: the restart releases it.
+fn bind_refusal(new: &str, running: Option<&str>, e: Option<&std::io::Error>) -> Option<String> {
+    use std::io::ErrorKind::*;
+    let Ok(addr) = new.parse::<SocketAddr>() else {
+        return Some(format!("listen {new:?} is not an address like 0.0.0.0:7878"));
+    };
+    let e = e?;
+    let held = running.and_then(|r| r.parse::<SocketAddr>().ok()).is_some_and(|r| r.port() == addr.port());
+    Some(match e.kind() {
+        AddrInUse if held => return None,
+        AddrNotAvailable => format!("listen {new} cannot be bound: {} is not an address of this machine ({e})", addr.ip()),
+        PermissionDenied => format!("listen {new} cannot be bound: port {} is privileged, use 1024 or above ({e})", addr.port()),
+        AddrInUse => format!("listen {new} cannot be bound: port {} is in use by another program ({e})", addr.port()),
+        _ => format!("listen {new} cannot be bound: {e}"),
+    })
+}
+
+/// Test-bind `new` (then release it): why a kiln restarted on it would not serve, if it would not.
+pub fn listen_refusal(new: &str) -> Option<String> {
+    let e = new.parse::<SocketAddr>().ok().and_then(|a| std::net::TcpListener::bind(a).err());
+    bind_refusal(new, RUNNING_LISTEN.get().map(String::as_str), e.as_ref())
+}
+
+/// Startup: addresses to try when `configured` fails to bind with `kind`. Only an address
+/// problem (not on this machine, privileged port) falls back: the last listen that bound,
+/// then loopback, so the box stays reachable. Anything else fails as before.
+fn listen_fallbacks(configured: &str, last: Option<&str>, kind: std::io::ErrorKind) -> Vec<String> {
+    use std::io::ErrorKind::*;
+    let mut v: Vec<String> = vec![];
+    if matches!(kind, AddrNotAvailable | PermissionDenied) {
+        for a in last.into_iter().chain([LOCAL_LISTEN]) {
+            if a != configured && a.parse::<SocketAddr>().is_ok() && !v.iter().any(|x| x == a) {
+                v.push(a.into());
+            }
+        }
+    }
+    v
+}
+
+/// Bind the configured listen, else a fallback (see `listen_fallbacks`). The listen that
+/// bound is kept in <data>/listen.last.
+async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(tokio::net::TcpListener, String)> {
+    let last_file = data.join("listen.last");
+    let e = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => {
+            let _ = std::fs::write(&last_file, listen);
+            return Ok((l, listen.into()));
+        }
+        Err(e) => e,
+    };
+    let last = std::fs::read_to_string(&last_file).ok();
+    for alt in listen_fallbacks(listen, last.as_deref().map(str::trim), e.kind()) {
+        if let Ok(l) = tokio::net::TcpListener::bind(&alt).await {
+            let msg = format!("listen {listen} could not be bound ({e}); serving on {alt}");
+            tracing::error!("{msg}. Fix the listen address in Settings › Access");
+            let _ = LISTEN_FALLBACK.set(msg);
+            return Ok((l, alt));
+        }
+    }
+    Err(e).with_context(|| format!("bind {listen}"))
+}
 
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    let addr = app.cfg().listen;
-    let _ = RUNNING_LISTEN.set(addr.clone());
     load_key(&app.data)?;
     let router = Router::new()
         .route("/", get(|| async { Html(PAGE.as_str()) }))
@@ -64,18 +129,30 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/onboard", get(onboard))
         .route("/api/onboard/hello", post(onboard_hello))
         .route("/api/bake", post(bake))
+        .route("/api/telemetry", get(|State(app): S| async move { Json(crate::telemetry::preview(&app)) }))
         .route("/api/update", get(update_get))
         .route("/api/update/check", post(update_check))
         .route("/api/update/apply", post(update_apply))
         .route("/api/update/cancel", post(update_cancel))
+        .route("/api/restart", post(restart))
+        .route("/api/restart/cancel", post(restart_cancel))
         .route("/api/tailscale", get(ts_status))
         .route("/api/tailscale/netcheck", get(ts_netcheck))
         .route("/api/tailscale/ping", post(ts_ping))
         .route("/api/tailscale/serve", post(ts_serve))
-        .route("/api/gh/{*path}", any(gh_proxy))
+        .route("/api/forges", get(forges_list))
+        .route("/api/runs", get(runs_list))
+        .route("/api/runs/{id}", get(run_get))
+        .route("/api/runs/{id}/rerun", post(run_rerun))
+        .route("/api/runs/{id}/cancel", post(run_cancel))
+        .route("/api/jobs/{id}/log", get(job_log))
+        .route("/api/workflows", get(workflows))
+        .route("/api/dispatch", post(dispatch))
+        .merge(crate::notify::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
-    let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("bind {addr}"))?;
+    let (listener, addr) = bind_listen(&app.data, &app.cfg().listen).await?;
+    let _ = RUNNING_LISTEN.set(addr.clone());
     let sock = app.data.join("serve.sock");
     // Without the socket (e.g. a KILN_DATA path past the ~108-byte unix socket limit) kiln still
     // serves; HTTPS via tailscale serve then proxies to loopback, where the API needs the key.
@@ -120,12 +197,14 @@ fn bind_serve_socket(path: &std::path::Path) -> anyhow::Result<tokio::net::UnixL
     bound
 }
 
-/// How a connection reached kiln: the TCP listener, or the unix socket only
-/// `tailscale serve` (tailscaled, as root) can connect to.
+/// How a connection reached kiln: the TCP listener, or the unix socket `tailscale serve`
+/// (tailscaled, as root) connects to. `root` is the peer's SO_PEERCRED uid being 0: kiln's
+/// own uid can also connect (the socket is 0600, owned by kiln), and so can a job VM's
+/// QEMU when the kernel has no Landlock socket scoping, so only root's headers are trusted.
 #[derive(Clone, Copy)]
 enum Via {
     Tcp(SocketAddr),
-    Serve,
+    Serve { root: bool },
 }
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>> for Via {
     fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
@@ -133,8 +212,8 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, toki
     }
 }
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::UnixListener>> for Via {
-    fn connect_info(_: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
-        Via::Serve
+    fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::UnixListener>) -> Self {
+        Via::Serve { root: s.io().peer_cred().is_ok_and(|c| c.uid() == 0) }
     }
 }
 
@@ -169,13 +248,17 @@ fn claim(via: Via, login: Option<&str>, fwd_for: Option<&str>, funnel: bool) -> 
                 Claim::Outside("kiln only answers on the tailnet")
             }
         }
-        Via::Serve if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
+        // Not tailscaled: the identity headers are whatever the caller wrote. The key decides.
+        Via::Serve { root: false } => Claim::Local,
+        Via::Serve { .. } if funnel => Claim::Outside("kiln does not answer through Tailscale Funnel"),
         // No login: a tagged node (or this machine), identified like a TCP peer. No tailnet source: local.
-        Via::Serve => match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
-            (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
-            (None, Some(ip)) if is_tailnet(ip) => Claim::Peer(ip),
-            _ => Claim::Local,
-        },
+        Via::Serve { .. } => {
+            match (login.filter(|l| !l.is_empty()), fwd_for.and_then(|f| f.parse::<IpAddr>().ok()).map(|ip| ip.to_canonical())) {
+                (Some(l), Some(ip)) if is_tailnet(ip) => Claim::Login(l.to_string(), ip),
+                (None, Some(ip)) if is_tailnet(ip) => Claim::Peer(ip),
+                _ => Claim::Local,
+            }
+        }
     }
 }
 
@@ -540,9 +623,28 @@ pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
         ServeUse::Unsafe(why) => {
             (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
         }
+        // Identity headers are trusted only from a root peer (see `Via`).
+        ServeUse::Proxied if !tailscaled_is_root() => {
+            (false, "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into())
+        }
         ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
         ServeUse::Unused => (true, "kiln's socket is not served".into()),
     })
+}
+
+/// Whether a process named tailscaled runs as root (true when none is found: the tailscale check covers that).
+fn tailscaled_is_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mut found = false;
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "tailscaled") {
+            found = true;
+            if e.metadata().is_ok_and(|m| m.uid() == 0) {
+                return true;
+            }
+        }
+    }
+    !found
 }
 
 /// Admission, then the handler. Admitted API writes go to the audit log; refused ones only to
@@ -552,16 +654,22 @@ async fn admit(app: Arc<App>, via: Via, req: Request, next: Next) -> Response {
     let (admitted, who) = admission(&app, via, req).await;
     let admitted_ok = admitted.is_ok();
     let resp = match admitted {
-        Ok(req) => next.run(req).await,
+        Ok(mut req) => {
+            req.extensions_mut().insert(crate::notify::Actor(who.actor.clone()));
+            next.run(req).await
+        }
         Err(denied) => denied,
     };
     if audited(&method, &path, admitted_ok) {
-        let mut e =
-            json!({ "actor": who.actor, "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
+        let mut e = json!({ "actor": who.actor.clone(), "from": who.from, "method": method.as_str(), "path": path, "status": resp.status().as_u16() });
         if let Some(n) = resp.extensions().get::<crate::audit::Note>() {
             e["note"] = n.0.clone().into();
         }
         crate::audit::record(&app.data, e);
+        if resp.status().is_success() {
+            let note = resp.extensions().get::<crate::audit::Note>().map(|n| n.0.clone());
+            crate::notify::security(&app, &who.actor, &path, note.as_deref());
+        }
     } else if audited(&method, &path, true) {
         tracing::info!(target: "audit", "audit: refused {method} {path} from {} ({}): {}", who.from, who.actor, resp.status());
     }
@@ -587,13 +695,13 @@ struct Requester {
 async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Response>, Requester) {
     let from = match via {
         Via::Tcp(peer) => peer.ip().to_canonical().to_string(),
-        Via::Serve => "tailscale serve".into(),
+        Via::Serve { .. } => "tailscale serve".into(),
     };
     let mut who = Requester { actor: "unknown".into(), from };
     let deny = |code: StatusCode, msg: &str, who: Requester| (Err((code, msg.to_string()).into_response()), who);
     // tailscaled sends `Host: localhost` to a unix socket and the name the browser
     // used in X-Forwarded-Host; put that back so the Host check and handlers see it.
-    if matches!(via, Via::Serve)
+    if matches!(via, Via::Serve { .. })
         && let Some(fh) = req.headers().get("x-forwarded-host").cloned()
     {
         req.headers_mut().insert(header::HOST, fh);
@@ -618,7 +726,7 @@ async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Re
         return deny(StatusCode::FORBIDDEN, msg, who);
     }
     // The identity headers mean something only if tailscaled's web proxy is all that reaches the socket.
-    let claim = if matches!(via, Via::Serve) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
+    let claim = if matches!(via, Via::Serve { .. }) && serve_check(&app.data.join("serve.sock")).await != ServeUse::Proxied {
         Claim::Local
     } else {
         claim
@@ -698,6 +806,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "token_saved": std::fs::metadata(app.data.join("token")).ok().filter(|_| app.gh.source() == "file").and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
         "poll": poll,
         "vms": vms,
+        "notify": crate::notify::state_json(&app),
         // 32 days covers the current month in any timezone.
         "usage": vm::usage_since(&app.data, now() / 86400 - 32),
         "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
@@ -708,6 +817,9 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.repos()),
         "update": update::compact(&app),
+        "restart": update::restart_json(&app, RUNNING_LISTEN.get().map(String::as_str)),
+        "serve_socket": SERVE_SOCKET.get() == Some(&true),
+        "listen_fallback": LISTEN_FALLBACK.get(),
     })))
 }
 
@@ -732,18 +844,33 @@ async fn doctor(State(app): S) -> R<Json<Value>> {
 }
 
 async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
-    let restart = RUNNING_LISTEN.get().is_some_and(|l| *l != c.listen);
-    let to_filtered = c.egress == "filtered" && app.cfg().egress != "filtered";
+    // Refused now rather than found out at the restart, which would leave kiln unreachable.
+    if c.listen != app.cfg().listen
+        && let Some(why) = listen_refusal(&c.listen)
+    {
+        bail_r(&why)?;
+    }
+    let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
+    let reprobe = vm::egress_reprobe(&app.cfg(), &c);
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
+    // Only new or changed rules are checked: an unrelated save never fails on an old rule.
+    // With notify.json unreadable the destination list is unknown, so ids are not checked.
+    let unreadable = app.notify.load_error.lock().unwrap().is_some();
+    let ids: Option<Vec<String>> = (!unreadable).then(|| app.notify.dests.lock().unwrap().iter().map(|d| d.id.clone()).collect());
+    let repos: Vec<String> = app.repos().into_iter().chain(c.repos.iter().cloned()).collect();
+    let errs = crate::notify::rule_errors(&app.cfg().notify_rules, &c.notify_rules, ids.as_deref(), &repos);
+    if !errs.is_empty() {
+        bail_r(&errs.join("; "))?;
+    }
     app.save_cfg(c)?;
-    if to_filtered {
+    if reprobe {
         // Probe now so the dashboard shows the result and the scheduler has it cached.
         let a = app.clone();
         tokio::spawn(async move {
             let _ = vm::egress_ready(&a, true).await;
         });
     }
-    Ok((Extension(crate::audit::Note(changed)), Json(json!({ "restart_required": restart }))))
+    Ok((Extension(crate::audit::Note(changed)), Json(json!({ "restart_required": !needed.is_empty(), "restart_needed": needed }))))
 }
 
 #[derive(Deserialize)]
@@ -885,7 +1012,7 @@ fn conflict(msg: &str) -> Response {
 /// Check now; a failed check is reported in the returned status, not as an HTTP error.
 async fn update_check(State(app): S) -> Response {
     if !update::check(&app).await {
-        return conflict("an update check or update is already running");
+        return conflict(update::busy_msg(&app));
     }
     Json(update::json(&app)).into_response()
 }
@@ -893,17 +1020,42 @@ async fn update_check(State(app): S) -> Response {
 /// Download, verify, drain and restart into the latest release (progress in GET /api/update).
 async fn update_apply(State(app): S) -> Response {
     if !update::start(&app, true) {
-        return conflict("an update check or update is already running");
+        return conflict(update::busy_msg(&app));
     }
     (StatusCode::ACCEPTED, Json(update::json(&app))).into_response()
 }
 
 /// Stop a draining update and resume launching.
 async fn update_cancel(State(app): S) -> Response {
-    if !update::cancel(&app) {
+    if !update::cancel(&app, false) {
         return conflict("only an update that is still draining can be cancelled");
     }
     Json(update::json(&app)).into_response()
+}
+
+#[derive(Deserialize)]
+struct RestartQuery {
+    #[serde(default)]
+    now: bool,
+}
+
+/// Restart kiln in place (same binary): drain first, or with `?now=true` kill running jobs.
+/// During a restart's drain, `?now=true` ends the wait. Progress in /api/state `restart`.
+async fn restart(State(app): S, Query(q): Query<RestartQuery>) -> Response {
+    let running = update::restart_waits_for(&app);
+    if let Err(why) = update::restart(&app, q.now) {
+        return conflict(&why);
+    }
+    let note = if q.now { format!("now: killed {running} running VMs") } else { format!("when idle: {running} running") };
+    (StatusCode::ACCEPTED, Extension(crate::audit::Note(note))).into_response()
+}
+
+/// Stop a restart's drain and resume launching.
+async fn restart_cancel(State(app): S) -> Response {
+    if !update::cancel(&app, true) {
+        return conflict("only a restart that is still draining can be cancelled");
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Bound on a tailscale CLI call; `tailscale serve` gets `SERVE_LIMIT`.
@@ -923,7 +1075,7 @@ pub async fn tailscale(args: &[&str]) -> anyhow::Result<std::process::Output> {
 /// `tailscale serve --https` on a tailnet without certs prints an enable-HTTPS URL and waits
 /// forever, and a forked helper that still holds stdout would keep `output()` waiting even
 /// after the direct child is gone, which `kill_on_drop` alone does not reach.
-async fn bounded(prog: &str, args: &[&str], limit: Duration) -> anyhow::Result<std::process::Output> {
+pub async fn bounded(prog: &str, args: &[&str], limit: Duration) -> anyhow::Result<std::process::Output> {
     let child = Command::new(prog)
         .args(args)
         .stdin(Stdio::null())
@@ -1125,7 +1277,7 @@ async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> 
 /// `app` object of /api/state; a failure is in its `error`, and the last map is kept.
 async fn app_refresh(State(app): S) -> R<Json<Value>> {
     if app.gh.app().is_none() {
-        bail_r("not in GitHub App mode: create or add the App in Settings › GitHub first")?;
+        bail_r("not in GitHub App mode: create or add the App in Settings › Forges first")?;
     }
     let _ = app.gh.discover_now().await;
     Ok(Json(app_json(&app)))
@@ -1147,55 +1299,238 @@ fn bail_r(msg: &str) -> R<()> {
     Err(anyhow!(msg.to_string()).into())
 }
 
-/// GitHub passthrough, restricted to `repos/<configured repo>/actions/...`,
-/// so the dashboard can browse workflows/runs/jobs/logs and dispatch, rerun
-/// or cancel without a dedicated endpoint per call.
-async fn gh_proxy(State(app): S, method: Method, Path(path): Path<String>, q: axum::extract::RawQuery, body: Bytes) -> R<Response> {
-    if !proxy_path_ok(&path, &app.repos()) {
-        bail_r("only repos/<configured repo>/actions/{workflows,runs,jobs}... is proxied")?;
-    }
-    if method != Method::GET && (method != Method::POST || !proxy_post_ok(&path)) {
-        bail_r("only GET, and POST to rerun or cancel a run or dispatch a workflow, are proxied")?;
-    }
-    let full = match q.0 {
-        Some(q) => format!("{path}?{q}"),
-        None => path,
-    };
-    let json_body = if body.is_empty() { None } else { Some(serde_json::from_slice(&body)?) };
-    let r = app.gh.raw(method, &full, json_body).await?;
-    let mut h = HeaderMap::new();
-    h.insert(header::CONTENT_TYPE, r.content_type.parse().unwrap_or(header::HeaderValue::from_static("text/plain")));
-    Ok((StatusCode::from_u16(r.status).unwrap_or(StatusCode::BAD_GATEWAY), h, r.body).into_response())
+/* ---------- the forge-neutral API: kiln's own JSON, never a forge's ---------- */
+
+/// `repo` is a canonical key and must be one kiln serves; the forge path used for the call is
+/// the configured one, never the request's text.
+fn served(app: &App, key: &str) -> anyhow::Result<(Arc<crate::forge::Forge>, crate::forge::RepoRef)> {
+    use crate::forge;
+    let want = forge::RepoRef::parse(key)?;
+    let cfg = app.cfg();
+    let fc = forge::effective(&cfg.forges, &cfg.repos).into_iter().find(|c| c.id == want.forge);
+    let f = app.forges.get(&want.forge).zip(fc).ok_or_else(|| anyhow!("{key}: not a forge kiln serves"))?;
+    let repo = f.0.repos(&f.1).into_iter().find(|r| r.eq_key(key)).ok_or_else(|| anyhow!("{key}: not a repo kiln serves"))?;
+    Ok((f.0, repo))
 }
 
-/// Strict allowlist: plain characters only (so nothing like `%2e%2e` can be
-/// re-decoded into `..` by the URL parser), no dot segments, and only the
-/// workflow/run/job APIs — not runners, secrets or variables.
-fn proxy_path_ok(path: &str, repos: &[String]) -> bool {
-    path.chars().all(|c| c.is_ascii_alphanumeric() || "/-_.".contains(c))
-        && !path.split('/').any(|seg| seg == "." || seg == "..")
-        && repos.iter().any(|r| {
-            path.strip_prefix(&format!("repos/{r}/actions/"))
-                .is_some_and(|rest| rest == "runs" || ["workflows", "runs/", "jobs/"].iter().any(|p| rest.starts_with(p)))
+#[derive(Deserialize)]
+struct RepoParam {
+    repo: String,
+}
+
+async fn forges_list(State(app): S) -> R<Json<Value>> {
+    let cfg = app.cfg();
+    let cfgs = crate::forge::effective(&cfg.forges, &cfg.repos);
+    let out: Vec<_> = app
+        .forges
+        .all()
+        .iter()
+        .map(|f| {
+            let repos: Vec<_> = cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default().iter().map(|r| r.key()).collect();
+            json!({ "id": f.id(), "kind": f.kind(), "url": f.web_url(), "caps": f.caps(), "auth": f.auth(), "repos": repos, "health": f.health() })
         })
+        .collect();
+    Ok(Json(json!(out)))
 }
 
-/// The writes the dashboard makes through the proxy: rerun or cancel a run, dispatch a
-/// workflow. Not run approvals, deployment reviews or log deletion.
-fn proxy_post_ok(path: &str) -> bool {
-    let mut seg = path.split('/').skip(4);
-    match (seg.next(), seg.next(), seg.next(), seg.next()) {
-        (Some("runs"), Some(id), Some("rerun" | "rerun-failed-jobs" | "cancel"), None) => {
-            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
-        }
-        (Some("workflows"), Some(_), Some("dispatches"), None) => true,
-        _ => false,
+#[derive(Deserialize)]
+struct RunsParam {
+    repo: String,
+    status: Option<String>,
+    branch: Option<String>,
+    page: Option<u32>,
+}
+
+async fn runs_list(State(app): S, Query(q): Query<RunsParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    if q.branch.as_deref().is_some_and(|b| b.is_empty() || b.len() > 255 || b.chars().any(char::is_control)) {
+        bail_r("bad branch")?;
     }
+    let rq = crate::forge::RunQuery { status: q.status, branch: q.branch, page: q.page.unwrap_or(1) };
+    Ok(Json(serde_json::to_value(f.runs(&repo, &rq).await?)?))
+}
+
+async fn run_get(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    Ok(Json(serde_json::to_value(f.run(&repo, id).await?)?))
+}
+
+#[derive(Deserialize)]
+struct LogParam {
+    repo: String,
+    from: Option<usize>,
+}
+
+async fn job_log(State(app): S, Path(id): Path<u64>, Query(q): Query<LogParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    Ok(Json(serde_json::to_value(f.job_log(&repo, id, q.from.unwrap_or(0)).await?)?))
+}
+
+async fn workflows(State(app): S, Query(q): Query<RepoParam>) -> R<Json<Value>> {
+    let (f, repo) = served(&app, &q.repo)?;
+    let caps = f.caps();
+    Ok(Json(serde_json::to_value(if caps.workflows { f.workflows(&repo).await? } else { vec![] })?))
+}
+
+#[derive(Deserialize)]
+struct RerunParam {
+    repo: String,
+    failed: Option<String>,
+}
+
+type Audited = (Extension<crate::audit::Note>, StatusCode);
+
+async fn run_rerun(State(app): S, Path(id): Path<u64>, Query(q): Query<RerunParam>) -> R<Audited> {
+    let (f, repo) = served(&app, &q.repo)?;
+    let failed = q.failed.as_deref() == Some("1");
+    let caps = f.caps();
+    if !(if failed { caps.rerun_failed } else { caps.rerun }) {
+        bail_r("this forge cannot rerun runs")?;
+    }
+    f.rerun(&repo, id, failed).await?;
+    Ok((
+        Extension(crate::audit::Note(format!("rerun{} {} run {id}", if failed { " failed" } else { "" }, repo.key()))),
+        StatusCode::NO_CONTENT,
+    ))
+}
+
+async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoParam>) -> R<Audited> {
+    let (f, repo) = served(&app, &q.repo)?;
+    if !f.caps().cancel {
+        bail_r("this forge cannot cancel runs")?;
+    }
+    f.cancel(&repo, id).await?;
+    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchBody {
+    repo: String,
+    workflow: Option<String>,
+    #[serde(rename = "ref")]
+    git_ref: String,
+    #[serde(default)]
+    inputs: HashMap<String, String>,
+}
+
+async fn dispatch(State(app): S, Json(b): Json<DispatchBody>) -> R<Audited> {
+    let (f, repo) = served(&app, &b.repo)?;
+    if !f.caps().dispatch {
+        bail_r("this forge cannot dispatch workflows")?;
+    }
+    // The workflow lands in a URL path: a plain file name or id, nothing that could climb out.
+    if let Some(w) = &b.workflow
+        && (w.is_empty() || w == "." || w == ".." || !w.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)))
+    {
+        bail_r("workflow must be a file name or id")?;
+    }
+    if b.git_ref.is_empty() || b.git_ref.len() > 255 || b.git_ref.chars().any(char::is_control) {
+        bail_r("bad ref")?;
+    }
+    f.dispatch(&repo, b.workflow.as_deref(), &b.git_ref, &b.inputs).await?;
+    let note = format!("dispatch {} {} on {}", repo.key(), b.workflow.as_deref().unwrap_or("-"), b.git_ref);
+    Ok((Extension(crate::audit::Note(note)), StatusCode::NO_CONTENT))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn api_state_shape() {
+        let app = App::for_tests();
+        let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/forge/golden/vm.json");
+        app.vms.lock().unwrap().push(serde_json::from_slice(&std::fs::read(golden).unwrap()).unwrap());
+        let Ok(Json(v)) = state(State(app.clone())).await else { panic!("state failed") };
+        let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        // A GitHub-only install: the exact top-level keys (serde_json sorts them) the dashboard reads.
+        assert_eq!(
+            keys(&v),
+            [
+                "app",
+                "baking",
+                "caches",
+                "config",
+                "host",
+                "image",
+                "image_ready",
+                "job_label",
+                "listen_fallback",
+                "mirror",
+                "notify",
+                "poll",
+                "restart",
+                "serve_socket",
+                "token_expires",
+                "token_saved",
+                "token_set",
+                "token_source",
+                "update",
+                "usage",
+                "version",
+                "vms"
+            ]
+        );
+        // Section contents: config is Config verbatim; a VM is its meta.json shape; poll has these keys.
+        assert_eq!(v["config"], serde_json::to_value(Config::default()).unwrap());
+        let vm: Value = serde_json::from_str(include_str!("testdata/forge/golden/vm.json")).unwrap();
+        assert_eq!(v["vms"][0], vm);
+        assert_eq!(
+            keys(&v["poll"]),
+            [
+                "backoff",
+                "blocked",
+                "blocked_kind",
+                "error",
+                "health",
+                "last_ok",
+                "paused_until",
+                "queued",
+                "queued_by_size",
+                "rate",
+                "refused_forks",
+                "repo_errors"
+            ]
+        );
+        assert_eq!(
+            (&v["token_set"], &v["token_source"], &v["app"], &v["image"]),
+            (&false.into(), &"none".into(), &Value::Null, &Value::Null)
+        );
+    }
+
+    #[test]
+    fn listen_bind_decisions() {
+        use std::io::{Error, ErrorKind::*};
+        let r = |new, running, k: Option<std::io::ErrorKind>| bind_refusal(new, running, k.map(Error::from).as_ref());
+        assert_eq!(r("127.0.0.1:17878", Some("127.0.0.1:17878"), None), None, "bound fine");
+        let no = r("10.255.255.1:17878", Some("127.0.0.1:17878"), Some(AddrNotAvailable)).unwrap();
+        assert!(no.contains("10.255.255.1") && no.contains("not an address of this machine"), "{no}");
+        assert!(r("0.0.0.0:80", Some("0.0.0.0:7878"), Some(PermissionDenied)).unwrap().contains("1024"));
+        // The port kiln holds now: in use by this very process, which the restart replaces.
+        assert_eq!(r("0.0.0.0:7878", Some("127.0.0.1:7878"), Some(AddrInUse)), None);
+        assert_eq!(r("127.0.0.1:7878", Some("127.0.0.1:7878"), Some(AddrInUse)), None);
+        assert!(r("0.0.0.0:7879", Some("127.0.0.1:7878"), Some(AddrInUse)).unwrap().contains("in use"));
+        assert!(r("0.0.0.0:7878", None, Some(AddrInUse)).is_some(), "not serving: someone else holds it");
+        assert!(r("nope", None, None).is_some());
+        assert!(r("1.2.3.4:5", None, Some(Other)).is_some());
+    }
+
+    #[test]
+    fn listen_fallback_order() {
+        use std::io::ErrorKind::*;
+        assert_eq!(
+            listen_fallbacks("10.255.255.1:17878", Some("127.0.0.1:17878"), AddrNotAvailable),
+            ["127.0.0.1:17878", "127.0.0.1:7878"]
+        );
+        assert_eq!(listen_fallbacks("10.255.255.1:17878", None, AddrNotAvailable), ["127.0.0.1:7878"]);
+        assert_eq!(listen_fallbacks("0.0.0.0:80", Some("0.0.0.0:80"), PermissionDenied), ["127.0.0.1:7878"], "last = configured");
+        assert_eq!(listen_fallbacks("10.0.0.9:7878", Some("garbage"), AddrNotAvailable), ["127.0.0.1:7878"]);
+        assert_eq!(listen_fallbacks("10.0.0.9:7878", Some("127.0.0.1:7878"), AddrNotAvailable), ["127.0.0.1:7878"], "no duplicates");
+        assert!(listen_fallbacks("127.0.0.1:7878", None, PermissionDenied).is_empty());
+        // Anything else (port in use, ...) is not an address problem: fail as before.
+        assert!(listen_fallbacks("0.0.0.0:7878", Some("127.0.0.1:7878"), AddrInUse).is_empty());
+    }
 
     #[test]
     fn only_admitted_writes_are_audited() {
@@ -1206,24 +1541,171 @@ mod tests {
         assert!(!audited(&Method::POST, "/", true));
     }
 
-    #[test]
-    fn proxy_writes() {
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun"));
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/rerun-failed-jobs"));
-        assert!(proxy_post_ok("repos/o/n/actions/runs/123/cancel"));
-        assert!(proxy_post_ok("repos/o/n/actions/workflows/ci.yml/dispatches"));
-        for p in [
-            "repos/o/n/actions/runs/123/approve",
-            "repos/o/n/actions/runs/123/pending_deployments",
-            "repos/o/n/actions/runs/123/deployment_protection_rule",
-            "repos/o/n/actions/runs/x/cancel",
-            "repos/o/n/actions/runs//cancel",
-            "repos/o/n/actions/runs/123/cancel/x",
-            "repos/o/n/actions/runs",
-            "repos/o/n/actions/workflows/ci.yml/enable",
-        ] {
-            assert!(!proxy_post_ok(p), "{p}");
+    async fn typed(name: &str) -> (crate::forge_test_mock::Mock, Arc<App>) {
+        use crate::forge_test_mock::{Mock, app as mock_app, fixture};
+        let m = Mock::start().await;
+        let r = "/repos/acme/demo/actions";
+        m.route("GET", &format!("{r}/runs?per_page=30&page=1"), 200, fixture("runs_queued.json"));
+        m.route("GET", &format!("{r}/runs?per_page=30&page=1&status=in_progress&branch=a%2Fb"), 200, fixture("runs_in_progress.json"));
+        m.route("GET", &format!("{r}/runs/2001"), 200, fixture("run_2001.json"));
+        m.route("GET", &format!("{r}/runs/2001/jobs?per_page=100"), 200, fixture("jobs_1001.json"));
+        m.route(
+            "GET",
+            &format!("{r}/workflows?per_page=100"),
+            200,
+            r#"{"workflows":[{"id":9001,"name":"CI","path":".github/workflows/ci.yml"}]}"#,
+        );
+        m.route("GET", &format!("{r}/jobs/5001/logs"), 200, "héllo\nworld\n");
+        for p in ["runs/2001/rerun", "runs/2001/rerun-failed-jobs", "runs/2001/cancel", "workflows/ci.yml/dispatches"] {
+            m.route("POST", &format!("{r}/{p}"), 204, "");
         }
+        let cfg = Config { repos: vec!["acme/demo".into()], ..Config::default() };
+        let app = mock_app(name, &m, cfg);
+        (m, app)
+    }
+
+    fn repo(r: &str) -> Query<RepoParam> {
+        Query(RepoParam { repo: r.into() })
+    }
+
+    #[tokio::test]
+    async fn typed_reads_are_normalised() {
+        let (m, app) = typed("typed-reads").await;
+        let Json(f) = forges_list(State(app.clone())).await.unwrap_or_else(|_| panic!("forges"));
+        assert_eq!(f[0]["id"], "github");
+        assert_eq!(f[0]["repos"], json!(["acme/demo"]));
+        assert_eq!(f[0]["caps"]["workflows"], true);
+        assert!(f[0]["auth"].get("source").is_some() && !f.to_string().contains("tok"));
+        let q = RunsParam { repo: "acme/demo".into(), status: None, branch: None, page: None };
+        let Json(runs) = runs_list(State(app.clone()), Query(q)).await.unwrap_or_else(|_| panic!("runs"));
+        let r0 = &runs["runs"][0];
+        // kiln's names and values, not GitHub's.
+        assert!(r0.get("workflow_id").is_none() && r0.get("html_url").is_none());
+        assert!(["queued", "running", "completed"].contains(&r0["status"].as_str().unwrap()));
+        assert_eq!(r0["links"]["run"], format!("https://github.com/acme/demo/actions/runs/{}", r0["id"]));
+        let Json(d) = run_get(State(app.clone()), Path(2001), repo("acme/demo")).await.unwrap_or_else(|_| panic!("run"));
+        assert_eq!(d["id"], 2001);
+        assert_eq!(d["outcome"], "Succeeded");
+        assert_eq!(d["jobs"][0]["status"], "queued");
+        assert_eq!(d["jobs"][0]["links"]["job"], "https://github.com/acme/demo/actions/runs/2001/job/5001");
+        let Json(w) = workflows(State(app.clone()), repo("acme/demo")).await.unwrap_or_else(|_| panic!("wf"));
+        assert_eq!(w, json!([{ "id": 9001, "name": "CI", "file": "ci.yml" }]));
+        let lq = |from| Query(LogParam { repo: "acme/demo".into(), from });
+        let Json(l) = job_log(State(app.clone()), Path(5001), lq(None)).await.unwrap_or_else(|_| panic!("log"));
+        assert_eq!(l, json!({ "text": "héllo\nworld\n", "next": 13, "complete": true }));
+        let Json(l) = job_log(State(app.clone()), Path(5001), lq(Some(7))).await.unwrap_or_else(|_| panic!("log"));
+        assert_eq!(l["text"], "world\n");
+        // The download itself is bounded, not only the page handed back.
+        let log = "repos/acme/demo/actions/jobs/5001/logs";
+        assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 4).await.is_err());
+        assert!(app.gh.raw_max(reqwest::Method::GET, log, None, 13).await.is_ok());
+        // Filters are encoded, not spliced.
+        let q = RunsParam { repo: "acme/demo".into(), status: Some("running".into()), branch: Some("a/b".into()), page: Some(1) };
+        assert!(runs_list(State(app), Query(q)).await.is_ok());
+        assert!(m.requests().iter().all(|r| r.starts_with("GET /repos/acme/demo/actions/")), "{:?}", m.requests());
+    }
+
+    #[tokio::test]
+    async fn typed_endpoints_refuse_unserved_and_malformed_repos() {
+        let (m, app) = typed("typed-refuse").await;
+        for bad in [
+            "other/repo",
+            "acme/demo-evil",
+            "acme/demo/../../x",
+            "acme/demo%2f..%2fsecrets",
+            "acme/demo/actions/runners",
+            "github:acme/demo",
+            "gitlab:acme/demo",
+            "acme/demo?x=1",
+            "",
+        ] {
+            assert!(run_get(State(app.clone()), Path(2001), repo(bad)).await.is_err(), "{bad:?}");
+            assert!(run_cancel(State(app.clone()), Path(2001), repo(bad)).await.is_err(), "{bad:?}");
+            assert!(workflows(State(app.clone()), repo(bad)).await.is_err(), "{bad:?}");
+        }
+        let b = |repo: &str, workflow: Option<&str>, r: &str| DispatchBody {
+            repo: repo.into(),
+            workflow: workflow.map(String::from),
+            git_ref: r.into(),
+            inputs: HashMap::new(),
+        };
+        assert!(dispatch(State(app.clone()), Json(b("other/repo", Some("ci.yml"), "main"))).await.is_err());
+        for wf in [
+            Some("../../../runners/generate-jitconfig"),
+            Some("ci.yml/enable"),
+            Some(".."),
+            Some("ci.yml?x"),
+            Some("a%2fb"),
+            Some(""),
+            None,
+        ] {
+            assert!(dispatch(State(app.clone()), Json(b("acme/demo", wf, "main"))).await.is_err(), "{wf:?}");
+        }
+        assert!(dispatch(State(app.clone()), Json(b("acme/demo", Some("ci.yml"), ""))).await.is_err());
+        let bad_status = RunsParam { repo: "acme/demo".into(), status: Some("x&y=1".into()), branch: None, page: None };
+        assert!(runs_list(State(app), Query(bad_status)).await.is_err());
+        assert!(m.requests().is_empty(), "a refusal must not reach the forge: {:?}", m.requests());
+    }
+
+    #[tokio::test]
+    async fn typed_writes_are_only_rerun_cancel_dispatch() {
+        let (m, app) = typed("typed-writes").await;
+        let rp = |failed: Option<&str>| Query(RerunParam { repo: "acme/demo".into(), failed: failed.map(String::from) });
+        let ok = |r: R<Audited>| r.unwrap_or_else(|_| panic!("write")).0.0.0;
+        assert_eq!(ok(run_rerun(State(app.clone()), Path(2001), rp(None)).await), "rerun acme/demo run 2001");
+        assert_eq!(ok(run_rerun(State(app.clone()), Path(2001), rp(Some("1"))).await), "rerun failed acme/demo run 2001");
+        assert_eq!(ok(run_cancel(State(app.clone()), Path(2001), repo("acme/demo")).await), "cancel acme/demo run 2001");
+        let mut inputs = HashMap::new();
+        inputs.insert("k".to_string(), "v".to_string());
+        let d = DispatchBody { repo: "acme/demo".into(), workflow: Some("ci.yml".into()), git_ref: "main".into(), inputs };
+        assert_eq!(ok(dispatch(State(app), Json(d)).await), "dispatch acme/demo ci.yml on main");
+        let log = m.log();
+        assert_eq!(
+            m.requests(),
+            [
+                "POST /repos/acme/demo/actions/runs/2001/rerun",
+                "POST /repos/acme/demo/actions/runs/2001/rerun-failed-jobs",
+                "POST /repos/acme/demo/actions/runs/2001/cancel",
+                "POST /repos/acme/demo/actions/workflows/ci.yml/dispatches"
+            ]
+        );
+        assert_eq!(log[3].body, Some(json!({ "ref": "main", "inputs": { "k": "v" } })));
+    }
+
+    /// The writes are API POSTs: admission demands `x-kiln` for them and the audit log records them.
+    #[test]
+    fn typed_writes_are_audited() {
+        for p in ["/api/runs/1/rerun", "/api/runs/1/cancel", "/api/dispatch"] {
+            assert!(audited(&Method::POST, p, true), "{p}");
+        }
+        assert!(!audited(&Method::GET, "/api/runs", true));
+    }
+
+    #[tokio::test]
+    async fn typed_writes_need_the_csrf_header() {
+        let app = App::for_tests();
+        let req = |csrf: bool| {
+            let mut b =
+                Request::builder().method(Method::POST).uri("/api/runs/1/rerun?repo=acme/demo").header(header::HOST, "localhost:7878");
+            if csrf {
+                b = b.header("x-kiln", "1");
+            }
+            b.body(axum::body::Body::empty()).unwrap()
+        };
+        let via = || Via::Tcp("127.0.0.1:5555".parse().unwrap());
+        let (r, _) = admission(&app, via(), req(false)).await;
+        assert_eq!(r.unwrap_err().status(), StatusCode::FORBIDDEN);
+        for p in ["/api/runs/1/cancel", "/api/dispatch"] {
+            let mut q = req(false);
+            *q.uri_mut() = p.parse().unwrap();
+            assert!(admission(&app, via(), q).await.0.is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn dispatch_body_rejects_unknown_fields() {
+        assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main","path":"x"}"#).is_err());
+        assert!(serde_json::from_str::<DispatchBody>(r#"{"repo":"a/b","ref":"main"}"#).is_ok());
     }
 
     #[test]
@@ -1271,7 +1753,9 @@ mod tests {
             std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
             let t = std::time::Instant::now();
-            let r = bounded(f.to_str().unwrap(), &["serve"], Duration::from_millis(300)).await;
+            // Run through sh rather than exec'ing the file just written: a test forking on
+            // another thread can briefly hold its write handle, and exec then fails with ETXTBSY.
+            let r = bounded("sh", &[f.to_str().unwrap(), "serve"], Duration::from_millis(300)).await;
             assert!(r.unwrap_err().to_string().contains("did not finish"), "{name}");
             assert!(t.elapsed() < Duration::from_secs(2), "{name} took {:?}", t.elapsed());
         }
@@ -1301,22 +1785,6 @@ mod tests {
         // Not logged in: certs are not the problem, let the CLI say what is.
         assert!(!st(r#"{"BackendState":"NeedsLogin","CertDomains":null}"#));
         assert!(!no_certs(&Value::Null));
-    }
-
-    #[test]
-    fn proxy_allowlist() {
-        let repos = vec!["Bunty9/kiln".to_string()];
-        let ok = |p: &str| proxy_path_ok(p, &repos);
-        assert!(ok("repos/Bunty9/kiln/actions/runs"));
-        assert!(ok("repos/Bunty9/kiln/actions/runs/123/jobs"));
-        assert!(ok("repos/Bunty9/kiln/actions/workflows/ci.yml/dispatches"));
-        assert!(ok("repos/Bunty9/kiln/actions/jobs/9/logs"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runners/generate-jitconfig"));
-        assert!(!ok("repos/Bunty9/kiln/actions/secrets"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runs/../../../other/x/actions/runs"));
-        assert!(!ok("repos/Bunty9/kiln/actions/runs/%2e%2e/%2e%2e"));
-        assert!(!ok("repos/Bunty9/kiln-evil/actions/runs"));
-        assert!(!ok("repos/Other/repo/actions/runs"));
     }
 
     #[test]
@@ -1425,6 +1893,7 @@ mod tests {
     #[test]
     fn identity_claims() {
         let tcp = |a: &str| Via::Tcp(a.parse().unwrap());
+        const SERVE: Via = Via::Serve { root: true };
         let peer: IpAddr = "100.64.0.7".parse().unwrap();
         // TCP: the source address decides; identity headers are never read.
         assert_eq!(claim(tcp("127.0.0.1:5000"), None, None, false), Claim::Local);
@@ -1434,18 +1903,24 @@ mod tests {
         assert_eq!(claim(tcp("100.64.0.7:5000"), Some("evil@x.com"), None, false), Claim::Peer(peer));
         assert!(matches!(claim(tcp("192.168.1.6:5000"), Some("me@x.com"), Some("100.64.0.7"), false), Claim::Outside(_)));
         // The serve socket: tailscaled's login header, from the tailnet address it saw.
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Login("me@x.com".into(), peer));
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Login("me@x.com".into(), peer));
         // No user from a tailnet address: a tagged node (or the box itself), judged as over TCP.
-        assert_eq!(claim(Via::Serve, None, Some("100.64.0.7"), false), Claim::Peer(peer));
-        assert_eq!(claim(Via::Serve, Some(""), Some("100.64.0.7"), false), Claim::Peer(peer));
+        assert_eq!(claim(SERVE, None, Some("100.64.0.7"), false), Claim::Peer(peer));
+        assert_eq!(claim(SERVE, Some(""), Some("100.64.0.7"), false), Claim::Peer(peer));
         // No tailnet source: key needed.
-        assert_eq!(claim(Via::Serve, None, None, false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), None, false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
-        assert_eq!(claim(Via::Serve, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
+        assert_eq!(claim(SERVE, None, None, false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), None, false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("127.0.0.1"), false), Claim::Local);
+        assert_eq!(claim(SERVE, Some("me@x.com"), Some("192.168.1.6"), false), Claim::Local);
         // Funnel (the public internet) is refused outright.
-        assert!(matches!(claim(Via::Serve, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Outside(_)));
-        assert!(matches!(claim(Via::Serve, None, None, true), Claim::Outside(_)));
+        assert!(matches!(claim(SERVE, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Outside(_)));
+        assert!(matches!(claim(SERVE, None, None, true), Claim::Outside(_)));
+        // The same headers from a non-root peer on the socket (kiln's uid, a confined
+        // QEMU) are ignored: the dashboard key is required.
+        let user = Via::Serve { root: false };
+        assert_eq!(claim(user, Some("me@x.com"), Some("100.64.0.7"), false), Claim::Local);
+        assert_eq!(claim(user, None, Some("100.64.0.7"), false), Claim::Local);
+        assert_eq!(claim(user, Some("me@x.com"), Some("100.64.0.7"), true), Claim::Local);
     }
 
     #[test]

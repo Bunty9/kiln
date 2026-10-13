@@ -18,7 +18,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. The dashboard tells you when a restart is required. |
+| `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. After saving a new address the Overview shows "Restart needed to apply: listen" with **Restart when idle** (see [Restarting kiln](#restarting-kiln)). kiln test-binds a new address before saving it and again before a restart, and refuses one it could not serve on (not an address of this machine, a port below 1024, a port another program holds). If the configured address still cannot be bound at startup (an interface that went away, a hand edit), kiln serves on the last address that worked (`<data>/listen.last`) or else `127.0.0.1:7878`, logs it, and shows "listen X could not be bound (...); serving on Y" on the Overview. |
 | `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
 | `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. On an arm64 host (Apple Silicon) VMs register `<label>-arm64` and `<label>-arm64-<N>cpu` instead, never the plain label. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
@@ -40,6 +40,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 | `poll_secs` | integer | `5` | at least `3` | live | Seconds between GitHub polls. 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. With a GitHub App each installation has its own limit: only the repos of the limited installation pause (shown as a repo error), the rest keep polling, and the 20% check uses the most constrained installation. |
 | `job_timeout_mins` | integer | `60` | `1` to `1440` | live (VMs started after the change) | Longest a job may run, counted from when the runner reports "Running job". |
 | `idle_timeout_mins` | integer | `10` | `1` to `1440` | live (VMs started after the change) | A VM that never gets a job (boot included) is killed after this. |
+| `stop_grace_secs` | integer | `25` | `0` to `570` | live | On SIGTERM (`systemctl stop` or `restart`), how long running jobs get to finish before their VMs are killed. The cap is the shipped unit's `TimeoutStopSec=600` minus about 30 s of cleanup. A host shutdown, reboot or logout of the user manager waits up to this long too. See [Restarting kiln](#restarting-kiln). |
 
 Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hold) x 60 + 300 seconds from its start, whatever its console prints. Warm VMs use `max(idle_timeout_mins, warm_recycle_mins + 5)` as their idle component.
 
@@ -71,7 +72,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Linux only: refused on macOS. Switching to `filtered` triggers a probe at once; if it fails no jobs launch (never a fallback to open). Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
+| `egress` | string | `"open"` | `"open"`, `"filtered"` | live (new VMs) | Job network. `open`: full outbound via the host's NAT (LAN and tailnet included). `filtered`: each VM in a rootless network namespace with an nftables allow-list (internet, DNS, Docker mirror). Linux only: refused on macOS. Switching to `filtered` triggers a probe at once; while it fails no jobs launch (never a fallback to open), and kiln retries it after 5 s, doubling up to every 2 minutes, so a probe that ran before the network was up (for example at boot) passes on its own once it is. Idle VMs booted under the old mode are recycled. See [architecture.md](architecture.md#egress). |
 
 ### Debugging
 
@@ -96,6 +97,15 @@ In practice a hold lasts `debug_hold_mins` only while the box has spare slots; u
 |---|---|---|---|---|---|
 | `auto_update` | bool | `false` | | live | Install a newer signed release by itself, once no job runs, no demand VM waits for one, no VM is held for debugging and no bake runs (looked at every minute after a successful check). Idle warm VMs do not hold it back; the drain reaps them. A version that was rolled back is never installed by itself again, only a newer one. See [Updates](#updates). |
 | `update_repo` | string | `"Bunty9/kiln"` | `owner/name` | live (next check) | Repository whose GitHub releases kiln checks and installs. Only releases signed with kiln's release key are installed, whatever the repo. |
+
+### Privacy
+
+| Field | Type | Default | Valid values | Applies | What it does |
+|---|---|---|---|---|---|
+| `usage_stats` | bool or null | `null` | | live (sending at the next hourly check) | Send an anonymous usage report about once a day. `null` means not chosen yet: it sends nothing, and the dashboard asks (Setup page, or an Overview banner) while either switch is `null`. |
+| `crash_reports` | bool or null | `null` | | live | Record kiln's panics (no panic message) and send them hourly. `null` means not chosen yet: nothing is recorded or sent, and the dashboard asks. Turning it off deletes waiting crash files at once. |
+
+What each report contains, and what it never contains, is in [SECURITY.md › Telemetry](../SECURITY.md#telemetry); Settings › Privacy shows the usage report as this box would send it now, and an example crash report. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off whatever is set here.
 
 ### Warm pool
 
@@ -134,6 +144,16 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 
 **Trust:** the signing key lives only in the release workflow's secrets; the public half is compiled into kiln. Changing `update_repo` cannot make kiln install a build not signed with that key: another repo can offer only genuine signed releases, and only ones newer than the running version (never a downgrade). If the key is ever rotated, kilns built with the old key refuse the new releases: install that one release by hand (see the README), after which updates resume.
 
+## Restarting kiln
+
+**Which settings need a restart:** only `listen`, which is bound once at startup. Every other field is read where it is used, so a dashboard save applies it within seconds (some only to VMs started afterwards, or at the next bake, as the tables say). Hand edits to `config.json` are read only at startup, so they all need a restart.
+
+**Restart when idle** (Overview banner after saving `listen`, or `POST /api/restart`) restarts without killing jobs. It drains exactly like an update: no new VMs start (warm ones included), idle VMs are reaped, and kiln waits for running VMs to finish, at most the job timeout plus 2 minutes, and for a running bake. VMs held for debugging are not waited for, as on SIGTERM: the restart ends the hold. Then it shuts down as usual and re-executes the same binary in place (if you installed a new binary over it by hand, that one), so under systemd the PID stays and the unit sees no restart. The Overview shows "Restart pending · waiting for N VMs to finish" meanwhile, the journal logs the drain every 30 s, and `/api/state` carries it as `restart: {needed, state: "draining" | "restarting", progress, running}`. **Cancel restart** (`POST /api/restart/cancel`) resumes launching. Only one drain runs at a time: a restart is refused (409, with what is running: "an update is draining", "kiln is stopping", ...) while an update or an update check runs, and an update is refused while a restart drains. A restart is also refused when the saved `listen` cannot be bound (see `listen` above), so it never leaves kiln unreachable. A restart request confirms a just-applied update (it reached the new version), so it never counts as a failed boot toward the rollback. The audit log notes each restart as "when idle: N running" or "now: killed N running VMs".
+
+**Restart now** (`POST /api/restart?now=true`, also offered during a restart's drain) does not wait: running jobs are killed and fail on GitHub with "The runner has received a shutdown signal". The dashboard asks for confirmation and says how many VMs that kills. A running bake is still waited for.
+
+**`systemctl --user restart kiln` / `stop`:** on the first SIGTERM (or Ctrl-C) kiln stops launching at once, reaps idle VMs, and waits up to `stop_grace_secs` (default 25) for running jobs to finish; VMs held for debugging are not waited for. The journal logs "stopping: waiting for N running VMs (at most S s more)" every 5 s and the dashboard keeps serving with a "kiln is stopping" banner. Then, or on a second SIGTERM/SIGINT, kiln kills what still runs and cleans up as before (runners deregistered, disks deleted). `systemctl` itself never sends a second SIGTERM; to end the wait from a shell, send one to kiln only: `systemctl --user kill --kill-whom=main kiln` (plain `systemctl kill` signals the whole cgroup, QEMU included). In a foreground `kiln serve`, press Ctrl-C again: job VMs run in their own process group, so the first Ctrl-C reaches kiln only and they get the grace too. The shipped unit sets `TimeoutStopSec=600`, so `stop_grace_secs` goes up to 570. An update does not touch the installed unit: under systemd kiln reads the unit's `TimeoutStopSec` at startup and, if it is too short for `stop_grace_secs` plus 25 s of cleanup (an older unit says 30), shortens the grace to fit and logs a warning; `kiln doctor` flags it as "kiln.service TimeoutStopSec=30s is shorter than stop_grace_secs ...". Reinstall the unit (`install -Dm644 deploy/kiln.service ~/.config/systemd/user/kiln.service && systemctl --user daemon-reload`) to get the longer timeout.
+
 ## Environment variables
 
 | Variable | Meaning |
@@ -142,6 +162,9 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 | `KILN_GITHUB_TOKEN` | GitHub token, highest precedence. |
 | `GITHUB_TOKEN` | GitHub token, used when `KILN_GITHUB_TOKEN` is unset. |
 | `HOME` | Used to find the default data directory. |
+| `DO_NOT_TRACK` | `1`, `true` or `yes`: no usage or crash reports, whatever `usage_stats` and `crash_reports` say. |
+| `KILN_TELEMETRY` | `0`, `false`, `no` or `off`: same as `DO_NOT_TRACK=1`. |
+| `KILN_TELEMETRY_URL` | An `https://` address to send reports to instead of the built-in one (for testing a receiver). Set to anything else, nothing is sent. |
 
 kiln logs through `tracing` to stderr (the systemd journal for the user unit). To set a token for the unit, add `Environment=KILN_GITHUB_TOKEN=...` to the service, or save it from the dashboard instead.
 
@@ -149,11 +172,11 @@ kiln logs through `tracing` to stderr (the systemd journal for the user unit). T
 
 A GitHub App is the recommended way to authenticate. kiln holds only the App's private key; the tokens it uses are minted per installation, expire after an hour, and carry exactly *Administration: write*, *Actions: write*, *Contents: read* and *Metadata: read*. The App cannot push code (so the hello PR is off in App mode), but *Administration: write* lets it change branch protection and repository settings on every repo it is installed on. Treat `app.pem` like an admin credential.
 
-**Create it from the dashboard:** Settings › GitHub › Create GitHub App (enter an organization to create it there, or leave it empty for your account). GitHub shows the App with its permissions preset; confirm, and GitHub sends you back to the dashboard, which saves the App and shows an **Install the App on your repos** button. No webhook is configured: kiln keeps polling. The setup link is valid for an hour and survives a kiln restart; if finishing it fails on a network error, try again with the same link. If GitHub says the code expired or was already used but the App exists on github.com, open it there, generate a private key, and use **Use an existing App**.
+**Create it from the dashboard:** Settings › Forges › Create GitHub App (enter an organization to create it there, or leave it empty for your account). GitHub shows the App with its permissions preset; confirm, and GitHub sends you back to the dashboard, which saves the App and shows an **Install the App on your repos** button. No webhook is configured: kiln keeps polling. The setup link is valid for an hour and survives a kiln restart; if finishing it fails on a network error, try again with the same link. If GitHub says the code expired or was already used but the App exists on github.com, open it there, generate a private key, and use **Use an existing App**.
 
-**Or use an existing App:** Settings › GitHub › Use an existing App, with its App ID and a private key (`.pem`, PKCS#1 as GitHub issues it, or PKCS#8). kiln checks the pair against GitHub before saving.
+**Or use an existing App:** Settings › Forges › Use an existing App, with its App ID and a private key (`.pem`, PKCS#1 as GitHub issues it, or PKCS#8). kiln checks the pair against GitHub before saving.
 
-**Which repos:** in App mode the repos kiln serves are exactly the repos the App is installed on. Install or uninstall it on github.com to change the list; the `repos` setting is only used with a token. kiln refreshes the list every 5 minutes, or every 30 seconds while the App serves no repo or has never been discovered successfully, so a new installation shows up quickly. **Refresh** in Settings › GitHub (`POST /api/app/refresh`) runs it at once. If a refresh fails, kiln keeps the last list and shows the error. Per-repo settings (`warm`, `cache_branches`, `repo_cache_gb`) stay keyed by `owner/name`; entries for repos the App is not installed on are kept and ignored.
+**Which repos:** in App mode the repos kiln serves are exactly the repos the App is installed on. Install or uninstall it on github.com to change the list; the `repos` setting is only used with a token. kiln refreshes the list every 5 minutes, or every 30 seconds while the App serves no repo or has never been discovered successfully, so a new installation shows up quickly. **Refresh** in Settings › Forges (`POST /api/app/refresh`) runs it at once. If a refresh fails, kiln keeps the last list and shows the error. Per-repo settings (`warm`, `cache_branches`, `repo_cache_gb`) stay keyed by `owner/name`; entries for repos the App is not installed on are kept and ignored.
 
 **Which accounts:** only installations on the App owner's account are served. The owner is read from GitHub at every refresh and matched by its numeric account id, so renaming the account is safe. Installations on other accounts (possible if the App is public) are ignored and listed as "Skipped" on the dashboard's GitHub App card. To serve one, add its user or org login to `app_accounts` (string array, default `[]`, GitHub logins: letters, digits and single hyphens, at most 39 characters; there is no dashboard field: edit `config.json` and restart kiln), then Refresh. `app_accounts` entries are matched by login, case-insensitively: if such an account is renamed, update the list.
 
@@ -172,9 +195,86 @@ A GitHub App is the recommended way to authenticate. kiln holds only the App's p
 - Classic PAT: the `repo` scope (plus `workflow` for the hello PR).
 - Fine-grained token, on each repo: *Administration: write* (register and delete runners), *Actions: read and write* (list and rerun or cancel runs, dispatch workflows, read jobs), *Contents: read* (check that a cache-saving push is really on its branch; without it caches never save). *Contents: write* and *Workflows: write* are needed only for the optional hello PR. *Metadata: read* is implicit.
 
-`kiln doctor` (and Settings › Diagnostics) probes each repo once per permission and names the one that is missing, for example "token lacks Contents: read". Reads can work while GitHub refuses to register runners, so it also exercises the write path: it mints a runner registration token (`POST …/actions/runners/registration-token`; harmless, it expires in an hour and nothing uses it) and reports "runner registration works" or "runner registration failing: HTTP 500". The result is cached for 10 minutes per repo, since the dashboard runs the checks periodically. When GitHub reports an expiry for the token (fine-grained tokens, and classic ones created with one), the dashboard shows it under Settings › GitHub and warns from 14 days before.
+`kiln doctor` (and Settings › Diagnostics) probes each repo once per permission and names the one that is missing, for example "token lacks Contents: read". Reads can work while GitHub refuses to register runners, so it also exercises the write path: it mints a runner registration token (`POST …/actions/runners/registration-token`; harmless, it expires in an hour and nothing uses it) and reports "runner registration works" or "runner registration failing: HTTP 500". The result is cached for 10 minutes per repo, since the dashboard runs the checks periodically. When GitHub reports an expiry for the token (fine-grained tokens, and classic ones created with one), the dashboard shows it under Settings › Forges and warns from 14 days before.
 
 The token stays on the host. A job VM only ever receives a single-use JIT runner configuration.
+
+## Notifications
+
+kiln can send alerts to up to 20 destinations (Settings › Notifications). They are stored in `<data>/notify.json` (mode 0600, written atomically). If that file cannot be read, notifications are off, the Overview says so, and kiln never rewrites the file.
+
+**Kinds:** `generic` (signed JSON, below), `slack` (incoming webhook), `discord` (webhook) and `ntfy` (optional access token). The URL and the ntfy token are write-only: the API never returns them. A generic destination's signing secret is returned once, when it is made (on create, on **Rotate secret**, or when an edit changes the kind to generic or the URL to another origin), and never again. All three are kept out of logs, the audit log and job VMs. Changing a destination's URL to a different host (or scheme or port) drops its stored ntfy token unless the same edit supplies a new one, and gives a generic destination a new signing secret, so a credential never follows the URL to a new party.
+
+**URL rules:** https only, no `user:password`, at most 2048 characters. Slack must be on `hooks.slack.com`; Discord on `discord.com` or `discordapp.com` under `/api/webhooks/`. Only public addresses are allowed. CGNAT `100.64.0.0/10` and IPv6 unique-local `fc00::/7` are refused unless the destination is marked "on my tailnet", which then allows only `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, for a receiver on your tailnet such as `https://100.64.0.7/hook`. LAN, loopback, link-local, IPv6 site-local (`fec0::/10`), cloud metadata (`169.254.0.0/16`), documentation (including `2001:db8::/32` and `3fff::/20`), multicast and reserved ranges are always refused. Stored URLs are checked against these rules again on every send, so a hand-edited `notify.json` cannot get past them. IPv6 mapped, compatible, NAT64 (`64:ff9b::/96`) and 6to4 addresses are judged by the IPv4 address inside them; the other translation prefixes (local-use NAT64 `64:ff9b:1::/48`, SIIT `::ffff:0:0:0/96`, Teredo `2001::/32`) and discard `100::/64` are always refused.
+
+**Events** (each destination picks job, health and security alerts):
+
+| Type | When |
+|---|---|
+| `job.failed` | A job failed, was cancelled, was killed after it started, timed out, or was lost when kiln restarted. Once per VM. Runner-registration failures are not jobs and are never sent, and neither are fork pull request jobs that kiln refuses. |
+| `job.finished` | A job succeeded and a workflow rule (below) matches it. |
+| `health.raised`, `health.cleared` | A launch blocker (old image, GitHub registration outage, egress filtering broken, low memory or disk), a poll error, Landlock missing, or a failing destination. Sent only after the state has held for 2 scheduler ticks and 60 s. "Draining" is not announced. |
+| `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed (created, converted or removed). A settings save that changes nothing is not announced; saving a destination always is. Destination changes (added, changed with the names of the changed fields, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
+| `more` | Rate-limit summary: "+N more events" in place of events beyond 30 a minute. |
+| `test` | The **Send test** button, at most once per destination every 10 s. |
+
+**Delivery:** each destination has its own queue (256 events; the oldest are dropped and counted) and is limited to 30 messages a minute, with the overflow folded into one "+N more events" message; `security.changed` is never folded. A failed send is retried up to 3 times after about 5 s, 30 s and 2 min (±20 %). A 429 honours `Retry-After` (1–300 s). 408, 429 and 5xx responses, timeouts and connection errors are retried; 3xx responses (redirects are never followed), other 4xx responses, refused addresses and an invalid signing secret are permanent. The client follows no redirects, ignores proxy environment variables, and uses a 5 s connect and 10 s total timeout. A destination whose failures have gone on for an hour (from its first failure to its latest, with no success in between), or that failed permanently 3 times in a row, is "failing": the Overview shows a banner and it is announced through the destinations that are not themselves failing. On shutdown, alerts get up to 2 s to go out.
+
+**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped, `mrkdwn` off and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In Slack, Discord and ntfy a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are kiln's own GitHub job URLs on `https://github.com/`. The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
+
+**Limits:** names are 1–40 characters; an ntfy token is up to 200 visible ASCII characters (no spaces).
+
+### Workflow rules
+
+`notify_rules` in `config.json` (also the table under Settings › Notifications; at most 50) send chosen workflows to chosen destinations:
+
+```json
+"notify_rules": [
+  { "repo": "acme/kiln", "workflow": "release.yml", "outcome": "any", "to": ["a1b2c3d4"] }
+]
+```
+
+`repo` is `owner/name` or `*`; `workflow` is `*` or a file name such as `release.yml`; `outcome` is `success`, `failure` or `any`; `to` lists destination ids (from `GET /api/notify`). `repo` must be one of your repos or `*`; `to` is 1–20 destination ids (8 hex characters), and unknown ids are rejected. Removing a destination prunes it from the rules and drops rules left empty. A job whose workflow file is unknown matches only `*`. A failed job that matches rules goes once to the union of the rule targets and every destination with job alerts on.
+
+### The generic payload
+
+The body is JSON with typed fields and never the actor's IP, logs or secrets:
+
+```json
+{
+  "type": "job.failed",
+  "id": "msg_01",
+  "at": 1791402114,
+  "kiln": { "version": "0.2.4", "link": null },
+  "job": {
+    "repo": "acme/kiln", "workflow": "release.yml", "workflow_name": "Release",
+    "job": "build", "branch": "main", "event": "push", "outcome": "failed",
+    "duration_s": 212, "url": "https://github.com/acme/kiln/actions/runs/1/job/2"
+  }
+}
+```
+
+`health.raised`/`health.cleared` carry `health: {kind, message, state}` instead of `job`, `security.changed` carries `security`, and a rate-limit summary carries `more: N`.
+
+The headers are `webhook-id`, `webhook-timestamp` (Unix seconds) and `webhook-signature` (`v1,<base64>`), as in [Standard Webhooks](https://www.standardwebhooks.com/). The signing secret (`whsec_…`, 32 random bytes) is shown once: when you create the destination, rotate it, or edit it into the generic kind. To verify, compute HMAC-SHA256 over `id.timestamp.body` with the base64-decoded part after `whsec_`, compare it with the `v1` signature in constant time, and reject timestamps more than 5 minutes from your clock:
+
+```python
+import base64, hashlib, hmac, time
+
+def verify(secret, headers, body: bytes) -> bool:
+    id_, ts = headers["webhook-id"], headers["webhook-timestamp"]
+    try:
+        if abs(time.time() - int(ts)) > 300:
+            return False
+    except ValueError:
+        return False
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    mac = hmac.new(key, f"{id_}.{ts}.".encode() + body, hashlib.sha256).digest()
+    want = "v1," + base64.b64encode(mac).decode()
+    return any(hmac.compare_digest(want.encode(), s.encode()) for s in headers["webhook-signature"].split())
+```
+
+Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub webhooks are a separate, future feature.
 
 ## Data directory
 
@@ -187,6 +287,10 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
+  notify.json                    notification destinations and their secrets, mode 0600
+  telemetry_id                   random install id for usage and crash reports; created at the first send, deleted as soon as both are off
+  telemetry_last                 when the last usage report was sent
+  crash/                         crash reports not yet sent (at most 20; only while crash_reports is on, deleted when it is turned off)
   audit.log, audit.log.1         one JSON line per admitted API write (mode 0600, rolled over at 8 MiB); refusals go to kiln's log
   update/                        self-update: pending.json (an update not yet confirmed), error (why
                                  the last one was rolled back), the release being unpacked

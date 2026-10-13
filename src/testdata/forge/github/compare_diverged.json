@@ -1,0 +1,9 @@
+{
+  "url": "https://api.github.com/repos/acme/demo/compare/a1b2c3d4e5f60718293a4b5c6d7e8f9012345678...c3d4e5f60718293a4b5c6d7e8f9012345678a1b2",
+  "status": "diverged",
+  "ahead_by": 2,
+  "behind_by": 1,
+  "total_commits": 2,
+  "commits": [],
+  "files": []
+}

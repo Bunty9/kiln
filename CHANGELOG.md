@@ -4,6 +4,51 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Groundwork for GitLab and Gitea: `config.json` accepts an optional `forges` list (id, kind, url, repos), validated on load and save. A list without a `github` entry together with top-level `repos` is refused. Nothing serves those forges yet, and configs without `forges` behave as before.
+- A forge-neutral dashboard API returning kiln's own JSON: `GET /api/forges`, `/api/runs`, `/api/runs/{id}`, `/api/jobs/{id}/log`, `/api/workflows`, and `POST /api/runs/{id}/rerun`, `/api/runs/{id}/cancel`, `/api/dispatch`. Each takes `repo=<canonical key>` checked against the served repos.
+
+### Changed
+
+- Settings › GitHub is now Settings › Forges: one card set per forge from `/api/forges`. The GitHub token and App cards are unchanged, the setup wizard's first step is "Connect a forge", and `#/settings/github` still opens the page.
+- The dashboard's Repos and Job pages use the forge-neutral API instead of `/api/gh/*`, which is removed. The Job page's log tab is named after the forge, and controls the forge can't do (rerun, cancel, run workflow) are hidden. The forge's job-log download is capped at 16 MiB.
+- QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
+- A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.
+
+### Fixed
+
+- A cache overlay is committed only when the VM's own console showed exactly one job start and a job id is bound, whatever the next API poll sees; a second start, no start, or an unbound job discards the overlay. The verdict is also re-checked after the forge lookup.
+- `kiln doctor` no longer reports "not enough for all slots at once" (and a failed memory check) whenever every slot is busy: it counted the memory held by kiln's own running VMs twice. It now adds that back to the available memory and shows it, for example `7941 MB available (+16850 MB in running VMs), 2 x 8192 MB wanted`.
+- Filtered egress no longer stays "unavailable" after kiln starts before the network is up: a failing probe is retried after 5 s, doubling up to every 2 minutes, and a save that changes `egress`, `listen` or `docker_mirror` while filtered re-probes at once. `deploy/kiln.service` drops `After=network-online.target`, which a user unit cannot order against (#44).
+
+## [0.2.5] - 2026-10-08
+
+### Added
+
+- **Outbound notifications.** Settings › Notifications sends job failures (`job.failed`), successes of workflows you choose with `notify_rules` (`job.finished`), box health (`health.raised`/`health.cleared`, debounced) and security changes (`security.changed`) to Slack, Discord, ntfy or any HTTPS endpoint (generic endpoints receive JSON signed with Standard Webhooks). Up to 20 destinations in `<data>/notify.json`; per-destination queue, rate limit and retries; a failing destination shows a banner and is announced through the destinations that are not failing. Destination URLs and ntfy tokens are write-only; a signing secret is returned once (on create, rotate, or a kind or origin change) and never again; moving a URL to another host drops its token and issues a new secret. Repo text is escaped per target. See docs/configuration.md.
+- **Opt-in usage statistics and crash reports.** Both are off until you choose: the dashboard asks once (the Setup page, or an Overview banner on existing installs), and the new Settings › Privacy page changes the choice and shows the usage report exactly as it would be sent, plus an example crash report. Usage is a daily report of counts and settings; a crash report carries the version and the panic's location in kiln's code, never the message. Neither ever includes repo, account or host names, IPs, file paths on this box, tokens or logs. kiln sends them itself (the dashboard stays offline); `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` turns both off. New config keys `usage_stats` and `crash_reports`, and `GET /api/telemetry`. Reports go to `kiln-telemetry-api.vercel.app`, which stores them for 400 days without IPs. See SECURITY.md › Telemetry.
+- A `check` workflow runs format, clippy, tests and the dashboard and service worker syntax checks on a GitHub-hosted runner for every push to main and every pull request, forks included (read-only token, no secrets).
+- **Settings › Analytics.** Jobs, success rate, median and p95 job time, time to start, job minutes and savings for the last 24 hours, 7 or 30 days, filtered by repo and VM size; stacked charts of jobs by outcome and minutes by VM size, the median queue/boot/wait/job split, a per-repo table and the slowest jobs. Each chart's numbers are also a table under "Show numbers". A last chart reads the usage ledger, so it includes jobs older than the newest 100 VMs (last 30 UTC days, by the day each job finished).
+- **Swipe between tabs on phones.** A quick sideways swipe on the page moves to the next or previous bottom tab; it is ignored on form fields, the host graphs, anything that scrolls sideways, and at the screen edges (the browser's back gesture).
+- Job rows show where the code came from: branch, PR number, short commit and the run's title (commit message or PR title), plus the trigger when it is not a push or PR (manual, scheduled, ...). The job page shows the same, with the PR and commit linked to GitHub, and the workflow name with its run number. kiln records this on the VM when its runner picks up a job, so jobs from before the upgrade show none.
+
+- Help for the new pages: guides for Analytics & savings and for Privacy & reports (what each report holds, and how to turn both off for good with `DO_NOT_TRACK=1`), and "?" help on Settings › Analytics, Settings › Privacy, the Overview's Recent failures and a job's branch/PR/commit line. Getting started mentions swiping between tabs on phones, and the Jobs tip and Debug guide mention the new run details.
+- An Alerts & webhooks guide for Settings › Notifications: what each destination kind and event switch sends, workflow rules, which addresses are allowed, retries and the failing banner, and where to find how to verify signed requests.
+
+### Changed
+
+- README: says who kiln is for and what it needs (x86_64 Linux with KVM, Tailscale, GitHub) on the first screen, adds a "Why not X?" comparison and a Performance section, replaces the generated cover image with a recorded demo of the real dashboard (`docs/media/`), and links measured benchmarks with their method (`docs/benchmarks.md`).
+- `docs/stacks.md` drops planned or nonexistent items (`kiln status`, forking kiln) and links GitHub's official pricing docs for the hosted runner prices it quotes. `CONTRIBUTING.md` describes the current `src/` layout.
+- The Overview's Recent failures section shows only jobs that failed in the last 15 minutes (it was 7 days), and is hidden when there are none.
+
+### Security
+
+- **The HTTPS socket trusts only tailscaled.** kiln checks the uid of whatever connects to `serve.sock` and reads the `Tailscale-User-Login` and `X-Forwarded-For` headers only from root (tailscaled). Before, any process running as the kiln user could connect and claim to be a tailnet user. That includes a job VM's QEMU after a VM escape on kernels without Landlock socket scoping, and it bypassed the dashboard key. `kiln doctor` flags a tailscaled that does not run as root, because HTTPS then needs the key.
+- Notification delivery uses an SSRF-safe client (public addresses only, checked in the resolver, no redirects, no proxies, tailnet ranges only by opt-in), stored URLs are re-checked on every send, and destination URLs and tokens are write-only, signing secrets shown once, all stored mode 0600.
+
+## [0.2.4] - 2026-10-08
+
 ### Security
 
 - **QEMU is confined.** Every VM's QEMU runs with libvirt's seccomp policy (`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`): no exec, no setuid, no obsolete syscalls. A job VM's QEMU also starts through `kiln __confine`, which applies a Landlock ruleset first: QEMU sees the system directories, `/dev/kvm` and the standard character devices, the images directory and its repo's cache disk (read-only), and writes only `vms/<id>/q/` (its disks, JIT secret and sockets; kiln's record and logs sit outside it, and QEMU can only append to the console log through its own output). It never inherits a token from kiln's environment (`KILN_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`). kiln refuses to start with its data directory under a path QEMU may read (such as `/opt`), connects to QEMU's sockets without following symlinks, and notes on a VM's page when the kernel has no Landlock. It cannot read the GitHub token, App key, dashboard key, other jobs or other repos' caches, or ptrace kiln or other VMs; on Linux 6.12+ it cannot signal them either. A trusted cache overlay is committed only if its qcow2 header names exactly the repo's cache disk and no external data file. New doctor checks "qemu sandbox" and "landlock". A QEMU built without seccomp now fails to start VMs instead of running unfiltered.
@@ -25,6 +70,9 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Restarts drain running jobs first instead of killing them ([#23](https://github.com/Bunty9/kiln/issues/23)). After saving a setting that only applies at startup (`listen` is the only one), the Overview shows "Restart needed to apply: listen" with **Restart when idle**, which drains like an update (no new VMs, idle ones reaped, running jobs finish, at most the job timeout + 2 min) and re-executes kiln in place, and **Restart now**, which kills running jobs after a confirmation that says so. The drain shows as "Restart pending · waiting for N VMs" with Cancel and Restart now, is logged in the journal, and is in `/api/state` as `restart`. New endpoints: `POST /api/restart` (`?now=true` to skip the wait) and `POST /api/restart/cancel`. A restart and an update never drain at once.
+- `systemctl restart` / `stop` (SIGTERM) now stops launching at once and gives running jobs up to the new `stop_grace_secs` (default 25, Settings › Timeouts) to finish before killing their VMs; a second SIGTERM (`systemctl --user kill --kill-whom=main kiln`) or Ctrl-C skips the wait. The journal and the dashboard show the progress. `deploy/kiln.service` raises `TimeoutStopSec` from 30 to 600 so a longer grace (up to 570 s) fits: reinstall the unit to get it (see docs/configuration.md, Restarting kiln). Under an older unit kiln shortens the grace to fit its timeout, logs a warning, and `kiln doctor` flags the unit. Job VMs now run in their own process group, so Ctrl-C at a foreground `kiln serve` gives them the grace too.
+- A `listen` address kiln cannot bind (not on this machine, a privileged port, a port in use) is refused when saved and before a restart, instead of leaving kiln crash-looping and unreachable. If the configured address cannot be bound at startup, kiln serves on the last address that worked or `127.0.0.1:7878` and says so on the Overview.
 - The JIT config and debug SSH keys also reach the guest as fw_cfg files; x86 VMs still get the SMBIOS strings too. The guest recipe is now 6: an image baked by an older kiln is rebaked before VMs launch (automatic with `auto_rebake`).
 - Docs: install from public release downloads without `gh`, and report vulnerabilities through GitHub's private vulnerability reporting.
 
@@ -145,7 +193,9 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/Bunty9/kiln/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Bunty9/kiln/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Bunty9/kiln/compare/v0.2.0...v0.2.1

@@ -41,3 +41,4 @@ jobs:
           node -e 'const fs = require("fs"); const s = fs.readFileSync("src/dashboard.html", "utf8");
             fs.writeFileSync(process.argv[1], [...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join("\n;\n"))' "$RUNNER_TEMP/dashboard.js"
           node --check "$RUNNER_TEMP/dashboard.js"
+          node src/dashboard.check.js src/dashboard.html

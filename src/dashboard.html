@@ -205,7 +205,7 @@ a.stat:hover{background:var(--s2)}
 .hx figure{margin:0}.hx figcaption{display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px}
 .hx .cv{position:relative;height:112px}.hx canvas{display:block;width:100%;height:100%;border-radius:4px;touch-action:pan-y}
 .hx canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.hx .ax{display:flex;justify-content:space-between;font-size:11px;color:var(--fg-3);margin-top:4px;font-variant-numeric:tabular-nums}
+.hx .ax,.an .ax{display:flex;justify-content:space-between;font-size:11px;color:var(--fg-3);margin-top:4px;font-variant-numeric:tabular-nums}
 .lg{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:12px}
 .vk{flex:none;width:8px;height:8px;border-radius:2px;background:var(--c)}
 .lg li{display:flex;align-items:center;gap:8px;min-width:0}.lg .k{flex:none;width:10px;height:10px;border-radius:2px;background:var(--c)}
@@ -221,12 +221,14 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .row[aria-current]{box-shadow:inset 3px 0 var(--accent);background:color-mix(in srgb,var(--accent) 7%,var(--s1))}
 .row .tt{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
 .row .tt .r{color:var(--fg-2);font-weight:400}.row .id{display:block;font:12px var(--mono);color:var(--fg-2)}
+.row .g{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;color:var(--fg-2);white-space:nowrap}.row .g .i{width:12px;height:12px;flex:none}.row .g>span{flex:none}.row .g .gt{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .row .w{color:var(--fg-2)}.row .d{text-align:right}.row .m{display:none}
 :root[data-density=compact] .row{padding-top:4px;padding-bottom:4px}
 @media(max-width:719px){
  .row{grid-template-columns:96px minmax(0,1fr);grid-template-areas:"b t" "b m";gap:2px 12px;min-height:56px}
  .row .bd{grid-area:b;align-self:start;padding-top:2px}.row .t{grid-area:t}.row .m{grid-area:m;display:block;font-size:12px;color:var(--fg-2)}
  .row .w,.row .d,.row .id{display:none}
+ .row .g{flex-wrap:wrap;row-gap:0}.row .g .gt{flex-basis:100%}
 }
 .rr{grid-template-columns:minmax(0,1fr) 160px 104px 80px}
 .rr .nm{font-weight:500;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -331,7 +333,7 @@ input[role=switch]:disabled{opacity:.5;cursor:not-allowed}
 .empty .acts{display:flex;flex-wrap:wrap;gap:8px}
 .empty.card{padding:24px var(--pad);border:0}
 /* job page and the firing log (timeline) */
-.jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:13px;color:var(--fg-2)}
+.jm{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:-8px 0 20px;font-size:13px;color:var(--fg-2)}.jm .i{width:14px;height:14px;vertical-align:-2px;margin-right:4px}.jm a{color:inherit}
 .tl{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--muted)}
 .tl i{display:block;min-width:4px;background:var(--queued);outline-offset:-2px}
 .tl i:first-child{border-radius:5px 0 0 5px}.tl i:last-child{border-radius:0 5px 5px 0}
@@ -368,6 +370,8 @@ input[role=switch]:disabled{opacity:.5;cursor:not-allowed}
 #gsel,#guide-sel{display:none;width:100%;margin-bottom:16px}
 @media(max-width:719px){.set{grid-template-columns:minmax(0,1fr);gap:0}.sub{display:none}#gsel,#guide-sel{display:flex}}
 /* settings rows: label column (centred on a 36px control), control, hint under the control */
+input.mask{-webkit-text-security:disc}
+.nd{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 16px;font-size:13px}.nd .t{flex:1 1 220px;min-width:0}.nd .id{display:block;font-size:12px;color:var(--fg-2);overflow-wrap:anywhere}.nsw,.nb{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px}.nb{gap:8px}
 .fld{display:grid;grid-template-columns:220px minmax(0,1fr);gap:6px 24px;align-items:start;padding:16px 0;border-top:1px solid var(--line)}
 .fld>:first-child{display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-height:36px}
 :root[data-density=compact] .fld{padding:10px 0}
@@ -426,6 +430,16 @@ dialog input{width:100%;margin-top:16px}
 #tip{position:fixed;z-index:70;left:0;top:0;max-width:min(280px,calc(100vw - 16px));padding:6px 10px;border-radius:var(--r1);background:var(--fg);color:var(--bg);font-size:12px;line-height:1.45;white-space:pre-line;box-shadow:0 6px 18px -4px rgb(0 0 0/.5);pointer-events:none;opacity:0;transition:opacity 100ms}
 #tip.on{opacity:1;pointer-events:auto}
 #tip code{background:color-mix(in srgb,var(--bg) 18%,transparent);box-shadow:none;color:inherit}
+/* analytics: stacked columns (HTML, so the tip system and themes just work) */
+.an .stats{margin-bottom:var(--gap)}.an .an-n{text-align:right}.an td .lnk{max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.bc{position:relative;display:flex;align-items:flex-end;gap:2px;height:140px;padding-top:16px;border-bottom:1px solid var(--line)}
+.bc>i{flex:1;min-width:0;height:100%;display:flex;flex-direction:column-reverse;border-radius:3px 3px 0 0;overflow:hidden;transition:background var(--ease)}
+.bc>i:hover{background:var(--muted)}.bc b{flex:none;display:block;background:var(--c);min-height:1px}
+.bc .mx{position:absolute;top:0;left:0;font-size:11px;color:var(--fg-3);font-variant-numeric:tabular-nums}
+.bc>i.x{background:repeating-linear-gradient(-45deg,var(--line) 0 1px,transparent 1px 6px)}
+.dt{margin-top:10px;font-size:13px}.dt summary{cursor:pointer;color:var(--fg-2);width:max-content}.dt .tw{margin-top:8px;max-height:280px;overflow:auto;box-shadow:inset 0 0 0 1px var(--line)}
+main{overflow-x:clip} /* the swipe slide-in starts 32px off to the side */
+.lgd{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--fg-2);margin-bottom:10px}.lgd span{display:inline-flex;align-items:center;gap:6px}.lgd i{width:10px;height:10px;border-radius:2px;background:var(--c)}
 .tabs{display:none}
 @media(max-width:719px){
  .nav{display:none}main{padding-bottom:calc(var(--tabh) + 24px)}
@@ -459,7 +473,7 @@ dialog input{width:100%;margin-top:16px}
 .hlp{margin-left:auto;padding:0 10px;gap:6px}
 .hlp+.cdot{margin-left:0}
 .gd{max-width:68ch;line-height:1.65}.gd h2{font-size:20px;font-weight:600;letter-spacing:-.015em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
-.gd .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
+.gd .tw,.an .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table,.an table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td,.an th,.an td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th,.an tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
 .gnav{display:flex;justify-content:space-between;gap:16px;margin-top:40px;font-size:14px}
 .gnav a{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px;border-radius:var(--rc);background:var(--s1);box-shadow:var(--e1);text-decoration:none}.gnav a:hover{box-shadow:var(--e2);background-image:linear-gradient(var(--hover),var(--hover))}
 @media(max-width:719px){.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
@@ -486,6 +500,7 @@ dialog input{width:100%;margin-top:16px}
 <symbol id="i-clock" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 6v4l2.75 1.75"/></symbol>
 <symbol id="i-copy" viewBox="0 0 20 20"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4.5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v.5"/></symbol>
 <symbol id="i-dl" viewBox="0 0 20 20"><path d="M10 3v10m-4-4 4 4 4-4M3.5 16.5h13"/></symbol>
+<symbol id="i-branch" viewBox="0 0 20 20"><circle cx="6" cy="4.5" r="1.8"/><circle cx="6" cy="15.5" r="1.8"/><circle cx="14" cy="5.5" r="1.8"/><path d="M6 6.3v7.4M14 7.3c0 4-8 2.5-8 6.4"/></symbol>
 <symbol id="i-ext" viewBox="0 0 20 20"><path d="M11.5 3.5h5v5M16.5 3.5 9 11M14 11.5V15a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 15V7.5A1.5 1.5 0 0 1 5 6h3.5"/></symbol>
 <symbol id="i-refresh" viewBox="0 0 20 20"><path d="M16.25 10A6.25 6.25 0 1 1 14 5.2M14.5 2.5v3h-3"/></symbol>
 <symbol id="i-kill" viewBox="0 0 20 20"><path d="M7 2.75h6L17.25 7v6L13 17.25H7L2.75 13V7Z"/><path d="m7.75 7.75 4.5 4.5m0-4.5-4.5 4.5"/></symbol>
@@ -519,12 +534,14 @@ dialog input{width:100%;margin-top:16px}
 <symbol id="i-network" viewBox="0 0 20 20"><path d="M10 2.75 16 5v4.5c0 3.7-2.6 6.6-6 7.75-3.4-1.15-6-4.05-6-7.75V5Z"/></symbol>
 <symbol id="i-bell" viewBox="0 0 20 20"><path d="M5 13.75V9a5 5 0 0 1 10 0v4.75l1.25 1.5H3.75ZM8.25 17.25h3.5"/></symbol>
 <symbol id="i-pulse" viewBox="0 0 20 20"><path d="M2.5 10.5h3.25l2-5 3.5 9 2-4h4.25"/></symbol>
+<symbol id="i-chart" viewBox="0 0 20 20"><path d="M3 16.5h14M5.5 13.5v-4M10 13.5v-9M14.5 13.5v-6"/></symbol>
 <symbol id="i-palette" viewBox="0 0 20 20"><path d="M10 2.75a7.25 7.25 0 0 0 0 14.5c1.1 0 1.5-.8 1.2-1.6-.4-1-.1-2.15 1.3-2.15h1.75a3 3 0 0 0 3-3c0-4.3-3.25-7.75-7.25-7.75Z"/><circle cx="6.5" cy="9" r=".9"/><circle cx="9" cy="6" r=".9"/><circle cx="12.75" cy="6.75" r=".9"/></symbol>
 <symbol id="i-sun" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3.25"/><path d="M10 2.5v1.5M10 16v1.5M2.5 10H4M16 10h1.5M4.7 4.7l1 1M14.3 14.3l1 1M4.7 15.3l1-1M14.3 5.7l1-1"/></symbol>
 <symbol id="i-moon" viewBox="0 0 20 20"><path d="M16.5 12.25A7 7 0 0 1 7.75 3.5a7 7 0 1 0 8.75 8.75Z"/></symbol>
 <symbol id="i-monitor" viewBox="0 0 20 20"><rect x="2.75" y="3.5" width="14.5" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/></symbol>
 <symbol id="i-key" viewBox="0 0 20 20"><circle cx="6.5" cy="13.5" r="3.25"/><path d="m8.8 11.2 7.45-7.45M14 6l2 2M12 8l1.5 1.5"/></symbol>
 <symbol id="i-tip" viewBox="0 0 20 20"><path d="M7.5 14.5h5M8.25 17h3.5M10 2.75a5 5 0 0 0-2.9 9.1c.25.2.4.5.4.85v.8h5v-.8c0-.35.15-.65.4-.85A5 5 0 0 0 10 2.75Z"/></symbol>
+<symbol id="i-shield" viewBox="0 0 20 20"><path d="M10 2.75 16.25 5v4.5c0 4-2.6 6.6-6.25 7.75C6.35 16.1 3.75 13.5 3.75 9.5V5Z"/><path d="m7.25 10 2 2 3.5-3.75"/></symbol>
 <symbol id="i-update" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 13.75v-7.5M6.75 9.5 10 6.25l3.25 3.25"/></symbol>
 </defs></svg>
 <header class="top"><div>
@@ -611,8 +628,18 @@ function status(v) {
     default: return 'lost';
   }
 }
-const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
-  : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
+// A run or job from the forge API (kiln's status and outcome) as a badge state.
+const runStatus = x => x.status !== 'completed' ? x.status : { Succeeded: 'passed', SucceededWithIssues: 'passed', Canceled: 'cancelled', Abandoned: 'cancelled', Skipped: 'skipped' }[x.outcome] || 'failed';
+// Forges (GET /api/forges) and what each allows: controls the forge can't do stay hidden.
+const forgeOf = (fs, repo) => (fs || []).find(f => f.repos.some(r => r.toLowerCase() === String(repo).toLowerCase()));
+const can = (f, cap) => !!f?.caps?.[cap];
+const runActs = (done, f) => (done ? [can(f, 'rerun') && 'rerun'] : [can(f, 'cancel') && 'cancel']).filter(Boolean);
+const FN = { github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea' };
+const fname = f => FN[f?.kind] || 'the forge';
+// Links only to the forge's own web UI (its url from /api/forges); anything else becomes inert.
+const forgeUrl = (f, u) => f && String(u ?? '').startsWith(f.url + '/') ? esc(u) : '#';
+let F = null;
+const loadForges = async () => { try { F = await api('/api/forges'); } catch { F ||= []; } return F; };
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -635,6 +662,11 @@ const HELP = {
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
+  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min.", "analytics"],
+  privacy: ["Privacy", "Usage statistics and crash reports stay off unless you turn them on. This box sends them, never your browser, and they never include repo, account or host names, IPs, file paths, tokens or logs. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever is set here.", "privacy"],
+  runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when GitHub hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
+  failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes. The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
+  webhooks: ["Webhooks", "This box sends alerts to Slack, Discord, ntfy or any https URL, with no dashboard open. Each destination picks job, health and security alerts, and workflow rules add the successes you choose. A URL is a secret: it is never shown again after saving.", "alerts"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -647,10 +679,10 @@ const cb = t => `<div class="cb"><pre class="snip">${esc(t)}</pre><button class=
 const WFSCOPE = "This token can't create workflow files. Add the `workflow` scope (classic), or Contents, Pull requests and Workflows: write (fine-grained), then save it again.";
 const TIPS = {
   overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
-  jobs: "Every row is one throwaway VM that ran one job. Open a row for its timeline and logs.",
+  jobs: "Every row is one throwaway VM that ran one job, with the branch, PR and commit it ran for. Open a row for its timeline and logs.",
   job: "Console is boot and runner output, Steps is your steps live, and the GitHub log appears when the job ends.",
   repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
-  settings: "Changes apply within seconds, with no restart. The listen address is the only exception.",
+  settings: "Changes apply within seconds, with no restart. The listen address is the only exception: Overview then offers Restart when idle.",
 };
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
@@ -677,7 +709,7 @@ async function api(path, o = {}) {
   }
   const r = await fetch(path, init);
   const text = await r.text();
-  // Only kiln's own 401 asks for the dashboard key; a 401 that GitHub sent through the proxy is GitHub's.
+  // Only kiln's own 401 asks for the dashboard key.
   if (r.status === 401 && /dashboard key/i.test(text)) { await askKey(); return api(path, o); }
   if (!r.ok) {
     let m = text; try { m = JSON.parse(text).message || text; } catch { /* plain text */ }
@@ -692,9 +724,8 @@ function ghMsg(m) {
   if (i < 0) return m;
   try { const j = JSON.parse(m.slice(i)); return m.slice(0, i).replace(/^(GET|POST|PUT|DELETE|PATCH) \S+: /, '').trim() + (j.message ? ': ' + j.message : ''); } catch { return m; }
 }
-// A repo from a hash route must not walk the API path elsewhere (`..` segments, `?`).
-const okRepo = r => { const p = String(r).split('/'); return p.length === 2 && p.every(x => /^[\w.-]+$/.test(x) && x !== '.' && x !== '..'); };
-const gh = (repo, rest) => { if (!okRepo(repo)) throw new Error('not a repo name: ' + repo); return `/api/gh/repos/${repo}/actions/${rest}`; };
+// The forge API takes the repo as a query value; kiln checks it against the repos it serves.
+const fq = (path, repo, extra = '') => `/api/${path}?repo=${encodeURIComponent(repo)}${extra}`;
 // Links to GitHub only: a URL from the API that is anything else becomes inert.
 const ghUrl = u => /^https:\/\/github\.com\//.test(String(u ?? '')) ? esc(u) : '#';
 // Served repos: the GitHub App's installations in App mode, else the configured list.
@@ -708,7 +739,7 @@ const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip
 const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_accounts || [])].filter(Boolean))];
 // A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
 let appConv = null;
-const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › GitHub.')}>Dismiss</button></div>`;
+const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › Forges.')}>Dismiss</button></div>`;
 const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${ghUrl(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
@@ -859,9 +890,9 @@ const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
 /* ---------- router ---------- */
 const pages = {};
-let cur = null, mounted = false;
+let cur = null, mounted = false, swipeDir = 0;
 const NAV = [['overview', '#/', 'Overview', 'VM slots, health and recent jobs (g o)'], ['jobs', '#/jobs', 'Jobs', 'Every VM kiln ran, newest first (g j)'],
-  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, GitHub, image, cache, network and more (g s)']];
+  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, forges, image, cache, network and more (g s)']];
 $('#nav').innerHTML = NAV.map(([k, h, l, t]) => `<a href="${h}" data-p="${k}"${tip(t)}>${ic(k)}${l}</a>`).join('');
 $('#tabs').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${ic(k, 20)}<span>${l}</span>${k === 'jobs' ? '<span class="n" hidden></span>' : ''}</a>`).join('');
 function parse() {
@@ -871,29 +902,31 @@ function parse() {
 }
 // GitHub's manifest flow sends the browser back to /?code=…&state=….
 // The URL keeps code and state until the conversion succeeds, so a failure can be retried.
-// No window.open here: after an await it is popup-blocked. Settings › GitHub shows the install button instead.
+// No window.open here: after an await it is popup-blocked. Settings › Forges shows the install button instead.
 async function appCallback() {
   const q = new URLSearchParams(location.search);
   appConv = { busy: true };
   try {
     const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
-    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/github');
+    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/forges');
     toast(`GitHub App ${r.slug || ''} created. Install it on your repos next.`); await poll();
   } catch (e) {
     appConv = { err: String(e.message || e) };
-    history.replaceState(null, '', location.pathname + location.search + '#/settings/github');
+    history.replaceState(null, '', location.pathname + location.search + '#/settings/forges');
   }
   route();
 }
 function route() {
   if (new URLSearchParams(location.search).get('code') && !appConv) return void appCallback();
   cur?.unmount?.(); closePop();
+  const sd = swipeDir; swipeDir = 0;
   const r = parse(), pg = pages[r.page] || pages.overview;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   cur = pg; scrollTo(0, 0);
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
   pg.mount(r);
+  if (sd && !still()) $('#app').animate([{ transform: `translateX(${sd * 32}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 180, easing: 'cubic-bezier(.2,0,0,1)' });
   const pk = Object.keys(pages).find(k => pages[k] === pg), tk = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'repos' && r.seg.length ? null : pk;
   if (pk === 'setup' || pk === 'repos' || !S.vms.length) loadHello();
   pg.update?.(); notifyState();
@@ -925,7 +958,7 @@ addEventListener('hashchange', async () => {
   if (guard) { guard = false; return; }
   const to = location.hash;
   if (cur === pages.settings && parse().page !== 'settings' && isDirty()) {
-    guard = true; location.hash = lastHash;
+    guard = true; swipeDir = 0; location.hash = lastHash;
     if (await ask({ title: 'Discard changes?', body: 'You have unsaved settings.', action: 'Discard', danger: 1 })) { draft = JSON.parse(JSON.stringify(S.config)); location.hash = to; }
     return;
   }
@@ -934,36 +967,65 @@ addEventListener('hashchange', async () => {
 const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !S.vms.length;
 
 /* ---------- overview ---------- */
+// Job page: the same, linked to GitHub.
+function runMeta(v, f, L) {
+  const r = v.run; if (!r) return '';
+  L = { ...r.links, ...L };
+  const a = (u, cls, t, body) => u && forgeUrl(f, u) !== '#' ? `<a${cls} href="${forgeUrl(f, u)}" target="_blank" rel="noopener"${kt(t)}>${body}</a>` : `<span${cls}${kt(t)}>${body}</span>`;
+  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? a(L.pr, '', 'Pull request', `PR #${+r.pr}`) : ''}${r.sha ? a(L.commit, ' class="mono"', 'Commit', esc(r.sha.slice(0, 7))) : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
+}
+// Where the job's code came from: branch, PR, commit, and the run's title.
+const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', schedule: 'scheduled' };
+const EVK = { push: '', pull_request: '', manual: 'manual', schedule: 'scheduled' };
+function gitLine(v) {
+  const r = v.run; if (!r) return '';
+  const ev = r.kind && r.kind !== 'other' ? (EVK[r.kind] ?? r.kind) : r.event in EV ? EV[r.event] : r.event;
+  return `<span class="g">${ic('branch')}<span>${esc(r.branch)}</span>${r.pr ? `<span>#${+r.pr}</span>` : ''}${r.sha ? `<span class="mono">${esc(r.sha.slice(0, 7))}</span>` : ''}${ev ? `<span>${esc(ev)}</span>` : ''}${r.title ? `<span class="gt">${esc(r.title)}</span>` : ''}</span>`;
+}
 function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
-  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>`;
+  const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>${gitLine(v)}`;
   return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}${tip([STATE[status(v)]?.[1], 'Started ' + when(v.started)].filter(Boolean).join('\n'))}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
     <span class="w"${tip('Started ' + when(v.started))}>${relH(v.started)}</span><span class="d"${tip(ACTIVE(v) ? 'Running for' : 'Job time: from the job starting to the VM ending')}>${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
 const BI = { fail: 'alert', warn: 'alert', ember: 'flame', queued: 'info', ok: 'check' };
+// After a restart that applies a changed listen address: where kiln will be.
+function newListen() {
+  if (!S.restart?.needed?.includes('listen')) return '';
+  const h = S.config.listen.replace(/^(0\.0\.0\.0|\[::\]):/, location.hostname + ':');
+  return ` kiln will be at <b class="mono">http://${esc(h)}</b>.` + (S.serve_socket ? '' : ' If HTTPS via tailscale serve is on, it still proxies the old port: switch it off and on in Settings › Network afterwards.');
+}
+const RESTART_WAITS = v => ACTIVE(v) && v.state !== 'held';
 function banners() {
   const p = S.poll, c = S.config, b = [], err = String(p.error || '');
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
   const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
-  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
-  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/github'))
-    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
+  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/forges'));
+  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/forges'))
+    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/forges'));
   if (S.baking) {
     const i = bakeIdx(), last = plain(bk.text.trim().split('\n').pop() || '');
     B('ember', `<b>Baking image</b> · elapsed ${dur((Date.now() - bk.t0) / 1000)}, usually ~4 min
       <span class="ph-steps">${PH.map(([, n], k) => k === i ? `<b>${n}</b>` : `<span>${n}</span>`).join('')}</span>${i === 2 && last ? `<span class="mono sm fg2" style="display:block;margin-top:4px">${esc(last.slice(0, 120))}</span>` : ''}`, A('View log', '#/settings/image'));
   } else if (bakeFailed()) B('fail', 'Image bake failed.', A('View log', '#/settings/image'));
   else if (!S.image_ready) B('fail', 'Base image not baked. VMs can\'t start.', X('Bake image', 'bake', 1));
+  if (consentUnset() && !setupNeeded()) B('queued', 'kiln can send anonymous usage statistics and crash reports. Both stay off unless you turn them on.', A('Choose', '#/settings/privacy'));
   const up = S.update || {};
   if (up.rollback) B('fail', 'Update rolled back: ' + esc(up.rollback), A('Updates', '#/settings/updates'));
   if (up.state === 'draining' || up.state === 'applying') B('ember', `<b>Updating to kiln ${esc(up.latest)}</b> · ${up.state === 'applying' ? 'restarting into the new version…' : esc(up.progress || 'draining')}`, up.state === 'draining' ? X('Cancel update', 'updcancel') : '');
   else if (up.available) B('queued', `kiln ${esc(up.latest)} is available. This box runs ${esc(S.version)}.`, A('View update', '#/settings/updates'));
+  const rs = S.restart || {};
+  if (S.listen_fallback) B('fail', esc(S.listen_fallback) + '.', A('Fix listen address', '#/settings/access'));
+  if (rs.state === 'stopping') B('ember', `<b>kiln is stopping</b> · ${esc(rs.progress || 'stopping VMs')}`);
+  else if (rs.state === 'restarting') B('ember', '<b>Restarting kiln</b> · back in a few seconds.' + newListen());
+  else if (rs.state === 'draining') B('ember', `<b>Restart pending</b> · ${esc(rs.progress || 'draining')}. No new VMs start meanwhile.`, X('Cancel restart', 'rscancel') + X('Restart now', 'rsnow'));
+  else if (rs.needed?.length) B('warn', `Restart needed to apply: ${rs.needed.map(esc).join(', ')}.`, X('Restart when idle', 'rsidle', 1) + X('Restart now', 'rsnow'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
   else if (p.blocked_kind === 'held') { const h = oldestHeld(); B('warn', esc(p.blocked) + `. kiln is releasing the oldest hold.${hq('held')}`, h ? X('Release oldest', 'relheld') + A('View held job', '#/jobs/' + encodeURIComponent(h.id)) : ''); }
-  else if (p.blocked && !oldImg && up.state !== 'draining') B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  else if (p.blocked && !oldImg && up.state !== 'draining' && !rs.state) B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
@@ -971,12 +1033,15 @@ function banners() {
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   if (im?.rebake) B('warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
-  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/github'));
+  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/forges'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
   if (bad) B('warn', `${bad} health check${bad > 1 ? 's' : ''} failing.`, A('View checks', '#/settings/diagnostics'));
-  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
+  const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && d.status.last_error && d.status.last_error[0] - d.status.failing_since >= 3600) || d.status?.permanent_streak >= 3);
+  if (nbad.length) B('fail', 'Notifications failing: ' + nbad.map(d => esc(d.name)).join(', '), A('Fix', '#/settings/notifications'));
+  if (S.notify?.load_error) B('fail', 'Notification destinations: ' + esc(S.notify.load_error), A('Fix', '#/settings/notifications'));
+  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/forges'));
   else if (S.app && !S.app.repos.length) b.push(`<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> kiln serves exactly the repos the GitHub App is installed on, and it is on none yet.</span>${appInstall(1)}</div>`);
   else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
@@ -1177,8 +1242,8 @@ pages.overview = {
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
     setHTML($('#ov-now'), `<h2>Now running ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
     setHTML($('#ov-stats'), stats());
-    const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 7 * 86400).slice(0, 3);
-    setHTML($('#ov-fail'), f.length ? `<h2>Recent failures</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
+    const f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 15 * 60).slice(0, 3);
+    setHTML($('#ov-fail'), f.length ? `<h2>Recent failures${hq('failures')}</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
     setHTML($('#ov-rec'), `<h2>Recent jobs <a class="sm fg2" href="#/jobs" style="font-weight:400;margin-left:auto">All jobs</a></h2>` + (S.vms.length ? jobList(S.vms.slice(0, 8)) : emptyJobs()));
     hostCard();
   },
@@ -1229,6 +1294,7 @@ pages.job = {
   mount(r) {
     this.id = r.seg[0]; this.lv = null;
     $('#app').innerHTML = `<div id="jd"></div><div id="jd-log"></div>`;
+    if (!F) loadForges().then(() => cur === this && this.update());
   },
   update() {
     const v = S.vms.find(x => x.id === this.id), box = $('#jd');
@@ -1238,33 +1304,54 @@ pages.job = {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
+    const fg = forgeOf(F, v.repo), L = jl.get(v.id), jobUrl = L?.job || v.run?.links?.job || v.job_url;
+    if (F && v.job_url && !jl.has(v.id)) loadLinks(v);
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span></div>
+      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id ' + fname(fg) + ' gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
-    if (!this.lv) {
+    if (!this.lv && F) {
       const id = v.id;
       this.lv = new Log($('#jd-log'), { id, live: () => ACTIVE(S.vms.find(x => x.id === id) || {}), sources: [
-        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, { k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' },
-        { k: 'gh', label: 'GitHub', off: true, tip: "GitHub's final log for this job", gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
+        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, ...(can(fg, 'live_steps') ? [{ k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' }] : []),
+        { k: 'forge', label: fname(fg), off: true, tip: `${fname(fg)}'s final log for this job`, forge: () => forgeLog(S.vms.find(x => x.id === id)) }] });
     }
-    this.lv.setOff('gh', ACTIVE(v) || !v.ended);
+    this.lv?.setOff('forge', ACTIVE(v) || !v.ended);
   },
   unmount() { this.lv?.destroy(); this.lv = null; },
 };
-async function ghLog(v) {
-  const jm = /\/job\/(\d+)/.exec(v.job_url || '');
-  if (jm) { try { return await api(gh(v.repo, `jobs/${jm[1]}/logs`), { text: true }); } catch (e) { if (e.status === 404) throw e; } }
-  const runs = (await api(gh(v.repo, 'runs?per_page=5'))).workflow_runs || [];
-  for (const run of runs) {
-    const j = ((await api(gh(v.repo, `runs/${run.id}/jobs`))).jobs || []).find(x => x.runner_name === v.id);
-    if (j) return api(gh(v.repo, `jobs/${j.id}/logs`), { text: true });
+// Run links per VM id, from the API (null if the run can't be read).
+const jl = new Map();
+async function loadLinks(v) {
+  jl.set(v.id, null);
+  const m = /\/runs\/(\d+)(?:\/job\/(\d+))?/.exec(v.job_url || ''); if (!m) return;
+  try {
+    const r = await api(fq('runs/' + m[1], v.repo)), j = r.jobs.find(x => String(x.id) === (m[2] || String(v.job_id)));
+    jl.set(v.id, { ...r.links, job: j?.links.job || r.links.run }); if (cur === pages.job) pages.job.update();
+  } catch { /* the page falls back to the stored job link */ }
+}
+// The forge's own log of a job, all pages (kiln caps each page and the download).
+async function forgeLog(v) {
+  let id = /\/job\/(\d+)/.exec(v.job_url || '')?.[1] || v.job_id;
+  if (!id) {
+    for (const run of (await api(fq('runs', v.repo))).runs.slice(0, 5)) {
+      const j = (await api(fq('runs/' + run.id, v.repo))).jobs.find(x => x.runner === v.id);
+      if (j) { id = j.id; break; }
+    }
+    if (!id) throw new Error("This job is not among the repo's 5 latest runs on the forge.");
   }
-  throw new Error('This job is not among the repo\'s 5 latest runs on GitHub.');
+  let text = '', from = 0;
+  for (let i = 0; i < 20; i++) {
+    const p = await api(fq(`jobs/${id}/log`, v.repo, '&from=' + from));
+    text += p.text;
+    if (p.complete || p.next <= from) break;
+    from = p.next;
+  }
+  return text;
 }
 
 /* ---------- log viewer ---------- */
@@ -1277,7 +1364,7 @@ class Log {
     el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
     const T = (a, i, l, p, t) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}"${tip(t)}>${ic(i)}<span class="lbl">${l}</span></button>`;
     el.innerHTML = `<div class="lt">${o.sources.length > 1 ? `<div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div>` : `<span class="ttl">${o.sources[0].label}</span>`}<span class="sp"></span>
-      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show GitHub's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
+      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show the forge's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
       <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">${ic('down')}Jump to latest</button></div>`;
     this.pre = $('pre', el);
     el.addEventListener('click', e => {
@@ -1301,7 +1388,7 @@ class Log {
       if (this.skipped || this.trimmed) {
         text = ''; try { for (let n = 0;;) { const r = await api(`/api/log?src=${encodeURIComponent(s.src)}&file=${s.file}&from=${n}`); if (!r.data) break; text += r.data; n = r.next; } } catch (e) { return fail(e); }
       }
-      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'github'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
+      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'forge'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
     }
   }
   note(t) { const n = $('[data-note]', this.el); n.textContent = t || ''; n.hidden = !t; }
@@ -1309,14 +1396,14 @@ class Log {
   select(k) {
     this.k = k; this.gen++; clearTimeout(this.timer); this.timer = null; this.next = 0; this.skipped = false; this.clear();
     $$('[data-src]', this.el).forEach(b => b.setAttribute('aria-checked', b.dataset.src === k)); rove(this.el);
-    $('[data-ts]', this.el).hidden = k !== 'gh';
+    $('[data-ts]', this.el).hidden = k !== 'forge';
     const s = this.src(); this.setFollow(true);
-    if (s.gh) this.loadGh(s, this.gen); else this.tick(this.gen);
+    if (s.forge) this.loadForge(s, this.gen); else this.tick(this.gen);
   }
-  async loadGh(s, g) {
-    this.pre.textContent = 'Fetching the log from GitHub…';
-    try { const t = await s.gh(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
-    catch (e) { if (g === this.gen) this.pre.textContent = e.status === 404 ? 'GitHub has no log for this job yet. Logs appear once the job completes.' : e.message; }
+  async loadForge(s, g) {
+    this.pre.textContent = `Fetching the log from ${s.label}…`;
+    try { const t = await s.forge(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
+    catch (e) { if (g === this.gen) this.pre.textContent = /\b404\b/.test(e.message) ? `${s.label} has no log for this job yet. Logs appear once the job completes.` : e.message; }
   }
   async tick(g) {
     this.busy = true; clearTimeout(this.timer); this.timer = null; const s = this.src();
@@ -1333,7 +1420,7 @@ class Log {
     if (!this.pre.isConnected) return this.destroy();
     if (g === this.gen && this.o.live() && !document.hidden) this.timer = setTimeout(() => this.tick(g), 1000);
   }
-  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().gh && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
+  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().forge && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
   big(t, g) { // render big logs in slices so the page stays responsive
     const lines = t.split('\n'); let i = 0;
     const step = () => { if (g !== this.gen) return; this.add(lines.slice(i, i + 2500).join('\n') + '\n', true); i += 2500; if (i < lines.length) setTimeout(step); };
@@ -1378,8 +1465,8 @@ class Log {
 /* ---------- repos ---------- */
 const lastRun = {};
 const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
-const repoErr = e => e.status === 404 ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
-  : e.status === 401 ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
+const repoErr = e => /\b404\b/.test(e.message) ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
+  : /\b401\b/.test(e.message) ? (S.app ? "GitHub rejected the App's credentials. Check Settings › Forges." : 'GitHub rejected the token. Replace it in Settings › Forges.') : e.message;
 function addRepo(raw) {
   const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
@@ -1388,7 +1475,7 @@ function addRepo(raw) {
 }
 async function saveCfg(c) {
   const r = await post('/api/config', c); await poll();
-  if (r?.restart_required) { restartPending = true; toast('Restart kiln to apply the listen address'); }
+  if (r?.restart_required) toast(`Saved. Restart needed to apply: ${r.restart_needed.join(', ')} (Overview › Restart when idle)`);
   return r;
 }
 const repoForm = `<form class="bar" data-form="addrepo" style="margin:16px 0 0"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false" style="width:260px"><button class="btn pri">Add repo</button></form>`;
@@ -1396,9 +1483,10 @@ const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs
 pages.repos = {
   mount(r) {
     this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null; this.app = !!S.app;
+    if (!F) loadForges().then(() => cur === this && this.update());
     if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
-    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
+    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><span id="rd-ext"></span></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
       ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div></div>`}`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
@@ -1407,14 +1495,14 @@ pages.repos = {
   async load() {
     const repo = this.r;
     this.loadRuns();
-    try { const w = await api(gh(repo, 'workflows')); if (repo === rd.repo) { rd.wfs = w.workflows || []; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
+    try { const w = await api(fq('workflows', repo)); if (repo === rd.repo) { rd.wfs = w; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
   },
   async loadRuns() {
     const repo = this.r; if (!repo || document.hidden) return;
     try {
-      const r = (await api(gh(repo, 'runs?per_page=15'))).workflow_runs || [];
+      const r = (await api(fq('runs', repo))).runs.slice(0, 15);
       if (repo !== rd.repo) return; rd.runs = r; rd.err = null;
-      await Promise.all([...rd.open].map(id => api(gh(repo, `runs/${id}/jobs`)).then(j => rd.jobs.set(id, j.jobs || [])).catch(() => {})));
+      await Promise.all([...rd.open].map(id => api(fq('runs/' + id, repo)).then(j => rd.jobs.set(id, j.jobs)).catch(() => {})));
     } catch (e) { rd.err = repoErr(e); }
     if (repo === rd.repo) this.update();
   },
@@ -1426,7 +1514,7 @@ pages.repos = {
         const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
         return `<li><div class="row rr"><a class="nm" href="#/repos/${esc(r)}">${esc(r)}</a>
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
-          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
+          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from the forge")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
       }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 30 seconds until it serves one.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
         : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
@@ -1438,34 +1526,54 @@ pages.repos = {
     const cg = ciGet(S.config.repo_cache_gb, this.r);
     setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
-    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button></div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>'));
-    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
+    const f = forgeOf(F, this.r);
+    setHTML($('#rd-ext'), f ? `<a class="btn" href="${esc(f.url)}/${esc(this.r.replace(/^[^:/]+:/, ''))}" target="_blank" rel="noopener"${tip('Open this repo on ' + fname(f))}>${fname(f)}${ic('ext')}</a>` : '');
+    const runBtn = w => can(f, 'dispatch') ? `<button class="btn" data-act="runwf" data-id="${esc(w)}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button>` : '';
+    setHTML($('#rd-wf'), can(f, 'workflows') ? `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.file)}</span></span>${runBtn(w.file)}</div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>')
+      : can(f, 'dispatch') ? `<h2>Pipelines</h2><div class="card">${runBtn('')}</div>` : '');
+    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(x => runHTML(x, f)).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
   },
 };
-function runHTML(run) {
-  const st = ghStatus(run.status, run.conclusion), open = rd.open.has(run.id), done = run.status === 'completed';
+function runHTML(run, f) {
+  const st = runStatus(run), open = rd.open.has(run.id), done = run.status === 'completed', fn = fname(f);
   const jobs = open ? (rd.jobs.get(run.id) || null) : null;
   const jh = !open ? '' : !jobs ? '<div class="sn fg2 sm">Loading jobs…</div>' : `<div class="sn" style="padding-top:0">${jobs.map(j => {
-    const vm = S.vms.find(v => v.id === j.runner_name), t0 = iso(j.started_at), t1 = iso(j.completed_at);
-    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(ghStatus(j.status, j.conclusion))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
-      ${j.runner_name ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner_name)}</span>` : ''}</div>`;
+    const vm = S.vms.find(v => v.id === j.runner), t0 = iso(j.started_at), t1 = iso(j.completed_at);
+    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(runStatus(j))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
+      ${j.runner ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner)}</span>` : ''}</div>`;
   }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
+  const btn = {
+    rerun: `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip(`Ask ${fn} to run this workflow run again`)}>${ic('rerun')}Rerun</button>`,
+    cancel: `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip(`Ask ${fn} to cancel this run`)}>${ic('cancel')}Cancel</button>`,
+  };
+  const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
-    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn ic" href="${ghUrl(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
+    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
+    <span style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
-  try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
+  try { const x = (await api(fq('runs', r))).runs[0]; lastRun[r] = x ? runStatus(x) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
   if (cur === pages.repos && !pages.repos.r) pages.repos.update();
 }
 
+/* ---------- privacy (opt-in usage stats and crash reports, telemetry.rs) ---------- */
+const consentUnset = () => S.config.usage_stats == null || S.config.crash_reports == null;
+const PRIV = {
+  usage_stats: ['Usage statistics', 'Once a day: kiln version, host CPU and memory size, how many repos and VMs, which features are on, and job counts and minutes for the last 24 hours.'],
+  crash_reports: ['Crash reports', 'When kiln panics: the version and the line of code. Not the error message, which can quote a repo or a path.'],
+};
+const consentHTML = () => `<div class="card"><h2>${ic('shield', 20)} Help improve kiln?</h2>
+  <p class="fg2">kiln can send anonymous reports to its maintainers. Both are off unless you turn them on. They never include repo, account or host names, IPs, file paths on this box, tokens or logs. You can change this any time in Settings › Privacy, where you can also see exactly what is sent.</p>
+  ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="cs-${k}" aria-label="${l}"><span class="fg2 sm">${h}</span></label></div>`).join('')}
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"><button class="btn pri" data-act="consent">Save choice</button><a class="btn" href="#/settings/privacy">See what is sent</a></div></div>`;
+
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', updates: 'Updates', appearance: 'Appearance' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', forges: 'Forges', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', privacy: 'Privacy', appearance: 'Appearance' };
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
-const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', updates: 'update', appearance: 'palette' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', forges: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', privacy: 'shield', appearance: 'palette' };
 let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
-let draft = null, cfgJ = '', TS = null, tokRes = null, restartPending = false;
+let draft = null, cfgJ = '', TS = null, tokRes = null;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
 const fld = (id, label, ctl, hint, help, t) => `<div class="fld"><div><label for="${id}"${tip(t)}>${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
@@ -1491,13 +1599,14 @@ const G = {
     },
   },
   timeouts: { html: () => `<div class="card"><h2>Timeouts</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
-    ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}</div>` },
+    ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks GitHub for queued jobs.')}
+    ${fld('f-stop_grace_secs', 'Stop grace (s)', num('stop_grace_secs', draft.stop_grace_secs ?? 25), 'On systemctl stop/restart, running jobs get this long to finish before their VMs are killed (0 to 570). A host shutdown or logout waits up to this long too.')}</div>` },
   access: {
     html: () => `<div class="card"><h2>Access</h2>
       <div class="fld"><span class="lb">Allowed users</span><div><div class="chips" id="chips"></div><input type="text" id="f-adduser" data-k="adduser" placeholder="Tailscale login, then Enter" autocomplete="off" spellcheck="false"></div><div class="h">Tailscale logins that may open the dashboard. Empty means only this machine's owner.</div></div>
       ${fld('f-listen', `Listen address<span class="tag" id="rtag" hidden>restart required</span>`, `<input type="text" id="f-listen" data-k="listen" value="${esc(draft.listen)}" spellcheck="false" class="mono">`)}
       <div class="fld"><div><span class="lb">Dashboard key</span>${hq('key')}</div><div><p class="fg2 sm">Browsers on the CI box need this key. It lives at <span class="mono">~/.local/share/kiln/dashboard.key</span>.</p><button class="btn" data-act="forgetkey" style="margin-top:8px">${ic('key')}Forget key in this browser</button></div></div></div>`,
-    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !restartPending; },
+    live() { setHTML($('#chips'), draft.allowed_users.map(u => `<span class="chip"${tip('Tailscale login allowed to open this dashboard')}>${esc(u)}<button data-act="rmuser" data-id="${esc(u)}" aria-label="Remove ${esc(u)}"${tip('Remove (applies when you save)')}>${ic('x')}</button></span>`).join('')); $('#rtag').hidden = draft.listen === S.config.listen && !S.restart?.needed?.includes('listen'); },
   },
   github: {
     html: () => {
@@ -1525,6 +1634,11 @@ const G = {
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
     },
+  },
+  forges: {
+    // One card set per configured forge (GET /api/forges), by kind. GitLab and Gitea slot in as G.gitlab / G.gitea.
+    html: () => !F ? '' : F.map(f => G[f.kind]?.html(f) ?? '').join('') || '<p class="fg2">No forge is configured.</p>',
+    live() { for (const f of F || []) G[f.kind]?.live?.(f); },
   },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
@@ -1579,9 +1693,19 @@ const G = {
       return `<div class="card"><h2>Notifications</h2><label class="sw"><input type="checkbox" role="switch" id="f-notify" data-act="notify" aria-label="Browser notifications" ${on ? 'checked' : ''} ${sec ? '' : 'disabled'}><span>Notify when a job fails</span></label>
         <p class="fg2 sm" style="margin-top:12px">${sec ? 'Shows a notification when a job fails, is lost or is killed. The tab polls every 15s while hidden.' : `Needs HTTPS: turn on Serve in Network, then use https://${esc(dns)}:8443.`}</p>
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
+        <div class="card"><h2>Webhooks${hq('webhooks')}</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
+          <div id="nlist" style="margin-top:12px"></div><div id="nsecret">${nSecretHTML()}</div><div id="nform" style="margin-top:12px">${nFormHTML()}</div></div>
+        <div class="card"><h2>Workflow rules</h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Rules save with the other settings.</p>
+          <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div></div>
         <div class="card"><h2>Tips</h2><p class="fg2 sm">Short hints shown once at the top of each page.</p><button class="btn" data-act="resettips" style="margin-top:12px">${ic('refresh')}Reset tips</button></div>`;
     },
-    open() { if (!TS) loadTs().then(() => { if ($('#f-notify')) $('#set-body').innerHTML = this.html(); }); },
+    // Re-rendered once Tailscale's name is known, unless a form is open: that would wipe what was typed.
+    open() { if (!TS) loadTs().then(() => { if (!$('#f-notify')) return; if (nf) return this.live(); $('#set-body').innerHTML = this.html(); this.live(); rove($('#set-body')); }); },
+    live() {
+      setHTML($('#nlist'), nListHTML());
+      // Destinations added, removed or renamed elsewhere: the rules card names them, so redraw it from the draft.
+      const r = $('#nrules'); if (r && nKey() !== nRulesKey) r.innerHTML = nRulesHTML();
+    },
   },
   diagnostics: {
     html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">${ic('refresh')}Run checks</button></h2><div id="doc"></div></div>`,
@@ -1602,6 +1726,21 @@ const G = {
       setHTML($('#upd'), updHTML());
     },
   },
+  privacy: {
+    html: () => consentUnset() ? consentHTML() + '<div class="card"><h2>What is sent</h2><div id="tel"></div></div>' : `<div class="card"><h2>Privacy${hq('privacy')}</h2>
+      <p class="fg2">Anonymous reports to kiln's maintainers, sent by this box (never by your browser). They never include repo, account or host names, IPs, file paths on this box, tokens or logs.</p>
+      ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="f-${k}" data-k="${k}" aria-label="${l}" ${draft[k] ? 'checked' : ''}><span class="fg2 sm">${h}</span></label></div>`).join('')}</div>
+      <div class="card"><h2>What is sent</h2><div id="tel"></div></div>`,
+    async open() {
+      let t, err; try { t = await api('/api/telemetry'); } catch (e) { err = e; }
+      const el = $('#tel'); if (!el) return;
+      if (err) return setHTML(el, `<div class="cal">${esc(err.message)}</div>`);
+      setHTML(el, `${t.disabled_by_env ? '<div class="cal w" style="margin:0 0 12px">Turned off on this box by <code>DO_NOT_TRACK</code> or <code>KILN_TELEMETRY</code>, whatever is set here.</div>' : ''}
+        ${t.endpoint ? '' : '<p class="fg2 sm">This build has no report address, so nothing is sent yet, even when turned on.</p>'}
+        <p class="fg2 sm">The usage report this box would send now. <code>id</code> is random, made on this box at the first send, and deleted as soon as you turn both off.</p>${cb(JSON.stringify(t.usage, null, 2))}
+        <p class="fg2 sm">An example crash report (a real one has the actual code location). ${t.pending_crashes ? `${+t.pending_crashes} waiting to be sent.` : 'None waiting.'}</p>${cb(JSON.stringify(t.crash_example, null, 2))}`);
+    },
+  },
   // Stored in this browser only (localStorage), applied by the script in <head> before first paint.
   appearance: {
     html() {
@@ -1615,6 +1754,154 @@ const G = {
         <p class="fg2 sm" style="margin-top:16px">Saved in this browser only.</p></div>`;
     },
   },
+};
+/* ---------- webhooks (Settings › Notifications) ---------- */
+// nf: the open add/edit form; nsecret: a signing secret shown once. Neither keeps a URL: URL and token live only in password fields, cleared on save.
+// nbusy: destinations with an event switch change in flight; nRulesKey: the destinations the rules card was drawn with.
+let nf = null, nsecret = null, nRulesKey = '';
+const nbusy = new Set();
+const onN = () => cur === pages.settings && pages.settings.g === 'notifications';
+const nKey = () => nDests().map(d => d.id + ':' + d.name).join();
+// After the form closes or a secret is shown: focus the secret, else "Add destination".
+const nfocus = () => { if (onN()) ($('#nsec-t') || $('#nform [data-act=nadd]'))?.focus(); };
+const NK = { generic: 'Generic', slack: 'Slack', discord: 'Discord', ntfy: 'ntfy' };
+const NPH = { slack: 'https://hooks.slack.com/services/…', discord: 'https://discord.com/api/webhooks/…', ntfy: 'https://ntfy.sh/your-topic', generic: 'https://…' };
+const NEV = [['job', 'Jobs'], ['health', 'Health'], ['security', 'Security']];
+const nDests = () => S.notify?.dests || [];
+function nListHTML() {
+  const n = S.notify || {}, ds = nDests();
+  const st = d => { const s = d.status || {}; return s.last_error && (!s.last_ok || s.last_error[0] > s.last_ok) ? `<span class="fail">failing · ${esc(s.last_error[1])}</span>` : s.last_ok ? `<span class="ok">ok · ${relH(s.last_ok)}</span>` : '<span class="fg2">not used yet</span>'; };
+  return (n.load_error ? `<div class="cal w" style="margin-top:0">${esc(n.load_error)}</div>` : '') + (ds.length ? `<ul class="list">${ds.map(d => `<li><div class="nd"><span class="t"><span class="tt">${esc(d.name)} <span class="bdg">${esc(NK[d.kind] || d.kind)}</span></span><span class="id" style="font-family:var(--sans)">${esc(d.host)} · ${st(d)}${d.status?.dropped ? ` · ${+d.status.dropped} dropped` : ''}</span></span>
+    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''} ${nbusy.has(d.id) ? 'disabled' : ''}><span class="sm">${l}</span></label>`).join('')}</span>
+    <span class="nb"><button class="btn sm" data-act="ntest" data-id="${esc(d.id)}"${tip('Send a test message. One every 10 seconds.')}>Send test</button><button class="btn sm" data-act="nedit" data-id="${esc(d.id)}">Edit</button>${d.kind === 'generic' ? `<button class="btn sm" data-act="nrot" data-id="${esc(d.id)}"${tip('Make a new signing secret. The old one stops working.')}>Rotate secret</button>` : ''}<button class="btn sm dng" data-act="ndel" data-id="${esc(d.id)}">${ic('trash')}Remove</button></span></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No destinations yet.</p>');
+}
+function nSecretHTML() {
+  if (!nsecret) return '';
+  nsecret.seen = 1; // only drawn on this page: leaving it now wipes the secret
+  return `<div class="cal o" role="alert"><b>Signing secret for ${esc(nsecret.name)}</b>
+    <div class="cb"><pre class="snip" id="nsec-t" tabindex="-1">${esc(nsecret.text)}</pre><button class="btn" data-act="ncopy" aria-label="Copy" data-tip="Copy to clipboard">${ic('copy')}</button></div>
+    <p class="sm" style="margin-top:8px;max-width:none">Shown once. kiln signs each request with Standard Webhooks headers (webhook-id, webhook-timestamp, webhook-signature); verify the HMAC-SHA256 and reject timestamps more than 5 minutes old.</p>
+    <div class="bar" style="margin:12px 0 0"><button class="btn pri" data-act="ndone">Done</button></div></div>`;
+}
+function nFormHTML() {
+  if (!nf) return `<button class="btn" data-act="nadd">${ic('plus')}Add destination</button>`;
+  const k = nf.kind, edit = !!nf.id;
+  return `<form data-form="notify" autocomplete="off"><h3 style="font-size:15px;margin-bottom:8px">${edit ? 'Edit ' + esc(nf.name0) : 'Add destination'}</h3>
+    <div class="fld"><span class="lb" id="nf-kl">Kind</span><div><div class="seg" role="radiogroup" aria-labelledby="nf-kl">${Object.entries(NK).map(([v, l]) => `<button type="button" role="radio" aria-checked="${v === k}" data-act="nkind" data-v="${v}">${l}</button>`).join('')}</div></div></div>
+    ${fld('nf-name', 'Name', `<input type="text" id="nf-name" value="${esc(nf.name)}" maxlength="40" spellcheck="false">`)}
+    ${fld('nf-url', 'URL', `<input type="text" class="mask" id="nf-url" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="${esc(edit ? 'leave empty to keep the current URL' : NPH[k])}">`, edit ? `Stored URL is hidden. Current host: <span class="mono">${esc(nf.host)}</span>` : 'The URL is a secret. It is never shown again after saving.')}
+    <div class="fld" id="nf-tokf" ${k === 'ntfy' ? '' : 'hidden'}><div><label for="nf-token">ntfy token</label></div><div><input type="text" class="mask" id="nf-token" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="${edit ? 'leave empty to keep the current token' : 'optional'}"></div></div>
+    <div class="fld"><span class="lb">Options</span><div>
+      <label class="sw"${tip('Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.')}><input type="checkbox" id="nf-ts" ${nf.tailnet ? 'checked' : ''}><span>On my tailnet</span></label><p class="fg2 sm" style="margin:0 0 8px 0">Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.</p>
+      <label class="sw"${tip('Needs Serve over HTTPS; coming in a later version')}><input type="checkbox" id="nf-link" disabled><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS; coming in a later version.</p></div></div>
+    <p class="ferr" id="nf-err" role="alert"></p>
+    <div class="bar" style="margin:12px 0 0"><button class="btn pri" ${nf.busy ? 'disabled' : ''}>${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel" ${nf.busy ? 'disabled' : ''}>Cancel</button></div></form>`;
+}
+function nRulesHTML() {
+  const ds = nDests(), ids = new Set(ds.map(d => d.id)), repos = REPOS();
+  // A destination that no longer exists must not stay in a rule: Save would be refused. The draft then differs, so Save shows.
+  // Only against a known, loaded list: with notify.json unreadable the list is empty and pruning would wipe every rule.
+  const prune = S.notify && !S.notify.load_error;
+  const rs = draft.notify_rules = (draft.notify_rules || []).map(r => !prune || r.to.every(t => ids.has(t)) ? r : { ...r, to: r.to.filter(t => ids.has(t)) });
+  nRulesKey = nKey();
+  const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f === 'repo' ? 'Repository' : 'Outcome'}, rule ${i + 1}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  return (rs.length ? `<ul class="list">${rs.map((r, i) => `<li><div class="nd"><span class="nb">${sel(i, 'repo', r.repo, [['*', 'Any repo'], ...[...new Set([...repos, ...(r.repo === '*' ? [] : [r.repo])])].map(x => [x, x])])}
+    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file, rule ${i + 1}" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>
+    ${sel(i, 'outcome', r.outcome, [['success', 'On success'], ['failure', 'On failure'], ['any', 'Any outcome']])}</span>
+    <span class="nsw">${ds.map(d => `<label class="sw"><input type="checkbox" data-act="nrule" data-i="${i}" data-f="to" data-d="${esc(d.id)}" aria-label="Send to ${esc(d.name)}, rule ${i + 1}" ${r.to.includes(d.id) ? 'checked' : ''}><span class="sm">${esc(d.name)}</span></label>`).join('')}${r.to.length ? '' : '<span class="fail sm">pick at least one destination</span>'}</span>
+    <button class="btn sm ic" data-act="nruledel" data-i="${i}" aria-label="Remove rule ${i + 1}"${tip('Remove this rule')}>${ic('x')}</button></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No rules.</p>')
+    + `<div class="bar" style="margin:12px 0 0"><button class="btn" data-act="nruleadd" ${ds.length && rs.length < 50 ? '' : 'disabled'}${tip(ds.length ? 'At most 50 rules' : 'Add a destination first')}>${ic('plus')}Add rule</button>${ds.length ? '' : '<span class="fg2 sm">Add a destination first.</span>'}</div>`;
+}
+// A signing secret must not outlive the page it was shown on. One that arrived while elsewhere waits until it has been shown.
+addEventListener('hashchange', () => { if (nsecret?.seen && !onN()) { nsecret = null; const e = $('#nsec-t'); if (e) e.textContent = ''; } });
+document.addEventListener('input', e => {
+  const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t);
+  // Keep what was typed in nf, so a form rebuild (kind change) keeps it. Never the URL or token.
+  if (nf && t.id === 'nf-name') nf.name = t.value; if (nf && t.id === 'nf-ts') nf.tailnet = t.checked;
+});
+
+/* ---------- analytics (Settings › Analytics) ---------- */
+// Every card but the last uses the VMs /api/state sends (the newest 100, web.rs state()). The last reads the
+// usage ledger: /api/state sends 32 days of it (all repos) and the card shows 30.
+const AN = { r: 7, repo: '', cpus: 0, open: {} };
+const pctl = (a, p) => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
+const jobEnd = v => v.done_at || v.ended;
+// Matches vm.rs record_usage: start to result, rounded up to the minute (how GitHub bills).
+const jobMins = v => Math.max(1, Math.ceil((jobEnd(v) - v.busy_since) / 60));
+// A lost job's end is when kiln noticed it at startup, not when it finished: kept out of durations.
+const timed = v => !!v.done_at || status(v) !== 'lost';
+// Success rate is passed / (passed + failed); everything else (cancelled, ended in a state this kiln doesn't know) counts as neither.
+const outcome = v => status(v) === 'passed' ? 0 : isFail(v) ? 1 : 2;
+const OUT = [['passed', 'Passed', 'var(--ok)'], ['failed', 'Failed', 'var(--fail)'], ['other', 'Cancelled or other', 'var(--fg-3)']];
+// Column start times (unix s) and labels: the last 24 hours by hour (current hour last), or local calendar days.
+function anBuckets(r) {
+  const d = new Date(), o = [];
+  if (r === 1) { d.setMinutes(0, 0, 0); for (let i = 23; i >= 0; i--) { const t = d / 1000 - i * 3600; o.push([t, hhmm(t)]); } }
+  else for (let i = r - 1; i >= 0; i--) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate() - i); o.push([x / 1000, x.toLocaleDateString([], { month: 'short', day: 'numeric' })]); }
+  return o;
+}
+// Stacked columns, each with a tip listing its parts, and the same numbers as a table under "Show numbers".
+// cols: [{ l, v: [n per series], x: true if outside the data }], ser: [[key, name, colour]], fmt: number to text,
+// label: the table caption, k: remembers whether the table is open across re-renders.
+function bars(cols, ser, fmt, label, k) {
+  const tot = c => c.v.reduce((a, b) => a + b, 0), max = Math.max(...cols.map(tot)) || 1, n = cols.length;
+  return `<div class="lgd">${ser.map(s => `<span><i style="--c:${s[2]}"></i>${esc(s[1])}</span>`).join('')}</div>
+    <div class="bc" aria-hidden="true"><span class="mx">${fmt(max)}</span>${cols.map(c => `<i${c.x ? ' class="x"' : ''}${tip(c.l + '\n' + (c.x ? 'Older than the newest 100 VMs: not counted' : tot(c) ? ser.map((s, j) => c.v[j] ? `${s[1]}: ${fmt(c.v[j])}` : '').filter(Boolean).join('\n') : 'None'))}>${ser.map((s, j) => c.v[j] ? `<b style="--c:${s[2]};height:${(c.v[j] / max * 100).toFixed(2)}%"></b>` : '').join('')}</i>`).join('')}</div>
+    <div class="ax" aria-hidden="true"><span>${esc(cols[0].l)}</span><span>${esc(cols[n >> 1].l)}</span><span>${esc(cols[n - 1].l)}</span></div>
+    <details class="dt" data-k="${k}"${AN.open[k] ? ' open' : ''}><summary>Show numbers</summary><div class="tw"><table><caption class="sr">${esc(label)}</caption><tr><th>Period</th>${ser.map(s => `<th class="an-n">${esc(s[1])}</th>`).join('')}</tr>${cols.filter(c => !c.x && tot(c)).map(c => `<tr><td>${esc(c.l)}</td>${c.v.map(x => `<td class="an-n">${fmt(x)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
+}
+// One colour per VM size on every chart: by its place among all sizes kiln has seen.
+const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
+const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', vcol(all.indexOf(c) % 8)]); };
+function anHTML() {
+  const B = anBuckets(AN.r), t0 = B[0][0], st = (l, v, t, x = '') => `<div class="stat"${kt(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
+  const jobs = S.vms.filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
+  const oldest = Math.min(...S.vms.map(v => v.started)), cut = S.vms.length >= 100 && oldest > t0;
+  const note = cut ? `<div class="cal neu" style="margin-top:0">The dashboard gets the newest 100 VMs, which reach back to ${esc(when(oldest))}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched; the minutes chart at the bottom isn't limited to these VMs.</div>` : '';
+  const ld = Math.floor(Date.now() / 86400000), use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
+  const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
+    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
+    : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
+  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}.</p></div>` + ledger;
+  const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };
+  const x = i => cut && (B[i + 1]?.[0] ?? Infinity) <= oldest;
+  const n = [0, 0, 0]; jobs.forEach(v => n[outcome(v)]++);
+  const tj = jobs.filter(timed), jd = tj.map(v => jobEnd(v) - v.busy_since), q = jobs.filter(v => v.queued_at), on = jobs.filter(v => v.online_at);
+  const sr = n[0] + n[1] ? n[0] / (n[0] + n[1]) : null, mins = jobs.reduce((a, v) => a + jobMins(v), 0), saved = jobs.reduce((a, v) => a + jobMins(v) * rate(v.cpus), 0), ms = median(q.map(v => v.busy_since - v.queued_at));
+  const oc = B.map(([, l], i) => ({ l, x: x(i), v: [0, 0, 0] })); jobs.forEach(v => oc[at(v.busy_since)].v[outcome(v)]++);
+  const js = sizeSer([...new Set(jobs.map(v => v.cpus))]), mc = B.map(([, l], i) => ({ l, x: x(i), v: js.map(() => 0) }));
+  jobs.forEach(v => mc[at(v.busy_since)].v[js.findIndex(s => s[0] === v.cpus)] += jobMins(v));
+  // Each job's phases, cut to its own queued → running span: a warm VM booted before its job was queued,
+  // and its idle time in the pool is not time the job waited.
+  const ph = [['Queue', q.map(v => Math.max(0, v.started - v.queued_at)), 'q'], ['Boot', on.map(v => Math.max(0, v.online_at - Math.max(v.started, v.queued_at || 0))), 'b'],
+    ['Wait', on.map(v => Math.max(0, v.busy_since - Math.max(v.online_at, v.queued_at || 0))), 'w'], ['Job', jd, 'j-ok']].filter(p => p[1].length).map(p => [p[0], median(p[1]), p[2]]);
+  const by = jobs.reduce((m, v) => m.set(v.repo, [...(m.get(v.repo) || []), v]), new Map());
+  const rp = [...by].map(([r, l]) => { const k = [0, 0, 0]; l.forEach(v => k[outcome(v)]++); const d = l.filter(timed).map(v => jobEnd(v) - v.busy_since); return { r, n: l.length, sr: k[0] + k[1] ? k[0] / (k[0] + k[1]) : null, md: median(d), p: pctl(d, .95), m: l.reduce((a, v) => a + jobMins(v), 0) }; }).sort((a, b) => b.m - a.m);
+  const pc = x => x == null ? '—' : Math.round(x * 100) + '%', dd = s => s == null ? '—' : dur(s), unit = AN.r === 1 ? 'hour' : 'day', lost = jobs.length - tj.length;
+  return `${note}
+    <div class="stats">${st('Jobs', jobs.length, `Finished jobs that started in this range: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`)}${st('Success rate', pc(sr), 'Passed out of passed and failed. Cancelled jobs count as neither.', sr != null && sr < .8 ? 'fail' : '')}
+    ${st('Median job time', dd(median(jd)), 'From a job starting to its result' + (lost ? `. Leaves out ${lost} lost job${lost > 1 ? 's' : ''}: kiln stopped while ${lost > 1 ? 'they' : 'it'} ran.` : ''))}${st('p95 job time', dd(pctl(jd, .95)), '95% of jobs took this long or less')}
+    ${st('Median time to start', dd(ms), 'From GitHub queueing the job to it starting in a kiln VM: queue, boot and wait')}${st('Failed', n[1], 'Failed, lost, or killed mid-job', n[1] ? 'fail' : '')}
+    ${st('Job minutes', mins, 'Each job rounded up to the minute, as GitHub bills it')}${st('Saved', '≈ $' + saved.toFixed(2), `${mins} job minutes at ${myRate() ? '$' + myRate() + '/min' : 'the GitHub-hosted rate for each VM size'}`)}</div>
+    <div class="card"><h2>Jobs per ${unit}</h2>${bars(oc, OUT, String, `Jobs per ${unit}: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`, 'jobs')}</div>
+    <div class="card"><h2>Job minutes per ${unit}</h2>${bars(mc, js, x => x + ' min', `${mins} job minutes per ${unit} by VM size`, 'mins')}</div>
+    <div class="card"><h2>Where the time goes <span class="fg2 sm" style="font-weight:400">median per phase</span>${hq('timeline')}</h2>${timeline(ph)}</div>
+    <div class="card"><h2>By repository</h2><div class="tw"><table><tr><th>Repository</th><th class="an-n">Jobs</th><th class="an-n">Success</th><th class="an-n">Median</th><th class="an-n">p95</th><th class="an-n">Minutes</th></tr>
+    ${rp.map(x => `<tr><td><button class="lnk" data-act="anpick" data-id="${esc(x.r)}"${tip('Show only ' + x.r)}>${esc(x.r)}</button></td><td class="an-n">${x.n}</td><td class="an-n ${x.sr != null && x.sr < .8 ? 'fail' : ''}">${pc(x.sr)}</td><td class="an-n">${dd(x.md)}</td><td class="an-n">${dd(x.p)}</td><td class="an-n">${x.m}</td></tr>`).join('')}</table></div></div>
+    <div class="card"><h2>Slowest jobs</h2>${jobList([...tj].sort((a, b) => (jobEnd(b) - b.busy_since) - (jobEnd(a) - a.busy_since)).slice(0, 5))}</div>${ledger}`;
+}
+addEventListener('toggle', e => { if (e.target.matches?.('.dt')) AN.open[e.target.dataset.k] = e.target.open; }, true);
+G.analytics = {
+  html() {
+    const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo)])].sort(), sizes = allSizes().filter(Boolean);
+    // A filter whose repo or size has aged out would filter while the menu shows "All".
+    if (!repos.includes(AN.repo)) AN.repo = ''; if (!sizes.includes(AN.cpus)) AN.cpus = 0;
+    return `<div class="an"><div class="bar"><div class="seg" role="radiogroup" aria-label="Range">${[[1, '24 hours'], [7, '7 days'], [30, '30 days']].map(([v, l]) => `<button role="radio" aria-checked="${v === AN.r}" data-act="anr" data-v="${v}">${l}</button>`).join('')}</div>
+      <label class="sr" for="an-repo">Repository</label><select id="an-repo" data-act="anrepo"><option value="">All repos</option>${repos.map(r => `<option ${r === AN.repo ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
+      <label class="sr" for="an-cpu">VM size</label><select id="an-cpu" data-act="ancpu"><option value="0">All sizes</option>${sizes.map(c => `<option value="${c}" ${c === AN.cpus ? 'selected' : ''}>${c} cpu</option>`).join('')}</select>${hq('analytics')}</div><div id="an"></div></div>`;
+  },
+  // Runs inside the poll: a drawing bug must not read as "kiln unreachable".
+  live() { try { setHTML($('#an'), anHTML()); } catch (e) { console.error('analytics', e); setHTML($('#an'), `<div class="cal">Analytics could not be drawn: ${esc(e.message)}</div>`); } },
 };
 // GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
 let UP = null, upBusy = false;
@@ -1642,7 +1929,8 @@ function updHTML() {
 const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
   mount(r) {
-    const g = GROUPS[r.seg[0]] ? r.seg[0] : 'capacity'; this.g = g;
+    const g = GROUPS[r.seg[0]] ? r.seg[0] : r.seg[0] === 'github' ? 'forges' : 'capacity'; this.g = g;
+    if (g === 'forges' && !F) loadForges().then(() => cur === this && this.g === 'forges' && this.render());
     cfgJ = JSON.stringify(S.config); draft = JSON.parse(cfgJ);
     $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${ic(GI[k])}${l}</a>`).join('')}</nav>
       <div><label class="sr" for="gsel">Settings group</label><select id="gsel" data-act="gsel">${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${k === g ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -1709,11 +1997,12 @@ const imgStrip = () => S.image_ready ? ['o', `<span class="ok">${ic('check')} VM
   : ['w', 'The VM image isn\'t built yet. <button class="btn" data-act="bake">Bake image</button>'];
 pages.setup = {
   mount() {
-    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › GitHub.')}>Skip for now</button></div>
-      <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div class="card" id="su"></div>`;
+    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › Forges.')}>Skip for now</button></div>
+      <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div id="su-consent" style="margin-bottom:16px"></div><div class="card" id="su"></div>`;
     setupOpen = null;
   },
   update() {
+    const sc = $('#su-consent'); sc.hidden = !consentUnset(); if (sc.hidden) sc.innerHTML = ''; else if (!sc.firstChild) sc.innerHTML = consentHTML();
     const c = S.config, rs = REPOS(), repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
     if (!S.image_ready && !S.baking && bk.checked && !bakeFailed() && !lsGet('kiln-bake-auto')) { lsSet('kiln-bake-auto', '1'); ACT.bake().catch(fail); }
     const [cls, st] = imgStrip(), strip = `<div class="cal ${cls}" style="margin:0 0 20px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">${st}</div>`;
@@ -1727,7 +2016,7 @@ pages.setup = {
     }
     const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
     const sum = [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
-      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › GitHub.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
       const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
@@ -1742,18 +2031,18 @@ pages.setup = {
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
     const B = S.app ? [
-      `<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/github">Settings › GitHub</a>.</p>`,
+      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/forges">Settings › Forges</a>.</p>`,
       `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 30 seconds, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
       test(),
     ] : [
-      `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
+      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
        <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
        <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}
-       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/github">Create one in Settings › GitHub</a>.</p>`,
+       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/forges">Create one in Settings › Forges</a>.</p>`,
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
+    setHTML($('#su'), strip + `<ol class="stp">${['Connect a forge', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
       const d = done[i] && i !== open;
       return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
@@ -1765,9 +2054,10 @@ const GUIDES = [
   ['start', 'Getting started', L => `<h2>Getting started</h2>
     <p>When GitHub queues a job whose <code>runs-on</code> names kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
     <p>You need three things:</p>
-    <ol><li><b>A GitHub token</b> (Settings › GitHub), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
+    <ol><li><b>A GitHub token</b> (Settings › Forges), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
     <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
-    <p>Day to day, glance at Overview: banners mean something needs you.</p>`],
+    <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
+    <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
   ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
     ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
     <p>For another size, use exactly one size label:</p>
@@ -1777,10 +2067,19 @@ const GUIDES = [
     <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. macOS, Windows and GPUs are not supported.</p>`],
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
     <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
-    <p>The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
+    <p>Under the job's name you see the branch, PR and commit it ran for, linked to GitHub. The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
     <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
     <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
+  ['alerts', 'Alerts & webhooks', () => `<h2>Alerts &amp; webhooks</h2>
+    <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
+    <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Click <b>Send test</b> to check it.</p>
+    <p>Each destination picks what it gets:</p>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted.</li><li><b>Health:</b> something stops launches (an old image, a GitHub registration outage, a broken network filter, low memory or disk) or polling fails, and again when it clears.</li><li><b>Security:</b> settings saved (only the names of what changed), the GitHub token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. A failed job matched by a rule is still sent only once.</p>
+    <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
+    <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
+    <p><b>Generic</b> destinations are signed the Standard Webhooks way. The signing secret is shown once, when you create the destination or rotate its secret. To verify it, see Notifications in <code>docs/configuration.md</code>.</p>`],
   ['cache', 'Caching', () => `<h2>Caching</h2>
     <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
     <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch, or to one of the repo's <b>cache branches</b> (Repos › your repo). Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
@@ -1796,17 +2095,29 @@ const GUIDES = [
     <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in.</p>
     <p><b>By hand:</b> Settings › Image › Rebake image. It takes ~4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
     <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
+  ['analytics', 'Analytics & savings', () => `<h2>Analytics &amp; savings</h2>
+    <p>Settings › Analytics sums up finished jobs for the last 24 hours, 7 or 30 days, for all repos or one, and all VM sizes or one.</p>
+    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from GitHub queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try warm VMs (Repos › your repo).</li>
+    <li><b>Job minutes and Saved:</b> each job is rounded up to the minute, as GitHub bills it, and priced at the GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute). To use one flat rate instead, click the rate under the Overview stats.</li>
+    <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
+    <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
+    <p>Each chart's numbers are also a table under <b>Show numbers</b>.</p>`],
+  ['privacy', 'Privacy & reports', () => `<h2>Privacy &amp; reports</h2>
+    <p>kiln can send two kinds of anonymous report to its maintainers. Both are off until you choose; kiln asks once, during setup or with an Overview banner.</p>
+    <ul><li><b>Usage statistics:</b> once a day, the kiln version, host CPU and memory size, how many repos and VMs, which features are on, and job counts and minutes for the last 24 hours.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
+    <p>Neither includes repo, account or host names, IPs, file paths on this box, tokens or logs. This box sends them; your browser never does. Settings › Privacy shows the usage report exactly as it would be sent, and an example crash report.</p>
+    <p>To turn both off for good, whatever the dashboard says, set <code>DO_NOT_TRACK=1</code> in kiln's environment. Under systemd, run <code>systemctl --user edit kiln</code>, add these lines, then restart kiln:${cb('[Service]\nEnvironment=DO_NOT_TRACK=1')}</p>`],
   ['stuck', 'Troubleshooting', L => `<h2>Troubleshooting</h2><p><i>A job stays queued.</i> Check these in order:</p>
     <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
     <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li></ul></li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li><li><i>Notifications failing:</i> a webhook destination keeps failing; its row in Settings › Notifications shows the last error.</li></ul></li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
     <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', cache: 'cache', network: 'network', image: 'image', stuck: 'help' };
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
     $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
       <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
@@ -1815,6 +2126,12 @@ pages.guides = {
 
 /* ---------- actions ---------- */
 const ACT = {
+  async consent() {
+    const v = Object.fromEntries(Object.keys(PRIV).map(k => [k, !!$('#cs-' + k)?.checked]));
+    await saveCfg({ ...S.config, ...v });
+    toast(v.usage_stats || v.crash_reports ? 'Thanks. Change it any time in Settings › Privacy.' : 'Saved. Nothing will be sent.');
+    if (cur === pages.settings) { draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); pages.settings.render(); }
+  },
   hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
   hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
     $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
@@ -1879,7 +2196,7 @@ const ACT = {
   },
   snip() { setupSnip = !setupSnip; pages.setup.update(); },
   surepo(s) { setupRepo = s.value; pages.setup.update(); },
-  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/github'; },
+  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/forges'; },
   resettips() { Object.keys(TIPS).forEach(k => lsSet('kiln-tip-' + k, null)); toast('Tips will show again'); },
   guides() { dlg.close(); location.hash = '#/guides'; },
   gdsel: s => (location.hash = '#/guides/' + s.value),
@@ -1893,14 +2210,14 @@ const ACT = {
     await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: ciPut(S.config.warm, r), cache_branches: ciPut(S.config.cache_branches, r), repo_cache_gb: ciPut(S.config.repo_cache_gb, r) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
-  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
+  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${esc(b.dataset.id)}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
   async run(b) {
     const id = +b.dataset.id;
-    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(gh(rd.repo, `runs/${id}/jobs`)).then(j => { rd.jobs.set(id, j.jobs || []); pages.repos.update(); }).catch(fail); }
+    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(fq('runs/' + id, rd.repo)).then(j => { rd.jobs.set(id, j.jobs); pages.repos.update(); }).catch(fail); }
     pages.repos.update();
   },
-  async rerun(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
-  async cancel(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async rerun(b) { await post(fq(`runs/${+b.dataset.id}/rerun`, rd.repo, b.dataset.failed ? '&failed=1' : '')); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async cancel(b) { await post(fq(`runs/${+b.dataset.id}/cancel`, rd.repo)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
   gsel: s => (location.hash = '#/settings/' + s.value),
   discard() { draft = JSON.parse(JSON.stringify(S.config)); pages.settings.render(); },
   async save() {
@@ -1909,7 +2226,7 @@ const ACT = {
     if (draft.warm_recycle_mins != null && !(draft.warm_recycle_mins >= 5 && draft.warm_recycle_mins <= 1440)) return toast('Warm VM recycle must be 5 to 1440 minutes', true);
     const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
     if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
-    await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); toast('Saved'); pages.settings.render();
+    const r = await saveCfg(draft); draft = JSON.parse(JSON.stringify(S.config)); cfgJ = JSON.stringify(S.config); if (!r?.restart_required) toast('Saved'); pages.settings.render();
   },
   rmuser(b) { draft.allowed_users = draft.allowed_users.filter(u => u !== b.dataset.id); pages.settings.live(); },
   forgetkey() { lsSet('kiln-key', null); toast('Key forgotten in this browser'); },
@@ -1931,6 +2248,17 @@ const ACT = {
     await post('/api/update/apply'); toast('Update started'); await poll(); loadUpd();
   },
   async updcancel() { await post('/api/update/cancel'); toast('Update cancelled. Launching resumes.'); await poll(); loadUpd(); },
+  async rsidle() {
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln when idle?', action: 'Restart when idle', body: `kiln drains first: it starts no new VMs (warm ones included) and waits for ${n ? `the <b>${n} running VM${n > 1 ? 's' : ''}</b>` : 'running jobs'} to finish, at most the job timeout (${+S.config.job_timeout_mins} min). Held debug VMs are not waited for: the restart ends them. Queued jobs wait meanwhile. Then kiln restarts in place, which takes a few seconds. You can cancel while it drains.${newListen()}` })) return;
+    await post('/api/restart'); toast('Restart pending: draining'); await poll();
+  },
+  async rsnow() {
+    const n = S.vms.filter(RESTART_WAITS).length;
+    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: (n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on GitHub with "The runner has received a shutdown signal". Use <b>Restart when idle</b> to let them finish first.` : 'No job is running: kiln restarts in place right away, which takes a few seconds.') + newListen() })) return;
+    await post('/api/restart?now=true'); toast('Restarting kiln'); await poll();
+  },
+  async rscancel() { await post('/api/restart/cancel'); toast('Restart cancelled. Launching resumes.'); await poll(); },
   look(b) { lsSet('kiln-' + b.dataset.id, b.dataset.v === { theme: 'system', density: 'comfortable', accent: 'ember' }[b.dataset.id] ? null : b.dataset.v); kilnAppearance(); pages.settings.render(); $(`[data-act=look][data-id=${b.dataset.id}][aria-checked=true]`)?.focus(); },
   motion(b) { lsSet('kiln-motion', b.checked ? 'reduce' : null); kilnAppearance(); },
   egress(b) { draft.egress = b.dataset.id; pages.settings.render(); },
@@ -1954,9 +2282,97 @@ const ACT = {
         <dt>Fastest</dt><dd>${lat.map(([id, ns]) => `${esc(n.DERPMap?.Regions?.[id]?.RegionName || id)}: ${(ns / 1e6).toFixed(1)} ms`).join('<br>') || '—'}</dd></dl>`;
     } catch (e) { $('#nc').textContent = e.message; } finally { b.disabled = false; }
   },
+  // --- webhooks: Settings › Notifications
+  // form: the form opened or closed, so #nform is rebuilt; otherwise it is left alone so nothing typed is lost.
+  nrender(form) {
+    if (!onN()) return;
+    if (form) { $('#nform').innerHTML = nFormHTML(); rove($('#nform')); }
+    $('#nsecret').innerHTML = nSecretHTML(); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live();
+  },
+  async nev(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    if (nbusy.has(d.id)) { b.checked = !b.checked; return; }
+    // One change per destination at a time: the next PUT must start from what this one saved.
+    const sw = on => $$('[data-act=nev]').filter(x => x.dataset.id === d.id).forEach(x => (x.disabled = on));
+    nbusy.add(d.id); sw(true);
+    try {
+      // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
+      await poll();
+    } finally { nbusy.delete(d.id); sw(false); }
+  },
+  async ntest(b) { await post('/api/notify/' + encodeURIComponent(b.dataset.id) + '/test'); toast('Test queued'); },
+  nadd() { nf = { id: null, kind: 'generic', name: '', tailnet: false, events: { job: true, health: true, security: true } }; ACT.nrender(1); $('#nf-name').focus(); },
+  nedit(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    nf = { id: d.id, kind: d.kind, name: d.name, name0: d.name, host: d.host, tailnet: d.tailnet, events: { ...d.events } }; ACT.nrender(1); $('#nf-name').focus();
+  },
+  ncancel() { if (nf?.busy) return; for (const i of ['#nf-url', '#nf-token']) if ($(i)) $(i).value = ''; nf = null; ACT.nrender(1); nfocus(); },
+  nkind(b) {
+    nf.kind = b.dataset.v; $$('#nform [data-act=nkind]').forEach(x => x.setAttribute('aria-checked', x === b)); rove($('#nform'));
+    if (!nf.id) $('#nf-url').placeholder = NPH[nf.kind]; $('#nf-tokf').hidden = nf.kind !== 'ntfy';
+  },
+  async nsave() {
+    // f, not nf: the user may leave the page while the request is out; the answer still belongs to this form.
+    const f = nf; if (!f || f.busy) return;
+    const name = $('#nf-name').value.trim(), url = $('#nf-url').value.trim(), token = $('#nf-token').value.trim(), err = $('#nf-err');
+    err.textContent = '';
+    if (!name) { err.textContent = 'Give the destination a name.'; return $('#nf-name').focus(); }
+    if (!f.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
+    // An edit sends the event switches as they are now (they may have changed since the form opened).
+    const events = f.id ? { ...(nDests().find(x => x.id === f.id)?.events || f.events) } : f.events;
+    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: false, events };
+    if (url) body.url = url; if (f.kind === 'ntfy' && token) body.token = token;
+    const cancel = $('#nform [data-act=ncancel]'); if (cancel) cancel.disabled = true;
+    let r; f.busy = 1;
+    try { r = await (f.id ? api('/api/notify/' + encodeURIComponent(f.id), { method: 'PUT', body }) : post('/api/notify', body)); }
+    catch (e) {
+      f.busy = 0; $$('#nform .bar button').forEach(x => (x.disabled = false)); // the form may have been redrawn while busy
+      const er = $('#nf-err'); if (er && nf === f) er.textContent = e.message; else fail(e);
+      return;
+    }
+    // The secret first: it is shown once, whatever happened to the page meanwhile.
+    if (r.secret) nsecret = { text: r.secret, name: r.dest?.name || name };
+    f.busy = 0;
+    for (const i of ['#nf-url', '#nf-token']) { const el = $(i); if (el) el.value = ''; }
+    if (nf === f) nf = null;
+    toast(r.secret && !onN() ? 'Destination saved — open Notifications to copy its signing secret' : 'Destination saved');
+    await poll(); ACT.nrender(1); nfocus();
+  },
+  async nrot(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    if (!await ask({ title: `Rotate the secret for ${d.name}?`, body: 'The old secret stops working at once. Update the receiver with the new one.', action: 'Rotate', danger: 1 })) return;
+    const r = await post('/api/notify/' + encodeURIComponent(d.id) + '/rotate'); nsecret = { text: r.secret, name: d.name };
+    if (!onN()) toast('Secret rotated — open Notifications to copy the new signing secret');
+    ACT.nrender(); nfocus();
+  },
+  async ndel(b) {
+    const d = nDests().find(x => x.id === b.dataset.id); if (!d) return;
+    if (!await ask({ title: `Remove ${d.name}?`, body: 'It stops receiving messages, and is dropped from any workflow rule that names it. A rule left with no destination is removed.', action: 'Remove', danger: 1 })) return;
+    try {
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'DELETE' });
+      // The server drops it from saved rules; do the same in the draft so Save does not name a dead id.
+      draft.notify_rules = (draft.notify_rules || []).map(r => ({ ...r, to: r.to.filter(t => t !== d.id) })).filter(r => r.to.length);
+      toast('Removed ' + d.name);
+    } finally { await poll(); ACT.nrender(); } // a failure may still have changed the rules: show what the server has
+  },
+  async ncopy(b) { if (nsecret) { await copy(nsecret.text, 'Secret copied'); copied(b); } },
+  ndone() { const e = $('#nsec-t'); if (e) e.textContent = ''; nsecret = null; ACT.nrender(); nfocus(); },
+  nrule(el) {
+    const r = draft.notify_rules[+el.dataset.i], f = el.dataset.f; if (!r) return;
+    if (f === 'to') r.to = el.checked ? [...new Set([...r.to, el.dataset.d])] : r.to.filter(t => t !== el.dataset.d);
+    else r[f] = f === 'workflow' ? el.value.trim() || '*' : el.value;
+    pages.settings.live();
+  },
+  nruleadd() { draft.notify_rules.push({ repo: '*', workflow: '*', outcome: 'failure', to: nDests().slice(0, 1).map(d => d.id) }); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live(); },
+  nruledel(b) { draft.notify_rules.splice(+b.dataset.i, 1); $('#nrules').innerHTML = nRulesHTML(); pages.settings.live(); },
   skip() { lsSet('kiln-skip-setup', '1'); location.hash = '#/'; },
   finish() { lsSet('kiln-skip-setup', '1'); },
   stepopen(b) { setupOpen = +b.dataset.id; pages.setup.update(); },
+  anr(b) { AN.r = +b.dataset.v; $$('[data-act=anr]').forEach(x => x.setAttribute('aria-checked', x === b)); rove(); G.analytics.live(); },
+  anrepo: s => { AN.repo = s.value; G.analytics.live(); },
+  ancpu: s => { AN.cpus = +s.value; G.analytics.live(); },
+  anpick(b) { AN.repo = $('#an-repo').value = b.dataset.id; G.analytics.live(); $('#an-repo').focus(); },
 };
 document.addEventListener('click', async e => {
   if (popEl && !popEl.contains(e.target) && !e.target.closest('[data-act=rate],[data-act=runwf],[data-act=help]')) closePop();
@@ -1966,7 +2382,7 @@ document.addEventListener('click', async e => {
   if (b.tagName === 'BUTTON' && !b.classList.contains('hq')) b.disabled = true;
   try { await fn(b); } catch (err) { fail(err); if (b.type === 'checkbox') b.checked = !b.checked; } finally { if (b.tagName === 'BUTTON' && b.isConnected) b.disabled = false; }
 });
-document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) ACT[e.target.dataset.act](e.target); });
+document.addEventListener('change', e => { if (e.target.tagName === 'SELECT' && ACT[e.target.dataset.act]) try { ACT[e.target.dataset.act](e.target); } catch (err) { fail(err); } });
 document.addEventListener('input', e => {
   const t = e.target, k = t.dataset.k; if (!k || !draft) return;
   if (k === 'adduser') { $('#dbar').hidden = false; return; }
@@ -1986,10 +2402,10 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('submit', async e => {
   const f = e.target, k = f.dataset.form; if (!k) return;
-  e.preventDefault(); const inp = $('input', f), btn = $('button', f); btn.disabled = true;
+  e.preventDefault(); const inp = $('input', f), btn = k === 'notify' ? $('button.pri', f) : $('button', f); btn.disabled = true;
   try {
     if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast(myRate() ? 'Rate saved' : 'Using GitHub-hosted rates'); }
-    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
+    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post('/api/dispatch', { repo: rd.repo, workflow: f.dataset.id || undefined, ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
     else if (k === 'warm') {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), r = pages.repos.r;
       await saveCfg({ ...S.config, warm: ciPut(S.config.warm, r, n || null) }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
@@ -2007,6 +2423,7 @@ document.addEventListener('submit', async e => {
       if (n && (n < 5 || n > 500)) return toast('Cache size must be 5 to 500 GB', true);
       await saveCfg({ ...S.config, repo_cache_gb: ciPut(S.config.repo_cache_gb, r, n || null) }); toast(n ? `Cache size for ${r}: ${n} GB` : `Cache size for ${r}: global ${S.config.cache_gb} GB`);
     }
+    else if (k === 'notify') await ACT.nsave();
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'token') {
       tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();
@@ -2088,6 +2505,23 @@ document.addEventListener('pointerdown', e => {
 });
 addEventListener('scroll', hideTip, true);
 addEventListener('keydown', e => { if (e.key === 'Escape') hideTip(); });
+
+/* ---------- phones: swipe sideways to move between the bottom tabs ---------- */
+// Not from the screen edges (the browser's back gesture), form fields, the canvas host graphs, or anything that scrolls sideways itself.
+const noSwipe = el => { for (; el && el !== document.body; el = el.parentElement) if (el.matches('input,textarea,select,canvas') || (el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(el).overflowX))) return true; return false; };
+let sw = null;
+addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  sw = e.touches.length === 1 && matchMedia('(max-width:719px)').matches && !popEl && !$('dialog[open]') && t.clientX > 24 && t.clientX < innerWidth - 24 && !noSwipe(e.target) ? { x: t.clientX, y: t.clientY, t: e.timeStamp } : null;
+}, { passive: true });
+addEventListener('touchcancel', () => { sw = null; });
+addEventListener('touchend', e => {
+  if (!sw) return; const t = e.changedTouches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y, ok = e.timeStamp - sw.t < 600; sw = null;
+  if (!ok || Math.abs(dx) < 60 || Math.abs(dx) < 2 * Math.abs(dy) || getSelection().toString()) return;
+  const i = NAV.findIndex(n => n[0] === $('#tabs [aria-current]')?.dataset.p), to = NAV[i + (dx < 0 ? 1 : -1)];
+  if (i < 0 || !to) return;
+  swipeDir = dx < 0 ? 1 : -1; location.hash = to[1];
+}, { passive: true });
 
 /* ---------- installable app: service worker + install button ---------- */
 // Service workers need a secure context (HTTPS via tailscale serve, or localhost); over plain http, skip.

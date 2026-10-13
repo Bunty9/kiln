@@ -1,16 +1,22 @@
 mod app_auth;
 mod audit;
 mod confine;
+mod forge;
+#[cfg(test)]
+mod forge_test_mock;
 mod github;
 mod host;
 mod mirror;
+mod notify;
 mod platform;
+mod telemetry;
 mod update;
 mod vm;
 mod web;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -38,6 +44,8 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     /// Tailnet login names allowed to use the dashboard. Empty = only the owner of this machine.
     pub allowed_users: Vec<String>,
+    /// Which finished jobs notify which destinations (see notify.rs).
+    pub notify_rules: Vec<notify::Rule>,
     /// GitHub App mode: accounts (user or org logins) whose installations are served,
     /// besides the App owner's. Empty = the owner's only.
     pub app_accounts: Vec<String>,
@@ -75,6 +83,20 @@ pub struct Config {
     pub auto_update: bool,
     /// "owner/name" whose GitHub releases kiln updates from.
     pub update_repo: String,
+    /// Opt-in daily usage report (see telemetry.rs). None = not asked yet: the dashboard asks.
+    pub usage_stats: Option<bool>,
+    /// Opt-in crash reports (no panic message; see telemetry.rs). None = not asked yet.
+    pub crash_reports: Option<bool>,
+    /// SIGTERM (`systemctl restart`/`stop`): seconds running jobs get to finish before
+    /// their VMs are killed. Must fit the unit's TimeoutStopSec, with ~30 s to spare.
+    pub stop_grace_secs: u64,
+    /// Extra forges (GitLab, Gitea) and their repos. Absent = GitHub only, from `repos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forges: Option<Vec<forge::ForgeCfg>>,
+    /// Top-level keys this version does not know (a newer kiln's, e.g. `forges`). Kept on load
+    /// and written back on save, so a rollback followed by a settings save does not drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl Default for Config {
@@ -92,6 +114,7 @@ impl Default for Config {
             job_timeout_mins: 60,
             idle_timeout_mins: 10,
             allowed_users: vec![],
+            notify_rules: vec![],
             app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
@@ -109,6 +132,11 @@ impl Default for Config {
             warm_recycle_mins: 30,
             auto_update: false,
             update_repo: "Bunty9/kiln".into(),
+            usage_stats: None,
+            crash_reports: None,
+            stop_grace_secs: 25,
+            forges: None,
+            extra: Default::default(),
         }
     }
 }
@@ -121,7 +149,7 @@ impl Config {
     }
 
     fn labels_for(&self, cpus: u32, arm64: bool) -> Vec<String> {
-        let label = github::arch_label(&self.label, arm64);
+        let label = crate::forge::arch_label(&self.label, arm64);
         let arch = if arm64 { "ARM64" } else { "x64" };
         let mut l = vec!["self-hosted".into(), "linux".into(), arch.into(), format!("{label}-{cpus}cpu")];
         if cpus == self.vm_cpus {
@@ -132,7 +160,7 @@ impl Config {
 
     /// What jobs put in `runs-on` for this host's default size: `<label>`, or `<label>-arm64`.
     pub fn job_label(&self) -> String {
-        github::arch_label(&self.label, platform::ARM64)
+        crate::forge::arch_label(&self.label, platform::ARM64)
     }
 
     /// Warm VMs wanted for `repo` at size `cpus`: default size only, none while paused.
@@ -149,11 +177,7 @@ impl Config {
     }
 
     pub fn mem_mb(&self, cpus: u32) -> u32 {
-        if cpus == self.vm_cpus {
-            self.vm_mem_mb
-        } else {
-            self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| github::size_mem_mb(cpus))
-        }
+        if cpus == self.vm_cpus { self.vm_mem_mb } else { self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| forge::size_mem_mb(cpus)) }
     }
 
     /// Cache disk size of `repo`: its `repo_cache_gb` entry, else `cache_gb`.
@@ -176,6 +200,7 @@ impl Config {
                 bail!("repo must look like owner/name: {r:?}");
             }
         }
+        forge::validate(&self.forges, &self.repos)?;
         if !valid_repo(&self.update_repo) {
             bail!("update_repo must look like owner/name: {:?}", self.update_repo);
         }
@@ -219,6 +244,30 @@ impl Config {
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
         }
+        if self.notify_rules.len() > 50 {
+            bail!("notify_rules: at most 50");
+        }
+        let wf_ok = |w: &str| {
+            w == "*"
+                || (w.len() <= 100
+                    && (w.ends_with(".yml") || w.ends_with(".yaml"))
+                    && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+        };
+        for r in &self.notify_rules {
+            // Membership in the served repos is checked in web::set_config (App mode learns them at runtime).
+            if r.repo != "*" && !valid_repo(&r.repo) {
+                bail!("notify_rules: repo must be \"*\" or look like owner/name: {:?}", r.repo);
+            }
+            if !wf_ok(&r.workflow) {
+                bail!("notify_rules: workflow must be \"*\" or a file name like release.yml: {:?}", r.workflow);
+            }
+            if !["success", "failure", "any"].contains(&r.outcome.as_str()) {
+                bail!("notify_rules: outcome must be success, failure or any");
+            }
+            if r.to.is_empty() || r.to.len() > 20 || !r.to.iter().all(|t| t.len() == 8 && t.bytes().all(|b| b.is_ascii_hexdigit())) {
+                bail!("notify_rules: each rule needs 1 to 20 destinations");
+            }
+        }
         if self.debug_hold_mins > 120 {
             bail!("debug_hold_mins must be 0..=120 (0 = off)");
         }
@@ -242,6 +291,9 @@ impl Config {
         }
         if !(5..=1440).contains(&self.warm_recycle_mins) {
             bail!("warm_recycle_mins must be 5..=1440");
+        }
+        if self.stop_grace_secs > 570 {
+            bail!("stop_grace_secs must be 0..=570 (kiln.service's TimeoutStopSec=600 minus ~30 s of cleanup)");
         }
         if !["open", "filtered"].contains(&self.egress.as_str()) {
             bail!("egress must be \"open\" or \"filtered\"");
@@ -294,6 +346,18 @@ pub struct PollStatus {
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
+    /// Every launch blocker active this tick, (kind, message), in priority order.
+    pub health: Vec<(String, String)>,
+}
+
+/// How a forge is named in messages: "GitHub", else its id.
+fn forge_name(id: &forge::ForgeId) -> String {
+    if id.as_str() == "github" { "GitHub".into() } else { id.as_str().into() }
+}
+
+/// The `PollStatus.blocked_kind` of a forge's registration backoff.
+fn api_kind(id: &forge::ForgeId) -> &'static str {
+    if id.as_str() == "github" { "github_api" } else { "forge_api" }
 }
 
 /// Pause after the n-th consecutive GitHub-wide registration failure: 1, 2, 5, then 10 min.
@@ -346,13 +410,14 @@ impl ApiBackoff {
     }
 
     /// The Overview banner (`PollStatus.blocked`) until a mint succeeds again.
-    pub fn banner(&self, t: u64) -> Option<String> {
+    /// `who` names the forge ("GitHub" for GitHub, else its id).
+    pub fn banner(&self, t: u64, who: &str) -> Option<String> {
         if self.fails == 0 {
             return None;
         }
         let what = match self.status {
-            Some(s) => format!("GitHub is rejecting runner registration (HTTP {s})"),
-            None => "GitHub is unreachable for runner registration".into(),
+            Some(s) => format!("{who} is rejecting runner registration (HTTP {s})"),
+            None => format!("{who} is unreachable for runner registration"),
         };
         Some(if self.held(t) {
             format!("{what} — launches paused, retrying in {} min", (self.retry_at - t).div_ceil(60))
@@ -365,7 +430,8 @@ impl ApiBackoff {
 pub struct App {
     pub data: PathBuf,
     pub cfg: RwLock<Config>,
-    pub gh: github::Gh,
+    pub gh: Arc<github::Gh>,
+    pub forges: forge::Forges,
     pub vms: Mutex<Vec<vm::Vm>>,
     pub kills: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
     /// "Release now" for held VMs.
@@ -378,17 +444,56 @@ pub struct App {
     pub stopping: AtomicBool,
     /// repo -> (consecutive launch failures, retry_at unix time).
     pub backoff: Mutex<HashMap<String, (u32, u64)>>,
-    /// GitHub-wide registration failures: hold every launch.
-    pub api_backoff: Mutex<ApiBackoff>,
+    /// Per forge: registration failures that hold every launch on it.
+    pub api_backoff: Mutex<HashMap<forge::ForgeId, ApiBackoff>>,
     pub mirror: Mutex<mirror::Status>,
     /// One-time states of GitHub App manifest flows in progress.
     pub app_states: Mutex<app_auth::States>,
-    /// An update is draining: launch nothing (warm included), reap idle VMs.
+    /// An update, restart or stop is draining: launch nothing (warm included), reap idle VMs.
     pub draining: AtomicBool,
     pub update: Mutex<update::Status>,
+    /// Outbound webhook notifications (destinations, queues, delivery status).
+    pub notify: notify::Hub,
 }
 
 impl App {
+    /// An App on a unique temp data dir (parallel tests each get their own).
+    #[cfg(test)]
+    pub fn for_tests() -> Arc<App> {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("kiln-test-app-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Arc::new(App::new(d, Config::default(), github::Gh::new(String::new(), "none")))
+    }
+
+    fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
+        let gh = Arc::new(gh);
+        let forges = forge::Forges::default();
+        forges.sync(&forge::effective(&cfg.forges, &cfg.repos), &gh);
+        App {
+            gh,
+            forges,
+            cfg: RwLock::new(cfg),
+            vms: Mutex::default(),
+            kills: Mutex::default(),
+            releases: Mutex::default(),
+            committing: Mutex::default(),
+            poll: Mutex::default(),
+            baking: Default::default(),
+            stopping: Default::default(),
+            backoff: Default::default(),
+            api_backoff: Default::default(),
+            mirror: Default::default(),
+            app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
+            draining: Default::default(),
+            update: Mutex::new(update::Status::load(&data)),
+            notify: Default::default(),
+            data,
+        }
+    }
+
     pub fn cfg(&self) -> Config {
         self.cfg.read().unwrap().clone()
     }
@@ -396,10 +501,12 @@ impl App {
     pub fn save_cfg(&self, c: Config) -> Result<()> {
         c.validate()?;
         *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
+        self.forges.sync(&forge::effective(&c.forges, &c.repos), &self.gh);
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;
         std::fs::rename(&tmp, &path)?;
+        telemetry::apply(&self.data, &c);
         *w = c;
         Ok(())
     }
@@ -500,6 +607,8 @@ async fn run() -> Result<()> {
             .with_context(|| format!("chmod 0700 {}", data.display()))?;
     }
     let cfg = load_config(&data)?;
+    telemetry::apply(&data, &cfg);
+    telemetry::install_hook(&data);
     let (token, source) = load_token(&data, false);
     let gh = github::Gh::new(token, source);
     *gh.app_accounts.write().unwrap() = cfg.app_accounts.clone();
@@ -508,24 +617,7 @@ async fn run() -> Result<()> {
         Some(Err(e)) => tracing::error!("GitHub App configured but unusable, using token auth: {e:#}"),
         None => {}
     }
-    let app = Arc::new(App {
-        gh,
-        cfg: RwLock::new(cfg),
-        vms: Mutex::default(),
-        kills: Mutex::default(),
-        releases: Mutex::default(),
-        committing: Mutex::default(),
-        poll: Mutex::default(),
-        baking: Default::default(),
-        stopping: Default::default(),
-        backoff: Default::default(),
-        api_backoff: Default::default(),
-        mirror: Default::default(),
-        app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
-        draining: Default::default(),
-        update: Mutex::new(update::Status::load(&data)),
-        data,
-    });
+    let app = Arc::new(App::new(data, cfg, gh));
 
     match std::env::args().nth(1).as_deref() {
         Some("bake") => vm::bake(app).await,
@@ -546,6 +638,10 @@ async fn run() -> Result<()> {
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
+            notify::start(&app);
+            for v in vm::take_newly_lost() {
+                notify::job_ended(&app, &v);
+            }
             let (ok, d) = confine::probe();
             confine::ENFORCED.store(ok && !platform::MACOS, std::sync::atomic::Ordering::Relaxed);
             match ok {
@@ -560,12 +656,23 @@ async fn run() -> Result<()> {
                     }
                 });
             }
+            if std::env::var_os("INVOCATION_ID").is_some() {
+                let t = unit_stop_timeout().await;
+                let _ = UNIT_STOP_TIMEOUT.set(t);
+                if let Some(p) = unit_timeout_problem(app.cfg().stop_grace_secs, t) {
+                    tracing::warn!("{p}");
+                }
+            }
             tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
+            tokio::spawn(telemetry::supervise(app.clone()));
+            // In its own task: the dashboard keeps serving while a stop drains.
+            let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
-                r = web::serve(app.clone()) => r,
+                r = web => r?,
                 _ = stop_signal() => {
+                    stop_drain(&app).await;
                     shutdown(&app).await;
                     Ok(())
                 }
@@ -611,6 +718,105 @@ async fn stop_signal() {
     }
 }
 
+/// VMs the stop drain waits for. Held VMs are not (they keep a finished job for
+/// debugging); waiting ones are reaped by the draining scheduler meanwhile.
+pub fn stop_waits_for(s: vm::State) -> bool {
+    s.is_active() && s != vm::State::Held
+}
+
+/// kiln.service's TimeoutStopSec in seconds, read at startup when systemd runs kiln.
+static UNIT_STOP_TIMEOUT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+/// What kiln needs after the stop grace: kill VMs, deregister runners, exit.
+const STOP_CLEANUP_SECS: u64 = 25;
+
+/// The stop grace that still leaves cleanup time before systemd SIGKILLs kiln.
+fn clamp_grace(grace: u64, unit_timeout: Option<u64>) -> u64 {
+    unit_timeout.map_or(grace, |t| grace.min(t.saturating_sub(STOP_CLEANUP_SECS)))
+}
+
+/// A systemd timespan ("30s", "1min 30s", "infinity") in whole seconds.
+fn parse_timespan(s: &str) -> Option<u64> {
+    if s == "infinity" {
+        return Some(u64::MAX);
+    }
+    let mut us: u64 = 0;
+    for part in s.split_whitespace() {
+        let i = part.find(|c: char| !c.is_ascii_digit())?;
+        let n: u64 = part[..i].parse().ok()?;
+        let unit = match &part[i..] {
+            "us" => 1,
+            "ms" => 1_000,
+            "s" => 1_000_000,
+            "min" => 60_000_000,
+            "h" => 3_600_000_000,
+            "d" => 86_400_000_000,
+            "w" => 604_800_000_000,
+            _ => return None,
+        };
+        us = us.checked_add(n.checked_mul(unit)?)?;
+    }
+    (!s.trim().is_empty()).then_some(us / 1_000_000)
+}
+
+/// TimeoutStopUSec from `systemctl show -p LoadState -p TimeoutStopUSec`, if the unit exists.
+fn unit_timeout(show: &str) -> Option<u64> {
+    let prop = |k: &str| show.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('='));
+    prop("LoadState").filter(|s| *s == "loaded")?;
+    parse_timespan(prop("TimeoutStopUSec")?)
+}
+
+/// kiln.service's (user unit) stop timeout in seconds; None without systemd or the unit.
+pub async fn unit_stop_timeout() -> Option<u64> {
+    let args = ["--user", "show", "-p", "LoadState", "-p", "TimeoutStopUSec", "kiln"];
+    let o = web::bounded("systemctl", &args, Duration::from_secs(5)).await.ok().filter(|o| o.status.success())?;
+    unit_timeout(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// Doctor and startup: a unit timeout too short for `grace` (an old 30 s unit).
+pub fn unit_timeout_problem(grace: u64, unit_timeout: Option<u64>) -> Option<String> {
+    let t = unit_timeout?;
+    (clamp_grace(grace, Some(t)) < grace).then(|| {
+        format!(
+            "kiln.service TimeoutStopSec={t}s is shorter than stop_grace_secs ({grace} s) + {STOP_CLEANUP_SECS} s cleanup, so stops wait only {} s: reinstall the unit (see docs/configuration.md)",
+            clamp_grace(grace, Some(t))
+        )
+    })
+}
+
+/// After the first SIGTERM/SIGINT: launch nothing (idle VMs are reaped) and give running
+/// jobs up to `stop_grace_secs` to finish. A second signal ends the wait.
+async fn stop_drain(app: &Arc<App>) {
+    update::stopping(app);
+    app.draining.store(true, Ordering::SeqCst);
+    let grace = clamp_grace(app.cfg().stop_grace_secs, UNIT_STOP_TIMEOUT.get().copied().flatten());
+    let deadline = now() + grace;
+    let again = stop_signal();
+    tokio::pin!(again);
+    let mut logged = 0;
+    loop {
+        let running = app.vms.lock().unwrap().iter().filter(|v| stop_waits_for(v.state)).count();
+        if running == 0 || now() >= deadline {
+            if running > 0 {
+                tracing::warn!("stop grace ({grace} s) is over: killing {running} running VM(s)");
+            }
+            return;
+        }
+        let p = format!("waiting for {running} running VM{} (at most {} s more)", if running == 1 { "" } else { "s" }, deadline - now());
+        if now() >= logged + 5 {
+            logged = now();
+            tracing::info!("stopping: {p}; signal again to stop now");
+        }
+        update::stop_progress(app, p);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = &mut again => {
+                tracing::warn!("second stop signal: killing {running} running VM(s) now");
+                return;
+            }
+        }
+    }
+}
+
 /// Stop launching, kill every VM and wait (<= 20s) for each one's cleanup in
 /// `vm::launch`: delete disk and JIT secret, deregister the runner, persist.
 async fn shutdown(app: &Arc<App>) {
@@ -631,6 +837,7 @@ async fn shutdown(app: &Arc<App>) {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    notify::flush(app).await;
 }
 
 /// Seconds between App discoveries: 30 while it serves no repo or has never discovered
@@ -664,9 +871,12 @@ async fn refresh_app(app: &Arc<App>) {
 async fn scheduler(app: Arc<App>) {
     refresh_app(&app).await;
     // Runners a crashed kiln left registered (offline) would otherwise linger for a day.
-    if app.gh.has_token() {
-        for repo in &app.repos() {
-            match app.gh.sweep_runners(repo).await {
+    let cfg = app.cfg();
+    let cfgs = forge::effective(&cfg.forges, &cfg.repos);
+    for f in app.forges.all().iter().filter(|f| f.has_credential()) {
+        for rr in cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default() {
+            let repo = rr.key();
+            match f.sweep(&rr).await {
                 Ok(n) if n > 0 => tracing::info!("{repo}: removed {n} stale runner(s)"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("{repo}: runner sweep: {e:#}"),
@@ -688,9 +898,51 @@ async fn scheduler(app: Arc<App>) {
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
-        let rate = app.gh.rate();
-        tokio::time::sleep(Duration::from_secs(poll_sleep(cfg.poll_secs, rate))).await;
+        let (health, poll_error) = {
+            let p = app.poll.lock().unwrap();
+            (p.health.clone(), p.error.clone())
+        };
+        let load_error = app.notify.load_error.lock().unwrap().clone();
+        let problems = health_list(
+            &health,
+            poll_error.as_deref(),
+            confine::ENFORCED.load(Ordering::Relaxed),
+            load_error.as_deref(),
+            &notify::failing(&app),
+        );
+        notify::health(&app, problems, now());
+        // The slowest-needing forge sets the pace for all (per-forge polling is a follow-up).
+        let sleep =
+            app.forges.all().iter().map(|f| poll_sleep(cfg.poll_secs, f.rate())).max().unwrap_or_else(|| poll_sleep(cfg.poll_secs, None));
+        tokio::time::sleep(Duration::from_secs(sleep)).await;
     }
+}
+
+/// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
+/// instead of replacing them. "draining" is left out: health state is in memory, so a restart
+/// would orphan its raise with no clear.
+fn health_list(
+    health: &[(String, String)],
+    poll_error: Option<&str>,
+    landlock: bool,
+    load_error: Option<&str>,
+    failing: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut l: Vec<_> = health.iter().filter(|h| h.0 != "draining").cloned().collect();
+    if let Some(e) = poll_error {
+        l.push(("poll".into(), e.into()));
+    }
+    if !landlock {
+        l.push(("landlock".into(), "job VMs' QEMU runs unconfined: this kernel has no Landlock".into()));
+    }
+    if let Some(e) = load_error {
+        l.push(("notify_failing".into(), e.into()));
+    }
+    if !failing.is_empty() {
+        let f = failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ");
+        l.push(("notify_failing".into(), format!("notifications failing: {f}")));
+    }
+    l
 }
 
 /// Seconds to wait between ticks. in_progress runs of hosted runners keep
@@ -768,16 +1020,17 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     static TICK: AtomicUsize = AtomicUsize::new(0);
     reload_token(app).await;
     refresh_app(app).await;
-    if !app.gh.has_token() {
-        bail!("no GitHub token: set one in the dashboard, export KILN_GITHUB_TOKEN, or `gh auth login`");
-    }
-    if let Some(t) = app.gh.paused_until() {
-        bail!("GitHub rate limit: paused until {t}");
+    // A forge with no credential or rate-limited skips its repos; when none can poll the tick fails.
+    let (live, down): (Vec<_>, Vec<_>) = app.forges.all().into_iter().partition(|f| f.health().is_none());
+    if live.is_empty() && !down.is_empty() {
+        bail!(down.iter().filter_map(|f| f.health()).collect::<Vec<_>>().join("; "));
     }
     if !vm::image_ready(&app.data) {
         bail!("base image not baked yet: run `kiln bake` or use the dashboard");
     }
-    app.gh.refresh_latest().await;
+    for f in &live {
+        f.refresh().await;
+    }
     // Launching during a bake is fine: new VMs use the old base until the atomic swap.
     auto_rebake(app, cfg);
     let (mem_avail, disk) = (platform::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
@@ -789,17 +1042,46 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     // An image from an older recipe may lack the job hooks (fork refusal, cold release builds): launch nothing, warm included.
     let old_image = !vm::image_recipe_ok(&vm::image_info(&app.data, None, cfg));
     let draining = app.draining.load(Ordering::SeqCst);
-    let api = app.api_backoff.lock().unwrap().clone();
-    // A launch still minting is the probe of this backoff step.
-    let mut probing = api.fails > 0 && app.vms.lock().unwrap().iter().any(|v| v.state == vm::State::Booting && v.runner_id.is_none());
+    let apis = app.api_backoff.lock().unwrap().clone();
+    // A launch still minting is the probe of its forge's backoff step.
+    let mut probing: std::collections::HashSet<forge::ForgeId> = {
+        let vms = app.vms.lock().unwrap();
+        vms.iter()
+            .filter(|v| v.state == vm::State::Booting && v.runner_id.is_none())
+            .map(|v| forge::RepoRef::parse(&v.repo).map_or_else(|_| forge::ForgeId::github(), |r| r.forge))
+            .filter(|id| apis.get(id).is_some_and(|a| a.fails > 0))
+            .collect()
+    };
     let mut any_queued = false;
     let gated = |g: Option<String>| g.map(|m| (gate_kind(&m), m));
-    let mut blocked = draining
-        .then(|| ("draining", "draining for a kiln update: running jobs finish, then kiln restarts".to_string()))
-        .or_else(|| old_image.then(|| ("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string())))
-        .or_else(|| api.banner(now()).filter(|_| api.held(now())).map(|m| ("github_api", m)))
-        .or_else(|| egress_err.as_ref().map(|e| ("egress", format!("egress filtering unavailable: {e}"))))
-        .or_else(|| gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)));
+    let mut problems: Vec<(&str, String)> = vec![];
+    if draining {
+        problems.push(("draining", "draining: running jobs finish, then kiln restarts or stops".to_string()));
+    }
+    if old_image {
+        problems.push(("old_image", "base image predates kiln's current job hooks: rebake (Settings › Image)".to_string()));
+    }
+    for f in &down {
+        problems.push(("forge", format!("{}: {}", forge_name(&f.id()), f.health().unwrap_or_default())));
+    }
+    let cfgs = forge::effective(&cfg.forges, &cfg.repos);
+    for c in cfgs.iter().filter(|c| app.forges.get(&c.id).is_none()) {
+        problems.push(("forge", format!("forge {}: {:?} is not yet supported", c.id.as_str(), c.kind)));
+    }
+    let mut ids: Vec<_> = apis.keys().collect();
+    ids.sort_by_key(|id| id.as_str());
+    for id in ids {
+        if let Some(m) = apis[id].banner(now(), &forge_name(id)).filter(|_| apis[id].held(now())) {
+            problems.push((api_kind(id), m));
+        }
+    }
+    if let Some(e) = egress_err.as_ref() {
+        problems.push(("egress", format!("egress filtering unavailable: {e}")));
+    }
+    if let Some(g) = gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)) {
+        problems.push(g);
+    }
+    let mut blocked = problems.first().cloned();
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
@@ -814,23 +1096,33 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     // Queued jobs this tick that found every slot taken while holds take some.
     let mut waiting_on_holds = 0;
     // Rotate the start so the first repo doesn't always win scarce slots.
-    let repos = app.repos();
+    let repos: Vec<_> = live
+        .iter()
+        .flat_map(|f| {
+            let rs = cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default();
+            rs.into_iter().map(|r| (f.clone(), r))
+        })
+        .collect();
     let start = TICK.fetch_add(1, Ordering::Relaxed) % repos.len().max(1);
-    for repo in repos.iter().cycle().skip(start).take(repos.len()) {
+    for (forge, rr) in repos.iter().cycle().skip(start).take(repos.len()) {
+        let repo = &rr.key();
+        let api = apis.get(&forge.id()).cloned().unwrap_or_default();
+        let probing = &mut probing;
         // App mode: only the repos of a rate-limited installation wait.
-        if let Some(m) = app.gh.repo_paused(repo) {
+        if let Some(m) = forge.repo_paused(rr) {
             errors.push(format!("{repo}: {m}"));
             repo_errors.insert(repo.clone(), m);
             continue;
         }
-        let (by_size, runners, forks) = match app.gh.queued_jobs(repo, &cfg.label, cfg.vm_cpus).await {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(format!("{repo}: {e:#}"));
-                repo_errors.insert(repo.clone(), format!("{e:#}"));
-                continue;
-            }
-        };
+        let (by_size, runners, forks) =
+            match forge.demand(rr, &cfg.label, cfg.vm_cpus).await.map(|d| (d.by_size, d.claimed, d.refused_forks)) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(format!("{repo}: {e:#}"));
+                    repo_errors.insert(repo.clone(), format!("{e:#}"));
+                    continue;
+                }
+            };
         if forks > 0 {
             refused_forks.insert(repo.clone(), forks);
         }
@@ -874,8 +1166,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 warm = 0;
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
-            let want = api.allow(now(), want, probing);
-            probing |= want > 0;
+            let want = api.allow(now(), want, probing.contains(&forge.id()));
+            if want > 0 {
+                probing.insert(forge.id());
+            }
             // A debug hold must not keep a queued job waiting: end the oldest, one per waiting job.
             // Not while GitHub is refusing runner registration: the freed slot couldn't be used.
             if let (false, Some(m)) = (held || api.fails > 0, held_block(demand, cfg.max_vms, active, holds)) {
@@ -898,12 +1192,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     }
     // Pause over: the banner stays only while a job waits on the probe, not indefinitely.
     if blocked.is_none() && any_queued {
-        blocked = api.banner(now()).map(|m| ("github_api", m));
+        let mut ids: Vec<_> = apis.keys().collect();
+        ids.sort_by_key(|id| id.as_str());
+        blocked = ids.into_iter().find_map(|id| apis[id].banner(now(), &forge_name(id)).map(|m| (api_kind(id), m)));
     }
     {
         let mut p = app.poll.lock().unwrap();
         p.repo_errors = repo_errors;
         p.refused_forks = refused_forks;
+        p.health = problems.iter().map(|(k, m)| (k.to_string(), m.clone())).collect();
         p.blocked_kind = blocked.as_ref().map(|b| b.0.to_string());
         p.blocked = blocked.map(|b| b.1);
     }
@@ -913,44 +1210,236 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     Ok(queued_by_repo)
 }
 
-/// Copy job page and queue time onto the VM whose runner picked the job up.
+/// Copy job page, queue time and run (branch, commit, PR) onto the VM whose runner picked the job up.
+/// A VM binds to the first job id it is seen with; a second, different id means the runner took a
+/// job it was not minted for: the VM is killed and its cache overlay discarded (trust follows the
+/// job that ran, never a later one).
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, (String, u64, bool)>) {
-    for (id, _) in runners.iter().filter(|(_, r)| r.2) {
-        let hit = app.vms.lock().unwrap().iter_mut().find(|v| &v.id == id && v.state.is_active()).map(|v| {
-            v.note = Some("refused: pull request from a fork".into());
-        });
-        if hit.is_some()
-            && let Some(k) = app.kills.lock().unwrap().get(id)
-        {
-            k.notify_one();
-        }
-    }
+fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
+    let mut kill = vec![];
     let changed: Vec<vm::Vm> = app
         .vms
         .lock()
         .unwrap()
         .iter_mut()
         .filter_map(|v| {
-            let (url, at, _) = runners.get(&v.id)?;
-            if v.job_url.as_deref() == Some(url) && v.queued_at == Some(*at) {
+            let job = runners.get(&v.id)?;
+            if v.job_id.as_deref().is_some_and(|id| id != job.id) {
+                if v.cache == vm::CacheUse::Read {
+                    v.cache = vm::CacheUse::Discarded;
+                    v.cache_note = Some("cache not saved: a second job reached this runner".into());
+                }
+                if !v.state.is_active() {
+                    return None;
+                }
+                v.note = Some("killed: a second job reached this runner".into());
+                kill.push(v.id.clone());
+                return Some(v.clone());
+            }
+            if job.fork && v.state.is_active() {
+                v.note = Some("refused: pull request from a fork".into());
+                kill.push(v.id.clone());
+            }
+            if v.job_id.as_deref() == Some(&job.id)
+                && v.job_url.as_deref() == Some(&job.url)
+                && v.queued_at == Some(job.queued_at)
+                && v.run.as_ref() == Some(&job.run)
+                && v.fork == job.fork
+            {
                 return None;
             }
-            v.job_url = Some(url.clone());
-            v.queued_at = Some(*at);
+            v.fork = job.fork;
+            v.job_id = Some(job.id.clone());
+            v.job_url = Some(job.url.clone());
+            v.queued_at = Some(job.queued_at);
+            v.run = Some(job.run.clone());
             Some(v.clone())
         })
         .collect();
+    for id in kill {
+        if let Some(k) = app.kills.lock().unwrap().get(&id) {
+            k.notify_one();
+        }
+    }
     for v in &changed {
         vm::persist(app, v);
     }
 }
 
+/// An App on a fresh temp data dir, listening (if ever) on an ephemeral loopback port.
+#[cfg(test)]
+pub fn test_app(name: &str) -> Arc<App> {
+    let data = std::env::temp_dir().join(format!("kiln-test-app-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(data.join("update")).unwrap();
+    let cfg = Config { listen: "127.0.0.1:0".into(), ..Config::default() };
+    Arc::new(App::new(data, cfg, github::Gh::new(String::new(), "none")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_jobs_marks_fork_vms() {
+        let app = test_app("attach-fork");
+        let mut v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v.clone());
+        v.id = "kiln-5-1".into();
+        app.vms.lock().unwrap().push(v);
+        let r = |fork| forge::JobInfo {
+            id: "2".into(),
+            url: "https://github.com/acme/kiln/actions/runs/1/job/2".to_string(),
+            queued_at: 1,
+            fork,
+            run: vm::Run::default(),
+        };
+        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
+        let vms = app.vms.lock().unwrap();
+        assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
+        assert!(!vms[1].fork && vms[1].note.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_job_id_discards_the_cache_overlay_and_kills_the_vm() {
+        let app = test_app("attach-second-id");
+        let v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read"
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-5-0".into(), kill.clone());
+        let job = |id: &str| forge::JobInfo {
+            id: id.into(),
+            url: format!("https://github.com/acme/kiln/actions/runs/1/job/{id}"),
+            queued_at: 1,
+            fork: false,
+            run: vm::Run::default(),
+        };
+        let attach = |id: &str| attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job(id))]));
+        // The first id binds; repeating it changes nothing.
+        attach("2");
+        attach("2");
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id.as_deref(), v.cache, v.note.as_deref()), (Some("2"), vm::CacheUse::Read, None));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
+        // A second id: the binding and job page stay, the overlay is discarded, the VM is killed.
+        attach("3");
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id.as_deref(), v.cache), (Some("2"), vm::CacheUse::Discarded));
+        assert_eq!(v.job_url.as_deref(), Some("https://github.com/acme/kiln/actions/runs/1/job/2"));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_tick_of_polling_fills_vm_fields() {
+        // queued_jobs against the mock forge, then attach_jobs: what the dashboard shows per VM.
+        let m = forge_test_mock::Mock::github().await;
+        let app = forge_test_mock::app("attach-tick", &m, Config::default());
+        let rec = |id: &str| -> vm::Vm {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "repo": "acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": null, "note": null
+            }))
+            .unwrap()
+        };
+        for id in ["kiln-7-0", "kiln-9-0", "kiln-8-0"] {
+            std::fs::create_dir_all(app.data.join("vms").join(id)).unwrap();
+            app.vms.lock().unwrap().push(rec(id));
+        }
+        let (by_size, runners, forks) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        assert_eq!((by_size.len(), forks), (2, 1));
+        attach_jobs(&app, &runners);
+        let vms = app.vms.lock().unwrap().clone();
+        let by = |id: &str| vms.iter().find(|v| v.id == id).unwrap().clone();
+        let ok = by("kiln-7-0");
+        assert_eq!(ok.job_url.as_deref(), Some("https://github.com/acme/demo/actions/runs/1004/job/5201"));
+        assert_eq!(ok.queued_at, Some(github::parse_rfc3339("2026-10-11T09:00:00Z").unwrap()));
+        let run = ok.run.as_ref().unwrap();
+        assert_eq!(
+            (run.branch.as_str(), run.pr, run.event.as_str(), run.workflow.as_str(), run.number),
+            ("fix-login", Some(7), "pull_request", "Release", 43)
+        );
+        assert!(!ok.fork && ok.note.is_none());
+        // The fork PR job that reached our runner anyway is flagged (and its VM killed by the caller's kill handle).
+        let fork = by("kiln-9-0");
+        assert!(fork.fork && fork.note.as_deref() == Some("refused: pull request from a fork"));
+        assert_eq!(fork.run.as_ref().unwrap().number, 42);
+        // A runner GitHub does not list yet is untouched.
+        assert!(by("kiln-8-0").run.is_none() && by("kiln-8-0").job_url.is_none());
+        // Persisted for the next start.
+        let meta: vm::Vm = serde_json::from_slice(&std::fs::read(app.data.join("vms/kiln-7-0/meta.json")).unwrap()).unwrap();
+        assert_eq!(meta.run, ok.run);
+        // Unchanged input writes nothing new.
+        std::fs::remove_file(app.data.join("vms/kiln-7-0/meta.json")).unwrap();
+        attach_jobs(&app, &runners);
+        assert!(!app.data.join("vms/kiln-7-0/meta.json").exists());
+    }
+
+    #[test]
+    fn config_json_golden() {
+        // The defaults as saved to config.json (App::save_cfg writes pretty JSON).
+        let text = serde_json::to_string_pretty(&Config::default()).unwrap();
+        forge_test_mock::golden("config.json", &text);
+        // Loading it back changes nothing, and so does a hand-written minimal file plus a save.
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(serde_json::to_string_pretty(&back).unwrap(), text);
+        let min: Config = serde_json::from_str(r#"{"repos":["acme/demo"]}"#).unwrap();
+        let mut want: serde_json::Value = serde_json::from_str(&text).unwrap();
+        want["repos"] = serde_json::json!(["acme/demo"]);
+        assert_eq!(serde_json::to_value(&min).unwrap(), want);
+    }
+
+    #[test]
+    fn notify_rules_validate() {
+        let mut c = Config { repos: vec!["acme/kiln".into()], ..Default::default() };
+        let rule = |repo: &str, wf: &str, oc: &str, to: Vec<&str>| notify::Rule {
+            repo: repo.into(),
+            workflow: wf.into(),
+            outcome: oc.into(),
+            to: to.into_iter().map(String::from).collect(),
+        };
+        c.notify_rules = vec![rule("acme/kiln", "release.yml", "any", vec!["a1b2c3d4"]), rule("*", "*", "failure", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_ok());
+        for bad in [
+            rule("not a repo", "*", "any", vec!["a1b2c3d4"]),
+            rule("*", "../x.yml", "any", vec!["a1b2c3d4"]),
+            rule("*", "release.txt", "any", vec!["a1b2c3d4"]),
+            rule("*", "*", "sometimes", vec!["a1b2c3d4"]),
+            rule("*", "*", "any", vec![]),
+            rule("*", "*", "any", vec!["NOT-HEX!"]),
+        ] {
+            c.notify_rules = vec![bad.clone()];
+            assert!(c.validate_for(8).is_err(), "{bad:?}");
+        }
+        c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
+        assert!(c.validate_for(8).is_err(), "at most 50");
+    }
+
+    #[test]
+    fn config_unknown_keys_survive_load_and_save() {
+        // A newer kiln's keys (rollback safety) survive a load and a settings save; integer map keys still parse.
+        let app = App::for_tests();
+        let path = app.data.join("config.json");
+        let src = r#"{"egress":"filtered","size_mem_mb":{"2":4096},"forges":[{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}],"future":true}"#;
+        std::fs::write(&path, src).unwrap();
+        let c = load_config(&app.data).unwrap();
+        assert_eq!((c.egress.as_str(), c.size_mem_mb.get(&2)), ("filtered", Some(&4096)));
+        app.save_cfg(c).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["forges"], serde_json::json!([{"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.com"}]));
+        assert_eq!(saved["future"], true);
+        assert_eq!(saved["size_mem_mb"], serde_json::json!({"2": 4096}));
+        assert_eq!(Config::default().extra.len(), 0);
+    }
 
     #[test]
     fn config_load_fails_closed() {
@@ -973,6 +1462,16 @@ mod tests {
         std::fs::create_dir(d.join("config.json")).unwrap();
         assert!(load_config(&d).is_err(), "unreadable is not missing");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn health_list_composition() {
+        let h = |k: &str| (k.to_string(), "m".to_string());
+        let base = [h("disk"), h("draining")];
+        let kinds = |l: Vec<(String, String)>| l.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        assert_eq!(kinds(health_list(&base, Some("x"), true, None, &[])), ["disk", "poll"]);
+        assert_eq!(kinds(health_list(&[], None, false, None, &[])), ["landlock"]);
+        assert_eq!(kinds(health_list(&[], None, true, Some("bad"), &[h("d1")])), ["notify_failing", "notify_failing"]);
     }
 
     #[test]
@@ -1200,9 +1699,10 @@ mod tests {
 
     #[test]
     fn github_wide_backoff() {
+        // The banner now takes the forge's name; GitHub's text is word for word what it was.
         assert_eq!([1, 2, 3, 4, 9].map(api_backoff_secs), [60, 120, 300, 600, 600]);
         let mut b = ApiBackoff::default();
-        assert!(!b.held(0) && b.banner(0).is_none());
+        assert!(!b.held(0) && b.banner(0, "GitHub").is_none());
         // First failure: pause 1 min, and say so once.
         assert!(b.fail(Some(500), 1000));
         assert!(b.held(1059) && !b.held(1060));
@@ -1210,7 +1710,7 @@ mod tests {
         assert!(!b.fail(Some(500), 1001));
         assert_eq!((b.fails, b.retry_at), (1, 1060));
         assert_eq!(
-            b.banner(1000).as_deref(),
+            b.banner(1000, "GitHub").as_deref(),
             Some("GitHub is rejecting runner registration (HTTP 500) — launches paused, retrying in 1 min")
         );
         // Each retry that fails again escalates: 2, 5, then 10 min, capped.
@@ -1218,12 +1718,40 @@ mod tests {
         assert_eq!(b.retry_at, 1180);
         assert!(b.fail(Some(500), 1180) && b.fail(None, 1480) && b.fail(None, 2080));
         assert_eq!((b.fails, b.retry_at), (5, 2680));
-        assert_eq!(b.banner(2081).as_deref(), Some("GitHub is unreachable for runner registration — launches paused, retrying in 10 min"));
+        assert_eq!(
+            b.banner(2081, "GitHub").as_deref(),
+            Some("GitHub is unreachable for runner registration — launches paused, retrying in 10 min")
+        );
         // Pause over, no new launch yet: still not healthy, but not paused either.
-        assert_eq!(b.banner(2680).as_deref(), Some("GitHub is unreachable for runner registration — retrying with the next launch"));
+        assert_eq!(
+            b.banner(2680, "GitHub").as_deref(),
+            Some("GitHub is unreachable for runner registration — retrying with the next launch")
+        );
         // The first successful mint clears it.
         b = ApiBackoff::default();
-        assert!(!b.held(2680) && b.banner(2680).is_none());
+        assert!(!b.held(2680) && b.banner(2680, "GitHub").is_none());
+    }
+
+    #[test]
+    fn settings_save_keeps_unchanged_forges() {
+        let app = App::for_tests();
+        let before = app.forges.get(&forge::ForgeId::github()).unwrap();
+        let mut c = app.cfg();
+        c.repos = vec!["acme/demo".into()];
+        c.forges = Some(vec![
+            serde_json::from_str(r#"{"id":"github","kind":"github"}"#).unwrap(),
+            serde_json::from_str(r#"{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com"}"#).unwrap(),
+        ]);
+        app.save_cfg(c).unwrap();
+        // Same client (ETags, rate limits, App tokens) after a save that changed repos and added a forge.
+        assert!(Arc::ptr_eq(&before, &app.forges.get(&forge::ForgeId::github()).unwrap()));
+        // GitLab is declared but refused for now: no forge is built.
+        assert!(app.forges.get(&forge::ForgeId::new("gl").unwrap()).is_none());
+        assert_eq!(app.forges.all().len(), 1);
+        let mut c = app.cfg();
+        c.forges = None;
+        app.save_cfg(c).unwrap();
+        assert!(Arc::ptr_eq(&before, &app.forges.get(&forge::ForgeId::github()).unwrap()));
     }
 
     #[test]
@@ -1238,6 +1766,45 @@ mod tests {
         assert_eq!(b.allow(1060, 5, false), 1);
         assert_eq!(b.allow(1060, 0, false), 0);
         assert_eq!(b.allow(1060, 5, true), 0);
+    }
+
+    #[test]
+    fn stop_waits_for_running_jobs_only() {
+        use vm::State::*;
+        for s in [Booting, Idle, Busy] {
+            assert!(stop_waits_for(s), "{s:?}");
+        }
+        for s in [Held, Done, Failed, Killed, Lost, Unneeded] {
+            assert!(!stop_waits_for(s), "{s:?}");
+        }
+        assert_eq!(Config::default().stop_grace_secs, 25);
+        assert!(Config { stop_grace_secs: 0, ..Config::default() }.validate_for(8).is_ok());
+        // 600 s unit timeout minus ~30 s of cleanup
+        assert!(Config { stop_grace_secs: 570, ..Config::default() }.validate_for(8).is_ok());
+        assert!(Config { stop_grace_secs: 571, ..Config::default() }.validate_for(8).is_err());
+    }
+
+    #[test]
+    fn unit_stop_timeout_clamps_the_grace() {
+        assert_eq!(parse_timespan("30s"), Some(30));
+        assert_eq!(parse_timespan("10min"), Some(600));
+        assert_eq!(parse_timespan("1min 30s"), Some(90));
+        assert_eq!(parse_timespan("1h 2min"), Some(3720));
+        assert_eq!(parse_timespan("1min 500ms"), Some(60));
+        assert_eq!(parse_timespan("infinity"), Some(u64::MAX));
+        for bad in ["", "abc", "30", "5parsecs", "s"] {
+            assert_eq!(parse_timespan(bad), None, "{bad}");
+        }
+        assert_eq!(unit_timeout("LoadState=loaded\nTimeoutStopUSec=30s\n"), Some(30));
+        assert_eq!(unit_timeout("TimeoutStopUSec=10min\nLoadState=loaded\n"), Some(600));
+        assert_eq!(unit_timeout("LoadState=not-found\nTimeoutStopUSec=1min 30s\n"), None, "no kiln unit");
+        assert_eq!(unit_timeout(""), None);
+        assert_eq!(clamp_grace(25, None), 25, "not under systemd");
+        assert_eq!(clamp_grace(25, Some(600)), 25);
+        assert_eq!(clamp_grace(570, Some(600)), 570);
+        assert_eq!(clamp_grace(570, Some(30)), 5, "an old 30 s unit");
+        assert_eq!(clamp_grace(25, Some(10)), 0);
+        assert_eq!(clamp_grace(570, Some(u64::MAX)), 570);
     }
 
     #[test]

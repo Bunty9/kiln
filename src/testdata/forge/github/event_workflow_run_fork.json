@@ -1,0 +1,24 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 1001,
+    "name": "CI",
+    "event": "pull_request",
+    "head_branch": "fix",
+    "head_sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "head_repository": {
+      "full_name": "forker/demo"
+    },
+    "conclusion": "success"
+  },
+  "workflow": {
+    "id": 9001,
+    "name": "CI"
+  },
+  "repository": {
+    "full_name": "acme/demo"
+  },
+  "sender": {
+    "login": "octocat"
+  }
+}

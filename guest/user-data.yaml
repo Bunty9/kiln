@@ -138,8 +138,10 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Boot entry of a job VM: read the JIT config kiln passed in, run exactly
-      # one job, power off. QEMU exits and the overlay is deleted.
+      # Boot entry of a job VM: read the forge kind and credentials kiln passed
+      # as secrets (see below), run exactly one job, power off. QEMU exits and
+      # the overlay is deleted. A missing kiln.forge means github (an older
+      # kiln only passes kiln.jit), so a rollback keeps working.
       # kiln's secrets ("kiln.<name>=<value>"): a fw_cfg file where the qemu_fw_cfg module
       # exists (arm64 bakes install it; arm64 has nothing else), else an SMBIOS OEM string (x86).
       secret() {
@@ -151,20 +153,47 @@ write_files:
           dmidecode -q -t 11 2>/dev/null | sed -n "s/^[[:space:]]*String [0-9]*: kiln\.$1=//p"
         fi
       }
-      jit=$(secret jit)
-      if [ -z "$jit" ]; then
-        echo "kiln: no JIT config passed, powering off"
-      else
+
+      # Host->guest control channel is the console input. Open it once and keep it open:
+      # input that arrives while no fd is open would be flushed.
+      open_tty() { stty -F /dev/{{CONSOLE}} -echo 2>/dev/null; exec 3</dev/{{CONSOLE}}; }
+
+      # Reads the host's lines on stdin. `kiln.verdict=<ok|cold|refuse> <job_id>`
+      # becomes /run/kiln/verdict, the first valid one only. Anything else is ignored.
+      verdict_reader() {
+        local line
+        install -d -m 755 /run/kiln
+        while read -r line; do
+          [[ $line =~ ^kiln\.verdict=(ok|cold|refuse)\ ([0-9]+)$ ]] || continue
+          [ -e /run/kiln/verdict ] && continue
+          printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" > /run/kiln/verdict.tmp
+          chmod 644 /run/kiln/verdict.tmp
+          mv /run/kiln/verdict.tmp /run/kiln/verdict
+        done
+      }
+      # For the gitlab and gitea branches: run the reader during the job.
+      start_verdict_reader() { open_tty; verdict_reader <&3 & reader=$!; }
+
+      run_github() {
+        jit=$(secret jit)
+        if [ -z "$jit" ]; then
+          echo "kiln: no JIT config passed, powering off"
+          return 1
+        fi
         /usr/local/sbin/kiln-steps &
         cd /home/runner/actions-runner
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
+      }
+      # The gitlab and gitea branches get their runner and gate later; they call start_verdict_reader.
+      run_gitlab() { echo "kiln: gitlab runner not in this image, powering off"; return 1; }
+      run_gitea() { echo "kiln: gitea runner not in this image, powering off"; return 1; }
+
+      # After the runner exits: the same for every forge.
+      finish() {
         /usr/local/sbin/kiln-cache scrub || echo "kiln: cache scrub failed"
         sleep 1 # let kiln-steps flush the last page
-        # Host->guest control channel is the console's input. Open it once and keep it open:
-        # input that arrives while no fd is open would be flushed.
-        stty -F /dev/{{CONSOLE}} -echo 2>/dev/null
-        exec 3</dev/{{CONSOLE}}
+        if [ -n "${reader-}" ]; then kill "$reader" 2>/dev/null; else open_tty; fi
         echo "kiln: decide"
         cmd=""
         read -r -t 20 cmd <&3 || true
@@ -189,9 +218,43 @@ write_files:
           done
           echo "kiln: hold over"
         fi
-      fi
-      sync
-      echo o > /proc/sysrq-trigger
+      }
+
+      main() {
+        local forge reader
+        forge=$(secret forge | head -n1)
+        case ${forge:-github} in
+          github) run_github ;;
+          gitlab) run_gitlab ;;
+          gitea) run_gitea ;;
+          *) echo "kiln: unknown forge, powering off"; false ;;
+        esac && finish
+        sync
+        echo o > /proc/sysrq-trigger
+      }
+      # Sourced by the tests: define only.
+      (return 0 2>/dev/null) || main
+  - path: /usr/local/sbin/kiln-verdict-wait
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # The guest gate (kiln-exec, kiln-gate) calls this: waits for the host's
+      # verdict in /run/kiln/verdict (written by kiln-job's reader). Prints ok,
+      # cold or refuse; exit 0 for ok and cold. A missing file after the wait or
+      # anything unreadable is refuse. The wait is 60 s at most; KILN_VERDICT_WAIT
+      # can only shorten it.
+      w=${KILN_VERDICT_WAIT:-60}
+      [[ $w =~ ^[0-9]+$ ]] && [ "$w" -le 60 ] || w=60
+      for ((i = 0; i <= w * 5; i++)); do
+        if [ -f /run/kiln/verdict ]; then
+          read -r v id < /run/kiln/verdict
+          if [[ $v =~ ^(ok|cold)$ ]] && [[ $id =~ ^[0-9]+$ ]]; then echo "$v"; exit 0; fi
+          break
+        fi
+        sleep 0.2
+      done
+      echo refuse
+      exit 1
   - path: /usr/local/sbin/kiln-cache
     permissions: "0755"
     content: |

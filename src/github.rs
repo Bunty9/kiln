@@ -1,6 +1,7 @@
 //! Thin GitHub REST client: just the calls the scheduler needs, plus a raw
 //! passthrough the dashboard uses for everything else.
 
+use crate::forge::JobInfo;
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode, header};
 use serde_json::{Value, json};
@@ -10,6 +11,8 @@ use tokio::sync::Mutex;
 
 pub struct Gh {
     http: reqwest::Client,
+    /// REST API root, without a trailing slash. Tests point it at a local server.
+    api_base: String,
     token: std::sync::RwLock<String>,
     /// Where the token came from: "env" | "file" | "gh" | "none".
     source: std::sync::RwLock<&'static str>,
@@ -101,6 +104,7 @@ impl Gh {
             reqwest::Client::builder().user_agent("kiln-ci").timeout(std::time::Duration::from_secs(60)).build().expect("http client");
         Self {
             http,
+            api_base: "https://api.github.com".into(),
             token: std::sync::RwLock::new(token),
             source: std::sync::RwLock::new(source),
             rates: Default::default(),
@@ -114,6 +118,14 @@ impl Gh {
             spelled: Default::default(),
             reg_probes: Default::default(),
         }
+    }
+
+    /// A client for the mock forge (forge_test_mock.rs).
+    #[cfg(test)]
+    pub fn for_mock(base: &str) -> Self {
+        let mut gh = Self::new("tok".into(), "test");
+        gh.api_base = base.into();
+        gh
     }
 
     pub fn set_token(&self, t: String, source: &'static str) {
@@ -247,7 +259,7 @@ impl Gh {
     }
 
     fn request_with(&self, token: &str, method: Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("https://api.github.com/{}", path.trim_start_matches('/'));
+        let url = format!("{}/{}", self.api_base, path.trim_start_matches('/'));
         let rb = self
             .http
             .request(method, url)
@@ -324,9 +336,14 @@ impl Gh {
         }
     }
 
-    /// Raw call for the dashboard proxy. Follows redirects (job logs redirect
+    /// Raw call, body capped at 8 MiB. Follows redirects (job logs redirect
     /// to a signed blob URL; reqwest drops the auth header cross-origin).
     pub async fn raw(&self, method: Method, path: &str, body: Option<Value>) -> Result<Resp> {
+        self.raw_max(method, path, body, 8 << 20).await
+    }
+
+    /// `raw` with the download bounded to `max` bytes: a larger body is an error, not a truncation.
+    pub async fn raw_max(&self, method: Method, path: &str, body: Option<Value>, max: usize) -> Result<Resp> {
         let (mut rb, who) = self.request(method, path).await?;
         if let Some(b) = body {
             rb = rb.json(&b);
@@ -334,12 +351,12 @@ impl Gh {
         let r = self.exec(rb, who).await?;
         let status = r.status().as_u16();
         let content_type = r.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
-        let body = r.bytes().await?;
+        let body = bytes::Bytes::from(crate::forge::net::read_capped(r, max).await?);
         self.note_body(who, status, &String::from_utf8_lossy(&body));
         Ok(Resp { status, content_type, body })
     }
 
-    async fn get(&self, path: &str) -> Result<Value> {
+    pub(crate) async fn get(&self, path: &str) -> Result<Value> {
         let cached = {
             let mut c = self.etags.lock().await;
             // ponytail: ceiling of 500 cached URLs, dropped wholesale; an LRU if the clear ever hurts the 304 hit rate.
@@ -425,14 +442,14 @@ impl Gh {
     /// Queued jobs per VM size (see `job_size`), counted once per job id.
     /// Sizes above the host's CPU count are not ours and not counted.
     /// Also returns, for jobs picked up by one of our runners (`kiln-*`),
-    /// runner name -> (job page, queued-at unix time, from a fork), and the
+    /// runner name -> its job, and the
     /// number of queued fork jobs refused (never counted as demand).
     pub async fn queued_jobs(
         &self,
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, (String, u64, bool)>, usize)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
         let mut forks = std::collections::HashSet::new();
@@ -447,7 +464,8 @@ impl Gh {
                 let jobs = self.get(&format!("repos/{repo}/actions/runs/{id}/jobs?per_page=100")).await?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
                     if j["status"] == "queued"
-                        && let Some(n) = job_size(&j["labels"], label, default_cpus, crate::platform::ARM64).filter(|&n| n <= host)
+                        && let Some(n) =
+                            crate::forge::job_size(&j["labels"], label, default_cpus, crate::platform::ARM64).filter(|&n| n <= host)
                     {
                         let jid = j["id"].as_u64().unwrap_or_default();
                         if fork {
@@ -457,10 +475,14 @@ impl Gh {
                         }
                     }
                     if let Some(name) = j["runner_name"].as_str().filter(|n| n.starts_with("kiln-"))
+                        && let Some(id) = j["id"].as_u64()
                         && let Some(url) = j["html_url"].as_str()
                         && let Some(at) = j["created_at"].as_str().and_then(parse_rfc3339)
                     {
-                        ours.insert(name.to_string(), (url.to_string(), at, fork));
+                        ours.insert(
+                            name.to_string(),
+                            JobInfo { id: id.to_string(), url: url.to_string(), queued_at: at, fork, run: run_info(run) },
+                        );
                     }
                 }
             }
@@ -476,7 +498,7 @@ impl Gh {
     pub async fn manifest_conversion(&self, code: &str) -> Result<Value> {
         let r = self
             .http
-            .post(format!("https://api.github.com/app-manifests/{code}/conversions"))
+            .post(format!("{}/app-manifests/{code}/conversions", self.api_base))
             .header(header::ACCEPT, "application/vnd.github+json")
             .send()
             .await
@@ -626,12 +648,16 @@ impl Gh {
     /// host's architecture: a kiln of the other one may serve the same repo, and its
     /// runners are offline while their VMs boot.
     pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
+        self.sweep_runners_for(repo, crate::platform::ARM64).await
+    }
+
+    async fn sweep_runners_for(&self, repo: &str, arm64: bool) -> Result<usize> {
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
             if let Some(id) = r["id"].as_u64()
                 && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-"))
-                && same_arch(&r["labels"], crate::platform::ARM64)
+                && crate::forge::same_arch(&r["labels"], arm64)
                 && r["status"] == "offline"
                 && r["busy"] == false
             {
@@ -747,13 +773,17 @@ impl Gh {
 
     /// Unused JIT registrations linger as offline runners; clean them up.
     pub async fn delete_runner(&self, repo: &str, id: u64) -> Result<()> {
-        let (rb, who) = self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?;
-        let r = self.exec(rb, who).await?;
+        let s = self.delete_runner_status(repo, id).await?;
         // 404 = the ephemeral runner already deregistered itself after its job.
-        if !r.status().is_success() && r.status() != StatusCode::NOT_FOUND {
-            bail!("delete runner {id}: {}", r.status());
+        if !s.is_success() && s != StatusCode::NOT_FOUND {
+            bail!("delete runner {id}: {s}");
         }
         Ok(())
+    }
+
+    pub async fn delete_runner_status(&self, repo: &str, id: u64) -> Result<StatusCode> {
+        let (rb, who) = self.request(Method::DELETE, &format!("repos/{repo}/actions/runners/{id}")).await?;
+        Ok(self.exec(rb, who).await?.status())
     }
 }
 
@@ -805,18 +835,29 @@ fn conversion_error(status: u16) -> String {
     }
 }
 
-/// Allowed `<label>-<N>cpu` sizes.
-pub const SIZES: [u32; 4] = [2, 4, 8, 16];
-
-/// RAM for a size label; the default size uses the configured memory instead.
-pub fn size_mem_mb(cpus: u32) -> u32 {
-    (cpus * 2048).min(24576)
-}
-
 /// `branch` marked up (so no writer matches it) when it is not a plain branch name
 /// that is safe to put in an API path unencoded ([A-Za-z0-9._/-], no ".."); None if it is.
 fn unsafe_branch(branch: &str) -> Option<String> {
     (!crate::valid_branch(branch)).then(|| format!("{branch} (not a plain branch name)"))
+}
+
+/// The dashboard's and alerts' view of a workflow run (see `vm::Run`).
+fn run_info(run: &Value) -> crate::vm::Run {
+    let s = |k: &str| run[k].as_str().unwrap_or("").chars().take(200).collect::<String>();
+    // `path` is ".github/workflows/release.yml", sometimes with "@refs/..." after it.
+    let path = run["path"].as_str().unwrap_or("");
+    let file = path.split('@').next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    crate::vm::Run {
+        branch: s("head_branch"),
+        sha: s("head_sha"),
+        pr: run["pull_requests"].as_array().and_then(|p| p.first()).and_then(|p| p["number"].as_u64()),
+        event: s("event"),
+        title: s("display_title"),
+        workflow: s("name"),
+        number: run["run_number"].as_u64().unwrap_or_default(),
+        file: file.chars().take(200).collect(),
+        ..Default::default()
+    }
 }
 
 /// Did this run's code come from another repository (a fork PR)? Fails closed:
@@ -826,46 +867,6 @@ fn is_fork_run(run: &Value) -> bool {
         (Some(head), Some(base)) => !head.eq_ignore_ascii_case(base),
         _ => true,
     }
-}
-
-/// The configured label as runners of this architecture advertise it: arm64 hosts
-/// add `-arm64`, so a job written for x64 (`<label>`) never lands on an arm64 VM.
-pub fn arch_label(label: &str, arm64: bool) -> String {
-    if arm64 { format!("{label}-arm64") } else { label.to_string() }
-}
-
-/// Does a runner (its `labels` from the runners API) have this host's architecture label?
-fn same_arch(labels: &Value, arm64: bool) -> bool {
-    let arch = if arm64 { "arm64" } else { "x64" };
-    labels.as_array().into_iter().flatten().any(|l| l["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(arch)))
-}
-
-/// The VM size a job asks for, if it is ours: every label must be implicit
-/// (GitHub adds `self-hosted`, `linux` and the architecture, `x64` or `ARM64`, to
-/// self-hosted runners) or one of ours, and exactly one of ours must be present.
-/// `<label>` is the default size, `<label>-Ncpu` size N (`<label>-arm64`... on an
-/// arm64 host). A plain `self-hosted` job is someone else's, and so is a job for
-/// the other architecture.
-fn job_size(job_labels: &Value, label: &str, default_cpus: u32, arm64: bool) -> Option<u32> {
-    let label = arch_label(label, arm64).to_ascii_lowercase();
-    let arch = if arm64 { "arm64" } else { "x64" };
-    let mut size = None;
-    let mut found = 0;
-    for l in job_labels.as_array()? {
-        let l = l.as_str()?.to_ascii_lowercase();
-        if ["self-hosted", "linux", arch].contains(&l.as_str()) {
-            continue;
-        }
-        found += 1;
-        size = Some(if l == label {
-            default_cpus
-        } else {
-            // Round-trip so `kiln-04cpu` (which no runner label matches) is not ours.
-            let digits = l.strip_prefix(&label)?.strip_prefix('-')?.strip_suffix("cpu")?;
-            digits.parse::<u32>().ok().filter(|n| SIZES.contains(n) && n.to_string() == digits)?
-        });
-    }
-    if found == 1 { size } else { None }
 }
 
 /// When to stop calling GitHub after a 403/429: until the rate-limit reset if
@@ -930,6 +931,37 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn get_goes_to_api_base() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // One-shot local server: checks the request line, answers a small JSON body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            while !buf.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0u8; 512];
+                let n = sock.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "client closed before sending headers");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let body = r#"{"id":7}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            head.lines().next().unwrap().to_string()
+        });
+        let mut gh = super::Gh::new("tok".into(), "test");
+        gh.api_base = format!("http://{addr}");
+        let v = gh.get("repos/o/n").await.unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(server.await.unwrap(), "GET /repos/o/n HTTP/1.1");
+    }
+
     #[test]
     fn anonymous_budget_is_not_ours() {
         // GitHub's unauthenticated budget is 60/h per IP; any token's is 5000+.
@@ -948,6 +980,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn run_info_reads_branch_pr_and_commit() {
+        let run = serde_json::json!({"head_branch": "fix", "head_sha": "abcdef1234", "event": "pull_request",
+            "display_title": "Fix it", "name": "CI", "run_number": 12, "pull_requests": [{"number": 42}]});
+        let r = run_info(&run);
+        assert_eq!((r.branch.as_str(), r.sha.as_str(), r.pr, r.event.as_str()), ("fix", "abcdef1234", Some(42), "pull_request"));
+        assert_eq!((r.title.as_str(), r.workflow.as_str(), r.number), ("Fix it", "CI", 12));
+        assert_eq!(run_info(&serde_json::json!({})), crate::vm::Run::default());
+        let file = |p: &str| run_info(&serde_json::json!({ "path": p })).file;
+        assert_eq!(file(".github/workflows/x.yml@refs/heads/main"), "x.yml");
+        assert_eq!(file(".github/workflows/ci.yml"), "ci.yml");
+        assert_eq!(file("dynamic/github-code-scanning/codeql"), "codeql");
+    }
 
     #[test]
     fn mint_errors() {
@@ -1056,60 +1102,6 @@ mod tests {
     }
 
     #[test]
-    fn label_matching() {
-        let size = |v: Value| job_size(&v, "kiln", 4, false);
-        assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));
-        assert_eq!(size(json!(["kiln"])), Some(4));
-        assert_eq!(size(json!(["Self-Hosted", "Linux", "KILN"])), Some(4));
-        assert_eq!(size(json!(["self-hosted", "linux", "x64", "kiln-16cpu"])), Some(16));
-        assert_eq!(size(json!(["kiln-8cpu"])), Some(8));
-        assert_eq!(size(json!(["self-hosted", "Kiln-2CPU"])), Some(2));
-        assert_eq!(size(json!(["kiln-4cpu"])), Some(4));
-        assert_eq!(job_size(&json!(["kiln"]), "kiln", 6, false), Some(6));
-        assert_eq!(size(json!(["ubuntu-latest"])), None);
-        assert_eq!(size(json!(["self-hosted"])), None);
-        assert_eq!(size(json!(["self-hosted", "linux"])), None);
-        assert_eq!(size(json!(["self-hosted", "kiln", "gpu"])), None);
-        assert_eq!(size(json!(["kiln", "kiln-8cpu"])), None);
-        assert_eq!(size(json!(["kiln-8cpu", "kiln-8cpu"])), None);
-        assert_eq!(size(json!(["kiln-3cpu"])), None);
-        assert_eq!(size(json!(["kiln-04cpu"])), None);
-        assert_eq!(size(json!(["kiln-32cpu"])), None);
-        assert_eq!(size(json!(["kiln-"])), None);
-        assert_eq!(size(json!(["kilnx-8cpu"])), None);
-        assert_eq!(size(json!([])), None);
-        assert_eq!(size(json!(null)), None);
-        // An x64 host ignores arm64 jobs.
-        assert_eq!(size(json!(["self-hosted", "kiln-arm64"])), None);
-        assert_eq!(size(json!(["self-hosted", "kiln-arm64-8cpu"])), None);
-        assert_eq!(size(json!(["self-hosted", "ARM64", "kiln"])), None);
-    }
-
-    #[test]
-    fn arm64_label_matching() {
-        let size = |v: Value| job_size(&v, "kiln", 4, true);
-        assert_eq!(size(json!(["self-hosted", "kiln-arm64"])), Some(4));
-        assert_eq!(size(json!(["self-hosted", "linux", "ARM64", "kiln-arm64"])), Some(4));
-        assert_eq!(size(json!(["kiln-arm64-8cpu"])), Some(8));
-        assert_eq!(size(json!(["self-hosted", "Kiln-ARM64-16CPU"])), Some(16));
-        // x64 jobs never land on an arm64 host.
-        assert_eq!(size(json!(["self-hosted", "kiln"])), None);
-        assert_eq!(size(json!(["self-hosted", "kiln-8cpu"])), None);
-        assert_eq!(size(json!(["self-hosted", "x64", "kiln-arm64"])), None);
-        assert_eq!(size(json!(["kiln-arm64", "kiln-arm64-8cpu"])), None);
-        assert_eq!(size(json!(["kiln-arm64-3cpu"])), None);
-        assert_eq!(size(json!(["kiln-arm64-"])), None);
-        assert_eq!(arch_label("kiln", true), "kiln-arm64");
-        assert_eq!(arch_label("kiln", false), "kiln");
-        let labels = |names: &[&str]| Value::from(names.iter().map(|n| json!({ "id": 1, "name": n })).collect::<Vec<_>>());
-        assert!(same_arch(&labels(&["self-hosted", "Linux", "X64", "kiln"]), false));
-        assert!(!same_arch(&labels(&["self-hosted", "Linux", "X64", "kiln"]), true), "an arm64 kiln leaves x64 runners alone");
-        assert!(same_arch(&labels(&["self-hosted", "Linux", "ARM64", "kiln-arm64"]), true));
-        assert!(!same_arch(&labels(&["self-hosted", "Linux", "ARM64", "kiln-arm64"]), false));
-        assert!(!same_arch(&Value::Null, false));
-    }
-
-    #[test]
     fn hello() {
         let w = hello_workflow("kiln");
         assert!(
@@ -1133,11 +1125,187 @@ mod tests {
         let e = conversion_error(502);
         assert!(e.contains("try again") && !e.contains("existing App"), "{e}");
     }
+}
 
-    #[test]
-    fn size_memory() {
-        assert_eq!(size_mem_mb(2), 4096);
-        assert_eq!(size_mem_mb(8), 16384);
-        assert_eq!(size_mem_mb(16), 24576);
+/// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
+/// the forge refactor (P0-4..P0-11) must keep every assertion here unchanged.
+#[cfg(test)]
+mod characterization {
+    use super::*;
+    use crate::forge_test_mock::Mock;
+
+    const RUNS: &str = "/repos/acme/demo/actions/runs";
+    const S1: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    #[tokio::test]
+    async fn queued_jobs_sizes_forks_and_runner_map() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // Default size 1 (host_threads is at least 1), so `kiln` and `kiln-2cpu` are different sizes.
+        let (by_size, ours, forks) = gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        // 5001 (kiln) + 5002 (kiln-2cpu) + 5203 (kiln-2cpu, in a running run); 5003 is someone else's
+        // self-hosted job, 5004 GitHub-hosted, 5101 a queued fork job (refused, never demand).
+        // Run 1001 is listed as queued and as in_progress, so its jobs are read twice but counted once.
+        assert_eq!(by_size, HashMap::from([(1, 1), (2, 2)]));
+        assert_eq!(forks, 1);
+        assert_eq!(
+            m.requests(),
+            [
+                format!("GET {RUNS}?status=queued&per_page=30"),
+                format!("GET {RUNS}/1001/jobs?per_page=100"),
+                format!("GET {RUNS}/1002/jobs?per_page=100"),
+                format!("GET {RUNS}?status=in_progress&per_page=30"),
+                format!("GET {RUNS}/1004/jobs?per_page=100"),
+                format!("GET {RUNS}/1001/jobs?per_page=100"),
+            ]
+        );
+        let first = m.log().remove(0);
+        assert_eq!(first.auth.as_deref(), Some("Bearer tok"));
+        // Only `kiln-*` runners, keyed by runner name: (job page, queued-at, from a fork, run).
+        let mut names: Vec<_> = ours.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["kiln-7-0", "kiln-9-0"]);
+        let JobInfo { url, queued_at: at, fork, run, .. } = &ours["kiln-7-0"];
+        assert_eq!(url, "https://github.com/acme/demo/actions/runs/1004/job/5201");
+        assert_eq!((*at, *fork), (parse_rfc3339("2026-10-11T09:00:00Z").unwrap(), false));
+        let want = crate::vm::Run {
+            branch: "fix-login".into(),
+            sha: "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2".into(),
+            pr: Some(7),
+            event: "pull_request".into(),
+            title: "Fix login".into(),
+            workflow: "Release".into(),
+            number: 43,
+            file: "release.yml".into(),
+            ..Default::default()
+        };
+        assert_eq!(run, &want);
+        // A fork PR run: null head_branch is an empty branch, no PR number, and the fork flag is set.
+        let JobInfo { fork, run, .. } = &ours["kiln-9-0"];
+        assert!(*fork);
+        assert_eq!(
+            (run.branch.as_str(), run.pr, run.event.as_str(), run.number, run.file.as_str()),
+            ("", None, "pull_request", 42, "ci.yml")
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_errors_surface() {
+        let m = Mock::github().await;
+        m.fail("GET", &format!("{RUNS}/1002/jobs?per_page=100"), 502, "Bad Gateway");
+        let e = Gh::for_mock(&m.base).queued_jobs("acme/demo", "kiln", 1).await.unwrap_err();
+        assert!(e.to_string().starts_with("GET repos/acme/demo/actions/runs/1002/jobs?per_page=100: 502 Bad Gateway"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn jit_config_request_and_response() {
+        let m = Mock::github().await;
+        let labels: Vec<String> = ["self-hosted", "linux", "x64", "kiln-4cpu", "kiln"].map(String::from).to_vec();
+        let (id, jit) = Gh::for_mock(&m.base).jit_config("acme/demo", "kiln-5-0", &labels).await.unwrap();
+        assert_eq!((id, jit.as_str()), (4242, "eyJydW5uZXIiOiJwbGFjZWhvbGRlciJ9"));
+        let req = m.log().remove(0);
+        assert_eq!((req.method.as_str(), req.path.as_str()), ("POST", "/repos/acme/demo/actions/runners/generate-jitconfig"));
+        assert_eq!(
+            req.body.unwrap().to_string(),
+            r#"{"labels":["self-hosted","linux","x64","kiln-4cpu","kiln"],"name":"kiln-5-0","runner_group_id":1,"work_folder":"_work"}"#
+        );
+    }
+
+    async fn mint(gh: &Gh) -> MintError {
+        gh.jit_config("acme/demo", "kiln-5-0", &[]).await.unwrap_err().downcast::<MintError>().unwrap()
+    }
+
+    #[tokio::test]
+    async fn jit_config_failures_are_classified() {
+        let path = "/repos/acme/demo/actions/runners/generate-jitconfig";
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // (status, message, GitHub-wide?)
+        for (status, wide) in [(404, false), (422, false), (403, false), (500, true), (503, true)] {
+            m.fail("POST", path, status, "boom");
+            let e = mint(&gh).await;
+            assert_eq!((e.status, e.endpoint, e.message.as_str(), e.github_wide()), (Some(status), "generate-jitconfig", "boom", wide));
+        }
+        // A secondary rate limit is a 403 whose only marker is the text: it pauses polling.
+        assert_eq!(gh.paused_until(), None);
+        m.fail("POST", path, 403, "You have exceeded a secondary rate limit.");
+        assert_eq!(mint(&gh).await.status, Some(403));
+        assert!(gh.paused_until().is_some_and(|t| t > crate::now()));
+        // A 2xx without the fields is a plain error, not a MintError.
+        m.route("POST", path, 201, "{}");
+        let e = gh.jit_config("acme/demo", "x", &[]).await.unwrap_err();
+        assert!(e.downcast_ref::<MintError>().is_none() && e.to_string().contains("runner.id missing"), "{e:#}");
+        // GitHub unreachable: no status, GitHub-wide.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let down = Gh::for_mock(&format!("http://{}", dead.local_addr().unwrap()));
+        drop(dead);
+        let e = mint(&down).await;
+        assert!(e.status.is_none() && e.github_wide());
+    }
+
+    #[tokio::test]
+    async fn delete_runner_outcomes() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        let path = |id: u32| format!("/repos/acme/demo/actions/runners/{id}");
+        gh.delete_runner("acme/demo", 11).await.unwrap(); // 204
+        m.fail("DELETE", &path(12), 404, "Not Found");
+        gh.delete_runner("acme/demo", 12).await.unwrap(); // already gone: fine
+        m.fail("DELETE", &path(13), 422, "Runner is busy");
+        let e = gh.delete_runner("acme/demo", 13).await.unwrap_err();
+        assert_eq!(e.to_string(), "delete runner 13: 422 Unprocessable Entity"); // it just got a job: must live
+        m.fail("DELETE", &path(15), 500, "oops");
+        assert!(gh.delete_runner("acme/demo", 15).await.is_err());
+        assert_eq!(m.requests(), [11, 12, 13, 15].map(|id| format!("DELETE {}", path(id))));
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_only_offline_idle_kiln_runners() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // 11 and 15: offline, idle, kiln-*. Kept: 12 (busy), 13 (online), 14 (not ours).
+        assert_eq!(gh.sweep_runners_for("acme/demo", false).await.unwrap(), 2);
+        let r = "/repos/acme/demo/actions/runners";
+        assert_eq!(m.requests(), [format!("GET {r}?per_page=100"), format!("DELETE {r}/11"), format!("DELETE {r}/15")]);
+        // A refused delete (422) stops the sweep with an error.
+        m.clear_log();
+        m.fail("DELETE", &format!("{r}/11"), 422, "busy");
+        assert!(gh.sweep_runners("acme/demo").await.is_err());
+        assert_eq!(m.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_trust_facts() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        let r = "/repos/acme/demo";
+        let facts = |t: (String, String, String, String)| [t.0, t.1, t.2, t.3];
+        // Push to the default branch whose commit is the branch tip: trusted facts, in call order.
+        let t = gh.cache_trust("acme/demo", 6001, &[]).await.unwrap();
+        assert_eq!(facts(t), ["push", "main", "main", "success"]);
+        assert_eq!(
+            m.requests(),
+            [
+                format!("GET {r}/actions/jobs/6001"),
+                format!("GET {r}/actions/runs/2001"),
+                format!("GET {r}"),
+                format!("GET {r}/git/ref/heads/main"),
+                format!("GET {r}/compare/{S1}...{S1}"),
+            ]
+        );
+        // The default branch is remembered (1 h): no second GET of the repo. Other events skip the ref and compare.
+        m.clear_log();
+        let t = gh.cache_trust("acme/demo", 6002, &[]).await.unwrap();
+        assert_eq!(facts(t), ["pull_request", "feat", "main", "success"]);
+        assert_eq!(m.requests(), [format!("GET {r}/actions/jobs/6002"), format!("GET {r}/actions/runs/2002")]);
+        // A tag: event push, head_branch the tag's name, neither default nor a writer.
+        let t = gh.cache_trust("acme/demo", 6003, &["dev".into()]).await.unwrap();
+        assert_eq!(facts(t), ["push", "v1.0", "main", "success"]);
+        // A tag named like the default branch: the commit is not on the branch, so the branch is marked up.
+        let t = gh.cache_trust("acme/demo", 6004, &[]).await.unwrap();
+        assert_eq!(facts(t), ["push", "main (commit c3d4e5f not on main)", "main", "success"]);
+        // GitHub failing is an error (finish_cache turns it into "could not verify the trigger").
+        m.fail("GET", &format!("{r}/actions/jobs/6001"), 500, "oops");
+        assert!(gh.cache_trust("acme/demo", 6001, &[]).await.is_err());
     }
 }

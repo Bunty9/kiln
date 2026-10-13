@@ -55,7 +55,7 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 2. **Decision.** If the repo has more queued jobs of that size than VMs that are booting or idle, and the gates and budget allow, it launches the difference.
 3. **JIT config.** kiln calls `generate-jitconfig` for the repo with a name like `kiln-<unix time>-<seq>` and the labels for that VM's size. The result is a single-use, auto-deregistering runner. The config is written to `<vm>/jit` with mode 0600 and handed to the guest as a fw_cfg file (`-fw_cfg name=opt/kiln/jit,file=...`), and on x86 also as an SMBIOS OEM string (`-smbios type=11,path=...`), which is what x86 guests read (the stock image has no `qemu_fw_cfg` module; arm64 bakes install it). Both are read by QEMU at start, and `file=`/`path=` keep the secret out of `ps`. kiln deletes the file as soon as the guest prints its first console line, which proves QEMU has read it. This happens before the VM's directory exists and before any disk or QEMU: if GitHub refuses (or does not answer), the attempt costs one API call, the VM record ends `failed` with a note like "runner registration failed: GitHub returned HTTP 500 (generate-jitconfig)", and nothing is left on disk (the record is kept in memory only, marked `mint_failed`, and only the latest 5 are kept; the dashboard does not count them as job failures or notify about them).
 4. **Overlay.** `qemu-img create` makes `disk.qcow2` backed by `base.qcow2`. If caching is on, a second overlay backed by the repo's cache disk is attached as `vdb`.
-5. **Boot.** QEMU starts through `kiln __confine` (see [VMM confinement](#vmm-confinement)), with a seccomp filter (`-sandbox`). It (q35, KVM, `-cpu host`, virtio disk, virtio-net on user-mode networking, virtio-rng) boots `base.vmlinuz` directly with no initrd. virtio and ext4 are built into the Ubuntu kernel, which gets the runner listening in about 4 seconds. `panic=1` and `-no-reboot` make a kernel panic end the VM instead of hanging. Overlay disks use `cache=unsafe` because they are thrown away anyway.
+5. **Boot.** QEMU starts through `kiln __confine` (see [VMM confinement](#vmm-confinement)), with a seccomp filter (`-sandbox`). It (q35, KVM, `-cpu host`, virtio disk, virtio-net on user-mode networking, virtio-rng) boots `base.vmlinuz` directly with no initrd. virtio and ext4 are built into the Ubuntu kernel, which gets the runner listening about 10 seconds after the VM is created on the reference box (see [benchmarks](benchmarks.md)). `panic=1` and `-no-reboot` make a kernel panic end the VM instead of hanging. Overlay disks use `cache=unsafe` because they are thrown away anyway.
 6. **Runner.** `kiln-job` runs `run.sh --jitconfig` as user `runner`. The runner prints "Listening for Jobs" (VM state becomes idle), then GitHub assigns it a job ("Running job", state busy), and finally "completed with result: ..." ends it.
 7. **Result.** When the runner exits, the guest prints `kiln: decide`. kiln answers `release` (or `hold N` for the [debug hold](#debug-hold-and-the-control-channel)) and the guest powers off through sysrq. QEMU exits and closes stdout, which ends the supervisor loop.
 8. **Cache.** The overlay is merged into the repo cache or discarded (see [Cache](#cache)).
@@ -107,7 +107,7 @@ Surplus idle VMs (more waiting VMs than queued jobs plus the warm target) are dr
 
 ### Warm pool
 
-`warm: {"owner/name": N}` keeps N idle default-size VMs ready per repo, so a job starts in about a second. Each tick launches `queued + N - waiting`. Idle warm VMs older than `warm_recycle_mins` are replaced, and their idle timeout is that plus 5 minutes. Warm launches wait while a cache commit is running or parked so that replacements boot on the new cache. If a parked commit is only blocked by idle job-less readers, kiln recycles those readers. A warm VM's `warm` flag clears when it takes a job.
+`warm: {"owner/name": N}` keeps N idle default-size VMs ready per repo, so a job starts in about 4 seconds instead of waiting for a boot. Each tick launches `queued + N - waiting`. Idle warm VMs older than `warm_recycle_mins` are replaced, and their idle timeout is that plus 5 minutes. Warm launches wait while a cache commit is running or parked so that replacements boot on the new cache. If a parked commit is only blocked by idle job-less readers, kiln recycles those readers. A warm VM's `warm` flag clears when it takes a job.
 
 ### Security-policy recycling
 
@@ -160,7 +160,7 @@ While a commit runs, new jobs of that repo start without the cache and say "cach
 
 The ruleset has an output chain with policy `drop`. It accepts established traffic and loopback, DNS to slirp's resolver (`10.0.2.3:53`), and the Docker mirror (`10.0.2.2:5000`, only when `docker_mirror` is on). A DNAT rule rewrites the mirror's host-loopback address to slirp4netns's host alias. Then it drops the private and special ranges: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (tailnet), `127.0.0.0/8`, `169.254.0.0/16` (cloud metadata), `172.16.0.0/12`, `192.0.0.0/24`, `192.168.0.0/16`, `198.18.0.0/15` and `224.0.0.0/3`. Outbound SMTP (port 25) is dropped. Finally it accepts IPv4 out of the TAP, which is the public internet. IPv6 is turned off in QEMU's network and has no accept rule. The result: a job reaches the internet, DNS and the mirror, and cannot reach the LAN, the tailnet, the host's own addresses, or any other port on host loopback.
 
-**Readiness probe.** Before any filtered VM launches (cached for 10 minutes, forced when you switch the mode and by `kiln doctor`), kiln starts a probe namespace with the same ruleset and checks that the mirror is reachable, the dashboard port (via `10.0.2.2`) and the tailnet IP are not, and the internet is. It also requires `rootlesskit`, `slirp4netns`, `nft` and `setpriv`. While the probe fails the scheduler launches nothing and says why. It never falls back to open.
+**Readiness probe.** Before any filtered VM launches (a pass is cached for 10 minutes; a failure is retried after 5 s, doubling up to every 2 minutes; forced when you switch to filtered or change `listen` or `docker_mirror` while filtered, and by `kiln doctor`), kiln starts a probe namespace with the same ruleset and checks that the mirror is reachable, the dashboard port (via `10.0.2.2`) and the tailnet IP are not, and the internet is. It also requires `rootlesskit`, `slirp4netns`, `nft` and `setpriv`. While the probe fails the scheduler launches nothing and says why. It never falls back to open.
 
 ## VMM confinement
 
@@ -194,9 +194,13 @@ If publishing fails the VM is released instead of held and a note says so. Host 
 
 The runner's console lines drive the VM's state: "Listening for Jobs" (booting to idle), "Running job: <name>" (to busy), "completed with result: <r>". Because a job is root in the guest and can print anything, each step is accepted once and only forward. Lines are read in chunks of at most 64 KiB, and a longer line and its remainder are never parsed. `console.log` and `steps.log` stop growing at 64 MiB while parsing continues. Console lines can shape the timeline but never extend a VM's life beyond the hard cap. Steps output travels over the second serial port (`ttyS1`; a virtio-serial port named `kiln.steps` on arm64) to a unix socket that kiln copies into `steps.log`.
 
+## Notifications
+
+`src/notify.rs` holds everything. Event sources build typed events: the VM supervisor when a job ends (`job.failed`, `job.finished`), the scheduler tick for health, and the config, token, App and notify handlers for `security.changed`. A hub receives them, applies the workflow rules and each destination's event switches, and pushes onto one bounded queue per destination (oldest dropped and counted). One worker per destination renders the event for its kind, signs generic bodies, sends through a client whose DNS resolver refuses non-public addresses, and handles rate limiting (overflow folded into one message), retries and the failing state. Health events pass a debounce first: a condition must hold for 2 scheduler ticks and 60 s before it is raised or cleared, so a flapping gate does not page anyone. A failing destination raises a health problem that is announced through the destinations that are not themselves failing. See [configuration.md](configuration.md#notifications) and [SECURITY.md](../SECURITY.md).
+
 ## Shutdown and crash recovery
 
-On SIGTERM or SIGINT kiln stops launching, marks active VMs "kiln shutting down", signals every VM's kill notifier and waits up to 20 seconds in total for the supervisors to finish cleanup (delete disk and JIT secret, deregister the runner, persist the record). The systemd unit uses `KillMode=mixed` with `TimeoutStopSec=30`. **Restarting kiln kills running jobs**, so do not restart while jobs are running.
+On the first SIGTERM or SIGINT kiln stops launching, reaps idle VMs and gives running jobs up to `stop_grace_secs` (default 25) to finish; a second signal ends the wait (under systemd: `systemctl --user kill --kill-whom=main kiln`). Job VMs run in their own process group, so a terminal's Ctrl-C reaches kiln only. Then it marks active VMs "kiln shutting down", signals every VM's kill notifier and waits up to 20 seconds in total for the supervisors to finish cleanup (delete disk and JIT secret, deregister the runner, persist the record). The systemd unit uses `KillMode=mixed` with `TimeoutStopSec=600`. To restart without killing jobs at all, use **Restart when idle** (`POST /api/restart`): it drains exactly like an update (below) and re-executes the same binary in place.
 
 Under systemd, the unit's cgroup kill takes QEMU down with kiln; outside systemd QEMU can outlive a SIGKILLed kiln, and `kiln doctor` reports it as stray. On the next `serve`, any VM recorded as active is marked `lost` and its disk, cache overlay and JIT secret are deleted, and the scheduler's startup sweep deletes offline idle `kiln-*` runners from GitHub. A parked cache overlay survives and is committed by a later tick.
 
@@ -216,7 +220,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 |---|---|
 | `GET /` | The dashboard page |
 | `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `github_api`, `egress`, `memory`, `disk`, `budget` or `held`), the last 100 VMs, image info, host stats, mirror status, cache sizes |
-| `POST /api/config` | Save settings (validated); returns `{restart_required}` |
+| `POST /api/config` | Save settings (validated); returns `{restart_required, restart_needed}` |
 | `POST /api/token` | Validate and save a GitHub token |
 | `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |
 | `POST /api/app/convert` | Finish it: trade GitHub's code (with the state) for the App's id and key, save them, switch to App mode |
@@ -231,14 +235,22 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/onboard` | Hello PRs this kiln has opened |
 | `POST /api/onboard/hello` | Open a PR adding `.github/workflows/kiln-hello.yml` to a configured repo |
 | `POST /api/bake` | Start a bake (202; refused while one runs) |
+| `GET /api/telemetry` | Privacy settings preview: `{endpoint, disabled_by_env, usage, crash_example, pending_crashes}`, where `usage` is the exact report this box would send now (see SECURITY.md › Telemetry) |
 | `GET /api/update` | Update status: `{current, latest, available, notes, published_at, flavor, state, error, progress, rollback, checked_at, auto, repo}`; `state` is `idle`, `checking`, `downloading`, `verifying`, `draining`, `applying` or `error`. `/api/state` carries a compact copy as `update` |
 | `POST /api/update/check` | Check for a release now; returns the status (a failed check is in its `error`). 409 while a check or update runs |
 | `POST /api/update/apply` | Download, verify, drain and restart into the latest release (202). 409 while a check or update runs |
+| `POST /api/restart` | Drain like an update (held VMs are not waited for), then re-exec in place (`?now=true` skips the wait and kills running jobs). 409 while an update runs or when `listen` cannot be bound. `/api/state` carries it as `restart` |
+| `POST /api/restart/cancel` | Cancel a draining restart and resume launching |
 | `POST /api/update/cancel` | Stop a draining update and resume launching. 409 unless one is draining |
 | `GET /api/tailscale` | Tailscale status and serve config |
 | `GET /api/tailscale/netcheck` | `tailscale netcheck` |
 | `POST /api/tailscale/ping` | Ping a peer (`{"peer": "..."}`, restricted characters) |
 | `POST /api/tailscale/serve` | Turn HTTPS serve on or off (port 8443) |
-| `GET, POST /api/gh/{path}` | Allow-listed GitHub proxy: GET of `repos/<configured repo>/actions/` followed by `workflows...`, `runs`, `runs/...` or `jobs/...`; POST only to `runs/<id>/rerun`, `rerun-failed-jobs` or `cancel` and `workflows/<id>/dispatches` |
+| `GET /api/forges` | Each forge: id, kind, web URL, caps, auth source, served repos, health |
+| `GET /api/runs?repo=` | Recent runs of a served repo (`status`, `branch`, `page` filter), in kiln's own shape with server-built links |
+| `GET /api/runs/{id}?repo=` | One run with its jobs |
+| `GET /api/jobs/{id}/log?repo=&from=` | A page of the forge's log for a job (`text`, `next`, `complete`) |
+| `GET /api/workflows?repo=` | The repo's workflows (`[]` where the forge has none) |
+| `POST /api/runs/{id}/rerun?repo=[&failed=1]`, `POST /api/runs/{id}/cancel?repo=`, `POST /api/dispatch` | The only forge writes; each needs the matching cap, `x-kiln` and is audited |
 
-The GitHub proxy is how the dashboard browses workflows and runs and dispatches, reruns or cancels them without a dedicated endpoint per call. Nothing else is written through it: not run approvals, deployment reviews or log deletion.
+These endpoints replace the old `/api/gh/` passthrough. The `repo` must be one kiln serves, ids are numeric, and nothing else is written through them: not run approvals, deployment reviews or log deletion.
