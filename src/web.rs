@@ -1487,6 +1487,7 @@ mod tests {
                 "blocked",
                 "blocked_kind",
                 "error",
+                "fork_queued",
                 "health",
                 "last_ok",
                 "paused_until",

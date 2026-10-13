@@ -1031,6 +1031,7 @@ function banners() {
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
   for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
   for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on GitHub-hosted runners.`);
+  for (const r of p.fork_queued || []) B('warn', `${esc(r)}: a pull request from a fork is waiting; approve or close it on Gitea, or kiln will not start runners for this repo.`);
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   if (im?.rebake) B('warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
