@@ -211,8 +211,29 @@ write_files:
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
       }
-      # The gitlab and gitea branches get their runner and gate later; they call start_verdict_reader.
-      run_gitlab() { echo "kiln: gitlab runner not in this image, powering off"; return 1; }
+      # GitLab: one job through `gitlab-runner run-single` and the custom executor kiln-exec (which blocks on the
+      # verdict). No config.toml (run-single ignores -c): flags, and the token in CI_SERVER_TOKEN so it never shows
+      # in `ps`. sudo's env_reset drops everything else. The exit status says nothing (it is 0 after a failed job
+      # too), so it is ignored: kiln takes the result from the API. The runner's stdout is the unit's console, and
+      # its `received ... job=<id>` line is how kiln learns which job this is. Gitea gets its own branch later.
+      # --wait-timeout is a backstop only; the host's own idle deadline ends an idle VM first.
+      run_gitlab() {
+        local url cred tok x=/usr/local/bin/kiln-exec
+        url=$(secret url | head -n1); cred=$(secret cred | head -n1)
+        tok=$(printf '%s' "$cred" | base64 -d 2>/dev/null)
+        if [[ ! $url =~ ^https?://[A-Za-z0-9._~:/%@+-]+$ || ! $tok =~ ^glrt-[A-Za-z0-9_.-]+$ ]]; then
+          echo "kiln: no usable gitlab url or runner token passed, powering off"
+          return 1
+        fi
+        start_verdict_reader
+        CI_SERVER_TOKEN=$tok sudo -H -u runner --preserve-env=CI_SERVER_TOKEN gitlab-runner run-single \
+          -u "$url" --name kiln --executor custom --shell bash \
+          --builds-dir /home/runner/.cache/gitlab/builds --cache-dir /home/runner/.cache/gitlab/cache \
+          --custom-config-exec "$x" --custom-config-args config --custom-prepare-exec "$x" --custom-prepare-args prepare \
+          --custom-run-exec "$x" --custom-run-args run --custom-cleanup-exec "$x" --custom-cleanup-args cleanup \
+          --max-builds 1 --wait-timeout 86400
+        echo "kiln: runner exited with $?"
+      }
       # Gitea guest hardening (6.4), at run time so GitHub and GitLab jobs (runc's memfd re-exec) are untouched.
       # GT-5 calls this from run_gitea just before the gate arms (the stub does not yet). The hold's sshd is started on demand, unaffected.
       harden_gitea() { sysctl -w vm.memfd_noexec=2 && { systemctl stop cron.service 2>/dev/null || true; }; }
