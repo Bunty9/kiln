@@ -737,7 +737,7 @@ const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip
 const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_accounts || [])].filter(Boolean))];
 // A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
 let appConv = null;
-const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › GitHub.')}>Dismiss</button></div>`;
+const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › Forges.')}>Dismiss</button></div>`;
 const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${ghUrl(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
@@ -890,7 +890,7 @@ const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 const pages = {};
 let cur = null, mounted = false, swipeDir = 0;
 const NAV = [['overview', '#/', 'Overview', 'VM slots, health and recent jobs (g o)'], ['jobs', '#/jobs', 'Jobs', 'Every VM kiln ran, newest first (g j)'],
-  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, GitHub, image, cache, network and more (g s)']];
+  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, forges, image, cache, network and more (g s)']];
 $('#nav').innerHTML = NAV.map(([k, h, l, t]) => `<a href="${h}" data-p="${k}"${tip(t)}>${ic(k)}${l}</a>`).join('');
 $('#tabs').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${ic(k, 20)}<span>${l}</span>${k === 'jobs' ? '<span class="n" hidden></span>' : ''}</a>`).join('');
 function parse() {
@@ -900,17 +900,17 @@ function parse() {
 }
 // GitHub's manifest flow sends the browser back to /?code=…&state=….
 // The URL keeps code and state until the conversion succeeds, so a failure can be retried.
-// No window.open here: after an await it is popup-blocked. Settings › GitHub shows the install button instead.
+// No window.open here: after an await it is popup-blocked. Settings › Forges shows the install button instead.
 async function appCallback() {
   const q = new URLSearchParams(location.search);
   appConv = { busy: true };
   try {
     const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
-    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/github');
+    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/forges');
     toast(`GitHub App ${r.slug || ''} created. Install it on your repos next.`); await poll();
   } catch (e) {
     appConv = { err: String(e.message || e) };
-    history.replaceState(null, '', location.pathname + location.search + '#/settings/github');
+    history.replaceState(null, '', location.pathname + location.search + '#/settings/forges');
   }
   route();
 }
@@ -999,9 +999,9 @@ function banners() {
   const p = S.poll, c = S.config, b = [], err = String(p.error || '');
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
   const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
-  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
-  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/github'))
-    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
+  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/forges'));
+  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/forges'))
+    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/forges'));
   if (S.baking) {
     const i = bakeIdx(), last = plain(bk.text.trim().split('\n').pop() || '');
     B('ember', `<b>Baking image</b> · elapsed ${dur((Date.now() - bk.t0) / 1000)}, usually ~4 min
@@ -1031,7 +1031,7 @@ function banners() {
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   if (im?.rebake) B('warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
-  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/github'));
+  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/forges'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
@@ -1039,7 +1039,7 @@ function banners() {
   const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && d.status.last_error && d.status.last_error[0] - d.status.failing_since >= 3600) || d.status?.permanent_streak >= 3);
   if (nbad.length) B('fail', 'Notifications failing: ' + nbad.map(d => esc(d.name)).join(', '), A('Fix', '#/settings/notifications'));
   if (S.notify?.load_error) B('fail', 'Notification destinations: ' + esc(S.notify.load_error), A('Fix', '#/settings/notifications'));
-  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
+  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/forges'));
   else if (S.app && !S.app.repos.length) b.push(`<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> kiln serves exactly the repos the GitHub App is installed on, and it is on none yet.</span>${appInstall(1)}</div>`);
   else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
   else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
@@ -1464,7 +1464,7 @@ class Log {
 const lastRun = {};
 const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
 const repoErr = e => /\b404\b/.test(e.message) ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
-  : /\b401\b/.test(e.message) ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
+  : /\b401\b/.test(e.message) ? (S.app ? "GitHub rejected the App's credentials. Check Settings › Forges." : 'GitHub rejected the token. Replace it in Settings › Forges.') : e.message;
 function addRepo(raw) {
   const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
@@ -1566,10 +1566,10 @@ const consentHTML = () => `<div class="card"><h2>${ic('shield', 20)} Help improv
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"><button class="btn pri" data-act="consent">Save choice</button><a class="btn" href="#/settings/privacy">See what is sent</a></div></div>`;
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', privacy: 'Privacy', appearance: 'Appearance' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', forges: 'Forges', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', privacy: 'Privacy', appearance: 'Appearance' };
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
-const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', privacy: 'shield', appearance: 'palette' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', forges: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', privacy: 'shield', appearance: 'palette' };
 let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
 let draft = null, cfgJ = '', TS = null, tokRes = null;
 const pings = new Map();
@@ -1632,6 +1632,11 @@ const G = {
       setHTML($('#gh-st'), `<dl class="kv" style="margin-bottom:16px"><dt>Token</dt><dd>${S.token_set ? '<span class="ok">Set</span>' : '<span class="fail">Not set</span>'}</dd><dt>Source</dt><dd>${esc(src)}</dd>${S.token_saved ? `<dt>Saved</dt><dd>${esc(when(S.token_saved))} (${rel(S.token_saved)})</dd>` : ''}<dt>Expires</dt><dd>${S.token_expires ? `${esc(when(S.token_expires))}${S.token_expires > now() ? ` (in ${Math.ceil((S.token_expires - now()) / 86400)}d)` : ' (expired)'}` : 'no expiry reported'}</dd></dl>
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
     },
+  },
+  forges: {
+    // One card set per configured forge (GET /api/forges), by kind. GitLab and Gitea slot in as G.gitlab / G.gitea.
+    html: () => !F ? '' : F.map(f => G[f.kind]?.html(f) ?? '').join('') || '<p class="fg2">No forge is configured.</p>',
+    live() { for (const f of F || []) G[f.kind]?.live?.(f); },
   },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
@@ -1922,7 +1927,8 @@ function updHTML() {
 const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
   mount(r) {
-    const g = GROUPS[r.seg[0]] ? r.seg[0] : 'capacity'; this.g = g;
+    const g = GROUPS[r.seg[0]] ? r.seg[0] : r.seg[0] === 'github' ? 'forges' : 'capacity'; this.g = g;
+    if (g === 'forges' && !F) loadForges().then(() => cur === this && this.g === 'forges' && this.render());
     cfgJ = JSON.stringify(S.config); draft = JSON.parse(cfgJ);
     $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${ic(GI[k])}${l}</a>`).join('')}</nav>
       <div><label class="sr" for="gsel">Settings group</label><select id="gsel" data-act="gsel">${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${k === g ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -1989,7 +1995,7 @@ const imgStrip = () => S.image_ready ? ['o', `<span class="ok">${ic('check')} VM
   : ['w', 'The VM image isn\'t built yet. <button class="btn" data-act="bake">Bake image</button>'];
 pages.setup = {
   mount() {
-    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › GitHub.')}>Skip for now</button></div>
+    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › Forges.')}>Skip for now</button></div>
       <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div id="su-consent" style="margin-bottom:16px"></div><div class="card" id="su"></div>`;
     setupOpen = null;
   },
@@ -2008,7 +2014,7 @@ pages.setup = {
     }
     const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
     const sum = [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
-      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › GitHub.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
       const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
@@ -2023,18 +2029,18 @@ pages.setup = {
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
     const B = S.app ? [
-      `<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/github">Settings › GitHub</a>.</p>`,
+      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/forges">Settings › Forges</a>.</p>`,
       `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 30 seconds, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
       test(),
     ] : [
-      `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
+      `<p class="fg2 sm">Forge: <b>GitHub</b></p><p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
        <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
        <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}
-       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/github">Create one in Settings › GitHub</a>.</p>`,
+       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/forges">Create one in Settings › Forges</a>.</p>`,
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
+    setHTML($('#su'), strip + `<ol class="stp">${['Connect a forge', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
       const d = done[i] && i !== open;
       return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
@@ -2046,7 +2052,7 @@ const GUIDES = [
   ['start', 'Getting started', L => `<h2>Getting started</h2>
     <p>When GitHub queues a job whose <code>runs-on</code> names kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
     <p>You need three things:</p>
-    <ol><li><b>A GitHub token</b> (Settings › GitHub), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
+    <ol><li><b>A GitHub token</b> (Settings › Forges), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
     <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
     <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
     <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
@@ -2188,7 +2194,7 @@ const ACT = {
   },
   snip() { setupSnip = !setupSnip; pages.setup.update(); },
   surepo(s) { setupRepo = s.value; pages.setup.update(); },
-  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/github'; },
+  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/forges'; },
   resettips() { Object.keys(TIPS).forEach(k => lsSet('kiln-tip-' + k, null)); toast('Tips will show again'); },
   guides() { dlg.close(); location.hash = '#/guides'; },
   gdsel: s => (location.hash = '#/guides/' + s.value),

@@ -11,6 +11,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Settings › GitHub is now Settings › Forges: one card set per forge from `/api/forges`. The GitHub token and App cards are unchanged, the setup wizard's first step is "Connect a forge", and `#/settings/github` still opens the page.
 - The dashboard's Repos and Job pages use the forge-neutral API instead of `/api/gh/*`, which is removed. The Job page's log tab is named after the forge, and controls the forge can't do (rerun, cancel, run workflow) are hidden. The forge's job-log download is capped at 16 MiB.
 - QEMU and its helpers (rootlesskit, slirp4netns) now start with a cleared environment and inherit only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `XDG_RUNTIME_DIR` and `RUST_LOG`, instead of only dropping the GitHub token variables.
 - A forge `url` in `forges` must now be plain ASCII without quotes, backslashes, whitespace or credentials, https (http only with `network: internal`), and not a loopback, host-own or link-local address.

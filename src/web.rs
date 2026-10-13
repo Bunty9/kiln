@@ -1276,7 +1276,7 @@ async fn app_manual(State(app): S, Json(b): Json<ManualBody>) -> R<Json<Value>> 
 /// `app` object of /api/state; a failure is in its `error`, and the last map is kept.
 async fn app_refresh(State(app): S) -> R<Json<Value>> {
     if app.gh.app().is_none() {
-        bail_r("not in GitHub App mode: create or add the App in Settings › GitHub first")?;
+        bail_r("not in GitHub App mode: create or add the App in Settings › Forges first")?;
     }
     let _ = app.gh.discover_now().await;
     Ok(Json(app_json(&app)))
