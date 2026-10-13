@@ -1530,6 +1530,15 @@ mod tests {
         // The fork job leaves the queue (and the retired VM is gone): the block lifts and the warm pool refills.
         m.route("GET", &format!("{api}/jobs?status=queued&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
         app.vms.lock().unwrap().retain(|v| v.id != "kiln-1-0");
+        // Let the GitHub VM launched above finish dying (it frees its share of the cpu budget and sets its backoff);
+        // on a slow 4-vCPU CI guest tick two otherwise raced it, and GitHub's relaunch could take the budget first.
+        for _ in 0..500 {
+            if app.kills.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app.kills.lock().unwrap().is_empty(), "the GitHub VM should have ended");
         tick(&app, &cfg).await.unwrap();
         assert!(app.poll.lock().unwrap().fork_queued.is_empty());
         assert_eq!(count(&app, "gitea:acme/demo"), 1, "warm launch resumes");

@@ -53,7 +53,7 @@ The data directory is set to mode 0700 at every start, and the systemd unit sets
 
 ### Filtered egress
 
-With `egress: "filtered"` each job's QEMU runs in its own rootless network namespace with an nftables allow-list loaded first, and then drops all capabilities. Jobs reach the public internet, DNS and the Docker mirror port only; the LAN, tailnet, the host's own addresses, cloud metadata addresses, every other host loopback port and outbound SMTP are blocked, and IPv6 is off. If any setup step fails, QEMU never starts. A probe verifies the filter and kiln launches nothing while it fails, never falling back to open. See [docs/architecture.md](docs/architecture.md#egress).
+With `egress: "filtered"` each job's QEMU runs in its own rootless network namespace with an nftables allow-list loaded first, and then drops all capabilities. Jobs reach the public internet, DNS and the Docker mirror port only (plus, for a GitLab or Gitea forge with `network: internal`, that forge's `ip:port` and nothing else private; the forge `url` must then be an IPv4 literal, never resolved from a DNS name, so whoever controls a name cannot aim the hole at another host; a loopback, host-own, link-local, slirp (10.0.2.0/24, which includes the host's loopback alias) or port-25 forge is refused; and because the rule is by address, every site behind a shared reverse proxy on that address becomes reachable too); the LAN, tailnet, the host's own addresses, cloud metadata addresses, every other host loopback port and outbound SMTP are blocked, and IPv6 is off. If any setup step fails, QEMU never starts. A probe verifies the filter and kiln launches nothing while it fails, never falling back to open. See [docs/architecture.md](docs/architecture.md#egress).
 
 ### Cache trust
 
