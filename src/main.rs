@@ -474,6 +474,7 @@ impl App {
         let gh = Arc::new(gh);
         let forges = forge::Forges::default();
         forges.sync(&forge::effective(&cfg.forges, &cfg.repos), &gh);
+        forges.load_tokens(&data);
         App {
             gh,
             forges,
@@ -504,6 +505,7 @@ impl App {
         c.validate()?;
         *self.gh.app_accounts.write().unwrap() = c.app_accounts.clone();
         self.forges.sync(&forge::effective(&c.forges, &c.repos), &self.gh);
+        self.forges.load_tokens(&self.data);
         let mut w = self.cfg.write().unwrap();
         let (tmp, path) = (self.data.join("config.json.tmp"), self.data.join("config.json"));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&c)?)?;

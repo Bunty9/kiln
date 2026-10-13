@@ -1135,7 +1135,7 @@ mod tests {
 
 /// Whether this host's runners and jobs carry the arm64 labels. Unit tests always run as x64:
 /// the mock forge's fixtures are x64, and the arm64 label rules have their own tests.
-fn fixtures_arch_arm64() -> bool {
+pub(crate) fn fixtures_arch_arm64() -> bool {
     crate::platform::ARM64 && !cfg!(test)
 }
 

@@ -1,0 +1,216 @@
+{
+  "jobs": [
+    {
+      "id": 81,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/81",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/71/jobs/81",
+      "run_id": 71,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/71",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "cbc188af1f0c88cb3579317f2451e561cbc0ff88",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 82,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/82",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/72/jobs/82",
+      "run_id": 72,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/72",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "cbc188af1f0c88cb3579317f2451e561cbc0ff88",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 83,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/83",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/73/jobs/83",
+      "run_id": 73,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/73",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "cbc188af1f0c88cb3579317f2451e561cbc0ff88",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 84,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/84",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/74/jobs/84",
+      "run_id": 74,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/74",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "cbc188af1f0c88cb3579317f2451e561cbc0ff88",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 85,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/85",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/75/jobs/85",
+      "run_id": 75,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/75",
+      "name": "size-default",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "03178e81544f6dacc5321a6b44c07b7d737672d4",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 86,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/86",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/75/jobs/86",
+      "run_id": 75,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/75",
+      "name": "size4",
+      "labels": [
+        "kiln-4cpu"
+      ],
+      "run_attempt": 1,
+      "head_sha": "03178e81544f6dacc5321a6b44c07b7d737672d4",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 87,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/87",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/75/jobs/87",
+      "run_id": 75,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/75",
+      "name": "hosted",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "run_attempt": 1,
+      "head_sha": "03178e81544f6dacc5321a6b44c07b7d737672d4",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 88,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/88",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/75/jobs/88",
+      "run_id": 75,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/75",
+      "name": "multi",
+      "labels": [
+        "kiln",
+        "gpu"
+      ],
+      "run_attempt": 1,
+      "head_sha": "03178e81544f6dacc5321a6b44c07b7d737672d4",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:51Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 90,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/90",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/76/jobs/90",
+      "run_id": 76,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/76",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "48a0bf2e699ea20938eda15856e2fe19e33394ff",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:55Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 91,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/91",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/77/jobs/91",
+      "run_id": 77,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/77",
+      "name": "check",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "48a0bf2e699ea20938eda15856e2fe19e33394ff",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:51:55Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    },
+    {
+      "id": 92,
+      "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/jobs/92",
+      "html_url": "https://gitea.example.org/acme/demo/actions/runs/78/jobs/92",
+      "run_id": 78,
+      "run_url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/runs/78",
+      "name": "follow",
+      "labels": [
+        "kiln"
+      ],
+      "run_attempt": 1,
+      "head_sha": "03178e81544f6dacc5321a6b44c07b7d737672d4",
+      "head_branch": "main",
+      "status": "queued",
+      "runner_id": 0,
+      "steps": [],
+      "created_at": "2026-10-13T08:52:30Z",
+      "started_at": "1970-01-01T00:00:00Z",
+      "completed_at": "1970-01-01T00:00:00Z"
+    }
+  ],
+  "total_count": 11
+}

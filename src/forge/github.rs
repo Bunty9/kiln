@@ -37,7 +37,7 @@ impl GitHub {
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
         let (by_size, claimed, refused_forks) = self.gh.queued_jobs(&repo.path, label, default_cpus).await?;
-        Ok(Demand { by_size, claimed, refused_forks })
+        Ok(Demand { by_size, claimed, refused_forks, ..Default::default() })
     }
 
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
