@@ -7,6 +7,8 @@ mod forge_test_mock;
 mod github;
 mod host;
 mod mirror;
+#[cfg(test)]
+mod mixed_tests;
 mod notify;
 mod platform;
 mod telemetry;
@@ -247,19 +249,25 @@ impl Config {
         if self.notify_rules.len() > 50 {
             bail!("notify_rules: at most 50");
         }
-        let wf_ok = |w: &str| {
+        let wf_ok = |w: &str, pipeline: bool| {
             w == "*"
                 || (w.len() <= 100
-                    && (w.ends_with(".yml") || w.ends_with(".yaml"))
+                    && (pipeline || w.ends_with(".yml") || w.ends_with(".yaml"))
                     && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
         };
         for r in &self.notify_rules {
             // Membership in the served repos is checked in web::set_config (App mode learns them at runtime).
-            if r.repo != "*" && !valid_repo(&r.repo) {
-                bail!("notify_rules: repo must be \"*\" or look like owner/name: {:?}", r.repo);
+            let other = forge::RepoRef::parse(&r.repo).ok().filter(|rr| rr.forge.as_str() != "github");
+            if r.repo != "*" && !valid_repo(&r.repo) && other.is_none() {
+                bail!("notify_rules: repo must be \"*\" or look like owner/name (forge-id:path on another forge): {:?}", r.repo);
             }
-            if !wf_ok(&r.workflow) {
-                bail!("notify_rules: workflow must be \"*\" or a file name like release.yml: {:?}", r.workflow);
+            // A GitLab repo has no workflow file: its rule names the pipeline.
+            let gitlab = other.is_some_and(|rr| self.forges.iter().flatten().any(|f| f.id == rr.forge && f.kind == forge::Kind::GitLab));
+            if !wf_ok(&r.workflow, gitlab) {
+                bail!(
+                    "notify_rules: workflow must be \"*\" or a file name like release.yml (a pipeline name for GitLab): {:?}",
+                    r.workflow
+                );
             }
             if !["success", "failure", "any"].contains(&r.outcome.as_str()) {
                 bail!("notify_rules: outcome must be success, failure or any");
@@ -1413,9 +1421,9 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
 
-    /// The seam for tick tests (X-3 extends it): a baked image so the tick runs, `max_vms: 0` so it
+    /// The seam for tick tests (`mixed_tests` builds on it): a baked image so the tick runs, `max_vms: 0` so it
     /// never reaches QEMU. Everything else in `tick` is the real code against the mock forge.
-    fn tick_app(name: &str, m: &forge_test_mock::Mock, forges: Option<Vec<forge::ForgeCfg>>) -> (Arc<App>, Config) {
+    pub(crate) fn tick_app(name: &str, m: &forge_test_mock::Mock, forges: Option<Vec<forge::ForgeCfg>>) -> (Arc<App>, Config) {
         // vm_cpus fits a 3-thread host (a hosted Mac runner), or the fixture's default-size jobs would not count.
         let cfg = Config {
             repos: vec!["acme/demo".into()],
@@ -1530,6 +1538,15 @@ mod tests {
         // The fork job leaves the queue (and the retired VM is gone): the block lifts and the warm pool refills.
         m.route("GET", &format!("{api}/jobs?status=queued&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
         app.vms.lock().unwrap().retain(|v| v.id != "kiln-1-0");
+        // Let the GitHub VM launched above finish dying (it frees its share of the cpu budget and sets its backoff);
+        // on a slow 4-vCPU CI guest tick two otherwise raced it, and GitHub's relaunch could take the budget first.
+        for _ in 0..500 {
+            if app.kills.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(app.kills.lock().unwrap().is_empty(), "the GitHub VM should have ended");
         tick(&app, &cfg).await.unwrap();
         assert!(app.poll.lock().unwrap().fork_queued.is_empty());
         assert_eq!(count(&app, "gitea:acme/demo"), 1, "warm launch resumes");
@@ -1632,6 +1649,14 @@ mod tests {
             c.notify_rules = vec![bad.clone()];
             assert!(c.validate_for(8).is_err(), "{bad:?}");
         }
+        // Other forges: a `forge-id:path` repo key; GitLab's workflow is a pipeline name, the others' a file.
+        c.forges = Some(serde_json::from_str(r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["g/p"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["o/n"]}]"#).unwrap());
+        c.notify_rules = vec![rule("gl:g/p", "pipeline", "any", vec!["a1b2c3d4"]), rule("ge:o/n", "ci.yml", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_ok());
+        c.notify_rules = vec![rule("ge:o/n", "pipeline", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_err(), "Gitea matches by file");
+        c.notify_rules = vec![rule("gl:g/../p", "*", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_err());
         c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
         assert!(c.validate_for(8).is_err(), "at most 50");
     }
@@ -1661,7 +1686,7 @@ mod tests {
 
     #[test]
     fn config_load_fails_closed() {
-        let d = std::env::temp_dir().join(format!("kiln-test-cfg-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-config_load_fails_closed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(load_config(&d).unwrap().egress, "open", "no file: defaults");
