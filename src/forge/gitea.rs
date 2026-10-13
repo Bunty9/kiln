@@ -4,7 +4,9 @@
 //! network mode. Registration, retire, sweep, verdict facts and logs arrive with GT-2/GT-3 and
 //! fail closed until then.
 
-use super::{Caps, Credential, Demand, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, env_name, net, read_token_file};
+use super::{
+    Caps, Credential, Demand, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, env_name, net, read_token_file,
+};
 use anyhow::{Context, Result, bail};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use serde_json::{Value, json};

@@ -10,8 +10,8 @@
 //! redirects, address guard, size cap), and a `Link` URL is only compared, never fetched.
 
 use super::{
-    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Links, Network, RepoRef, RunnerReg, env_name, net, read_token_file,
-    token_path,
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Links, Network, RepoRef, RunnerReg, env_name, net,
+    read_token_file, token_path,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -280,6 +280,8 @@ impl GitLab {
         };
         let (mut by_size, mut claimed, mut refused_forks) = (HashMap::new(), HashMap::new(), 0);
         let prefix = format!("{}-", self.install);
+        // arm64 hosts tag their runners `<label>-arm64[-Ncpu]`, so x64 jobs never match them.
+        let label = &super::arch_label(label, crate::github::fixtures_arch_arm64());
         for j in &jobs {
             match j["status"].as_str() {
                 Some("pending") => {
@@ -300,7 +302,7 @@ impl GitLab {
                 _ => {}
             }
         }
-        Ok(Demand { by_size, claimed, refused_forks })
+        Ok(Demand { by_size, claimed, refused_forks, ..Default::default() })
     }
 
     /// Whether the job's code came from a fork (true on any doubt), and the MR's source branch
@@ -843,6 +845,9 @@ mod tests {
         for bad in ["kiln-64cpu", "kiln-04cpu", "kiln-cpu", "kiln-4", "Kiln", "kiln-4CPU", "kiln--4cpu", "kiln-+4cpu"] {
             assert_eq!(s(&[bad], 4), None, "{bad}");
         }
+        // An arm64 host's label is `kiln-arm64`: plain x64 tags are not its jobs.
+        let a = |t: &[&str]| job_size(t, &crate::forge::arch_label("kiln", true), 4);
+        assert_eq!((a(&["kiln-arm64"]), a(&["kiln-arm64-2cpu"]), a(&["kiln"]), a(&["kiln-2cpu"])), (Some(4), Some(2), None, None));
         assert_eq!(runner_tags("kiln", 4, 4), ["kiln-4cpu", "kiln"]);
         assert_eq!(runner_tags("kiln", 8, 4), ["kiln-8cpu"]);
         // What a runner is registered with is what the job is matched against.
