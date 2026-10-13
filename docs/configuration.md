@@ -232,25 +232,45 @@ Settings › Forges › **Add a forge** takes the kind (GitLab or Gitea), an add
 
 ### GitLab
 
-**GitLab support is in preview: jobs will not run until enabled.** kiln reads a GitLab project's queue and pipelines and can check its setup, but starts no VM for GitLab yet; the card, setup wizard and **Use GitLab** guide say so until launches are on.
+kiln serves GitLab projects on gitlab.com and self-managed GitLab. It refuses a server older than 16.0 and recommends 17 or newer; the whole path (plain, `image:`, `services:`, tag, fork merge request, child and downstream pipeline, cancel, runner cleanup) was tested end to end against GitLab CE 19.4.1 with the pinned GitLab Runner 19.4.1 in the VM image. gitlab.com itself (its tier limits and rate limits) is untested.
 
-kiln needs GitLab 16.0 or newer. Create a **bot account** (a user dedicated to kiln) and add it as **Maintainer** to only the projects kiln serves; Maintainer is what creating a project runner needs. Create a personal access token for it with exactly:
+**Setup**
 
-| Scope | Why |
-|---|---|
-| `create_runner` | make a one-job runner for each VM |
-| `manage_runner` | pause it and delete it |
-| `read_api` | queued jobs, pipelines, job logs, merge request lookups |
+1. Create a **bot account** (a user dedicated to kiln) and add it as **Maintainer** to only the projects kiln serves; Maintainer is what creating a project runner needs.
+2. Create a personal access token for it with exactly:
 
-Give it an expiry; the dashboard warns 14 days before. Project and group access tokens work too where your GitLab tier offers them. Save it under Settings › Forges (or write it to `<data>/forges/<id>.token`).
+   | Scope | Why |
+   |---|---|
+   | `create_runner` | make a one-job runner for each VM |
+   | `manage_runner` | pause it and delete it |
+   | `read_api` | queued jobs, pipelines, job logs, merge request and branch lookups, job results |
 
-**Rerun, Cancel and Run pipeline** (Repos page) need the wider `api` scope, which kiln does not recommend. kiln reads the token's scopes (`GET /personal_access_tokens/self`, every 10 minutes and whenever a token is saved) and shows those three controls only when the token has `api`; the server refuses them otherwise ("needs the api scope"). With only the three runner scopes, rerun and cancel pipelines in GitLab itself.
+   Give it an expiry; the dashboard warns 14 days before. Project and group access tokens work too where your GitLab tier offers them. Save it under Settings › Forges (or write it to `<data>/forges/<id>.token`).
+3. Add the forge (`kind: "gitlab"`, see [Forges](#forges)) and its projects, press **Test**, and tag a job.
 
-**What the token can do.** With `read_api`, a token whose user is Maintainer or Owner on a project can read that project's CI/CD variables with their values, masked and protected ones included (`GET /projects/:id/variables`); GitHub's API never returns secret values. Group and instance variables are not readable by a project member. That is why the bot must be a dedicated account in only the served projects, with an expiring token, and why the token never enters a job VM, QEMU's environment or an error message. A job VM gets only a runner credential for one project, which kiln pauses before the job's code runs and deletes when it ends. A two-token split (a Maintainer with `create_runner` and `manage_runner` but no `read_api`, and a Reporter with `read_api`) would stop either token reading variables; kiln takes one token today, and the dashboard does not offer the split.
+**Rerun, Cancel and Run pipeline** (Repos page) need the wider `api` scope, which kiln does not recommend. kiln reads the token's scopes (`GET /personal_access_tokens/self`, every 10 minutes and whenever a token is saved) and shows those three controls only when the token has `api`; the server refuses them otherwise ("needs the api scope"). With only the three runner scopes, rerun and cancel pipelines in GitLab itself. Cancelling from the dashboard still stops the pipeline's VMs first, even when GitLab then refuses the cancel for lack of `api`; GitLab's own pipeline stays running until cancelled there.
+
+**What the token can do.** With `read_api`, a token whose user is Maintainer or Owner on a project can read that project's CI/CD variables with their values, masked and protected ones included (`GET /projects/:id/variables`); GitHub's API never returns secret values. Group and instance variables are not readable by a project member. That is why the bot must be a dedicated account in only the served projects, with an expiring token. The token never enters a job VM, QEMU's environment or an error message. A job VM gets only a runner credential for one project, which kiln pauses before the job's code runs and deletes when the VM ends. A two-token split (a Maintainer with `create_runner` and `manage_runner` but no `read_api`, and a Reporter with `read_api`) would stop either token reading variables; kiln takes one token today, and the dashboard does not offer the split. Variables marked `hidden` (GitLab 17.x and newer) are not returned by the API. See [SECURITY.md](../SECURITY.md#gitlab).
 
 **Setup check** (`kiln doctor`, Settings › Diagnostics, and the card's **Test**, which creates nothing): the GitLab version, who the token belongs to, its scopes and expiry, and its role on each project. Saving a token refuses one that is rejected or lacks a scope, naming it ("the token lacks `create_runner`"). A role below Maintainer is shown on the project's row. When creating a runner still gets **403**, GitLab does not say why; there are three causes: the role is below Maintainer; the instance setting `valid_runner_registrars` (Admin › Settings › CI/CD › Runner registration) lacks `project`; or runner registration is switched off for the project or its group (a toggle with no API, so kiln cannot check it).
 
-**Using it.** Give a job `tags: [kiln]` (or `kiln-4cpu` and the other size labels) in `.gitlab-ci.yml`; jobs with no tag, or other tags, are left to your other runners. Merge request pipelines from forks are never run by kiln (decided by the job's ref, not by its variables). GitLab can also run a fork's pipeline in your project when someone clicks Run pipeline and the project allows it (*Run pipelines in the parent project for merge requests from forks*): that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave that setting off.
+**Using it.** Give a job `tags: [kiln]` in `.gitlab-ci.yml`:
+
+```yaml
+build:
+  tags: [kiln]
+  script:
+    - make test
+```
+
+- **Tags.** `kiln` is the default size (`vm_cpus`); `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu` and `kiln-16cpu` pick a size. A job may carry `kiln` together with its own size only if that size is the default. A job with no tag, another tag, an unknown size or two different sizes is left to your other runners. `label` renames `kiln`. On an arm64 host (Apple Silicon or aarch64 Linux) the tags are `kiln-arm64` and `kiln-arm64-<N>cpu`, so x64 jobs never land there; GitLab on arm64 has not been tested.
+- **What runs.** A job without `image:` runs directly in the VM as the `runner` user. With `image:` and `services:` the job and its services run in Docker inside the VM (a service gets its own network alias; services run privileged, since the VM is the isolation boundary). Artifacts upload as usual. `docker:dind` as a service is untested.
+- **Which jobs run** is decided from GitLab's API, never from a `CI_*` variable (see [SECURITY.md](../SECURITY.md#gitlab)). Merge request pipelines from forks, multi-project downstream pipelines (source `pipeline`) and any job kiln cannot classify are refused. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request) and never save the cache. Tag pipelines and merge-train pipelines run without the cache. A pending job that kiln would refuse gets no VM of its own: it stays `pending` in GitLab until a VM for another job takes and refuses it, or someone cancels it.
+- **Cache.** The repo cache disk works as on GitHub. It is saved only after a `push` pipeline on the default branch or a protected branch in `cache_branches`, whose job the API reports as `success` on this VM's own runner, with exactly one job started and a recorded `ok` verdict for it.
+- **Runner cleanup.** The runner of every VM is deleted when the VM ends. At startup, and about hourly for GitLab and Gitea, kiln also deletes this install's runners that no VM can own (never by their status).
+- **Forks you did not intend.** GitLab can run a fork's pipeline in your project when someone clicks Run pipeline and the project allows it (*Run pipelines in the parent project for merge requests from forks*, `ci_allow_fork_pipelines_to_run_in_parent_project`): that exposes the project's unprotected CI/CD variables to the fork's code on any runner. kiln refuses the job but cannot prevent the exposure. Leave that setting off.
+- **Network.** `network: public` (the default) is for gitlab.com or a GitLab with a public address. For a GitLab on your LAN or tailnet use `network: internal`; with `egress: "filtered"` the forge `url` must then be an IPv4 literal (for example `http://100.64.0.7:8929`), because a DNS name is never resolved for the one extra accept rule kiln adds for that `ip:port`. Every site behind a shared reverse proxy on that address becomes reachable from job VMs. Loopback, this machine's own addresses, link-local addresses, slirp's `10.0.2.0/24` and port 25 are refused. See [Forges](#forges) and [Egress](architecture.md#egress).
+- **Notifications.** `notify_rules[].repo` is `<forge-id>:<group/project>` (for example `gl:acme/demo`) or `*`; `workflow` is `pipeline` or `*`, since GitLab has no workflow file; `outcome` and `to` are as for GitHub. See [Workflow rules](#workflow-rules) and [The generic payload](#the-generic-payload).
 
 ### Gitea
 
@@ -286,10 +306,6 @@ jobs:
 `kiln-4cpu` and the other size labels work like GitHub's; jobs that do not ask for kiln are left to your other runners. Fork pull requests, `pull_request_target` from a fork and every `workflow_run` are never run by kiln (see [SECURITY.md](../SECURITY.md#fork-pull-requests)).
 
 **Caching on Gitea.** The repo cache disk (Docker layers, `~/.cargo`, `~/.npm`, ...) works as on GitHub, but Gitea's `actions/cache` does **not** persist between jobs: the runner's cache server and its work directory live on the VM's disk, not on the cache disk (a cold run must be able to unmount the cache disk), so each job starts with an empty `actions/cache`. Rely on the cache disk for package and toolchain caches instead.
-
-## GitLab jobs
-
-Which GitLab jobs kiln runs is decided from GitLab's API (see [SECURITY.md](../SECURITY.md#fork-pull-requests)). Multi-project downstream pipelines (source `pipeline`) are refused: the upstream project chooses their variables and kiln cannot vouch for them. Child pipelines (`parent_pipeline`) run only if their ref passes the usual rules (a branch of the project, or a same-project merge request; fork merge requests are refused), and they never save the cache. Merge-train pipelines run without the cache. The cache is saved only after a `push` pipeline on the default or a protected cache branch whose job the API reports as `success`, on this VM's own runner, with exactly one job started and a recorded `ok` verdict for that job. kiln removes the runners of VMs that ended, at startup and about hourly for GitLab and Gitea. Cancelling a pipeline from the dashboard stops its VMs first, even when the token lacks the `api` scope and GitLab refuses the cancel.
 
 ## Notifications
 
