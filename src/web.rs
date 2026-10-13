@@ -854,6 +854,8 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     {
         bail_r(&why)?;
     }
+    // Held to the save: a forge add, token save or removal cannot interleave with the checks below.
+    let forge_guard = FORGE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
     let (old_forges, new_forges) = (app.cfg().forges.unwrap_or_default(), c.forges.clone().unwrap_or_default());
     let bad = crate::forge::unknown_keys(&old_forges, &new_forges);
     if !bad.is_empty() {
@@ -878,7 +880,10 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     if !errs.is_empty() {
         bail_r(&errs.join("; "))?;
     }
+    c.validate()?;
+    drop_stale_tokens(&app.data, &old_forges, &new_forges);
     app.save_cfg(c)?;
+    drop(forge_guard);
     if reprobe {
         // Probe now so the dashboard shows the result and the scheduler has it cached.
         let a = app.clone();
@@ -1477,7 +1482,8 @@ fn edit_forges(app: &App, edit: impl FnOnce(&mut Vec<crate::forge::ForgeCfg>) ->
     use crate::forge::{ForgeCfg, ForgeId, Kind};
     let _g = FORGE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
     let mut c = app.cfg();
-    let mut list = crate::forge::effective(&c.forges, &c.repos);
+    let old = crate::forge::effective(&c.forges, &c.repos);
+    let mut list = old.clone();
     edit(&mut list)?;
     // GitHub's repos stay in the top-level `repos`.
     list.iter_mut().filter(|f| f.kind == Kind::GitHub).for_each(|f| f.repos.clear());
@@ -1490,8 +1496,21 @@ fn edit_forges(app: &App, edit: impl FnOnce(&mut Vec<crate::forge::ForgeCfg>) ->
         repos: vec![],
         extra: Default::default(),
     };
-    c.forges = if list == [plain] { None } else { Some(list) };
+    c.forges = if list == [plain] { None } else { Some(list.clone()) };
+    c.validate()?;
+    drop_stale_tokens(&app.data, &old, &list);
     app.save_cfg(c)
+}
+
+/// Deletes the saved token of every forge that is in only one of the lists (removed or new). A
+/// token file belongs to the forge id, so one left by a removed forge must never be read by a
+/// later forge of that name at another address. Before the save, so the new forge never loads it.
+fn drop_stale_tokens(data: &std::path::Path, old: &[crate::forge::ForgeCfg], new: &[crate::forge::ForgeCfg]) {
+    let only_old = old.iter().filter(|o| !new.iter().any(|n| n.id == o.id));
+    let only_new = new.iter().filter(|n| !old.iter().any(|o| o.id == n.id));
+    for f in only_old.chain(only_new).filter(|f| f.kind != crate::forge::Kind::GitHub) {
+        let _ = std::fs::remove_file(crate::forge::token_path(data, &f.id));
+    }
 }
 
 /// The stored entry and the live forge for `id`; GitHub is managed elsewhere.
@@ -1572,9 +1591,6 @@ async fn forge_add(State(app): S, Json(b): Json<AddForge>) -> R<(Extension<crate
         });
         Ok(())
     })?;
-    // A new forge starts with no token: one left behind by an earlier forge of this name is not for this address.
-    let _ = std::fs::remove_file(crate::forge::token_path(&app.data, &id));
-    app.forges.load_tokens(&app.data);
     Ok((Extension(crate::audit::Note(format!("added gitlab forge {} at {url}", id.as_str()))), Json(json!({ "id": id, "url": url }))))
 }
 
@@ -1585,7 +1601,11 @@ struct ForgeTokenBody {
 
 /// Tries a token against the forge, and saves it only if GitLab accepts it with the scopes kiln
 /// needs. Written to `<data>/forges/<id>.token` (0600). The token is never sent back or logged.
-async fn forge_token(State(app): S, Path(id): Path<String>, Json(b): Json<ForgeTokenBody>) -> R<Json<Value>> {
+async fn forge_token(
+    State(app): S,
+    Path(id): Path<String>,
+    Json(b): Json<ForgeTokenBody>,
+) -> R<(Extension<crate::audit::Note>, Json<Value>)> {
     let (cfg, f) = managed(&app, &id)?;
     let crate::forge::Forge::GitLab(g) = &*f else {
         return Err(anyhow!("only GitLab tokens are managed from the dashboard so far").into());
@@ -1603,7 +1623,28 @@ async fn forge_token(State(app): S, Path(id): Path<String>, Json(b): Json<ForgeT
     if !problems.is_empty() {
         bail_r(&format!("token not saved: {}", problems.join("; ")))?;
     }
-    let path = crate::forge::token_path(&app.data, &cfg.id);
+    store_token(&app, &cfg.id, &f, g, &cand, token)?;
+    let note = format!("set the token of forge {id} (login {})", res["login"].as_str().unwrap_or("?"));
+    Ok((Extension(crate::audit::Note(note)), Json(res)))
+}
+
+/// Saves a token that was just accepted by `f`. The check awaited the network, so the forge may
+/// have been removed or re-added at another address meanwhile: the token goes to disk only if
+/// `f` is still the live forge, under the lock that removals and adds hold.
+fn store_token(
+    app: &App,
+    id: &crate::forge::ForgeId,
+    f: &Arc<crate::forge::Forge>,
+    g: &crate::forge::gitlab::GitLab,
+    cand: &crate::forge::gitlab::GitLab,
+    token: &str,
+) -> anyhow::Result<()> {
+    let _g = FORGE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
+    let cur = managed(app, id.as_str())?.1;
+    if !Arc::ptr_eq(&cur, f) {
+        return Err(anyhow!("the forge changed while its token was being checked; the token was not saved"));
+    }
+    let path = crate::forge::token_path(&app.data, id);
     let dir = path.parent().context("token path")?;
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -1611,8 +1652,8 @@ async fn forge_token(State(app): S, Path(id): Path<String>, Json(b): Json<ForgeT
     }
     crate::app_auth::write_private(&path, token.as_bytes())?;
     f.load_token(&app.data);
-    g.adopt(&cand);
-    Ok(Json(res))
+    g.adopt(cand);
+    Ok(())
 }
 
 /// The setup check against the saved token: the same answer a token save gives.
@@ -1656,7 +1697,6 @@ async fn forge_remove(State(app): S, Path(id): Path<String>) -> R<(Extension<cra
         list.retain(|f| f.id != cfg.id);
         Ok(())
     })?;
-    let _ = std::fs::remove_file(crate::forge::token_path(&app.data, &cfg.id));
     Ok((Extension(crate::audit::Note(format!("removed forge {id}"))), StatusCode::NO_CONTENT))
 }
 
@@ -2435,7 +2475,7 @@ mod tests {
         }
         // Least privilege: saved 0600, caps hidden, the answer has the role and no token.
         serve(&ver, 30);
-        let Json(r) =
+        let (_, Json(r)) =
             forge_token(State(app.clone()), Path("gl".into()), body(" glpat-secret-1 ")).await.unwrap_or_else(|e| panic!("{:#}", e.0));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "glpat-secret-1");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -2483,5 +2523,49 @@ mod tests {
         c.forges.as_mut().unwrap()[1].url = Some("https://gitlab.example.org".into());
         let e = set_config(State(app.clone()), Json(c)).await.err().unwrap();
         assert!(format!("{:#}", e.0).contains("remove the forge and add it again"), "{:#}", e.0);
+    }
+    #[tokio::test]
+    async fn a_saved_token_never_outlives_its_forge_or_follows_its_name_to_another_address() {
+        let (m, app) = typed("forge-token-bound").await;
+        let id = crate::forge::ForgeId::new("gl").unwrap();
+        let tok = crate::forge::token_path(&app.data, &id);
+        let put = |t: &str| {
+            std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
+            std::fs::write(&tok, t).unwrap();
+        };
+        let add = |url: &str| {
+            forge_add(
+                State(app.clone()),
+                Json(AddForge { kind: crate::forge::Kind::GitLab, id: "gl".into(), url: url.into(), network: None, repos: vec![] }),
+            )
+        };
+        let _ = add("https://gitlab.example.com").await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        put("tok-a");
+        // A refused add (the id exists) leaves the live forge's token alone.
+        assert!(add("https://gitlab.example.org").await.is_err() && tok.exists());
+        // A token whose check straddles a remove and a re-add at another address is not saved.
+        let f_old = app.forges.get(&id).unwrap();
+        let crate::forge::Forge::GitLab(g_old) = &*f_old else { panic!("gitlab") };
+        let cand = g_old.candidate("tok-b");
+        let _ = forge_remove(State(app.clone()), Path("gl".into())).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert!(!tok.exists());
+        let _ = add("https://gitlab.example.org").await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert!(
+            store_token(&app, &id, &f_old, g_old, &cand, "tok-b").is_err() && !tok.exists(),
+            "the old forge's token must not bind to the new address"
+        );
+        // The same through the settings save: removing a forge there drops its token, and so does adding one by that name.
+        let mut c = app.cfg();
+        let gl = c.forges.take().unwrap().remove(1);
+        put("tok-c");
+        c.forges = None;
+        let _ = set_config(State(app.clone()), Json(c.clone())).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert!(!tok.exists(), "removed through /api/config");
+        put("tok-d"); // residue, as after a crash or an older kiln
+        c.forges = Some(vec![serde_json::from_value(json!({ "id": "github", "kind": "github" })).unwrap(), gl]);
+        let _ = set_config(State(app.clone()), Json(c)).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        assert!(!tok.exists(), "a forge added through /api/config starts without a token");
+        assert!(!app.forges.get(&id).unwrap().has_credential());
+        let _ = m;
     }
 }
