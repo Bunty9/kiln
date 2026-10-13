@@ -1,8 +1,9 @@
 #cloud-config
 # Bake recipe for the kiln base image. Runs once (`kiln bake`), then the image
 # is frozen; every job boots a throwaway qcow2 overlay of it.
-# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln, and so are,
-# per guest architecture (`Guest` in src/vm.rs): {{ARCH}} (GitHub's and Node's name for it),
+# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln, and so are the GitLab and
+# Gitea runner pins (version and this architecture's SHA-256, compiled into kiln: GITLAB_RUNNER and
+# GITEA_RUNNER in src/vm.rs) and, per guest architecture (`Guest` in src/vm.rs): {{ARCH}} (GitHub's and Node's name for it),
 # {{CONSOLE}} (the kernel console, also kiln's control channel) and {{STEPS}} (the step-log device).
 hostname: kiln
 users:
@@ -63,6 +64,16 @@ write_files:
       curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-{{ARCH}}-$V.tar.gz" \
         | tar -xz -C /home/runner/actions-runner
       /home/runner/actions-runner/bin/installdependencies.sh
+      # GitLab and Gitea runners: versions and checksums are pinned in kiln, never "latest".
+      # A mismatch fails sha256sum, and so the bake. /usr/local/bin is on every user's PATH (sudo's too).
+      for P in gitlab-runner:https://gitlab-runner-downloads.s3.amazonaws.com/v{{GITLAB_RUNNER_VERSION}}/binaries/gitlab-runner-linux-{{DEB_ARCH}}:{{GITLAB_RUNNER_SHA256}} \
+               gitea-runner:https://gitea.com/gitea/runner/releases/download/v{{GITEA_RUNNER_VERSION}}/gitea-runner-{{GITEA_RUNNER_VERSION}}-linux-{{DEB_ARCH}}:{{GITEA_RUNNER_SHA256}}; do
+        N=${P%%:*}; R=${P#*:}; U=${R%:*}; H=${R##*:}
+        curl -fsSL -o "/tmp/$N" "$U"
+        echo "$H  /tmp/$N" | sha256sum --strict -c -
+        install -m 0755 "/tmp/$N" "/usr/local/bin/$N"
+        rm -f "/tmp/$N"
+      done
       # Write environment variables to both .env and /etc/environment
       # setup-go keys caches on ImageOS; erlef/setup-beam refuses to run without it
       BAKE_DATE=$(date +%Y%m%d)
@@ -75,6 +86,8 @@ write_files:
       printf 'vm.max_map_count=262144\nfs.inotify.max_user_watches=655360\nfs.inotify.max_user_instances=1280\n' \
         > /etc/sysctl.d/90-kiln.conf
       sysctl -p /etc/sysctl.d/90-kiln.conf || true
+      # Gitea guest hardening: no executing memfd files (kernel 6.3+). Checked at the end of the bake.
+      echo 'vm.memfd_noexec=2' > /etc/sysctl.d/91-kiln-hardening.conf
       # Nested KVM for Android emulator / VM-in-CI; host passes -cpu host
       mkdir -p /etc/udev/rules.d
       printf 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"\n' \
@@ -131,6 +144,21 @@ write_files:
       systemctl disable ssh.service ssh.socket || true
       # kiln talks to the guest over the console's input; nothing else may read it.
       systemctl mask serial-getty@{{CONSOLE}}.service
+      # Gitea guest hardening: no cron, no linger for runner (sshd is off above).
+      systemctl mask cron.service || true
+      rm -f /var/lib/systemd/linger/runner
+      # Image checks: a bake that fails one does not print KILN_BAKE_OK, so no image is kept.
+      check() { local m=$1; shift; "$@" || { echo "kiln: image check failed: $m"; exit 1; }; }
+      sysctl -p /etc/sysctl.d/91-kiln-hardening.conf
+      check "vm.memfd_noexec=2" test "$(sysctl -n vm.memfd_noexec)" = 2
+      check "gitlab-runner on the runner user's PATH" sudo -u runner bash -c 'command -v gitlab-runner'
+      check "gitlab-runner version" bash -c 'gitlab-runner --version | grep -qx "Version: *{{GITLAB_RUNNER_VERSION}}"'
+      check "gitea-runner version" bash -c 'gitea-runner --version | grep -qx "gitea-runner version v{{GITEA_RUNNER_VERSION}}"'
+      check "docker present" sudo -u runner bash -c 'command -v docker'
+      check "sshd off" bash -c '! systemctl is-enabled ssh.service ssh.socket'
+      check "cron off" bash -c '! systemctl is-enabled cron.service'
+      check "no linger for runner" test ! -e /var/lib/systemd/linger/runner
+      check "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y" grep -qx CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y "/boot/config-$(uname -r)"
       touch /etc/cloud/cloud-init.disabled
       cloud-init clean --logs --machine-id
       echo KILN_BAKE_OK > /dev/{{CONSOLE}}
