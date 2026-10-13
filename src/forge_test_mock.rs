@@ -146,3 +146,33 @@ pub fn golden(name: &str, actual: &str) {
     let want = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("golden {name}: {e}"));
     assert_eq!(actual, want, "golden {name} changed (KILN_BLESS=1 rewrites it, only for an intended change)");
 }
+
+/// A scripted gated forge for the verdict engine: what `pause` lists and what the API says about
+/// the job, each optionally failing or slow. Nothing here reads the console or the guest.
+pub struct FakeForge {
+    pub held: Result<Option<Vec<String>>, String>,
+    pub facts: Result<crate::forge::VerdictFacts, String>,
+    pub delay: std::time::Duration,
+}
+
+impl FakeForge {
+    /// A same-repo push job that holds only `job_id`.
+    pub fn ok(job_id: &str) -> Self {
+        let facts = crate::forge::VerdictFacts { ours: true, ..Default::default() };
+        Self { held: Ok(Some(vec![job_id.into()])), facts: Ok(facts), delay: std::time::Duration::ZERO }
+    }
+
+    pub async fn pause(&self) -> anyhow::Result<Option<Vec<String>>> {
+        tokio::time::sleep(self.delay).await;
+        self.held.clone().map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub async fn verdict_facts(&self) -> anyhow::Result<crate::forge::VerdictFacts> {
+        self.facts.clone().map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// The engine, run against this fake with the console's `job_id`.
+    pub async fn gate(&self, job_id: &str, limit: std::time::Duration) -> crate::forge::Verdict {
+        crate::forge::gate(job_id, limit, self.pause(), self.verdict_facts()).await
+    }
+}
