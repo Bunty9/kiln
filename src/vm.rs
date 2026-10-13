@@ -1591,7 +1591,7 @@ fn start_cap(cfg: &crate::Config, warm: bool) -> u64 {
 /// Returns true when the change is worth persisting right away. Each lifecycle
 /// step is accepted once and only forward: the job (root in the guest) can echo
 /// these lines itself, and must not rewind the state or restart its timeout.
-fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool {
+pub(crate) fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool {
     use crate::forge::console::{Line, parse_line};
     match parse_line(kind, line) {
         Some(Line::Hostkey(k)) => {
