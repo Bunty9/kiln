@@ -874,12 +874,12 @@ async fn refresh_app(app: &Arc<App>) {
     }
 }
 
-async fn scheduler(app: Arc<App>) {
-    refresh_app(&app).await;
-    // Runners a crashed kiln left registered (offline) would otherwise linger for a day.
+const SWEEP_EVERY: u64 = 3600;
+
+async fn sweep_runners(app: &App, gated_only: bool) {
     let cfg = app.cfg();
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
-    for f in app.forges.all().iter().filter(|f| f.has_credential()) {
+    for f in app.forges.all().iter().filter(|f| f.has_credential() && (f.gated() || !gated_only)) {
         for rr in cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default() {
             let repo = rr.key();
             match f.sweep(&rr).await {
@@ -889,7 +889,21 @@ async fn scheduler(app: Arc<App>) {
             }
         }
     }
+}
+
+async fn scheduler(app: Arc<App>) {
+    refresh_app(&app).await;
+    // Runners a crashed kiln left registered (offline) would otherwise linger for a day. A gated forge's
+    // ended VMs first: their runners were never removed by the runner itself (R2b B-L2).
+    vm::retire_ended(&app).await;
+    sweep_runners(&app, false).await;
+    let mut swept = now();
     while !app.stopping.load(Ordering::SeqCst) {
+        // GitLab and Gitea runners that a failed delete left behind; GitHub's JIT runners go by the startup sweep alone.
+        if now() >= swept + SWEEP_EVERY {
+            swept = now();
+            sweep_runners(&app, true).await;
+        }
         let cfg = app.cfg();
         let res = tick(&app, &cfg).await;
         {

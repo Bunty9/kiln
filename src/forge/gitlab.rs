@@ -89,6 +89,9 @@ pub struct GitLab {
     mine: Mutex<HashSet<u64>>,
     /// (project, pipeline, ref) -> (fork, MR source branch). Only answers, never lookup errors.
     origins: Mutex<HashMap<(u64, u64, String), Origin>>,
+    /// (repo key, job id) -> (project id, finished job): the one API read `job_result` makes, which the
+    /// `cache_trust` call right after it takes instead of asking again.
+    finished: Mutex<HashMap<(String, u64), (u64, Value)>>,
     /// Tests dial a mock on loopback, which the address guard refuses.
     #[cfg(test)]
     unguarded: bool,
@@ -142,6 +145,7 @@ impl GitLab {
             projects: Mutex::default(),
             mine: Mutex::default(),
             origins: Mutex::default(),
+            finished: Mutex::default(),
             #[cfg(test)]
             unguarded: false,
             id,
@@ -595,7 +599,15 @@ impl GitLab {
     }
 
     async fn origin_lookup(&self, pid: u64, j: &Value) -> Result<Origin> {
-        if j["pipeline"]["id"].as_u64().is_none() || !SOURCES.contains(&j["pipeline"]["source"].as_str().context("no pipeline source")?) {
+        // `pipeline` (multi-project downstream) is refused by the verdict like Gitea's workflow_run (R2b B-M1): its ref is a
+        // plain branch whatever the upstream was, but the variables come from a trigger job in another
+        // project that kiln never inspects. `parent_pipeline` (a child) is allowed, through the ref rules
+        // below only: a child of an MR pipeline keeps `refs/merge-requests/<iid>/head` (so the fork and MR
+        // checks apply), and a child on a branch ref is this project's own branch pipeline. It is never a
+        // cache writer (`cache_trust` only lets source `push` write). Residual: a child of a downstream
+        // pipeline looks like a child on a branch.
+        let source = j["pipeline"]["source"].as_str().context("no pipeline source")?;
+        if j["pipeline"]["id"].as_u64().is_none() || !SOURCES.contains(&source) {
             return Ok((true, None));
         }
         let r = j["ref"].as_str().filter(|r| !r.is_empty()).context("no ref")?;
@@ -683,10 +695,52 @@ impl GitLab {
             ours: j["pipeline"]["project_id"].as_u64() == Some(pid),
             // Not `origin`: that counts a failed lookup as a fork, this one must say it failed.
             fork: self.origin_lookup(pid, &j).await?.0,
+            downstream: j["pipeline"]["source"] == "pipeline",
             unknown_source: !SOURCES.contains(&j["pipeline"]["source"].as_str().unwrap_or("")),
             tag: j["tag"] == true,
+            train: mr_iid(j["ref"].as_str().unwrap_or("")).is_some() && j["ref"].as_str().is_some_and(|r| r.ends_with("/train")),
             ..Default::default()
         })
+    }
+
+    /// The job, once GitLab has recorded its end (the VM powers off a moment before): up to `TRUST_LOOKS`
+    /// looks, then whatever status it has. A finished job is stashed for the other caller.
+    async fn finished_job(&self, repo: &RepoRef, id: &str) -> Result<(u64, Value)> {
+        let key = (repo.key(), id.parse().unwrap_or(0));
+        if let Some(f) = self.finished.lock().unwrap().remove(&key) {
+            return Ok(f);
+        }
+        let (pid, mut j) = self.job(repo, id).await?;
+        for _ in 1..TRUST_LOOKS {
+            if stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(self.poll).await;
+            j = self.job(repo, id).await?.1;
+        }
+        if j["pipeline"]["project_id"].as_u64() != Some(pid) {
+            bail!("job {id} is not for {}", repo.key());
+        }
+        Ok((pid, j))
+    }
+
+    /// The VM's job result (R2b section 4), from the project's job API only, never a console line: `Succeeded`
+    /// only for status `success`, `Failed` for any other end, None while unfinished or when the job's runner
+    /// is not `runner_id` (a missing runner field counts as a mismatch). Called before the runner is deleted,
+    /// which nulls the job's runner. The read is kept for `cache_trust`.
+    pub async fn job_result(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<Option<&'static str>> {
+        let (pid, j) = self.finished_job(repo, job_id).await?;
+        let done = stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed;
+        let ours = j["runner"]["id"].as_u64() == Some(runner_id);
+        if done {
+            let mut f = self.finished.lock().unwrap();
+            // ponytail: wholesale reset keeps this bounded; the entry is normally taken within seconds.
+            if f.len() >= 64 {
+                f.clear();
+            }
+            f.insert((repo.key(), job_id.parse().unwrap_or(0)), (pid, j.clone()));
+        }
+        Ok((done && ours).then(|| if j["status"] == "success" { "Succeeded" } else { "Failed" }))
     }
 
     /// (event, branch, default branch, conclusion) of the job that ran, for `cache_verdict`. The
@@ -694,17 +748,7 @@ impl GitLab {
     /// `fork`, a tag `tag`, any other source is itself (so `pipeline`, `web`, ... never write). A
     /// writer branch must also be protected. The conclusion is `success` or GitLab's own status.
     pub async fn cache_trust(&self, job: &JobRef, writers: &[String]) -> Result<(String, String, String, String)> {
-        let (pid, mut j) = self.job(&job.repo, &job.id).await?;
-        for _ in 1..TRUST_LOOKS {
-            if stat(j["status"].as_str().unwrap_or("")).0 == RunStatus::Completed {
-                break;
-            }
-            tokio::time::sleep(self.poll).await;
-            j = self.job(&job.repo, &job.id).await?.1;
-        }
-        if j["pipeline"]["project_id"].as_u64() != Some(pid) {
-            bail!("job {} is not for {}", job.id, job.repo.key());
-        }
+        let (pid, j) = self.finished_job(&job.repo, &job.id).await?;
         let default = self.default_branch(&job.repo.path).await?;
         let (fork, mr_branch) = self.origin_lookup(pid, &j).await?;
         let (r, source) = (j["ref"].as_str().unwrap_or(""), j["pipeline"]["source"].as_str().unwrap_or(""));
@@ -829,6 +873,18 @@ impl GitLab {
     /// and its rerun-failed. ponytail: no `play` of manual jobs; add when a "Run" button asks for it.
     pub async fn rerun(&self, repo: &RepoRef, id: u64, _failed_only: bool) -> Result<()> {
         self.act(repo, "retry", &format!("pipelines/{id}/retry"), None).await
+    }
+
+    /// Ids of the first 100 jobs of a pipeline, so a cancel can also stop VMs whose job started since the last poll.
+    pub async fn pipeline_job_ids(&self, repo: &RepoRef, id: u64) -> Result<Vec<String>> {
+        repo.check_kind(Kind::GitLab)?;
+        let pid = self.project_id(&repo.path, false).await?;
+        let r = self.get(&format!("projects/{pid}/pipelines/{id}/jobs?per_page=100")).await?;
+        if r.status != 200 {
+            return Err(self.fail("pipeline jobs", &r));
+        }
+        let Value::Array(a) = r.json()? else { bail!("GitLab pipeline job list is not an array") };
+        Ok(a.iter().filter_map(|j| j["id"].as_u64()).map(|n| n.to_string()).collect())
     }
 
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
@@ -1447,7 +1503,7 @@ mod tests {
         let m = Mock::start().await;
         m.ok("projects/acme%2Fdemo", "project.json");
         m.route(&jobs_path(5, None), 404, vec![], fx("jobs_404.json"));
-        let e = gl("stale", &m).demand_for(&repo(), "kiln", 4, 16).await.err().unwrap();
+        let e = gl("stale-demand", &m).demand_for(&repo(), "kiln", 4, 16).await.err().unwrap();
         assert!(e.to_string().contains("no jobs endpoint"), "{e:#}");
         assert_eq!((m.count("projects/acme%2Fdemo"), m.count("/jobs?")), (2, 2));
     }
@@ -1867,7 +1923,11 @@ mod tests {
             ("tag", with(3, "v1", "push", |j| j["tag"] = true.into()), Call::Cold),
             ("MR from a fork", with(4, "refs/merge-requests/3/head", "merge_request_event", |_| {}), Call::Refuse),
             ("same-project MR", with(5, "refs/merge-requests/2/head", "merge_request_event", |_| {}), Call::Ok),
-            ("source pipeline", with(6, "ci", "pipeline", |_| {}), Call::Ok),
+            ("multi-project downstream", with(6, "ci", "pipeline", |_| {}), Call::Refuse),
+            ("child on a branch", with(16, "ci", "parent_pipeline", |_| {}), Call::Ok),
+            ("child of a same-project MR", with(17, "refs/merge-requests/2/head", "parent_pipeline", |_| {}), Call::Ok),
+            ("merge train", with(18, "refs/merge-requests/2/train", "merge_request_event", |_| {}), Call::Cold),
+            ("merged results", with(19, "refs/merge-requests/2/merge", "merge_request_event", |_| {}), Call::Ok),
             ("child of a fork MR", with(7, "refs/merge-requests/3/head", "parent_pipeline", |_| {}), Call::Refuse),
             ("unknown source", with(8, "ci", "external_pull_request_event", |_| {}), Call::Refuse),
             ("no source", with(9, "ci", "push", |j| j["pipeline"]["source"] = Value::Null), Call::Refuse),
@@ -1994,7 +2054,14 @@ mod tests {
                 &[],
                 t("fork", "refs/merge-requests/3/head", "success"),
             ),
-            ("source pipeline", with(10, "main", "pipeline", |_| {}), &[], t("pipeline", "main", "success")),
+            ("downstream pipeline", with(10, "main", "pipeline", |_| {}), &[], t("pipeline", "main", "success")),
+            ("child on the default branch", with(13, "main", "parent_pipeline", |_| {}), &[], t("parent_pipeline", "main", "success")),
+            (
+                "merge train",
+                with(14, "refs/merge-requests/2/train", "merge_request_event", |_| {}),
+                &[],
+                t("merge_request_event", "feat", "success"),
+            ),
             ("web", with(11, "main", "web", |_| {}), &[], t("web", "main", "success")),
             ("schedule", with(12, "main", "schedule", |_| {}), &[], t("schedule", "main", "success")),
         ];
@@ -2036,6 +2103,89 @@ mod tests {
         serve_job(&m, &b);
         m.route("projects/1/repository/branches/feat", 500, vec![], "{}".into());
         assert!(trust(&g, &b, &["feat"]).await.is_err(), "protected lookup failed");
+    }
+
+    /// The job result is the project's job API alone (R2b section 4): success only, on the VM's own runner.
+    #[tokio::test]
+    async fn job_result_comes_from_the_job_api_for_the_vms_runner() {
+        let m = Mock::start().await;
+        serve_trust(&m);
+        let mut g = gl("result", &m);
+        g.poll = std::time::Duration::ZERO;
+        let id = |j: &Value| j["id"].to_string();
+        let on = |n: u64, runner: Value, f: &dyn Fn(&mut Value)| {
+            with(n, "main", "push", |j| {
+                j["runner"] = runner;
+                f(j)
+            })
+        };
+        let cases: Vec<(&str, Value, Option<&str>)> = vec![
+            ("success", on(1, json!({"id": 79}), &|_| {}), Some("Succeeded")),
+            ("failed", on(2, json!({"id": 79}), &|j| j["status"] = "failed".into()), Some("Failed")),
+            ("canceled", on(3, json!({"id": 79}), &|j| j["status"] = "canceled".into()), Some("Failed")),
+            ("another runner", on(4, json!({"id": 80}), &|_| {}), None),
+            ("runner nulled", on(5, Value::Null, &|_| {}), None),
+            ("runner without an id", on(6, json!({"description": "x"}), &|_| {}), None),
+            ("never finishes", on(7, json!({"id": 79}), &|j| j["status"] = "running".into()), None),
+        ];
+        for (name, j, want) in &cases {
+            serve_job(&m, j);
+            assert_eq!(g.job_result(&repo(), &id(j), 79).await.unwrap(), *want, "{name}");
+        }
+        // A job of another project, or one the API cannot read, is an error, never a result.
+        let other = with(8, "main", "push", |j| j["pipeline"]["project_id"] = 2.into());
+        serve_job(&m, &other);
+        assert!(g.job_result(&repo(), &id(&other), 79).await.is_err());
+        assert!(g.job_result(&repo(), "999", 79).await.is_err());
+        // The read is shared: the trust call right after makes no second one, and a later call asks again.
+        let j = on(9, json!({"id": 79}), &|_| {});
+        serve_job(&m, &j);
+        assert_eq!(g.job_result(&repo(), &id(&j), 79).await.unwrap(), Some("Succeeded"));
+        assert_eq!(m.count("projects/1/jobs/1009"), 1);
+        assert_eq!(trust(&g, &j, &[]).await.unwrap().3, "success");
+        assert_eq!(m.count("projects/1/jobs/1009"), 1, "cache_trust took the result's read");
+        trust(&g, &j, &[]).await.unwrap();
+        assert_eq!(m.count("projects/1/jobs/1009"), 2);
+    }
+
+    /// R2b B-L2: a restart deletes the runners of the records it finds ended, whatever ended them.
+    #[tokio::test]
+    async fn startup_deletes_the_runners_of_ended_records() {
+        let m = Mock::start().await;
+        m.on("DELETE", "runners/79", 204, String::new());
+        m.on("DELETE", "runners/81", 404, String::new());
+        let app = crate::test_app("retire-ended");
+        app.forges.insert(cfg(SPOOF), super::super::Forge::GitLab(Box::new(gl("retire-ended", &m))));
+        let t = crate::now();
+        let vm = |id: &str, repo: &str, runner: u64, ended: Option<u64>| -> crate::vm::Vm {
+            serde_json::from_value(json!({
+                "id": id, "repo": repo, "runner_id": runner, "state": "lost", "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": ended, "note": null
+            }))
+            .unwrap()
+        };
+        app.vms.lock().unwrap().extend([
+            vm("kiln-1-0", "gl:acme/demo", 79, Some(t - 60)),
+            vm("kiln-1-1", "gl:acme/demo", 80, Some(t - 3 * 86400)), // the orphan sweep's
+            vm("kiln-1-2", "gl:acme/demo", 81, Some(t - 60)),        // already gone: a 404 is fine
+            vm("kiln-1-3", "gl:acme/demo", 82, None),                // not ended
+            vm("kiln-1-4", "acme/demo", 83, Some(t - 60)),           // GitHub is not gated
+        ]);
+        crate::vm::retire_ended(&app).await;
+        let mut got = m.requests();
+        got.sort();
+        assert_eq!(got, ["runners/79", "runners/81"], "only DELETEs, only the ended records of the last day");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_lists_the_pipelines_jobs() {
+        let m = Mock::start().await;
+        m.ok("projects/acme%2Fdemo", "project.json");
+        m.ok("projects/1/pipelines/127/jobs?per_page=100", "pipeline_127_jobs.json");
+        let g = gl("pjobs", &m);
+        assert_eq!(g.pipeline_job_ids(&repo(), 127).await.unwrap(), ["251", "252", "253"]);
+        m.route("projects/1/pipelines/128/jobs?per_page=100", 403, vec![], "{}".into());
+        assert!(g.pipeline_job_ids(&repo(), 128).await.is_err());
     }
 
     #[tokio::test]

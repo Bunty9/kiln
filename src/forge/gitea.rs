@@ -718,6 +718,7 @@ fn facts(run: &Value, ours: bool) -> VerdictFacts {
         unknown_source: !KNOWN_EVENTS.contains(&event),
         // `contains`, not a parse: a file or branch named to look like a tag only makes the job cold.
         tag: event == "release" || path.contains("@refs/tags/"),
+        ..Default::default()
     }
 }
 
