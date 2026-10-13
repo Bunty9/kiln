@@ -1371,7 +1371,9 @@ mod tests {
             b.entry(forge::ForgeId::new("gl").unwrap()).or_default().fail(None, now());
         }
         tick(&app, &cfg).await.unwrap();
-        let p = app.poll.lock().unwrap().clone();
+        let mut p = app.poll.lock().unwrap().clone();
+        // Host-resource entries (memory, disk) depend on the machine running the test.
+        p.health.retain(|(k, _)| k != "memory" && k != "disk");
         let kinds: Vec<_> = p.health.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(kinds, ["forge", "github_api", "forge_api"], "{:?}", p.health);
         assert!(p.health[0].1.contains("gl") && p.health[0].1.contains("not yet supported"), "{:?}", p.health[0]);
@@ -1382,7 +1384,8 @@ mod tests {
         // Clearing GitHub's entry leaves GitLab's.
         app.api_backoff.lock().unwrap().remove(&forge::ForgeId::github());
         tick(&app, &cfg).await.unwrap();
-        let kinds: Vec<_> = app.poll.lock().unwrap().health.iter().map(|(k, _)| k.clone()).collect();
+        let kinds: Vec<_> =
+            app.poll.lock().unwrap().health.iter().map(|(k, _)| k.clone()).filter(|k| k != "memory" && k != "disk").collect();
         assert_eq!(kinds, ["forge", "forge_api"]);
     }
 
