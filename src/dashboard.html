@@ -665,12 +665,13 @@ function ciSnippet(kind, L) {
   return `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${L}]\n    steps:\n      - uses: actions/checkout@v7\n`;
 }
 const sizeNote = (kind, L, cpus) => `Sizes: ${kind === 'gitlab' ? `tags: [${L}-2cpu]` : kind === 'gitea' ? `runs-on: [${L}-2cpu]` : `runs-on: [self-hosted, ${L}-2cpu]`} (also 4cpu, 8cpu, 16cpu). Default is ${cpus} vCPUs.`;
-// Minutes of finished non-GitHub jobs since `t0`, by forge name: shown unpriced, because only GitHub bills them.
-function otherMins(vms, F, t0) {
+// Minutes of finished non-GitHub jobs from the usage ledger (rows [utc day, forge id, jobs, minutes]) from UTC day `d0` on,
+// by forge name: shown unpriced, because only GitHub bills them.
+function otherMins(rows, F, d0) {
   const m = {};
-  for (const v of vms) {
-    const k = kindOf(F, v.repo);
-    if (k !== 'github' && v.busy_since && jobEnd(v) >= t0) m[FN[k] || k] = (m[FN[k] || k] || 0) + jobMins(v);
+  for (const [d, id, , n] of rows || []) {
+    const k = (F || []).find(f => f.id === id)?.kind || id, nm = FN[k] || k;
+    if (d >= d0) m[nm] = (m[nm] || 0) + n;
   }
   return m;
 }
@@ -1139,8 +1140,8 @@ function stats() {
   // GitHub bills by UTC calendar month; usage rows are [utc day, cpus, jobs, minutes].
   const use = (S.usage || []).filter(u => u[0] >= m0);
   const mins = use.reduce((s, u) => s + u[3], 0), saved = use.reduce((s, u) => s + u[3] * rate(u[1]), 0);
-  // Only GitHub bills minutes: the other forges' are shown as minutes, from the newest 100 jobs.
-  const om = Object.entries(otherMins(S.vms, F, m0 * 86400)).map(([k, n]) => `${k}: ${n} min, not priced`).join(', ');
+  // Only GitHub bills minutes: the other forges' are shown as minutes, from their own part of the usage ledger.
+  const om = Object.entries(otherMins(S.usage_other, F, m0)).map(([k, n]) => `${k}: ${n} min, not priced`).join(', ');
   const st = (l, v, t, x = '') => `<div class="stat" tabindex="0"${tip(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
   return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length, 'Jobs that started running since midnight, your time')}
     <a class="stat" href="#/jobs?f=failed"${tip('Jobs that failed, were lost, or were killed mid-job in the last 24 hours. Click to list them.')}><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
@@ -2081,8 +2082,9 @@ function anHTML() {
   const oldest = Math.min(...S.vms.map(v => v.started)), cut = S.vms.length >= 100 && oldest > t0;
   const note = cut ? `<div class="cal neu" style="margin-top:0">The dashboard gets the newest 100 VMs, which reach back to ${esc(when(oldest))}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched; the minutes chart at the bottom isn't limited to these VMs.</div>` : '';
   const ld = Math.floor(Date.now() / 86400000), use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
+  const lom = Object.entries(otherMins((S.usage_other || []).filter(u => u[0] > ld - 30), F, 0)).map(([k, n]) => `${k} ${n} min`).join(', ');
   const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
-    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
+    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. ${lom ? ` Not priced: ${esc(lom)}.` :''} From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
     : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
   if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}.</p></div>` + ledger;
   const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };

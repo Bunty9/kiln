@@ -813,6 +813,8 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "notify": crate::notify::state_json(&app),
         // 32 days covers the current month in any timezone.
         "usage": vm::usage_since(&app.data, now() / 86400 - 32),
+        // Other forges: [day, forge id, jobs, minutes]. Counted, never priced.
+        "usage_other": vm::usage_other_since(&app.data, now() / 86400 - 32),
         "image": vm::image_info(&app.data, app.gh.latest_cached(), &app.cfg()),
         "image_ready": vm::image_ready(&app.data),
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
@@ -875,7 +877,11 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     // With notify.json unreadable the destination list is unknown, so ids are not checked.
     let unreadable = app.notify.load_error.lock().unwrap().is_some();
     let ids: Option<Vec<String>> = (!unreadable).then(|| app.notify.dests.lock().unwrap().iter().map(|d| d.id.clone()).collect());
-    let repos: Vec<String> = app.repos().into_iter().chain(c.repos.iter().cloned()).collect();
+    let other = new_forges
+        .iter()
+        .filter(|f| f.kind != crate::forge::Kind::GitHub)
+        .flat_map(|f| f.repos.iter().map(|r| format!("{}:{r}", f.id.as_str())));
+    let repos: Vec<String> = app.repos().into_iter().chain(c.repos.iter().cloned()).chain(other).collect();
     let errs = crate::notify::rule_errors(&app.cfg().notify_rules, &c.notify_rules, ids.as_deref(), &repos);
     if !errs.is_empty() {
         bail_r(&errs.join("; "))?;
@@ -1761,6 +1767,7 @@ mod tests {
                 "token_source",
                 "update",
                 "usage",
+                "usage_other",
                 "version",
                 "vms"
             ]

@@ -78,6 +78,9 @@ fn invisible(c: char) -> bool {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct JobInfo {
     pub repo: String,
+    /// The forge's id and kind (`github`, `gitlab`, `gitea`); added to every payload.
+    pub forge: String,
+    pub forge_kind: String,
     pub workflow: Option<String>,
     pub workflow_name: Option<String>,
     pub job: String,
@@ -107,6 +110,7 @@ pub struct SecurityInfo {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // one JobInfo per event; boxing it only adds churn
 pub enum Detail {
     Job(JobInfo),
     Health(HealthInfo),
@@ -148,14 +152,20 @@ pub fn forge_link<'a>(url: &'a str, origins: &[String]) -> Option<&'a str> {
     (on_origin && net::link_safe(url)).then_some(url)
 }
 
+/// The origin a forge's links must be on: its own URL (github.com for GitHub).
+fn forge_origin(f: &crate::forge::ForgeCfg) -> Option<String> {
+    match f.url.as_deref() {
+        Some(u) => {
+            net::check_forge_url(u, f.network.unwrap_or(crate::forge::Network::Public)).ok().map(|u| u.origin().ascii_serialization())
+        }
+        None => (f.kind == crate::forge::Kind::GitHub).then(|| "https://github.com".to_string()),
+    }
+}
+
 /// Origins job links may point to: github.com and every configured forge's own URL.
 fn link_origins(cfg: &crate::Config) -> Vec<String> {
     let mut o = vec!["https://github.com".to_string()];
-    for f in crate::forge::effective(&cfg.forges, &cfg.repos) {
-        if let Some(u) = f.url.as_deref().and_then(|u| net::check_forge_url(u, f.network.unwrap_or(crate::forge::Network::Public)).ok()) {
-            o.push(u.origin().ascii_serialization());
-        }
-    }
+    o.extend(crate::forge::effective(&cfg.forges, &cfg.repos).iter().filter_map(forge_origin));
     o
 }
 
@@ -174,8 +184,15 @@ fn summary(e: &Event, esc: &dyn Fn(&str) -> String) -> String {
     match &e.detail {
         Detail::Job(j) => {
             let icon = if j.outcome == "succeeded" { "✅" } else { "❌" };
-            let wf = j.workflow.as_deref().unwrap_or("workflow unknown");
-            let mut s = format!("{icon} {} · {} · {} {}", esc(&j.repo), esc(wf), esc(&j.job), j.outcome);
+            // GitLab has no workflow file: its pipeline name is what it has.
+            let wf = if j.forge_kind == "gitlab" { j.workflow_name.as_ref().or(j.workflow.as_ref()) } else { j.workflow.as_ref() };
+            let wf = wf.map_or("workflow unknown", String::as_str);
+            let name = match j.forge_kind.as_str() {
+                "gitlab" => " (GitLab)",
+                "gitea" => " (Gitea)",
+                _ => "",
+            };
+            let mut s = format!("{icon} {}{name} · {} · {} {}", esc(&j.repo), esc(wf), esc(&j.job), j.outcome);
             if let Some(b) = &j.branch {
                 s += &format!(" on {}", esc(b));
             }
@@ -950,9 +967,17 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     }
     let Some(oc) = outcome(v) else { return };
     let ok = oc == "succeeded";
-    let wf = v.run.as_ref().map(|r| r.file.as_str()).filter(|w| !w.is_empty());
-    let mut to: Vec<String> =
-        app.cfg().notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
+    let cfg = app.cfg();
+    let forge_id = crate::forge::RepoRef::parse(&v.repo).map_or_else(|_| crate::forge::ForgeId::github(), |r| r.forge);
+    let fcfg = crate::forge::effective(&cfg.forges, &cfg.repos).into_iter().find(|f| f.id == forge_id);
+    let kind = fcfg.as_ref().map_or(crate::forge::Kind::GitHub, |f| f.kind);
+    // What a rule's `workflow` names: the run's file (GitHub, Gitea) or the pipeline name (GitLab has no workflow file).
+    let wf = v
+        .run
+        .as_ref()
+        .map(|r| if kind == crate::forge::Kind::GitLab { r.workflow.as_str() } else { r.file.as_str() })
+        .filter(|w| !w.is_empty());
+    let mut to: Vec<String> = cfg.notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
     if ok && to.is_empty() {
         return;
     }
@@ -969,8 +994,18 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     }
     let run = v.run.clone().unwrap_or_default();
     let opt = |s: &str| (!s.is_empty()).then(|| clean(s));
+    // The forge's own server-built link, on that forge's origin only (GitHub keeps its job URL).
+    let origin: Vec<String> = fcfg.as_ref().and_then(forge_origin).into_iter().collect();
+    let url = if kind == crate::forge::Kind::GitHub { None } else { run.links.job.as_deref().or(run.links.run.as_deref()) };
     let info = JobInfo {
         repo: clean(&v.repo),
+        forge: forge_id.as_str().to_string(),
+        forge_kind: match kind {
+            crate::forge::Kind::GitHub => "github",
+            crate::forge::Kind::GitLab => "gitlab",
+            crate::forge::Kind::Gitea => "gitea",
+        }
+        .to_string(),
         workflow: opt(&run.file),
         workflow_name: opt(&run.workflow),
         job: clean(v.job.as_deref().unwrap_or("job")),
@@ -979,7 +1014,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         outcome: oc.to_string(),
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
-        url: v.job_url.as_deref().and_then(|u| forge_link(u, &link_origins(&app.cfg()))).map(String::from),
+        url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
         vm_id: v.id.clone(),
     };
     let (ty, class) = if ok { ("job.finished", Class::Direct) } else { ("job.failed", Class::Job) };
@@ -1482,6 +1517,78 @@ mod tests {
         (app, q)
     }
 
+    fn gl_app() -> (Arc<crate::App>, Arc<Queue>) {
+        let (app, q) = job_app();
+        let f: Vec<crate::forge::ForgeCfg> = serde_json::from_str(
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["g/p"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["o/n"]}]"#,
+        )
+        .unwrap();
+        let mut c = app.cfg();
+        c.forges = Some(f);
+        *app.cfg.write().unwrap() = c;
+        (app, q)
+    }
+
+    fn other_vm(repo: &str, id: &str, file: &str, link: &str) -> Vm {
+        let run = crate::vm::Run {
+            workflow: "pipeline".into(),
+            file: file.into(),
+            links: crate::forge::Links { job: Some(link.into()), ..Default::default() },
+            ..Default::default()
+        };
+        Vm { id: id.into(), repo: repo.into(), run: Some(run), ..vm_end(crate::vm::State::Done, Some("Failed")) }
+    }
+
+    #[test]
+    fn other_forges_name_themselves_and_match_by_their_own_workflow() {
+        let (app, q) = gl_app();
+        job_ended(&app, &other_vm("gl:g/p", "kiln-9-1", ".gitlab-ci.yml", "https://gitlab.example.com/g/p/-/jobs/7"));
+        job_ended(&app, &other_vm("ge:o/n", "kiln-9-2", "ci.yml", "https://gitea.example.com/o/n/actions/runs/3"));
+        // A link on another forge's origin (here github.com) is dropped, not trusted.
+        job_ended(&app, &other_vm("ge:o/n", "kiln-9-3", "ci.yml", "https://github.com/o/n/actions/runs/3"));
+        let got: Vec<JobInfo> =
+            q.q.lock()
+                .unwrap()
+                .iter()
+                .map(|e| match &e.detail {
+                    Detail::Job(j) => j.clone(),
+                    _ => panic!(),
+                })
+                .collect();
+        assert_eq!((got[0].forge.as_str(), got[0].forge_kind.as_str()), ("gl", "gitlab"));
+        assert_eq!(got[0].url.as_deref(), Some("https://gitlab.example.com/g/p/-/jobs/7"));
+        assert_eq!((got[1].forge.as_str(), got[1].forge_kind.as_str()), ("ge", "gitea"));
+        assert!(got[2].url.is_none());
+        let e = Event { ty: "job.failed", class: Class::Job, detail: Detail::Job(got[0].clone()), to: vec![] };
+        let t = summary(&e, &|s| s.to_string());
+        assert!(t.contains("gl:g/p (GitLab) · pipeline ·"), "{t}");
+        // A success reaches only a rule: GitLab's workflow is the pipeline name, Gitea's the file.
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let rule = |repo: &str, wf: &str| Rule { repo: repo.into(), workflow: wf.into(), outcome: "success".into(), to: vec![d.clone()] };
+        let mut c = app.cfg();
+        c.notify_rules = vec![rule("gl:g/p", "pipeline"), rule("ge:o/n", "ci.yml")];
+        *app.cfg.write().unwrap() = c;
+        let ok = |repo: &str, id: &str, file: &str| Vm {
+            result: Some("Succeeded".into()),
+            ..other_vm(repo, id, file, "https://gitlab.example.com/x")
+        };
+        let n = q.q.lock().unwrap().len();
+        job_ended(&app, &ok("gl:g/p", "kiln-9-4", ".gitlab-ci.yml"));
+        job_ended(&app, &ok("ge:o/n", "kiln-9-5", "ci.yml"));
+        job_ended(&app, &ok("ge:o/n", "kiln-9-6", "other.yml"));
+        assert_eq!(q.q.lock().unwrap().len(), n + 2);
+    }
+
+    #[test]
+    fn generic_payload_names_the_forge_and_still_verifies() {
+        let e = job("acme/kiln", "build", "main");
+        let r = render(Kind::Generic, Some("whsec_dGVzdC1zZWNyZXQ="), None, &e, "msg_1", 1_700_000_000, None, &go()).unwrap();
+        let v = body(&r);
+        assert_eq!((v["job"]["forge"].as_str(), v["job"]["forge_kind"].as_str()), (Some("github"), Some("github")));
+        let sig = sign("whsec_dGVzdC1zZWNyZXQ=", "msg_1", 1_700_000_000, &r.body).unwrap();
+        assert_eq!(r.headers.iter().find(|h| h.0 == "webhook-signature").unwrap().1, sig);
+    }
+
     #[test]
     fn refused_fork_jobs_never_alert() {
         let (app, q) = job_app();
@@ -1634,6 +1741,9 @@ mod tests {
             to: vec![],
             detail: Detail::Job(JobInfo {
                 repo: clean(repo),
+                // forge and forge_kind are ADDED to every payload (forge support X-2); the rest is unchanged.
+                forge: "github".into(),
+                forge_kind: "github".into(),
                 workflow: Some(clean("ci.yml")),
                 workflow_name: Some(clean("ci")),
                 job: clean(job),

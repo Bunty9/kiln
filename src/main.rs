@@ -247,19 +247,25 @@ impl Config {
         if self.notify_rules.len() > 50 {
             bail!("notify_rules: at most 50");
         }
-        let wf_ok = |w: &str| {
+        let wf_ok = |w: &str, pipeline: bool| {
             w == "*"
                 || (w.len() <= 100
-                    && (w.ends_with(".yml") || w.ends_with(".yaml"))
+                    && (pipeline || w.ends_with(".yml") || w.ends_with(".yaml"))
                     && w.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
         };
         for r in &self.notify_rules {
             // Membership in the served repos is checked in web::set_config (App mode learns them at runtime).
-            if r.repo != "*" && !valid_repo(&r.repo) {
-                bail!("notify_rules: repo must be \"*\" or look like owner/name: {:?}", r.repo);
+            let other = forge::RepoRef::parse(&r.repo).ok().filter(|rr| rr.forge.as_str() != "github");
+            if r.repo != "*" && !valid_repo(&r.repo) && other.is_none() {
+                bail!("notify_rules: repo must be \"*\" or look like owner/name (forge-id:path on another forge): {:?}", r.repo);
             }
-            if !wf_ok(&r.workflow) {
-                bail!("notify_rules: workflow must be \"*\" or a file name like release.yml: {:?}", r.workflow);
+            // A GitLab repo has no workflow file: its rule names the pipeline.
+            let gitlab = other.is_some_and(|rr| self.forges.iter().flatten().any(|f| f.id == rr.forge && f.kind == forge::Kind::GitLab));
+            if !wf_ok(&r.workflow, gitlab) {
+                bail!(
+                    "notify_rules: workflow must be \"*\" or a file name like release.yml (a pipeline name for GitLab): {:?}",
+                    r.workflow
+                );
             }
             if !["success", "failure", "any"].contains(&r.outcome.as_str()) {
                 bail!("notify_rules: outcome must be success, failure or any");
@@ -1632,6 +1638,14 @@ mod tests {
             c.notify_rules = vec![bad.clone()];
             assert!(c.validate_for(8).is_err(), "{bad:?}");
         }
+        // Other forges: a `forge-id:path` repo key; GitLab's workflow is a pipeline name, the others' a file.
+        c.forges = Some(serde_json::from_str(r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["g/p"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["o/n"]}]"#).unwrap());
+        c.notify_rules = vec![rule("gl:g/p", "pipeline", "any", vec!["a1b2c3d4"]), rule("ge:o/n", "ci.yml", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_ok());
+        c.notify_rules = vec![rule("ge:o/n", "pipeline", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_err(), "Gitea matches by file");
+        c.notify_rules = vec![rule("gl:g/../p", "*", "any", vec!["a1b2c3d4"])];
+        assert!(c.validate_for(8).is_err());
         c.notify_rules = vec![rule("*", "*", "any", vec!["a1b2c3d4"]); 51];
         assert!(c.validate_for(8).is_err(), "at most 50");
     }
