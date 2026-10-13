@@ -1,0 +1,14 @@
+{
+  "runner": {
+    "id": "52",
+    "uuid": "00000000-0000-4000-8000-000000000000",
+    "token": "RUNNER-TOKEN-REDACTED",
+    "name": "a1b2c3-kiln-fx-1",
+    "version": "v5.0.0",
+    "labels": [
+      "kiln",
+      "kiln-4cpu"
+    ],
+    "ephemeral": true
+  }
+}

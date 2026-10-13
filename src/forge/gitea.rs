@@ -1,13 +1,16 @@
 //! The Gitea forge (5.3 of the forge design): demand from the queued-jobs listing with labels
 //! matched client-side, each job joined to its run for event, path and fork status, and the
-//! server version that gates what Gitea can do. All HTTP goes through `net` with the forge's
-//! network mode. Registration, retire, sweep, verdict facts and logs arrive with GT-2/GT-3 and
-//! fail closed until then.
+//! server version that gates what Gitea can do, runner registration over the connect-RPC JSON
+//! `Register` call, retire and sweep. All HTTP goes through `net` with the forge's network mode.
+//! Verdict facts and logs arrive with GT-3 and fail closed until then.
 
 use super::{
-    Caps, Credential, Demand, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, env_name, net, read_token_file,
+    Caps, Credential, Demand, Dereg, EventKind, ForgeCfg, ForgeId, JobInfo, Kind, Links, Network, RepoRef, RunnerReg, env_name, net,
+    read_token_file,
 };
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use reqwest::Method;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -21,9 +24,14 @@ const MAX_PAGES: usize = 10;
 const BODY_CAP: usize = 8 << 20;
 const VERSION_TTL: Duration = Duration::from_secs(600);
 const RUN_CACHE_MAX: usize = 1000;
+/// What `Register` is told the runner is; the server stores it and shows it.
+const RUNNER_VERSION: &str = "v5.0.0";
+const NOT_OWNER: &str =
+    "Gitea refused the runner registration token: the service account must be the repo owner or a member of the organisation's Owners team";
 
-/// No VM launches for Gitea until GT-2 (registration) and GT-3 (the verdict gate) land: demand
-/// reports the queue, fork jobs and claims, but no launchable jobs.
+/// Registration works (GT-2), but no VM launches for Gitea until the guest side and the verdict
+/// gate land (GT-5 `kiln-gate`, GT-3 facts): demand reports the queue, fork jobs and claims, but
+/// no launchable jobs.
 const LAUNCH_READY: bool = false;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
@@ -78,6 +86,8 @@ pub struct Gitea {
     /// False only in tests, whose mock forge sits on loopback.
     guard: bool,
     cred: Credential,
+    /// The install's id (`<data>/install_id`): runner names are `<install>-<vm id>`.
+    install: String,
     token: RwLock<Option<String>>,
     version: Mutex<Option<(Ver, Instant)>>,
     runs: Mutex<HashMap<(String, u64), Arc<RunRec>>>,
@@ -86,7 +96,7 @@ pub struct Gitea {
 }
 
 impl Gitea {
-    pub fn new(cfg: &ForgeCfg) -> Result<Self> {
+    pub fn new(cfg: &ForgeCfg, data: &Path) -> Result<Self> {
         let network = cfg.network.unwrap_or(Network::Public);
         let url = cfg.url.as_deref().with_context(|| format!("forge {:?}: Gitea needs a url", cfg.id.as_str()))?;
         net::check_forge_url(url, network)?;
@@ -100,6 +110,7 @@ impl Gitea {
             client: net::client(mode),
             guard: true,
             cred: cfg.credential.unwrap_or(Credential::File),
+            install: super::gitlab::install_id(data)?,
             token: RwLock::new(None),
             version: Mutex::new(None),
             runs: Mutex::default(),
@@ -111,7 +122,8 @@ impl Gitea {
     #[cfg(test)]
     pub fn for_mock(web: &str, mock: &str, token: &str) -> Self {
         let cfg: ForgeCfg = serde_json::from_value(json!({ "id": "gitea", "kind": "gitea", "url": web })).unwrap();
-        let mut g = Self::new(&cfg).unwrap();
+        let mut g = Self::new(&cfg, &std::env::temp_dir()).unwrap();
+        g.install = "a1b2c3".into();
         g.api = format!("{mock}/api/v1");
         g.client = net::base().build().unwrap();
         g.guard = false;
@@ -207,20 +219,37 @@ impl Gitea {
         Ok(ver)
     }
 
-    /// GET `{api}/{path}` as JSON. A non-2xx answer is an error carrying Gitea's own message,
-    /// never the credential.
-    async fn get(&self, path: &str) -> Result<Value> {
+    /// One authenticated API request: the status and the body as JSON (`Null` if it is not).
+    async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
         let token = self.token().context("no Gitea token")?;
         let mut auth = HeaderValue::from_str(&format!("token {token}"))?;
         auth.set_sensitive(true);
-        let rb = self.client.get(format!("{}/{path}", self.api)).header(AUTHORIZATION, auth).header(ACCEPT, "application/json");
+        let mut rb =
+            self.client.request(method, format!("{}/{path}", self.api)).header(AUTHORIZATION, auth).header(ACCEPT, "application/json");
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        self.finish(rb).await
+    }
+
+    async fn finish(&self, rb: reqwest::RequestBuilder) -> Result<(u16, Value)> {
         let r = if self.guard { net::send(&self.client, self.mode, rb).await? } else { rb.send().await? };
-        let status = r.status();
+        let status = r.status().as_u16();
         let body = net::read_capped(r, BODY_CAP).await?;
-        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if !status.is_success() {
-            let msg: String = v["message"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
-            bail!("Gitea answered {status} for {path}: {msg}");
+        Ok((status, serde_json::from_slice(&body).unwrap_or(Value::Null)))
+    }
+
+    /// Gitea's own message from an error body, one line and cut. It never echoes a credential.
+    fn message(v: &Value) -> String {
+        v["message"].as_str().unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect()
+    }
+
+    /// GET `{api}/{path}` as JSON. A non-2xx answer is an error carrying Gitea's own message,
+    /// never the credential.
+    async fn get(&self, path: &str) -> Result<Value> {
+        let (status, v) = self.call(Method::GET, path, None).await?;
+        if !(200..300).contains(&status) {
+            bail!("Gitea answered {status} for {path}: {}", Self::message(&v));
         }
         if v.is_null() {
             bail!("Gitea answered {path} with something that is not JSON");
@@ -265,6 +294,136 @@ impl Gitea {
     /// Records which VM a registered runner belongs to, so its job is found among the running ones.
     pub fn track(&self, runner_id: u64, vm: &str) {
         self.tracked.lock().unwrap().insert(runner_id, vm.into());
+    }
+
+    /// Registers a single-use runner for `repo` and returns what the guest gets: only the
+    /// per-runner `.runner` file. The reusable registration token stays in this function.
+    ///
+    /// `labels` are GitHub-style (`runner_labels`); Gitea has no implicit labels, so those are
+    /// dropped. `Register` takes plain names, the `.runner` file the `:host` form (a literal
+    /// `kiln:host` registered would match no task until the daemon's `Declare`).
+    pub async fn register(&self, repo: &RepoRef, vm: &str, labels: &[String]) -> Result<RunnerReg> {
+        repo.check_kind(Kind::Gitea)?;
+        let plain: Vec<&str> = labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !["self-hosted", "linux", "x64", "arm64"].contains(&l.to_ascii_lowercase().as_str()))
+            .collect();
+        if plain.is_empty() {
+            bail!("no runner labels to register");
+        }
+        let (status, v) = self.call(Method::POST, &format!("repos/{}/actions/runners/registration-token", repo.path), None).await?;
+        match status {
+            200..=299 => {}
+            403 => bail!(NOT_OWNER),
+            _ => bail!("Gitea answered {status} for the registration token of {}: {}", repo.path, Self::message(&v)),
+        }
+        let reg_token = v["token"].as_str().filter(|t| !t.is_empty()).context("Gitea sent no registration token")?;
+        let name = format!("{}-{vm}", self.install);
+        let body = json!({ "name": name, "token": reg_token, "version": RUNNER_VERSION, "labels": plain, "ephemeral": true });
+        // Connect-RPC over JSON, no auth header: the registration token in the body is the credential.
+        // `self.api` is `{origin}/api/v1`; the RPC lives at `{origin}/api/actions/...`.
+        let rpc = format!("{}/actions/runner.v1.RunnerService/Register", self.api.strip_suffix("/v1").context("api url")?);
+        let (status, v) = self.finish(self.client.post(rpc).json(&body)).await?;
+        if !(200..300).contains(&status) {
+            bail!("Gitea answered {status} for runner registration of {name}: {}", Self::message(&v));
+        }
+        let r = &v["runner"];
+        let id = r["id"].as_str().and_then(|i| i.parse::<u64>().ok()).or(r["id"].as_u64()).filter(|&i| i > 0);
+        let (Some(id), Some(uuid), Some(token)) = (id, r["uuid"].as_str(), r["token"].as_str().filter(|t| !t.is_empty())) else {
+            bail!("Gitea's registration answer for {name} has no runner id, uuid or token");
+        };
+        let dot_runner = json!({
+            "id": id, "uuid": uuid, "name": name, "token": token, "address": self.url,
+            "labels": plain.iter().map(|l| format!("{l}:host")).collect::<Vec<_>>(), "ephemeral": true,
+        });
+        self.track(id, vm);
+        let cred = base64::engine::general_purpose::STANDARD.encode(dot_runner.to_string());
+        Ok(RunnerReg { runner_id: id, guest_secret: format!("kiln.forge=gitea\nkiln.cred={cred}") })
+    }
+
+    /// Drops a runner kiln registered (retire, 3.3 of the forge design). The `busy` field is never
+    /// consulted: it stays false while a task is assigned.
+    /// - 1.26+: disable (no new task), see whether a job is in progress on it, delete only if not.
+    ///   A job in progress: leave it, the entry deletes itself when the job ends (`Busy`).
+    /// - 1.25: no disable, so a delete could strand a job being assigned. The runner idles out
+    ///   (`Busy`) unless it is already gone.
+    pub async fn deregister(&self, repo: &RepoRef, runner_id: u64) -> Dereg {
+        let r = async {
+            repo.check_kind(Kind::Gitea)?;
+            if self.version().await?.rerun() {
+                return self.retire(repo, runner_id, true).await;
+            }
+            let (status, v) = self.call(Method::GET, &format!("repos/{}/actions/runners/{runner_id}", repo.path), None).await?;
+            match status {
+                404 => Ok(Dereg::Gone),
+                200..=299 => Ok(Dereg::Busy),
+                _ => bail!("Gitea answered {status} for runner {runner_id}: {}", Self::message(&v)),
+            }
+        };
+        let d = r.await.unwrap_or_else(Dereg::Err);
+        if matches!(d, Dereg::Gone) {
+            self.tracked.lock().unwrap().remove(&runner_id);
+        }
+        d
+    }
+
+    /// Disable (when the server can), check for a job, delete. 404 at any step: already gone.
+    async fn retire(&self, repo: &RepoRef, runner_id: u64, disable: bool) -> Result<Dereg> {
+        let path = format!("repos/{}/actions/runners/{runner_id}", repo.path);
+        if disable {
+            let (status, v) = self.call(Method::PATCH, &path, Some(&json!({ "disabled": true }))).await?;
+            match status {
+                404 => return Ok(Dereg::Gone),
+                200..=299 => {}
+                _ => bail!("Gitea answered {status} disabling runner {runner_id}: {}", Self::message(&v)),
+            }
+        }
+        // An unreadable listing is an error, not "no job": a delete here could strand one.
+        if self.jobs(repo, "in_progress").await?.iter().any(|j| j["runner_id"].as_u64() == Some(runner_id)) {
+            return Ok(Dereg::Busy);
+        }
+        let (status, v) = self.call(Method::DELETE, &path, None).await?;
+        match status {
+            200..=299 | 404 => Ok(Dereg::Gone),
+            _ => bail!("Gitea answered {status} deleting runner {runner_id}: {}", Self::message(&v)),
+        }
+    }
+
+    /// Removes this install's offline runners (a crashed kiln leaves them), by the same
+    /// check-then-delete sequence. Returns how many were deleted.
+    pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
+        repo.check_kind(Kind::Gitea)?;
+        let disable = self.version().await?.rerun();
+        let prefix = format!("{}-", self.install);
+        // Listed in full before anything is deleted, so a delete cannot shift the pages.
+        let mut stale = vec![];
+        let mut seen = HashSet::new();
+        'pages: {
+            for page in 1..=MAX_PAGES {
+                let v = self.get(&format!("repos/{}/actions/runners?limit={PAGE}&page={page}", repo.path)).await?;
+                let runners = v["runners"].as_array().context("runner listing has no runners")?;
+                for r in runners {
+                    let Some(id) = r["id"].as_u64().filter(|&id| seen.insert(id)) else { continue };
+                    if r["name"].as_str().is_some_and(|n| n.starts_with(&prefix)) && r["status"] == "offline" {
+                        stale.push(id);
+                    }
+                }
+                if runners.is_empty() || seen.len() >= v["total_count"].as_u64().unwrap_or(0) as usize {
+                    break 'pages;
+                }
+            }
+            bail!("more than {} runners: not reading further", MAX_PAGES * PAGE)
+        }
+        let mut n = 0;
+        for id in stale {
+            match self.retire(repo, id, disable).await {
+                Ok(Dereg::Gone) => n += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!("{}: stale runner {id}: {e:#}", repo.path),
+            }
+        }
+        Ok(n)
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
@@ -690,12 +849,185 @@ mod tests {
         assert_eq!((d.refused_forks, d.fork_queued), (3, true));
     }
 
+    const RUNNERS: &str = "/api/v1/repos/acme/demo/actions/runners";
+    const REG_TOKEN: &str = "REGISTRATION-TOKEN-REDACTED";
+
+    fn labels() -> Vec<String> {
+        ["self-hosted", "linux", "x64", "kiln", "kiln-4cpu"].map(String::from).to_vec()
+    }
+
+    fn jobs_running(runner: u64) -> String {
+        json!({"jobs": [{"id": 5, "status": "in_progress", "runner_id": runner}], "total_count": 1}).to_string()
+    }
+
+    /// The mock with the routes a healthy 1.26+ retire of runner 52 takes.
+    async fn retire_mock(version: &str) -> (Mock, Gitea) {
+        let (m, g) = mock().await;
+        m.route("GET", "/api/v1/version", 200, json!({ "version": version }).to_string());
+        m.route("PATCH", &format!("{RUNNERS}/52"), 200, fx("runner_disabled.json"));
+        m.route("GET", &format!("{RUNNERS}/52"), 200, fx("runner_disabled.json"));
+        m.route("DELETE", &format!("{RUNNERS}/52"), 204, "");
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
+        (m, g)
+    }
+
+    #[tokio::test]
+    async fn register_over_rpc_and_hand_the_guest_only_the_runner_file() {
+        let (m, g) = mock().await;
+        m.route("POST", &format!("{RUNNERS}/registration-token"), 200, fx("registration_token.json"));
+        m.route("POST", "/api/actions/runner.v1.RunnerService/Register", 200, fx("register.json"));
+        let reg = g.register(&repo(), "kiln-fx-1", &labels()).await.unwrap();
+        assert_eq!(reg.runner_id, 52);
+        let log = m.log();
+        assert_eq!(
+            m.requests(),
+            [format!("POST {RUNNERS}/registration-token"), "POST /api/actions/runner.v1.RunnerService/Register".into()]
+        );
+        assert_eq!(log[0].auth.as_deref(), Some("token tok"));
+        // The RPC carries no API credential, and plain label names (no `:host`, no implicit ones).
+        assert_eq!(log[1].auth, None);
+        assert_eq!(log[1].body, Some(serde_json::from_str(&fx("register_request.json")).unwrap()));
+        // The guest gets the per-runner `.runner` file and nothing else.
+        let lines: Vec<&str> = reg.guest_secret.lines().collect();
+        assert_eq!(lines[0], "kiln.forge=gitea");
+        let raw = base64::engine::general_purpose::STANDARD.decode(lines[1].strip_prefix("kiln.cred=").unwrap()).unwrap();
+        let dot: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            dot,
+            json!({"id": 52, "uuid": "00000000-0000-4000-8000-000000000000", "name": "a1b2c3-kiln-fx-1", "token": "RUNNER-TOKEN-REDACTED",
+                   "address": "https://gitea.example.org", "labels": ["kiln:host", "kiln-4cpu:host"], "ephemeral": true})
+        );
+        assert!(!reg.guest_secret.contains(REG_TOKEN) && !String::from_utf8_lossy(&raw).contains(REG_TOKEN));
+        assert_eq!(g.tracked.lock().unwrap().get(&52).map(String::as_str), Some("kiln-fx-1"));
+    }
+
+    #[tokio::test]
+    async fn registration_failures_are_named_and_never_carry_the_token() {
+        let (m, g) = mock().await;
+        let tok = format!("{RUNNERS}/registration-token");
+        m.route("POST", &tok, 403, fx("registration_token_403.json"));
+        let e = g.register(&repo(), "v", &labels()).await.err().unwrap();
+        assert!(e.to_string().contains("Owners team"), "{e:#}");
+        m.route("POST", &tok, 200, fx("registration_token.json"));
+        m.route("POST", "/api/actions/runner.v1.RunnerService/Register", 500, fx("register_bad_token.json"));
+        let e = g.register(&repo(), "v", &labels()).await.err().unwrap();
+        assert!(e.to_string().contains("registration token not found"), "{e:#}");
+        // A 2xx without a runner is an error too; no error text holds the token.
+        m.route("POST", "/api/actions/runner.v1.RunnerService/Register", 200, r#"{"runner":{"id":"0"}}"#);
+        let e = g.register(&repo(), "v", &labels()).await.err().unwrap();
+        assert!(!format!("{e:?}").contains(REG_TOKEN));
+        // Nothing of ours to register (only GitHub's implicit labels) never reaches the server.
+        m.clear_log();
+        assert!(g.register(&repo(), "v", &["self-hosted".into(), "Linux".into(), "ARM64".into()]).await.is_err());
+        assert!(m.requests().is_empty());
+        assert!(g.tracked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retire_disables_checks_then_deletes() {
+        let (m, g) = retire_mock("28.1.0").await;
+        g.track(52, "vm");
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        let log = m.log();
+        assert_eq!(
+            m.requests(),
+            [
+                "GET /api/v1/version".to_string(),
+                format!("PATCH {RUNNERS}/52"),
+                format!("GET {API}/jobs?status=in_progress&limit=50&page=1"),
+                format!("DELETE {RUNNERS}/52")
+            ]
+        );
+        assert_eq!(log[1].body, Some(json!({"disabled": true})));
+        assert!(g.tracked.lock().unwrap().is_empty());
+        // A job on the runner: it stays (disabled), is never deleted, and stays tracked. `busy` is not read.
+        m.clear_log();
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(52));
+        g.track(52, "vm");
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Busy));
+        assert!(!m.requests().iter().any(|r| r.starts_with("DELETE")));
+        assert_eq!(g.tracked.lock().unwrap().len(), 1);
+        // Another runner's job does not hold this one.
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(53));
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+    }
+
+    #[tokio::test]
+    async fn retire_fails_closed() {
+        let (m, g) = retire_mock("28.1.0").await;
+        // Already gone: 404 on the disable (or the delete) is Gone.
+        m.route("PATCH", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        m.route("PATCH", &format!("{RUNNERS}/52"), 200, fx("runner_disabled.json"));
+        m.route("DELETE", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        // An unreadable job listing is an error and nothing is deleted.
+        m.clear_log();
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 500, "{}");
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Err(_)));
+        assert!(!m.requests().iter().any(|r| r.starts_with("DELETE")));
+        // A refused disable: no check, no delete.
+        m.clear_log();
+        m.route("PATCH", &format!("{RUNNERS}/52"), 403, r#"{"message":"no"}"#);
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Err(_)));
+        assert_eq!(m.requests(), [format!("PATCH {RUNNERS}/52")]);
+    }
+
+    #[tokio::test]
+    async fn retire_on_1_25_never_deletes_a_runner_that_may_hold_a_job() {
+        let (m, g) = retire_mock("1.25.3").await;
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Busy));
+        assert_eq!(m.requests(), ["GET /api/v1/version".to_string(), format!("GET {RUNNERS}/52")]);
+        // Gone on its own (it took a job and deleted itself).
+        m.route("GET", &format!("{RUNNERS}/52"), 404, fx("runner_404.json"));
+        assert!(matches!(g.deregister(&repo(), 52).await, Dereg::Gone));
+        assert!(m.requests().iter().all(|r| !r.starts_with("DELETE") && !r.starts_with("PATCH")));
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_only_this_installs_offline_runners() {
+        let (m, g) = retire_mock("28.1.0").await;
+        let list = |rs: Vec<Value>| json!({"runners": rs, "total_count": rs.len()}).to_string();
+        let r = |id: u64, name: &str, status: &str| json!({"id": id, "name": name, "status": status});
+        let page = format!("{RUNNERS}?limit=50&page=1");
+        m.route(
+            "GET",
+            &page,
+            200,
+            list(vec![
+                r(52, "a1b2c3-vm-1", "offline"),
+                r(60, "a1b2c3-vm-2", "online"),
+                r(61, "ffffff-vm-3", "offline"),
+                r(62, "a1b2c3x-vm-4", "offline"),
+                r(63, "a1b2c3-vm-5", "offline"),
+            ]),
+        );
+        m.route("PATCH", &format!("{RUNNERS}/63"), 200, fx("runner_disabled.json"));
+        m.route("DELETE", &format!("{RUNNERS}/63"), 204, "");
+        // 63 has a job in progress: it is left alone.
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(63));
+        assert_eq!(g.sweep(&repo()).await.unwrap(), 1);
+        let reqs = m.requests();
+        assert!(reqs.contains(&format!("DELETE {RUNNERS}/52")), "{reqs:?}");
+        assert!(!reqs.contains(&format!("DELETE {RUNNERS}/63")), "{reqs:?}");
+        for other in [60, 61, 62] {
+            assert!(!reqs.iter().any(|q| q.contains(&format!("/{other}"))), "{other}: {reqs:?}");
+        }
+        // Nothing listed, or an unreadable listing.
+        m.route("GET", &page, 200, fx("runners_empty.json"));
+        assert_eq!(g.sweep(&repo()).await.unwrap(), 0);
+        m.route("GET", &page, 500, "{}");
+        assert!(g.sweep(&repo()).await.is_err());
+    }
+
     #[test]
     fn credentials_and_construction() {
         let cfg = |j: Value| serde_json::from_value::<ForgeCfg>(j).unwrap();
-        let ok = Gitea::new(&cfg(
-            json!({"id": "home-lab", "kind": "gitea", "url": "https://gitea.example.org/", "repos": ["acme/demo", "bad", "a/b/c"]}),
-        ))
+        let ok = Gitea::new(
+            &cfg(json!({"id": "home-lab", "kind": "gitea", "url": "https://gitea.example.org/", "repos": ["acme/demo", "bad", "a/b/c"]})),
+            &std::env::temp_dir(),
+        )
         .unwrap();
         assert_eq!(ok.web_url(), WEB);
         assert_eq!(ok.api, format!("{WEB}/api/v1"));
@@ -725,7 +1057,7 @@ mod tests {
             json!({"id": "g", "kind": "gitea", "url": "http://gitea.example.org"}),
             json!({"id": "g", "kind": "gitea", "url": "http://127.0.0.1:3000", "network": "internal"}),
         ] {
-            assert!(Gitea::new(&cfg(j.clone())).is_err(), "{j}");
+            assert!(Gitea::new(&cfg(j.clone()), &std::env::temp_dir()).is_err(), "{j}");
         }
     }
 
@@ -734,10 +1066,14 @@ mod tests {
         // `Gitea::new` always builds the guarded client: even an `internal` forge never dials loopback.
         let cfg: ForgeCfg =
             serde_json::from_value(json!({"id": "g", "kind": "gitea", "url": "http://10.1.2.3:3000", "network": "internal"})).unwrap();
-        let mut g = Gitea::new(&cfg).unwrap();
+        let mut g = Gitea::new(&cfg, &std::env::temp_dir()).unwrap();
         g.api = "http://127.0.0.1:9/api/v1".into();
         *g.token.write().unwrap() = Some("tok".into());
         let e = g.get("version").await.unwrap_err();
+        assert!(format!("{e:#}").contains("internal address"), "{e:#}");
+        // The registration RPC goes through the same guard, and fails before any token is sent.
+        g.api = "http://127.0.0.1:9/api/v1".into();
+        let e = g.finish(g.client.post("http://127.0.0.1:9/api/actions/x")).await.unwrap_err();
         assert!(format!("{e:#}").contains("internal address"), "{e:#}");
     }
 }

@@ -1,0 +1,4 @@
+{
+  "message": "user should be the owner of the repo",
+  "url": "https://gitea.example.org/api/swagger"
+}
