@@ -1373,7 +1373,7 @@ mod tests {
         assert_eq!(ok.repos(&c).iter().map(RepoRef::key).collect::<Vec<_>>(), ["home-lab:acme/demo"]);
         assert!(ok.health().unwrap().contains("no Gitea token"));
         // A token file: read, trimmed, header-safe only; a bad one is no credential.
-        let dir = std::env::temp_dir().join(format!("kiln-gitea-token-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-credentials_and_construction-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("forges")).unwrap();
         let file = dir.join("forges/home-lab.token");
         std::fs::write(&file, "abc123\n").unwrap();

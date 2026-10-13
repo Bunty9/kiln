@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn crash_files_are_capped() {
-        let dir = std::env::temp_dir().join(format!("kiln-crash-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-crash_files_are_capped-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for _ in 0..MAX_PENDING + 5 {
             record(&dir, &json!({})).unwrap();

@@ -218,7 +218,7 @@ mod tests {
     /// The real thing, in a child thread: files outside the policy are out of reach.
     #[test]
     fn confines_files() {
-        let d = std::env::temp_dir().join(format!("kiln-test-confine-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-confines_files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("vm")).unwrap();
         std::fs::write(d.join("token"), "secret").unwrap();

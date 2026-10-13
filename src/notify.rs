@@ -1811,7 +1811,7 @@ mod tests {
     #[test]
     fn store_is_private_and_redacted() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("kiln-test-notify-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-store_is_private_and_redacted-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(load(&d).unwrap().len(), 0, "missing file = none");
@@ -1832,7 +1832,7 @@ mod tests {
 
     #[test]
     fn load_errors_never_echo_file_contents() {
-        let d = std::env::temp_dir().join(format!("kiln-test-notify-err-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-load_errors_never_echo_file_contents-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let bad_type = r#"[{"id":"a1b2c3d4","name":"x","kind":"slack","url":"https://hooks.slack.com/services/T000/B000/XXXX","tailnet":"SECRETMARK_42"}]"#;
