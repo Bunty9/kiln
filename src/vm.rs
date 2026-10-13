@@ -575,7 +575,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     // Direct kernel boot without initrd: virtio + ext4 are built into the
     // Ubuntu kernel, which brings boot-to-runner down to ~4s.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
-    cmd.args(job_args(&GUEST, &q, ssh_host.is_some()));
+    cmd.args(job_args(&GUEST, &q, ssh_host.is_some(), now_us()));
     if ssh_host.is_some() && publish == Publish::Monitor {
         cmd.arg("-monitor").arg(format!("unix:{},server=on,wait=off", q.join("mon.sock").display()));
     }
@@ -1374,6 +1374,11 @@ struct Guest {
     steps_args: &'static [&'static str],
     /// SMBIOS OEM strings reach the guest (x86 only: arm64 `virt` has no SMBIOS without UEFI).
     smbios: bool,
+    /// The guest kernel reads a real-time clock at boot. x86's rtc_cmos is built in; arm64's
+    /// PL031 driver is a module the cloud image lacks (and rtc-efi needs UEFI), so an arm64 guest
+    /// would start at systemd's build time, months behind, and apt rejects the archive's Release
+    /// files as "not valid yet". Guests without one get the host's time on the kernel command line.
+    rtc: bool,
 }
 
 const X64: Guest = Guest {
@@ -1385,6 +1390,7 @@ const X64: Guest = Guest {
     steps: "/dev/ttyS1",
     steps_args: &["-serial", "chardev:s1"],
     smbios: true,
+    rtc: true,
 };
 
 /// Apple Silicon (HVF) or aarch64 Linux (KVM). `virt` has a single UART (PL011, ttyAMA0), so
@@ -1398,17 +1404,29 @@ const ARM64: Guest = Guest {
     steps: "/dev/virtio-ports/kiln.steps",
     steps_args: &["-device", "virtio-serial-pci", "-device", "virtserialport,chardev=s1,name=kiln.steps"],
     smbios: false,
+    rtc: false,
 };
 
 const GUEST: Guest = if platform::ARM64 { ARM64 } else { X64 };
+
+/// Kernel command line: `base`, plus `systemd.clock_usec` (the host's time, which systemd sets
+/// early in boot) on guests without an RTC. `now_us` is microseconds since the epoch.
+fn cmdline(g: &Guest, base: &str, now_us: u128) -> String {
+    if g.rtc { base.into() } else { format!("{base} systemd.clock_usec={now_us}") }
+}
+
+fn now_us() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()
+}
 
 /// Job VM flags after the kernel: its command line, the secrets (JIT config, debug SSH
 /// keys) and the serial channels. Secrets go in as fw_cfg files (read by guests that have the
 /// qemu_fw_cfg module: arm64 bakes install it) and on x86 also as SMBIOS OEM strings (what x86
 /// guests read: their image lacks the module); `path=`/`file=` keep them out of `ps`.
 /// panic=1 + -no-reboot make a kernel panic end the VM instead of hanging until the timeout.
-fn job_args(g: &Guest, dir: &Path, ssh: bool) -> Vec<String> {
-    let mut a = vec!["-append".into(), format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console)];
+fn job_args(g: &Guest, dir: &Path, ssh: bool, now_us: u128) -> Vec<String> {
+    let base = format!("root=/dev/vda1 rootfstype=ext4 ro console={} quiet panic=1", g.console);
+    let mut a = vec!["-append".into(), cmdline(g, &base, now_us)];
     for s in if ssh { &["jit", "ssh"][..] } else { &["jit"] } {
         let f = dir.join(s).display().to_string();
         if g.smbios {
@@ -1810,7 +1828,7 @@ async fn bake_inner(app: &App) -> Result<()> {
     say("booting bake VM (installs packages + runner, takes a few minutes)".into()).await?;
     let mut cmd = qemu(&GUEST, cfg.vm_cpus, cfg.vm_mem_mb.max(4096), &disk, "");
     cmd.arg("-kernel").arg(&kernel).arg("-initrd").arg(&initrd);
-    cmd.arg("-append").arg(format!("root=LABEL=cloudimg-rootfs ro console={}", GUEST.console));
+    cmd.arg("-append").arg(cmdline(&GUEST, &format!("root=LABEL=cloudimg-rootfs ro console={}", GUEST.console), now_us()));
     cmd.arg("-drive").arg(format!("file={},if=virtio,format=raw,readonly=on", seed.display()));
     cmd.arg("-serial").arg(format!("file:{}", work.join("console.log").display()));
     let qemu_err = std::fs::OpenOptions::new().append(true).open(&log)?;
@@ -2959,15 +2977,17 @@ mod tests {
         let has = |a: &[String], k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
         let d = Path::new("/d/vm");
         // x86: unchanged SMBIOS path plus fw_cfg, ttyS0 console, ttyS1 steps.
-        let x = job_args(&X64, d, true);
+        // x86 has an RTC (rtc_cmos is built in), so its command line carries no clock.
+        let x = job_args(&X64, d, true, 1_791_740_492_019_978);
         assert!(has(&x, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyS0 quiet panic=1"));
         assert!(has(&x, "-smbios", "type=11,path=/d/vm/jit") && has(&x, "-smbios", "type=11,path=/d/vm/ssh"));
         assert!(has(&x, "-fw_cfg", "name=opt/kiln/jit,file=/d/vm/jit") && has(&x, "-fw_cfg", "name=opt/kiln/ssh,file=/d/vm/ssh"));
         assert!(has(&x, "-serial", "stdio") && has(&x, "-chardev", "socket,id=s1,path=/d/vm/steps.sock,server=on,wait=off"));
         assert!(has(&x, "-serial", "chardev:s1"));
         // arm64: no SMBIOS without UEFI; PL011 console; steps on a virtio-serial port.
-        let a = job_args(&ARM64, d, false);
-        assert!(has(&a, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyAMA0 quiet panic=1"));
+        // arm64: no RTC driver in the image, so the host's time goes in for systemd.
+        let a = job_args(&ARM64, d, false, 1_791_740_492_019_978);
+        assert!(has(&a, "-append", "root=/dev/vda1 rootfstype=ext4 ro console=ttyAMA0 quiet panic=1 systemd.clock_usec=1791740492019978"));
         assert!(!a.iter().any(|s| s == "-smbios" || s.contains("opt/kiln/ssh")));
         assert!(has(&a, "-fw_cfg", "name=opt/kiln/jit,file=/d/vm/jit") && has(&a, "-serial", "stdio"));
         assert!(has(&a, "-device", "virtserialport,chardev=s1,name=kiln.steps") && !has(&a, "-serial", "chardev:s1"));
