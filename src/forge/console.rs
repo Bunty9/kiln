@@ -81,7 +81,8 @@ fn gitlab_line(line: &str) -> Option<Line> {
 /// `job=` (the workflow's job name) is job-controlled text: logrus quotes it, but only the fixed `level=info
 /// msg="task started"` anchor and the first unquoted `job_id=<digits>` field are read, never anything inside a quoted value.
 fn gitea_line(line: &str) -> Option<Line> {
-    if line == "kiln.gate=dead" || line.ends_with(": kiln.gate=dead") {
+    // Only the bare line kiln-job writes straight to the console device: a journal-prefixed copy is some other process's text (R3 L-3).
+    if line == "kiln.gate=dead" {
         return Some(Line::GateDead);
     }
     if let Some((head, rest)) = line.split_once(r#" level=info msg="task started" "#) {
@@ -94,9 +95,23 @@ fn gitea_line(line: &str) -> Option<Line> {
     if line.contains(r#" level=info msg="runner: "#) && line.ends_with(r#"declare successfully""#) {
         return Some(Line::Listening);
     }
-    // A job cannot make the server say this; matched on the text, the status code differs by version (500, 401).
-    ((line.contains(" level=warning ") || line.contains(" level=error ")) && line.contains("unregistered runner"))
-        .then_some(Line::Unregistered)
+    // A job cannot make the server say this; matched on the text, the status code differs by version (500, 401). The fields are
+    // walked from the logrus `time="` start (after any journal prefix): `level` is warning or error and the unquoted `msg` or
+    // `error` value holds the text, so job text inside another quoted value (a workflow parse error echoing it) never matches.
+    let body = &line[line.find("time=\"")?..];
+    let said = |k| logrus_field(body, k).is_some_and(|v| v.contains("unregistered runner"));
+    matches!(logrus_field(body, "level").as_deref(), Some("warning" | "error")).then_some(())?;
+    (said("msg") || said("error")).then_some(Line::Unregistered)
+}
+
+/// Whether `line` is kiln-job's own `kiln: decide`: the whole remainder after the journal prefix
+/// (`[ts] kiln-job[<pid>]: `), so a job name containing the words cannot mark it early (R3 L-3).
+pub fn is_decide(line: &str) -> bool {
+    let l = line.trim_end();
+    let l = l.strip_prefix('[').and_then(|r| r.split_once("] ")).map_or(l, |(_, rest)| rest);
+    l.strip_prefix("kiln-job[")
+        .and_then(|r| r.split_once("]: "))
+        .is_some_and(|(pid, rest)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest == "kiln: decide")
 }
 
 /// The raw value of the first unquoted `key=value` field of a logrus text line (quoted values are skipped whole,
@@ -220,14 +235,47 @@ mod tests {
         ] {
             assert_eq!(p(l), Some(Line::Unregistered), "{l}");
         }
+        // The journal prefix is skipped; the text must be in msg/error of a warning or error line, never in another field.
+        let w = r#"time="x" level=warning msg="UpdateLog error: 401 unregistered runner""#;
+        assert_eq!(p(&format!("[   50.1] kiln-job[1395]: {w}")), Some(Line::Unregistered), "journal prefix");
+        for l in [
+            r#"time="x" level=warning msg="workflow parse error" job="unregistered runner""#,
+            r#"time="x" level=error msg="x" detail="error=\"unregistered runner\" msg=\"unregistered runner\"""#,
+            r#"time="x" level=info msg="x" error="unregistered runner""#,
+            r#"level=warning msg="unregistered runner""#,
+            r#"time="x" level=warning job=" level=warning msg=\"unregistered runner\"" msg="fine""#,
+            "a level=warning msg=\"unregistered runner\"",
+        ] {
+            assert_eq!(p(l), None, "{l}");
+        }
         assert_eq!(p("unregistered runner"), None, "plain text is not the daemon");
         assert_eq!(p(r#"time="x" level=info msg="unregistered runner""#), None);
-        // The guest's gate-death line, bare or with the journal prefix.
+        // The guest's gate-death line.
         assert_eq!(p("kiln.gate=dead\n"), Some(Line::GateDead));
-        assert_eq!(p("[   50.1] kiln-job[1395]: kiln.gate=dead"), Some(Line::GateDead));
+        // Only the bare line (written straight to the console device); the journal-prefixed form is another process's text.
+        assert_eq!(p("[   50.1] kiln-job[1395]: kiln.gate=dead"), None);
+        assert_eq!(p("gitea-runner[9]: kiln.gate=dead"), None);
         assert_eq!(p("echo kiln.gate=dead"), None);
         assert_eq!(parse_line(Kind::GitHub, "kiln.gate=dead"), None);
         assert_eq!(parse_line(Kind::GitLab, "kiln.gate=dead"), None);
         assert_eq!(p("kiln: hostkey k"), Some(Line::Hostkey("k".into())));
+    }
+
+    #[test]
+    fn decide_is_the_whole_journal_line() {
+        for l in ["[   50.1] kiln-job[1395]: kiln: decide", "kiln-job[7]: kiln: decide\n", "[ 1.0] kiln-job[7]: kiln: decide  "] {
+            assert!(is_decide(l), "{l}");
+        }
+        for l in [
+            "kiln: decide",
+            "[ 1.0] kiln-job[7]: kiln: decide now",
+            "[ 1.0] kiln-job[x]: kiln: decide",
+            "[ 1.0] other[7]: kiln: decide",
+            r#"time="x" level=info msg="task started" job="kiln: decide" job_id=5"#,
+            "[ 1.0] kiln-job[7]: time=x job=kiln-job[7]: kiln: decide",
+            "echo kiln: decide",
+        ] {
+            assert!(!is_decide(l), "{l}");
+        }
     }
 }

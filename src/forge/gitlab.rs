@@ -1791,7 +1791,7 @@ mod tests {
         assert!(e.to_string().contains("later version"), "{e:#}");
         assert!(matches!(f.deregister(&repo(), 1, Reason::Surplus).await, Dereg::Err(_)));
         assert!(f.pause(&repo(), 1).await.is_err());
-        assert!(f.verdict_facts(&repo(), "1").await.is_err());
+        assert!(f.verdict_facts(&repo(), "1", 79).await.is_err());
         assert!(f.sweep(&repo()).await.is_err());
         assert!(f.runs(&repo(), &Default::default()).await.is_err());
         assert_eq!(f.repo_paused(&repo()), None);

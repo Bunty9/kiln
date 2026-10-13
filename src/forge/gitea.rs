@@ -861,8 +861,17 @@ impl Gitea {
     /// What the API says about the job the console named (4.2: nothing from the guest). Fork,
     /// `workflow_run`, unknown event and tag come from the run record; a read error is the
     /// caller's refusal.
-    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str) -> Result<VerdictFacts> {
+    /// The job must also be this VM's: its `runner_id` is `runner_id` and it is `in_progress` (the server
+    /// sets both at FetchTask, before the runner logs `task started`), so a console line naming another
+    /// runner's job (a parser differential, a log-format change) is refused instead of judged (R3 M-1).
+    pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<VerdictFacts> {
         let job = self.job(repo, job_id).await?;
+        if job["runner_id"].as_u64() != Some(runner_id) {
+            bail!("job {job_id} is not this VM's runner's job");
+        }
+        if job["status"] != "in_progress" {
+            bail!("job {job_id} is not in progress");
+        }
         let (run, ours) = self.job_run(repo, &job).await?;
         Ok(facts(&run, ours))
     }
@@ -1597,10 +1606,12 @@ mod tests {
     }
 
     const REPO_API: &str = "/api/v1/repos/acme/demo";
+    /// The runner id the verdict tests act for.
+    const RUNNER: u64 = 52;
 
     /// A job of run `run` (a fixture) as the API lists it, with the routes a verdict or trust read needs.
     fn job_routes(m: &Mock, job: u64, run: u64, status: &str, conclusion: Option<&str>) {
-        let mut j = json!({"id": job, "run_id": run, "status": status});
+        let mut j = json!({"id": job, "run_id": run, "status": status, "runner_id": RUNNER});
         if let Some(c) = conclusion {
             j["conclusion"] = c.into();
         }
@@ -1610,7 +1621,7 @@ mod tests {
 
     /// The whole host path for a job: `gate` with Gitea's no-op pause and `verdict_facts`.
     async fn verdict(g: &Gitea, job: &str) -> crate::forge::Verdict {
-        crate::forge::gate(job, Duration::from_secs(5), async { Ok(None) }, g.verdict_facts(&repo(), job)).await
+        crate::forge::gate(job, Duration::from_secs(5), async { Ok(None) }, g.verdict_facts(&repo(), job, RUNNER)).await
     }
 
     #[tokio::test]
@@ -1643,7 +1654,12 @@ mod tests {
             r["event"] = event.into();
             r["id"] = (200 + job).into();
             m.route("GET", &format!("{API}/runs/{}", 200 + job), 200, r.to_string());
-            m.route("GET", &format!("{API}/jobs/{job}"), 200, json!({"id": job, "run_id": 200 + job}).to_string());
+            m.route(
+                "GET",
+                &format!("{API}/jobs/{job}"),
+                200,
+                json!({"id": job, "run_id": 200 + job, "status": "in_progress", "runner_id": RUNNER}).to_string(),
+            );
             assert_eq!(verdict(&g, &job.to_string()).await.v, call, "event {event:?}");
         }
     }
@@ -1675,6 +1691,22 @@ mod tests {
         r.as_object_mut().unwrap().remove("repository");
         m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
         assert_eq!(verdict(&g, "102").await.v, Refuse);
+        // R3 M-1: a job of another runner, a job that is not running, and one with no runner are refused
+        // even when the run is fine (a console line naming a trusted job on another runner).
+        for (rid, st, why) in [
+            (json!(53), "in_progress", "not this VM's runner"),
+            (json!(null), "in_progress", "not this VM's runner"),
+            (json!(RUNNER), "queued", "not in progress"),
+            (json!(RUNNER), "completed", "not in progress"),
+        ] {
+            job_routes(&m, 107, 70, st, None);
+            m.route("GET", &format!("{API}/jobs/107"), 200, json!({"id": 107, "run_id": 70, "status": st, "runner_id": rid}).to_string());
+            m.route("GET", &format!("{API}/runs/70"), 200, fx("run_70.json"));
+            let v = verdict(&g, "107").await;
+            assert!(v.v == Refuse && v.why.contains(why), "{rid} {st}: {}", v.why);
+        }
+        job_routes(&m, 107, 70, "in_progress", None);
+        assert_eq!(verdict(&g, "107").await.v, crate::forge::Call::Ok, "this runner's running job");
         // The id is the console's: anything but digits never reaches the API.
         m.clear_log();
         for bad in ["", "1/../2", "1 2", "-1", "٣"] {

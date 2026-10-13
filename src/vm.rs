@@ -701,6 +701,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let secret =
         if forge.gated() { format!("{}\nkiln.timeout={}", reg.guest_secret, cfg.job_timeout_mins) } else { reg.guest_secret.clone() };
     // One file per line: QEMU makes a whole file one SMBIOS OEM string, and the guest reads one `kiln.<name>=` per string.
+    check_secret_lines(&secret)?;
     for (i, line) in secret.lines().enumerate() {
         write_secret(&q.join(secret_file(i)), line).await?;
     }
@@ -846,12 +847,14 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         }
         .min(v.started + hard_cap);
         let left = Duration::from_secs(deadline.saturating_sub(now()));
-        buf.clear();
+        // `buf` is not cleared here: a line another branch cut off (cancelled mid-line) keeps its bytes in it, and the
+        // next read appends the rest, so its tail is never parsed as a whole line (R3 L-4).
         tokio::select! {
             r = read_capped(&mut lines, &mut buf) => {
                 if r? == 0 {
                     break; // guest powered off, QEMU closed stdout
                 }
+                let buf = std::mem::take(&mut buf);
                 if first {
                     // QEMU read the secret files at start, before the guest printed anything.
                     first = false;
@@ -902,13 +905,13 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         Bound::First => {
                             let (forge, rr, tx) = (forge.clone(), rr.clone(), verdicts.clone());
                             tokio::spawn(async move {
-                                let vd = crate::forge::gate(&jid, crate::forge::GATE_TIMEOUT, forge.pause(&rr, runner_id), forge.verdict_facts(&rr, &jid)).await;
+                                let vd = crate::forge::gate(&jid, crate::forge::GATE_TIMEOUT, forge.pause(&rr, runner_id), forge.verdict_facts(&rr, &jid, runner_id)).await;
                                 let _ = tx.send((jid, vd)).await;
                             });
                         }
                     }
                 }
-                if text.contains("kiln: decide") && !std::mem::replace(&mut decided, true) {
+                if crate::forge::console::is_decide(&text) && !std::mem::replace(&mut decided, true) {
                     let v = update(app, id, |_| {}).context("vm vanished")?;
                     let max_vms = app.cfg().max_vms;
                     let held = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Held).count();
@@ -980,6 +983,10 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             }
             _ = tokio::time::sleep(left) => {
                 child.kill().await.ok();
+                // Silent until the deadline with a job started and no verdict: the same gate death.
+                if forge.gated() && let Some(v) = update(app, id, |v| if verdictless(v) { gate_died(v) }) {
+                    persist(app, &v);
+                }
                 if v.state == State::Held {
                     note(app, id, hold_expired_note(v.note.as_deref()));
                     return Ok(State::Killed);
@@ -994,6 +1001,22 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 return Ok(State::Failed);
             }
         }
+    }
+    // A gated VM that ends between its job start and its verdict is a gate death, whether or not `kiln.gate=dead` made it
+    // to the console (the guest powers off right after printing it); the line is only a hint (R3 L-2).
+    let mut lost = false;
+    if forge.gated()
+        && let Some(v) = update(app, id, |v| {
+            if verdictless(v) {
+                gate_died(v);
+                lost = true;
+            }
+        })
+        && lost
+    {
+        persist(app, &v);
+        child.kill().await.ok();
+        return Ok(State::Killed);
     }
     if dropped {
         child.kill().await.ok();
@@ -1697,6 +1720,11 @@ fn gate_died(v: &mut Vm) {
     }
 }
 
+/// A job started on this VM (the console bound its id) but the host recorded no verdict for it.
+fn verdictless(v: &Vm) -> bool {
+    v.job_id.is_some() && v.verdict.is_none()
+}
+
 /// What a console job-start line did to a VM's bound job id.
 #[derive(PartialEq, Eq, Debug)]
 enum Bound {
@@ -1795,6 +1823,15 @@ fn now_us() -> u128 {
 
 /// Secret lines a job VM can be given (`kiln.forge`, `kiln.url`, `kiln.cred`, `kiln.timeout`, ...).
 const MAX_SECRET_LINES: usize = 8;
+
+/// More lines than `MAX_SECRET_LINES` would leave `jit.N` files that are neither passed to QEMU nor deleted (R3 L-6).
+fn check_secret_lines(secret: &str) -> Result<()> {
+    let n = secret.lines().count();
+    if n > MAX_SECRET_LINES {
+        bail!("{n} guest secret lines, at most {MAX_SECRET_LINES} fit");
+    }
+    Ok(())
+}
 
 /// The file holding line `i` of the guest's secrets: `jit`, then `jit.1`, `jit.2`, ...
 fn secret_file(i: usize) -> String {
@@ -2392,7 +2429,9 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 9: kiln-job runs GitLab jobs (`run_gitlab`).
 /// 10: kiln-exec binds the verdict to the server job id and is one-shot.
 /// 11: kiln-job runs Gitea jobs under the exec gate (`run_gitea`, `kiln-gate`); dockerd waits for the verdict there.
-const RECIPE: u64 = 11;
+/// 12: R3 fixes: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
+/// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
+const RECIPE: u64 = 12;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -3376,7 +3415,10 @@ mod tests {
             .take_while(|l| l.is_empty() || l.starts_with("      "))
             .map(|l| format!("{}\n", l.get(6..).unwrap_or("")))
             .collect();
-        script.replace("/run/kiln", &dir.to_string_lossy()).replace("/proc/sysrq-trigger", &dir.join("sysrq").to_string_lossy())
+        script
+            .replace("/run/kiln", &dir.to_string_lossy())
+            .replace("/proc/sysrq-trigger", &dir.join("sysrq").to_string_lossy())
+            .replace("/dev/{{CONSOLE}}", &dir.join("console").to_string_lossy())
     }
 
     /// Writes a guest script to a file the test sources (kiln-job only defines functions then).
@@ -3502,7 +3544,8 @@ mod tests {
         // ok, no image: no docker, runs directly, a failing script is exit 1.
         fresh();
         let (rc, _, calls) = stage("ok 42", &[], &["prepare"]);
-        assert_eq!((rc, calls.contains("docker"), calls.contains("kiln-cache")), (Some(0), false, false));
+        // dockerd is not up at boot (R3 M-2c): an ok verdict starts it, once the gate has passed; no container is created for a plain job.
+        assert_eq!((rc, calls.as_str()), (Some(0), "kiln-verdict-wait\nsystemctl start docker.service\n"), "{calls}");
         std::fs::write(dir.join("s.sh"), format!("echo ran > {}/ran\n", dir.display())).unwrap();
         let ran = dir.join("ran");
         assert_eq!(stage("ok 42", &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]).0, Some(0));
@@ -3605,7 +3648,7 @@ mod tests {
             fresh();
             let (rc, err, calls) = stage("ok 42", &[("CUSTOM_ENV_CI_JOB_IMAGE", bad)], &["prepare"]);
             assert_eq!(rc, Some(1), "{bad:?}");
-            assert!(err.contains("invalid image name") && !calls.contains("docker"), "{bad:?}: {err}");
+            assert!(err.contains("invalid image name") && !calls.contains("docker "), "{bad:?}: {err}");
         }
         fresh();
         let svcs = serde_json::json!([{ "name": "--privileged" }]).to_string();
@@ -3745,12 +3788,14 @@ twin=$([ $# -eq 1 ] && echo 1)
 case "$STUB:${twin:-p}" in
   noarm:1) exit 1 ;;
   twindead:1) sleep 0.1; exit 1 ;;
-  *:1) sleep 2; exit 0 ;;
+  race:1) sleep 1; echo "twin finished" >> "$REC"; exit 77 ;;
+  *:1) sleep 0.8; exit 0 ;;
   ok:p) sleep 0.3; echo "ok 5" > "$V"; exit 3 ;;
   cold:p) sleep 0.3; echo "cold 5" > "$V"; exit 0 ;;
   refuse:p) exit 77 ;;
   gone:p) exit 75 ;;
   dead:p) exit 137 ;;
+  race:p) sleep 0.3; echo "refuse 5" > "$V"; exit 137 ;;
   twindead:p) sleep 3 ;;
 esac
 "#;
@@ -3763,6 +3808,7 @@ esac
                 "{src}\nsecret(){{ case $1 in cred) printf '%s' \"$JSON\" | base64 -w0;; timeout) printf '%s' \"$MINS\";; esac; }}\n\
                  start_verdict_reader(){{ echo reader >> \"$REC\"; }}; harden_gitea(){{ echo harden >> \"$REC\"; }}\n\
                  systemctl(){{ echo \"systemctl $*\" >> \"$REC\"; }}; chown(){{ :; }}; id(){{ echo 4000000000; }}\n\
+                 kill_uid(){{ echo \"kill_uid $1\" >> \"$REC\"; }}\n\
                  run_gitea; echo \"rc=$?\""
             );
             let o = std::process::Command::new("bash")
@@ -3813,9 +3859,20 @@ esac
         let (out, _) = run("gone", dot, "7");
         assert!(out.contains("runner exited before taking a job") && out.contains("rc=1"), "{out}");
         for stub in ["dead", "twindead"] {
-            let (out, _) = run(stub, dot, "7");
-            assert!(out.contains("kiln.gate=dead") && out.contains("rc=1") && dir.join("sysrq").exists(), "{stub}: {out}");
+            let (out, rec) = run(stub, dot, "7");
+            // The marker goes straight to the console device (the host takes no journal-prefixed form), not to stdout.
+            assert!(out.contains("rc=1") && !out.contains("kiln.gate=dead") && dir.join("sysrq").exists(), "{stub}: {out}");
+            assert_eq!(std::fs::read_to_string(dir.join("console")).unwrap(), "kiln.gate=dead\n", "{stub}");
+            assert!(rec.contains("kill_uid 4000000000"), "{stub}: {rec}");
         }
+        // R3 M-3: the primary dies just as a refuse verdict lands. The twin, still holding, is waited for (never killed: that
+        // would free its group and release every held exec), and the job's uid is killed before the VM is failed.
+        let (out, rec) = run("race", dot, "7");
+        let lines: Vec<&str> = rec.lines().collect();
+        assert!(out.contains("rc=1") && !out.contains("runner exited with"), "{out}");
+        assert_eq!(&lines[lines.len() - 2..], ["twin finished", "kill_uid 4000000000"], "{rec}");
+        // A refused run (gate exit 77) kills the uid as well.
+        assert!(run("refuse", dot, "7").1.ends_with("kill_uid 4000000000\n"));
         // The twin never arms: the primary is not started.
         let (out, rec) = run("noarm", dot, "7");
         assert!(out.contains("did not arm") && out.contains("rc=1") && !rec.contains("gitea-runner"), "{out} {rec}");
@@ -3835,6 +3892,192 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// GitHub's path (R3 M-2c): dockerd is not up at boot, so run_github starts it, before the runner and never without a
+    /// JIT config.
+    #[test]
+    fn guest_run_github_starts_docker_before_the_runner() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_run_github-{}", std::process::id()));
+        let job = guest_script("/usr/local/sbin/kiln-job", &dir)
+            .replace("/usr/local/sbin/kiln-steps", &dir.join("steps").to_string_lossy())
+            .replace("/home/runner/actions-runner", &dir.to_string_lossy());
+        let run = |jit: &str, docker_ok: bool| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = format!(
+                "{}\nsecret(){{ printf '%s' \"$JIT\"; }}\nsystemctl(){{ echo \"systemctl $*\" >> \"$REC\"; {}; }}\n\
+                 sudo(){{ echo \"sudo $*\" >> \"$REC\"; }}\nrun_github; echo \"rc=$?\"",
+                source_line(&job, "rgh"),
+                if docker_ok { "true" } else { "false" }
+            );
+            let o = std::process::Command::new("bash").args(["-c", &script]).env("JIT", jit).env("REC", dir.join("rec")).output().unwrap();
+            (String::from_utf8_lossy(&o.stdout).replace('\n', " "), std::fs::read_to_string(dir.join("rec")).unwrap_or_default())
+        };
+        let (out, rec) = run("abc", true);
+        assert!(out.contains("rc=0"), "{out}");
+        assert_eq!(rec, "systemctl start docker.service\nsudo -u runner ./run.sh --jitconfig abc\n", "docker first, then the runner");
+        // A docker that fails to start does not stop a job that never needs it.
+        let (out, rec) = run("abc", false);
+        assert!(out.contains("docker did not start") && rec.contains("run.sh --jitconfig abc"), "{out} {rec}");
+        // No JIT config: nothing starts, dockerd included.
+        let (out, rec) = run("", true);
+        assert!(out.contains("rc=1") && rec.is_empty(), "{out} {rec}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Secrets on arm64 (fw_cfg): the host names the files jit, jit.1, ..., ssh and every file holds one `kiln.<name>=` line,
+    /// so a secret is found in whichever file carries it (GitLab and Gitea send more than `jit`); x86 reads SMBIOS as before.
+    #[test]
+    fn guest_secret_reads_every_fw_cfg_file() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_secret-{}", std::process::id()));
+        let job = guest_script("/usr/local/sbin/kiln-job", &dir).replace("/sys/firmware/qemu_fw_cfg", &dir.join("fw").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+        let kiln = dir.join("fw/by_name/opt/kiln");
+        for (f, v) in [("jit", "kiln.forge=gitea"), ("jit.1", "kiln.cred=Y3JlZA=="), ("jit.2", "kiln.timeout=30"), ("ssh", "kiln.ssh=a2V5")]
+        {
+            std::fs::create_dir_all(kiln.join(f)).unwrap();
+            std::fs::write(kiln.join(f).join("raw"), v).unwrap(); // no trailing newline, as fw_cfg files have none
+        }
+        let script = format!(
+            "{}\nmodprobe(){{ :; }}\nfor n in forge cred timeout ssh jit nope; do echo \"$n=$(secret $n)\"; done",
+            source_line(&job, "sec")
+        );
+        let o = std::process::Command::new("bash").args(["-c", &script]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "forge=gitea\ncred=Y3JlZA==\ntimeout=30\nssh=a2V5\njit=\nnope=\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// kiln-docker-gate (docker.service's ExecStartPre): pass outside Gitea VMs and on ok; refuse fails; cold waits for the
+    /// cache disk to be unmounted (R3 M-2a).
+    #[test]
+    fn guest_docker_gate_waits_for_the_detach() {
+        if !have_bash() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_docker_gate-{}", std::process::id()));
+        let wait = dir.join("verdict-wait");
+        let gate =
+            guest_script("/usr/local/sbin/kiln-docker-gate", &dir).replace("/usr/local/sbin/kiln-verdict-wait", &wait.to_string_lossy());
+        // `mounted` stands for /mnt/cache being a mount point.
+        let run = |marker: bool, verdict: &str, mounted: bool, unmount_after: bool| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&wait, "#!/bin/bash\necho \"$VW\"\n[ \"$VW\" = ok ] || [ \"$VW\" = cold ]\n").unwrap();
+            std::process::Command::new("chmod").arg("755").arg(&wait).status().unwrap();
+            if marker {
+                std::fs::write(dir.join("gate-docker"), "").unwrap();
+            }
+            if mounted {
+                std::fs::write(dir.join("mounted"), "").unwrap();
+            }
+            std::fs::write(dir.join("gate.sh"), format!("findmnt(){{ [ -e {}/mounted ]; }}\n{gate}", dir.display())).unwrap();
+            let bg = if unmount_after { format!("(sleep 0.7; rm -f {}/mounted) & ", dir.display()) } else { String::new() };
+            let o = std::process::Command::new("bash")
+                .args(["-c", &format!("{bg}timeout 3 bash {}/gate.sh", dir.display())])
+                .env("VW", verdict)
+                .output()
+                .unwrap();
+            o.status.code()
+        };
+        assert_eq!(run(false, "refuse", true, false), Some(0), "not a Gitea VM: no gating at all");
+        assert_eq!(run(true, "ok", true, false), Some(0), "ok does not wait for the unmount (there is none)");
+        assert_eq!(run(true, "refuse", false, false), Some(1));
+        assert_eq!(run(true, "cold", false, false), Some(0), "cold, already detached");
+        assert_eq!(run(true, "cold", true, false), Some(124), "cold with the cache still mounted keeps waiting");
+        assert_eq!(run(true, "cold", true, true), Some(0), "and goes on the moment it is unmounted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow (R3 L-1).
+    #[test]
+    fn guest_gate_events_and_crash_handler() {
+        if !std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-test-guest_gate_events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gate.py"), guest_script("/usr/local/sbin/kiln-gate", &dir)).unwrap();
+        let test = r#"
+import importlib.machinery, importlib.util, struct, sys
+ld = importlib.machinery.SourceFileLoader("kiln_gate", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("kiln_gate", ld)); ld.exec_module(m)
+rec = lambda ln, mask, fd, pid: struct.pack("=IBBHQii", ln, 3, 0, 24, mask, fd, pid)
+perm = 0x40000
+assert list(m.events(rec(24, perm, 5, 100) + rec(24, perm, 6, 101))) == [(5, 100), (6, 101)]
+# stepped by event_len, not by 24: a longer record is skipped whole
+assert list(m.events(rec(32, perm, 5, 100) + b"\0" * 8 + rec(24, perm, 6, 101))) == [(5, 100), (6, 101)]
+assert list(m.events(b"")) == []
+def bad(buf):
+    try: list(m.events(buf))
+    except RuntimeError: return True
+    return False
+assert bad(rec(24, 0x4000, -1, 0)), "FAN_Q_OVERFLOW"
+assert bad(rec(24, perm, -1, 0)), "no fd"
+assert bad(rec(24, perm, 5, 1) + rec(24, 0x4000, -1, 0)), "overflow after a good record"
+assert bad(b"\0" * 10), "short"
+assert bad(rec(0, perm, 5, 1)), "zero length would loop"
+assert bad(rec(48, perm, 5, 1)), "length past the buffer"
+m.crash()
+assert open(sys.argv[2]).read() == "b"
+print("ok")
+"#;
+        let o = std::process::Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(test)
+            .arg(dir.join("gate.py"))
+            .arg(dir.join("sysrq"))
+            .output()
+            .unwrap();
+        assert!(o.status.success() && o.stdout == b"ok\n", "{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_line_limit_is_enforced() {
+        let n = |k: usize| (0..k).map(|i| format!("kiln.x{i}=1")).collect::<Vec<_>>().join("\n");
+        assert!(check_secret_lines(&n(MAX_SECRET_LINES)).is_ok());
+        assert!(check_secret_lines(&n(MAX_SECRET_LINES + 1)).unwrap_err().to_string().contains("9 guest secret lines"));
+    }
+
+    /// R3 L-2: a gated VM with a bound job and no recorded verdict is a gate death when it ends.
+    #[test]
+    fn a_job_without_a_verdict_is_a_gate_death() {
+        let mut v = Vm { cache: CacheUse::Read, ..vm("a", State::Busy, None) };
+        assert!(!verdictless(&v), "no job started");
+        v.job_id = Some("5".into());
+        assert!(verdictless(&v));
+        v.verdict = Some(("ok".into(), "5".into()));
+        assert!(!verdictless(&v), "judged");
+    }
+
+    /// R3 L-4: a read cancelled mid-line (another `select!` branch won) keeps the partial line in the buffer, and the
+    /// next read completes it, so its tail is never seen as a line of its own.
+    #[tokio::test]
+    async fn a_cancelled_read_keeps_the_partial_line() {
+        use tokio::io::AsyncWriteExt;
+        let (mut w, r) = tokio::io::duplex(64);
+        let mut lines = BufReader::new(r);
+        let mut buf = Vec::new();
+        w.write_all(b"kiln: dec").await.unwrap();
+        tokio::select! {
+            _ = read_capped(&mut lines, &mut buf) => panic!("no newline yet"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        w.write_all(b"ide\nnext\n").await.unwrap();
+        assert!(read_capped(&mut lines, &mut buf).await.unwrap() > 0);
+        assert_eq!(buf, b"kiln: decide\n");
+        assert_eq!(std::mem::take(&mut buf), b"kiln: decide\n");
+        read_capped(&mut lines, &mut buf).await.unwrap();
+        assert_eq!(buf, b"next\n");
+    }
+
     /// The recipe's exec gate and its dockerd gating are baked as written (the gate itself runs only in a VM).
     #[test]
     fn guest_gate_is_baked() {
@@ -3846,8 +4089,8 @@ esac
             "/proc/self/mountinfo",
             "oom_score_adj",
             "-1000",
-            "os.closerange(3, 1024)", // the runner inherits neither the fanotify fd nor kiln-job's console
-            "answer(fan, fd, 2)",     // deny on any handler error
+            "os.closerange(3, MAXFD)", // the runner inherits neither the fanotify fd nor kiln-job's console
+            "answer(fan, fd, 2)",      // deny on any handler error
             "except Exception",
             "sys.exit(77)",
         ] {
@@ -3870,7 +4113,24 @@ esac
         }
         // dockerd: socket-activated, and docker.service waits for the verdict in Gitea VMs only.
         let d = yaml.split("path: /etc/systemd/system/docker.service.d/kiln-gate.conf\n").nth(1).unwrap();
-        assert!(d.contains("ExecStartPre=/bin/sh -c '[ ! -e /run/kiln/gate-docker ] || /usr/local/sbin/kiln-verdict-wait"));
+        assert!(d.contains("ExecStartPre=/usr/local/sbin/kiln-docker-gate\n"));
+        let g = yaml.split("path: /usr/local/sbin/kiln-docker-gate\n").nth(1).unwrap();
+        assert!(g.contains("kiln-verdict-wait") && g.contains("findmnt /mnt/cache"), "cold waits for the cache disk to be detached");
+        // R3 M-2c: dockerd is not pulled in at boot (neither by kiln-job nor as an enabled unit): each forge's path starts it.
+        let unit = yaml.split("path: /etc/systemd/system/kiln-job.service\n").nth(1).unwrap();
+        assert!(unit.contains("Wants=network-online.target\n") && !unit.contains("Wants=network-online.target docker"), "{unit}");
+        assert!(yaml.contains("systemctl disable docker.service") && yaml.contains("check \"docker.service not enabled at boot\""));
+        // R3 M-2b: container records and plugins are gone from the cache before the bind mounts.
+        let cache = yaml.split("path: /usr/local/sbin/kiln-cache\n").nth(1).unwrap();
+        let (rm, bind) = (
+            cache.find("rm -rf /mnt/cache/var_lib_docker/containers /mnt/cache/var_lib_docker/plugins").unwrap(),
+            cache.find("mount --bind").unwrap(),
+        );
+        assert!(rm < bind);
+        // R3 L-1: the gate's hardening.
+        for f in ["4 | 1 | 0x10", "RLIMIT_NOFILE", "def crash", "sysrq", "mask & 0x4000", "crash()\n"] {
+            assert!(gate.contains(f), "{f} missing from kiln-gate");
+        }
         assert!(d.contains("StartLimitIntervalSec=0"), "a cold run's detach restarts dockerd within seconds of its first activation");
     }
 
@@ -4419,7 +4679,7 @@ esac
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 11);
+        assert_eq!(RECIPE, 12);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
