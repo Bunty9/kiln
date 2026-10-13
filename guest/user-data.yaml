@@ -335,11 +335,18 @@ write_files:
       refuse() { say "$*"; exit "$BFEC"; }
       NAME='^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'    # image, service and alias names: no leading '-', no shell or docker option syntax
       gate() {
-        local v id
+        local v id jid
+        # One-shot (R2 M-3): the runner takes one job per VM, so a second prepare is a job the host never judged.
+        [ -e "$S/gate-ok" ] && refuse "a second job in this VM, job not run"
         v=$(/usr/local/sbin/kiln-verdict-wait) || refuse "kiln did not allow this job (refused, or no verdict from the kiln host in time). No job code was run."
         case $v in ok | cold) ;; *) refuse "unreadable verdict, job not run" ;; esac
         read -r _ id _ < /run/kiln/verdict
         [[ $id =~ ^[0-9]+$ ]] || refuse "unreadable verdict, job not run"
+        # The verdict must be for the job being prepared. The id comes from JOB_RESPONSE_FILE, which the runner
+        # itself sets (a job cannot set a variable without the CUSTOM_ENV_ prefix) and fills from the server's
+        # response; CUSTOM_ENV_CI_JOB_ID is job-overridable and never read here.
+        jid=$(jq -r '.id // empty' "${JOB_RESPONSE_FILE:-/nonexistent}" 2> /dev/null)
+        [[ $jid =~ ^[0-9]+$ && $jid = "$id" ]] || refuse "the verdict is not for this job, job not run"
         if [ "$v" = cold ]; then
           say "cold run: detaching the cache disk"
           sudo /usr/local/sbin/kiln-cache detach >&2 || refuse "cache detach failed, job not run"

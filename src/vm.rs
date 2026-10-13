@@ -432,13 +432,17 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                     e.1 = now() + backoff_secs(e.0);
                 }
             }
-            // A JIT runner that never ran a job stays registered (offline) on GitHub.
-            if let (Some(rid), None) = (v.runner_id, &v.job) {
-                retire(&app, &v.repo, vec![(v.id.clone(), rid)], Reason::Unused).await;
-            }
             // A failed mint (or anything else before boot) never made a directory: memory only.
+            // Persisted before the runner is retired, so a crash in between still names the claim.
             if dir.exists() {
                 persist(&app, &v);
+            }
+            // A JIT runner that never ran a job stays registered (offline) on GitHub. A gated forge's
+            // runner never removes itself, so it goes whatever the VM did (R2 H-1); the VM is over.
+            if let Some(rid) = v.runner_id
+                && (v.job.is_none() || forge_for(&app, &v.repo).is_ok_and(|(f, _)| f.gated()))
+            {
+                retire(&app, &v.repo, vec![(v.id.clone(), rid)], Reason::Unused).await;
             }
             record_usage(&app.data, &v);
             crate::notify::job_ended(&app, &v);
@@ -468,8 +472,32 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
     retire(app, repo, c, Reason::Surplus).await;
 }
 
+/// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id` (R2 L-6): the runner only
+/// notices a cancel after about a minute, so a maintainer stopping a suspicious job must stop the VM.
+pub fn kill_pipeline(app: &App, repo: &str, id: u64) -> usize {
+    let tail = format!("/-/pipelines/{id}");
+    let ids: Vec<String> = app
+        .vms
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active())
+        .filter(|v| v.run.as_ref().and_then(|r| r.links.run.as_deref()).is_some_and(|u| u.ends_with(&tail)))
+        .map(|v| v.id.clone())
+        .collect();
+    for i in &ids {
+        update(app, i, |v| {
+            v.note.get_or_insert("killed: the pipeline was cancelled".into());
+        });
+        if let Some(k) = app.kills.lock().unwrap().get(i) {
+            k.notify_one();
+        }
+    }
+    ids.len()
+}
+
 /// The forge and repo ref a VM's repo key stands for.
-fn forge_for(app: &App, repo: &str) -> Result<(Arc<crate::forge::Forge>, RepoRef)> {
+pub(crate) fn forge_for(app: &App, repo: &str) -> Result<(Arc<crate::forge::Forge>, RepoRef)> {
     let rr = RepoRef::parse(repo)?;
     let f = app.forges.get(&rr.forge).with_context(|| format!("forge {:?} is not configured", rr.forge.as_str()))?;
     Ok((f, rr))
@@ -837,17 +865,14 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             }
             Some((jid, vd)) = verdict_rx.recv() => {
                 send(&mut stdin, &vd.line(&jid)).await;
-                if vd.v == crate::forge::Call::Refuse {
-                    let rec = update(app, id, |v| {
-                        v.note = Some(format!("refused: {}", vd.why));
-                        if v.cache == CacheUse::Read {
-                            v.cache = CacheUse::Discarded;
-                            v.cache_note = Some("cache not saved: the job was refused".into());
-                        }
-                    });
-                    if let Some(v) = rec {
-                        persist(app, &v);
-                    }
+                let refuse = vd.v == crate::forge::Call::Refuse;
+                if let Some(v) = update(app, id, |v| apply_verdict(v, &vd)) {
+                    persist(app, &v);
+                }
+                if refuse {
+                    // The guest fails the job cleanly (kiln-exec exits 1) so the forge shows why; no job
+                    // code can run before an `ok`, so waiting is safe. Bounded, then killed (R2 M-2).
+                    let _ = tokio::time::timeout(REFUSE_GRACE, child.wait()).await;
                     child.kill().await.ok();
                     return Ok(State::Killed);
                 }
@@ -1279,7 +1304,9 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     };
     let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
-        match v.job_id.clone().or_else(|| v.job_url.as_deref().and_then(job_id).map(|j| j.to_string())) {
+        // A gated forge's id is the console's alone: the API-sourced job page never stands in for it (R2 L-5).
+        let gated = forge_for(app, repo).is_ok_and(|(f, _)| f.gated());
+        match v.job_id.clone().or_else(|| v.job_url.as_deref().filter(|_| !gated).and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
                 Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
                 Err(e) => Err(format!("{e:#}")),
@@ -1523,6 +1550,22 @@ fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u64) -> bool 
         None => false,
     }
 }
+
+/// The host's own record of a verdict. A refused or cold job never commits the cache, whatever the
+/// guest does (R2 L-2): a tag or release job may keep a mounted overlay.
+fn apply_verdict(v: &mut Vm, vd: &crate::forge::Verdict) {
+    use crate::forge::Call;
+    if vd.v == Call::Refuse {
+        v.note = Some(format!("refused: {}", vd.why));
+    }
+    if vd.v != Call::Ok && v.cache == CacheUse::Read {
+        v.cache = CacheUse::Discarded;
+        v.cache_note = Some(if vd.v == Call::Refuse { "cache not saved: the job was refused" } else { "cache not saved: cold run" }.into());
+    }
+}
+
+/// How long a refused job's VM may live on, so its runner reports the failure before QEMU dies.
+const REFUSE_GRACE: Duration = Duration::from_secs(10);
 
 /// What a console job-start line did to a VM's bound job id.
 #[derive(PartialEq, Eq, Debug)]
@@ -2141,7 +2184,8 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 7: GitLab and Gitea runners (pinned below), Docker and guest checks.
 /// 8: kiln-exec, the GitLab custom executor.
 /// 9: kiln-job runs GitLab jobs (`run_gitlab`).
-const RECIPE: u64 = 9;
+/// 10: kiln-exec binds the verdict to the server job id and is one-shot.
+const RECIPE: u64 = 10;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -2607,6 +2651,52 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancelling_a_gitlab_pipeline_kills_its_active_vms() {
+        let app = crate::test_app("kill-pipeline");
+        let vm = |id: &str, pipeline: u64, state: &str| -> Vm {
+            let mut v: Vm = serde_json::from_value(serde_json::json!({
+                "id": id, "repo": "gitlab:acme/demo", "runner_id": 1, "state": state, "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": null, "note": null
+            }))
+            .unwrap();
+            let mut run = Run::default();
+            run.links.run = Some(format!("https://gl.example.org/acme/demo/-/pipelines/{pipeline}"));
+            v.run = Some(run);
+            v
+        };
+        let kill = Arc::new(tokio::sync::Notify::new());
+        let other = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
+        app.kills.lock().unwrap().insert("kiln-1-1".into(), other.clone());
+        app.vms.lock().unwrap().extend([vm("kiln-1-0", 127, "busy"), vm("kiln-1-1", 1270, "busy")]);
+        assert_eq!(kill_pipeline(&app, "gitlab:acme/demo", 127), 1, "127 is not 1270");
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
+        assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
+    }
+
+    #[test]
+    fn a_cold_or_refused_verdict_discards_the_overlay_on_the_host() {
+        use crate::forge::{Call, Verdict};
+        let vm = || -> Vm {
+            serde_json::from_value(serde_json::json!({
+                "id": "kiln-5-0", "repo": "acme/kiln", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+                "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read"
+            }))
+            .unwrap()
+        };
+        let say = |v, why: &str| Verdict { v, why: why.into() };
+        let mut ok = vm();
+        apply_verdict(&mut ok, &say(Call::Ok, ""));
+        assert_eq!((ok.cache, ok.note), (CacheUse::Read, None));
+        let mut cold = vm();
+        apply_verdict(&mut cold, &say(Call::Cold, "tag or release"));
+        assert_eq!((cold.cache, cold.cache_note.as_deref(), cold.note), (CacheUse::Discarded, Some("cache not saved: cold run"), None));
+        let mut no = vm();
+        apply_verdict(&mut no, &say(Call::Refuse, "unknown job source"));
+        assert_eq!((no.cache, no.note.as_deref()), (CacheUse::Discarded, Some("refused: unknown job source")));
+    }
+
     #[test]
     fn job_id_binds_once_and_a_second_id_discards_the_overlay() {
         let mut v: Vm = serde_json::from_value(serde_json::json!({
@@ -3063,6 +3153,9 @@ mod tests {
             let mut c = std::process::Command::new("bash");
             c.arg(path).args(args).env("HOME", &dir).env("BUILD_FAILURE_EXIT_CODE", "1").env("SYSTEM_FAILURE_EXIT_CODE", "2");
             c.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+            // The runner's job response: the server-assigned id is the verdict's, unless a test overrides the file.
+            std::fs::write(dir.join("resp"), format!("{{\"id\": {}}}", verdict.split(' ').nth(1).unwrap_or("0"))).unwrap();
+            c.env("JOB_RESPONSE_FILE", dir.join("resp"));
             for (k, v) in env {
                 c.env(k, v);
             }
@@ -3108,6 +3201,24 @@ mod tests {
             let (rc, _, _) = stage(v, &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]);
             assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{v}");
         }
+
+        // One-shot (R2 M-3): a second prepare in the same VM is refused, even with an ok verdict.
+        fresh();
+        assert_eq!(stage("ok 42", &[], &["prepare"]).0, Some(0));
+        let (rc, err, _) = stage("ok 42", &[], &["prepare"]);
+        assert_eq!(rc, Some(1));
+        assert!(err.contains("second job"), "{err}");
+        // The verdict must be for the server's job id, whatever the job claims in its own variables.
+        fresh();
+        std::fs::write(dir.join("other"), r#"{"id": 43}"#).unwrap();
+        let (rc, err, calls) =
+            stage("ok 42", &[("JOB_RESPONSE_FILE", dir.join("other").to_str().unwrap()), ("CUSTOM_ENV_CI_JOB_ID", "42")], &["prepare"]);
+        assert_eq!(rc, Some(1));
+        assert!(err.contains("not for this job") && !calls.contains("docker"), "{err}");
+        // No job response at all: fail closed.
+        fresh();
+        let (rc, _, _) = stage("ok 42", &[("JOB_RESPONSE_FILE", "/nonexistent")], &["prepare"]);
+        assert_eq!(rc, Some(1));
 
         // image job: build_script and after_script go in the container (then chown), other stages run on the VM.
         fresh();
@@ -3769,7 +3880,7 @@ mod tests {
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 9);
+        assert_eq!(RECIPE, 10);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
