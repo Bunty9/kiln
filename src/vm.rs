@@ -118,6 +118,11 @@ pub struct Vm {
     /// The forge's id of the job this VM ran: set once (4.3 of the forge design); a second id kills the VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// "Running job" lines this VM's own console showed, counted even when `apply_line` ignores
+    /// them. `finish_cache` commits only for exactly one. Needs no API poll, so a second job that
+    /// ends before `attach_jobs` sees it still blocks the commit.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub starts: u32,
     /// When GitHub queued the job this VM's runner picked up.
     #[serde(default)]
     pub queued_at: Option<u64>,
@@ -346,6 +351,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         result: None,
         job_url: None,
         job_id: None,
+        starts: 0,
         queued_at: None,
         started: now(),
         online_at: None,
@@ -1215,7 +1221,14 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let cfg = app.cfg();
     let writers = cfg.cache_branches(repo);
     let succeeded = done && v.result.as_deref() == Some("Succeeded");
-    let trust = if succeeded && cfg.cache {
+    // Fail closed on console evidence alone (no API poll): exactly one job start, and a bound id.
+    let console = match (v.starts, v.job_id.is_some() || v.job_url.is_some()) {
+        (1, true) => Ok(()),
+        (0, _) => Err("the console showed no job start"),
+        (1, false) => Err("a job started but no job id is bound"),
+        _ => Err("more than one job started on this runner"),
+    };
+    let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
         match v.job_id.clone().or_else(|| v.job_url.as_deref().and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
@@ -1228,7 +1241,20 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         Err(String::new())
     };
     let t = trust.as_ref().map(|(a, b, c, d)| (a.as_str(), b.as_str(), c.as_str(), d.as_str())).map_err(String::as_str);
-    let verdict = if v.job.is_none() { Err("no job ran".to_string()) } else { cache_verdict(cfg.cache, succeeded, &writers, t) };
+    let verdict = if let Err(why) = console {
+        Err(why.to_string())
+    } else if v.job.is_none() {
+        Err("no job ran".to_string())
+    } else {
+        cache_verdict(cfg.cache, succeeded, &writers, t)
+    };
+    // cache_trust awaited the forge: attach_jobs or the console may have flagged a second job
+    // meanwhile. Re-read and refuse rather than commit on the stale snapshot.
+    let verdict = match (verdict, update(app, id, |_| {})) {
+        (Ok(()), Some(now)) if now.cache != CacheUse::Read || now.starts != v.starts => Err("a second job reached this runner".to_string()),
+        (Ok(()), None) => Err("VM gone".to_string()),
+        (verdict, _) => verdict,
+    };
     // The overlay file was QEMU's to write: its header (backing file, external data file) is
     // the job's if QEMU was ever compromised, and `qemu-img commit` writes wherever it points.
     let verdict = match verdict {
@@ -1419,8 +1445,13 @@ fn apply_line(v: &mut Vm, line: &str, t: u64) -> bool {
             true
         }
         Some(Line::Running(job)) => {
+            // Counted before the forward-only guard: an echoed or second start must be seen.
+            // ponytail: a job with root can print extra lines (only ever a refusal, safe) but
+            // cannot hide a start on GitHub (JIT is single-use). Later forges bind the console
+            // job id in the verdict gate (V-1); this counter is not the guarantee there.
+            v.starts = v.starts.saturating_add(1);
             if v.busy_since.is_some() || !matches!(v.state, State::Booting | State::Idle) {
-                return false;
+                return v.starts == 2; // persist the evidence of a second start
             }
             v.state = State::Busy;
             v.warm = false;
@@ -2504,6 +2535,7 @@ mod tests {
             result: None,
             job_url: None,
             job_id: None,
+            starts: 0,
             queued_at: None,
             started: 0,
             online_at,
@@ -2689,10 +2721,11 @@ mod tests {
         // A job echoing lifecycle lines itself can't rewind state, restart its
         // timeout or rewrite its result.
         assert!(!apply_line(&mut v, "Listening for Jobs", 500));
-        assert!(!apply_line(&mut v, "x: Running job: again", 600));
+        assert!(apply_line(&mut v, "x: Running job: again", 600), "the second start is persisted"); // ...but changes nothing else
         apply_line(&mut v, "Job x completed with result: Succeeded", 700);
         assert_eq!((v.state, v.busy_since, v.job.as_deref(), v.result.as_deref()), (State::Busy, Some(120), Some("build"), Some("Failed")));
         assert_eq!(v.done_at, Some(130), "an echoed result line must not move the billed end");
+        assert_eq!(v.starts, 2, "every start line is counted, even the ignored ones");
         let cfg = crate::Config { idle_timeout_mins: 10, job_timeout_mins: 60, debug_hold_mins: 30, ..Default::default() };
         assert_eq!(start_cap(&cfg, false), 100 * 60 + 300);
         let cfg = crate::Config { warm_recycle_mins: 30, ..cfg };
@@ -3109,6 +3142,7 @@ mod tests {
             result: Some("Succeeded".into()),
             job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
             job_id: None,
+            starts: 0,
             queued_at: Some(1_790_000_000),
             started: 1_790_000_010,
             online_at: Some(1_790_000_020),
@@ -3276,6 +3310,7 @@ mod tests {
             job: Some("build".into()),
             result: Some("Succeeded".into()),
             job_url: Some(url),
+            starts: 1,
             cache: CacheUse::Read,
             ..vm(id, State::Done, None)
         });
@@ -3322,7 +3357,16 @@ mod tests {
         // No job page recorded.
         cache_vm(&app, "c6", 6001, 2001);
         app.vms.lock().unwrap().last_mut().unwrap().job_url = None;
-        assert_eq!(settle("c6", true).await.1, "cache not saved: could not verify the trigger (no job page)");
+        assert_eq!(settle("c6", true).await.1, "cache not saved: a job started but no job id is bound");
+        // The console's own job count gates the commit, without asking GitHub.
+        m.clear_log();
+        cache_vm(&app, "c8", 6001, 2001);
+        app.vms.lock().unwrap().last_mut().unwrap().starts = 2;
+        assert_eq!(settle("c8", true).await.1, "cache not saved: more than one job started on this runner");
+        cache_vm(&app, "c10", 6001, 2001);
+        app.vms.lock().unwrap().last_mut().unwrap().starts = 0;
+        assert_eq!(settle("c10", true).await.1, "cache not saved: the console showed no job start");
+        assert!(m.log().is_empty(), "no refusal asked GitHub");
         // GitHub failing: fail closed.
         m.fail("GET", &format!("{r}/actions/jobs/6001"), 500, "oops");
         cache_vm(&app, "c7", 6001, 2001);
