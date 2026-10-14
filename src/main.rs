@@ -1532,6 +1532,7 @@ mod tests {
         let (app, mut cfg) = tick_app("tick-fork-queued", &m, Some(forges.clone()));
         cfg.max_vms = 4;
         cfg.vm_mem_mb = 64;
+        cfg.vm_cpus = 1; // two warm VMs and GitHub's must fit the cpu budget of a 3-thread host
         cfg.warm.insert("gitea:acme/demo".into(), 2);
         let g = forge::gitea::Gitea::for_mock("https://gitea.example.org", &m.base, "tok");
         app.forges.insert(forges[1].clone(), forge::Forge::Gitea(Box::new(g)));
