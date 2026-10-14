@@ -2657,7 +2657,7 @@ mod tests {
         let Json(f) = forges_list(State(app.clone())).await.unwrap_or_else(|_| panic!("forges"));
         let f = f.as_array().unwrap().iter().find(|x| x["id"] == "gitea").unwrap().clone();
         assert_eq!((f["auth"]["login"].clone(), f["auth"]["source"].clone()), (json!("kiln-bot"), json!("file")));
-        assert_eq!((f["caps"]["cancel"].clone(), f["launches"].clone()), (json!(true), json!(false)));
+        assert_eq!((f["caps"]["cancel"].clone(), f["launches"].clone()), (json!(true), json!(true)));
         assert!(!f.to_string().contains("tok-secret") && !r.to_string().contains("REG"));
         // The token only ever went to the mock, in the header of Gitea calls.
         assert!(m.log().iter().all(|q| {

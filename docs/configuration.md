@@ -274,9 +274,7 @@ build:
 
 ### Gitea
 
-**Gitea support is in preview: jobs will not run until enabled.** kiln reads a Gitea repo's queue and runs and can check its setup, but starts no VM for Gitea yet; the card, setup wizard and **Use Gitea** guide say so until launches are on.
-
-kiln needs Gitea **1.25 or newer** (the jobs listing it reads the queue from does not exist before). 1.26.3 or newer is recommended: before it, approving one fork pull request once trusts that user's later ones, and the Test warns. Rerun and retiring a runner safely need 1.26, Cancel and approving a run need 28; the dashboard hides a button the server cannot do. Versions are compared as numbers: Gitea 28 is newer than 1.26.
+kiln needs Gitea **1.25 or newer** (end-to-end tested on 28.1) (the jobs listing it reads the queue from does not exist before). 1.26.3 or newer is recommended: before it, approving one fork pull request once trusts that user's later ones, and the Test warns. Rerun and retiring a runner safely need 1.26, Cancel and approving a run need 28; the dashboard hides a button the server cannot do. Versions are compared as numbers: Gitea 28 is newer than 1.26.
 
 Create a **service account** (a user dedicated to kiln) and give it the **Owner** role on every repo kiln serves: it owns the repo (a personal namespace, or an organisation it belongs to as a member of the **Owners** team). Gitea hands the runner registration token to an Owner only, and a collaborator with Admin permission gets 403. Then create an access token for it (Settings › Applications) with exactly:
 

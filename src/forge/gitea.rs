@@ -39,10 +39,8 @@ const RUNNER_VERSION: &str = "v5.0.0";
 const NOT_OWNER: &str =
     "Gitea refused the runner registration token: the service account must be the repo owner or a member of the organisation's Owners team";
 
-/// Registration (GT-2) and the verdict facts (GT-3) work, but no VM launches for Gitea until the
-/// guest side lands (GT-5 `kiln-gate`): demand reports the queue, fork jobs and claims, but no
-/// launchable jobs.
-pub const LAUNCH_READY: bool = false;
+/// Kill switch: when false, demand reports the queue, fork jobs and claims, but no launchable jobs.
+pub const LAUNCH_READY: bool = true;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -876,6 +874,25 @@ impl Gitea {
         Ok(facts(&run, ours))
     }
 
+    /// The VM's job result from the job API only, never a console line: `Succeeded` only for conclusion
+    /// `success`, `Failed` for any other end, None while unfinished (a few looks, the runner reports just
+    /// before it exits) or when the job's runner is not `runner_id`.
+    pub async fn job_result(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<Option<&'static str>> {
+        for i in 0..TRUST_LOOKS {
+            let j = self.job(repo, job_id).await?;
+            if j["runner_id"].as_u64() != Some(runner_id) {
+                return Ok(None);
+            }
+            if j["status"] == "completed" {
+                return Ok(Some(if j["conclusion"] == "success" { "Succeeded" } else { "Failed" }));
+            }
+            if i + 1 < TRUST_LOOKS {
+                tokio::time::sleep(self.poll).await;
+            }
+        }
+        Ok(None)
+    }
+
     /// (event, branch, default branch, conclusion) of the job that ran, from the run's `path` ref
     /// (5.3). A tag is event `tag`; anything that is not exactly one branch ref the run's own
     /// `head_branch` agrees with gets a branch name no branch can have.
@@ -1369,11 +1386,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_launchable_demand_until_registration_exists() {
+    async fn demand_counts_launchable_jobs_and_forks_apart() {
         let (m, g) = mock().await;
         serve(&m, "queued", "jobs_queued_b.json");
         let d = g.demand(&repo(), "kiln", 2).await.unwrap();
-        assert!(d.by_size.is_empty());
+        assert_eq!(d.by_size, g.demand_with(&repo(), "kiln", 2, crate::host_threads()).await.unwrap().by_size);
         assert_eq!((d.refused_forks, d.fork_queued), (3, true));
     }
 
@@ -1662,6 +1679,27 @@ mod tests {
             );
             assert_eq!(verdict(&g, &job.to_string()).await.v, call, "event {event:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn job_result_comes_from_the_job_api_for_the_vms_runner() {
+        let (m, g) = mock().await;
+        let r = repo();
+        for (job, st, c, want) in [
+            (130, "completed", Some("success"), Some("Succeeded")),
+            (131, "completed", Some("failure"), Some("Failed")),
+            (132, "completed", Some("cancelled"), Some("Failed")),
+            (133, "completed", None, Some("Failed")),
+        ] {
+            job_routes(&m, job, 70, st, c);
+            assert_eq!(g.job_result(&r, &job.to_string(), RUNNER).await.unwrap(), want, "{job}");
+        }
+        // Another runner's job is never this VM's result; an unfinished one stays unknown.
+        job_routes(&m, 134, 70, "completed", Some("success"));
+        assert_eq!(g.job_result(&r, "134", RUNNER + 1).await.unwrap(), None);
+        job_routes(&m, 135, 70, "in_progress", None);
+        assert_eq!(g.job_result(&r, "135", RUNNER).await.unwrap(), None);
+        assert!(g.job_result(&r, "x", RUNNER).await.is_err());
     }
 
     #[tokio::test]
