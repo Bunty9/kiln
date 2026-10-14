@@ -467,22 +467,27 @@ impl Gitea {
         }
     }
 
-    /// Every job of `repo` in `status`, all pages (up to `MAX_PAGES`, then a warning and the part read).
+    /// Every job of `repo` in `status`, all pages (up to `MAX_PAGES`; beyond that the queue is read in part with a warning, any other status is an error).
     async fn jobs(&self, repo: &RepoRef, status: &str) -> Result<Vec<Value>> {
         let mut out: Vec<Value> = vec![];
         let mut seen = HashSet::new();
         for page in 1..=MAX_PAGES {
             let v = self.get(&format!("repos/{}/actions/jobs?status={status}&limit={PAGE}&page={page}", repo.path)).await?;
             let jobs = v["jobs"].as_array().context("jobs listing has no jobs")?;
-            let total = v["total_count"].as_u64().unwrap_or(0) as usize;
+            // A listing without a count could end after one page with jobs unread: an in_progress one hidden from a retire.
+            let total = v["total_count"].as_u64().context("jobs listing has no total_count")? as usize;
             // A job can move between pages while we read: count each id once.
             out.extend(jobs.iter().filter(|j| seen.insert(j["id"].as_u64())).cloned());
             if jobs.is_empty() || seen.len() >= total {
                 return Ok(out);
             }
         }
-        // Read to the cap and carry on (R4 L-6): a queued fork job holds nothing back any more, so a partial view
-        // costs a missed count at worst, while failing here would let anyone who queues that many jobs stop the repo.
+        // Only the queue may be read in part (R4 L-6): a queued fork job holds nothing back any more, so a missed count is
+        // harmless, while failing would let anyone who queues that many jobs stop the repo. Running jobs decide whether a
+        // runner may be deleted and which VM holds a fork job: a partial view of those fails closed.
+        if status != "queued" {
+            bail!("more than {} {status} jobs: not reading further", MAX_PAGES * PAGE);
+        }
         tracing::warn!("{}: more than {} {status} jobs: not reading further", repo.path, MAX_PAGES * PAGE);
         Ok(out)
     }
@@ -1367,6 +1372,19 @@ mod tests {
         }
         g.demand_with(&repo(), "kiln", 2, 16).await.unwrap_or_else(|e| panic!("{e:#}"));
         assert_eq!(m.requests().iter().filter(|r| r.contains("/jobs?status=queued")).count(), 12, "10 more pages were read");
+        // Running jobs decide a runner's deletion and which VM holds a fork job: a partial view, or a listing without
+        // a count (which would end after one page), fails closed.
+        for p in 1..=10 {
+            m.route(
+                "GET",
+                &format!("{API}/jobs?status=in_progress&limit=50&page={p}"),
+                200,
+                json!({"jobs": (p as u64 * 100..p as u64 * 100 + 50).map(job).collect::<Vec<_>>(), "total_count": 9999}).to_string(),
+            );
+        }
+        assert!(g.jobs(&repo(), "in_progress").await.unwrap_err().to_string().contains("not reading further"));
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, json!({"jobs": [job(1)]}).to_string());
+        assert!(g.jobs(&repo(), "in_progress").await.is_err(), "no total_count");
     }
 
     #[tokio::test]
