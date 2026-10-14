@@ -533,6 +533,12 @@ impl App {
         }
     }
 
+    /// Every repo kiln serves, GitHub's and each other forge's (`id:path`).
+    pub fn all_repos(&self) -> Vec<String> {
+        let other = self.cfg().forges.unwrap_or_default().into_iter().filter(|f| f.kind != forge::Kind::GitHub);
+        self.repos().into_iter().chain(other.flat_map(|f| f.repos.into_iter().map(move |r| format!("{}:{r}", f.id.as_str())))).collect()
+    }
+
     pub fn save_token(&self, t: String) -> Result<()> {
         app_auth::write_private(&self.data.join("token"), t.trim().as_bytes())?;
         self.gh.set_token(t.trim().to_string(), "file");
@@ -1155,12 +1161,12 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         if forks > 0 {
             refused_forks.insert(repo.clone(), forks);
         }
-        // A runner takes the oldest matching job, so any VM of this repo could be handed the fork job:
-        // none starts, warm ones included, and idle ones are retired.
+        // Informational only (R4 M-3): a VM that is handed the fork job is refused by the exec gate and
+        // killed, so a queued fork job can burn one VM but never stops the repo's launches.
         if fork_job {
             fork_queued.push(repo.clone());
         }
-        attach_jobs(app, &runners);
+        attach_jobs(app, repo, &runners);
         let backed_off = app.backoff.lock().unwrap().get(repo).is_some_and(|&(_, at)| at > now());
         vm::recycle_warm(app, repo, cfg.warm_recycle_mins).await;
         vm::recycle_stale_policy(app, repo, &vm::policy_id(cfg)).await;
@@ -1183,8 +1189,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 (waiting, vms.iter().filter(|v| v.state.is_active()).count(), holds)
             };
             // Draining: every waiting VM is surplus, and none are kept warm.
-            let target = if draining || fork_job { 0 } else { cfg.warm_target(repo, n) };
-            let surplus = if draining || fork_job { waiting } else { vm::surplus(waiting, queued, target) };
+            let target = if draining { 0 } else { cfg.warm_target(repo, n) };
+            let surplus = if draining { waiting } else { vm::surplus(waiting, queued, target) };
             if surplus > 0 {
                 vm::reap(app, repo, n, surplus).await;
             }
@@ -1193,13 +1199,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 blocked = gated(gate.clone());
             }
             any_queued |= queued > 0;
-            let held = backed_off
-                || old_image
-                || gate.is_some()
-                || egress_err.is_some()
-                || draining
-                || fork_job
-                || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -1258,13 +1258,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
 /// A fork PR job that reached one of our runners anyway (a JIT runner takes any
 /// matching job) is killed. The guest's pre-job hook fails it before its first
 /// step; this kill is the backstop.
-fn attach_jobs(app: &App, runners: &HashMap<String, forge::JobInfo>) {
+fn attach_jobs(app: &App, repo: &str, runners: &HashMap<String, forge::JobInfo>) {
     let mut kill = vec![];
     let changed: Vec<vm::Vm> = app
         .vms
         .lock()
         .unwrap()
         .iter_mut()
+        // A job listing speaks only for the repo it was read from: another repo's runner may carry any name (R4 M-4).
+        .filter(|v| v.repo.eq_ignore_ascii_case(repo))
         .filter_map(|v| {
             let job = runners.get(&v.id)?;
             // A gated forge's job id comes from the console alone: it starts the verdict gate (R2 M-1).
@@ -1346,10 +1348,33 @@ mod tests {
             fork,
             run: vm::Run::default(),
         };
-        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
+        attach_jobs(&app, "acme/kiln", &HashMap::from([("kiln-5-0".to_string(), r(true)), ("kiln-5-1".to_string(), r(false))]));
         let vms = app.vms.lock().unwrap();
         assert!(vms[0].fork && vms[0].note.as_deref() == Some("refused: pull request from a fork"));
         assert!(!vms[1].fork && vms[1].note.is_none());
+    }
+
+    /// Another repo's job listing may name this VM's runner (VM ids are guessable): nothing happens to the VM (R4 M-4).
+    #[tokio::test]
+    async fn another_repos_job_naming_this_vm_changes_nothing() {
+        let app = test_app("attach-foreign");
+        let v: vm::Vm = serde_json::from_value(serde_json::json!({
+            "id": "kiln-5-0", "repo": "gitea:acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null, "cache": "read", "job_id": "2"
+        }))
+        .unwrap();
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-5-0".into(), kill.clone());
+        // A different job id and a fork flag: both would kill the VM if the listing counted.
+        let job =
+            forge::JobInfo { id: "9".into(), url: "https://x.example/job/9".into(), queued_at: 1, fork: true, run: vm::Run::default() };
+        let runners = HashMap::from([("kiln-5-0".to_string(), job)]);
+        attach_jobs(&app, "acme/demo", &runners);
+        attach_jobs(&app, "gitlab:acme/demo", &runners);
+        let v = app.vms.lock().unwrap()[0].clone();
+        assert_eq!((v.job_id.as_deref(), v.cache, v.note, v.fork, v.job_url), (Some("2"), vm::CacheUse::Read, None, false, None));
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
     }
 
     #[tokio::test]
@@ -1370,7 +1395,7 @@ mod tests {
             fork: false,
             run: vm::Run::default(),
         };
-        let attach = |id: &str| attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job(id))]));
+        let attach = |id: &str| attach_jobs(&app, "acme/kiln", &HashMap::from([("kiln-5-0".to_string(), job(id))]));
         // The first id binds; repeating it changes nothing.
         attach("2");
         attach("2");
@@ -1408,7 +1433,7 @@ mod tests {
             run: vm::Run::default(),
         };
         // The API saw the job first: the page shows, but the console's `JobStart` is still the one to bind the id.
-        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job("2"))]));
+        attach_jobs(&app, "gitea:acme/demo", &HashMap::from([("kiln-5-0".to_string(), job("2"))]));
         let v = app.vms.lock().unwrap()[0].clone();
         assert_eq!((v.job_id, v.cache), (None, vm::CacheUse::Read));
         assert!(v.job_url.is_some());
@@ -1416,7 +1441,7 @@ mod tests {
         // Once the console bound an id, a different API id is a second job.
         app.vms.lock().unwrap()[0].job_id = Some("2".into());
         app.vms.lock().unwrap()[0].state = vm::State::Busy;
-        attach_jobs(&app, &HashMap::from([("kiln-5-0".to_string(), job("3"))]));
+        attach_jobs(&app, "gitea:acme/demo", &HashMap::from([("kiln-5-0".to_string(), job("3"))]));
         assert_eq!(app.vms.lock().unwrap()[0].job_id.as_deref(), Some("2"));
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
     }
@@ -1496,7 +1521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_queued_fork_job_blocks_launches_for_its_repo_only() {
+    async fn a_queued_fork_job_is_reported_but_blocks_no_launches() {
         let m = forge_test_mock::Mock::github().await;
         // A launch that mints nothing: the GitHub VM below dies at registration, long before QEMU.
         m.route("POST", "/repos/acme/demo/actions/runners/generate-jitconfig", 404, "{}");
@@ -1507,7 +1532,7 @@ mod tests {
         let (app, mut cfg) = tick_app("tick-fork-queued", &m, Some(forges.clone()));
         cfg.max_vms = 4;
         cfg.vm_mem_mb = 64;
-        cfg.warm.insert("gitea:acme/demo".into(), 1);
+        cfg.warm.insert("gitea:acme/demo".into(), 2);
         let g = forge::gitea::Gitea::for_mock("https://gitea.example.org", &m.base, "tok");
         app.forges.insert(forges[1].clone(), forge::Forge::Gitea(Box::new(g)));
         let gt = |f: &str| forge_test_mock::fixture_in("gitea", f);
@@ -1518,38 +1543,30 @@ mod tests {
         }
         // Job 91 of this fixture is a queued pull_request_target fork job.
         m.route("GET", &format!("{api}/jobs?status=queued&limit=50&page=1"), 200, gt("jobs_queued_a.json"));
-        // An idle warm VM of the Gitea repo: the fork job would reach it.
+        // An idle warm VM of the Gitea repo, which the fork job could reach.
         let warm: vm::Vm = serde_json::from_value(serde_json::json!({
             "id": "kiln-1-0", "repo": "gitea:acme/demo", "runner_id": 5, "state": "idle", "job": null, "result": null,
-            "started": 1, "online_at": 2, "busy_since": null, "ended": null, "note": null, "cpus": cfg.vm_cpus, "warm": true
+            "started": now(), "online_at": now(), "busy_since": null, "ended": null, "note": null, "cpus": cfg.vm_cpus, "warm": true,
+            "policy": vm::policy_id(&cfg)
         }))
         .unwrap();
         app.vms.lock().unwrap().push(warm);
         let count = |app: &App, repo: &str| app.vms.lock().unwrap().iter().filter(|v| v.repo == repo).count();
 
         tick(&app, &cfg).await.unwrap();
-        // The banner names the Gitea repo; GitHub's acme/demo still launched for its queue.
+        // The banner names the Gitea repo, but nothing is held (R4 M-3): the warm pool refills like any other repo's.
         assert_eq!(app.poll.lock().unwrap().fork_queued, ["gitea:acme/demo"]);
-        assert_eq!(count(&app, "gitea:acme/demo"), 1, "only the seeded VM: no warm or demand launch for the fork repo");
-        assert!(count(&app, "acme/demo") > 0, "other repos keep launching");
-        // The idle warm VM is retired (its runner looked up on the forge).
-        assert!(m.requests().iter().any(|r| r.contains("/api/v1/repos/acme/demo/actions/runners/5")), "{:?}", m.requests());
-
-        // The fork job leaves the queue (and the retired VM is gone): the block lifts and the warm pool refills.
-        m.route("GET", &format!("{api}/jobs?status=queued&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
-        app.vms.lock().unwrap().retain(|v| v.id != "kiln-1-0");
-        // Let the GitHub VM launched above finish dying (it frees its share of the cpu budget and sets its backoff);
-        // on a slow 4-vCPU CI guest tick two otherwise raced it, and GitHub's relaunch could take the budget first.
-        for _ in 0..500 {
-            if app.kills.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(app.kills.lock().unwrap().is_empty(), "the GitHub VM should have ended");
-        tick(&app, &cfg).await.unwrap();
-        assert!(app.poll.lock().unwrap().fork_queued.is_empty());
-        assert_eq!(count(&app, "gitea:acme/demo"), 1, "warm launch resumes");
+        assert!(
+            count(&app, "gitea:acme/demo") >= 2,
+            "the warm pool refills despite the queued fork job: {:?}",
+            app.poll.lock().unwrap().blocked
+        );
+        // A warm VM that the fork job reaches is still refused and killed, and an idle one is not retired beforehand.
+        assert!(!m.requests().iter().any(|r| r.contains("/api/v1/repos/acme/demo/actions/runners/5")), "{:?}", m.requests());
+        let fork = forge::JobInfo { id: "91".into(), url: "u".into(), queued_at: 1, fork: true, run: vm::Run::default() };
+        attach_jobs(&app, "gitea:acme/demo", &HashMap::from([("kiln-1-0".to_string(), fork)]));
+        let v = app.vms.lock().unwrap().iter().find(|v| v.id == "kiln-1-0").unwrap().clone();
+        assert!(v.fork && v.note.as_deref() == Some("refused: pull request from a fork"));
     }
 
     #[tokio::test]
@@ -1584,7 +1601,7 @@ mod tests {
         }
         let (by_size, runners, forks) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
         assert_eq!((by_size.len(), forks), (2, 1));
-        attach_jobs(&app, &runners);
+        attach_jobs(&app, "acme/demo", &runners);
         let vms = app.vms.lock().unwrap().clone();
         let by = |id: &str| vms.iter().find(|v| v.id == id).unwrap().clone();
         let ok = by("kiln-7-0");
@@ -1609,7 +1626,7 @@ mod tests {
         assert_eq!(meta.run, ok.run);
         // Unchanged input writes nothing new.
         std::fs::remove_file(app.data.join("vms/kiln-7-0/meta.json")).unwrap();
-        attach_jobs(&app, &runners);
+        attach_jobs(&app, "acme/demo", &runners);
         assert!(!app.data.join("vms/kiln-7-0/meta.json").exists());
     }
 

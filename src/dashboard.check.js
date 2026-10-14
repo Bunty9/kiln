@@ -118,5 +118,5 @@ assert(bn(FF, {}, [mint('gitea:o/n', 'runner registration failed: Gitea returned
 assert.deepEqual(bn(FF, {}, [mint('gitlab:g/s/p', 'Maintainer', { ended: NOW - 7200 })]), [], 'an old failure is gone');
 assert.deepEqual(bn(FF, {}, [{ repo: 'gitlab:g/s/p', ended: NOW }, mint('gitlab:g/s/p', 'Maintainer')]), [], 'only the newest VM of a repo counts');
 assert.deepEqual(bn(FF, {}, [mint('gitlab:g/s/p', 'lacks the create_runner scope')]), [], 'a scope failure is not a role failure');
-assert.deepEqual(bn(FF, { fork_queued: ['gitea:o/n'] }), ['warn | gitea:o/n: a pull request from a fork is waiting; approve or close it on Gitea, or kiln will not start runners for this repo.']);
+assert.deepEqual(bn(FF, { fork_queued: ['gitea:o/n'] }), ['warn | gitea:o/n: a pull request from a fork is waiting. kiln refuses it, and a VM that is handed it is killed; close or cancel it on Gitea to stop that.']);
 console.log('dashboard analytics ok');

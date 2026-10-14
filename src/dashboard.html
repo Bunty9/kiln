@@ -704,7 +704,7 @@ function forgeBanners(F, p, vms, t) {
       if (f.kind === 'gitlab' && /Maintainer/.test(note)) add('warn', `${n}: kiln cannot create a runner in ${path}. The token's user must be Maintainer or above there, and runner registration must be on for the project. Press Test on its card.`);
       if (f.kind === 'gitea' && /Owners team|HTTP 403/.test(note)) add('warn', `${n}: kiln cannot register a runner for ${path}. The service account must own the repo, or be in its organisation's Owners team.`);
     }
-    for (const r of p.fork_queued || []) if (forgeOf([f], r)) add('warn', `${esc(r)}: a pull request from a fork is waiting; approve or close it on ${n}, or kiln will not start runners for this repo.`);
+    for (const r of p.fork_queued || []) if (forgeOf([f], r)) add('warn', `${esc(r)}: a pull request from a fork is waiting. kiln refuses it, and a VM that is handed it is killed; close or cancel it on ${n} to stop that.`);
   }
   return out;
 }
@@ -2414,7 +2414,7 @@ const ACT = {
   forgetest: b => forgeTest(b.dataset.id),
   async forgerm(b) {
     const id = b.dataset.id;
-    if (!await ask({ title: `Remove forge ${id}?`, body: 'kiln stops serving its projects and deletes its saved token. Its running jobs must finish first. Its cache disks stay until you clear them.', action: 'Remove', danger: 1 })) return;
+    if (!await ask({ title: `Remove forge ${id}?`, body: 'kiln stops serving its projects and deletes its saved token. Its running jobs must finish first. Its cache disks are deleted.', action: 'Remove', danger: 1 })) return;
     await api(`/api/forges/${encodeURIComponent(id)}`, { method: 'DELETE' }); delete FC[id]; delete FB[id]; toast(`Forge ${id} removed`); await poll();
     if (cur === pages.settings) pages.settings.render(); else forgeUI();
   },

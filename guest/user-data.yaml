@@ -213,10 +213,9 @@ write_files:
           echo "kiln: no JIT config passed, powering off"
           return 1
         fi
-        # dockerd is not started at boot (it would run whatever the cached /var/lib/docker holds before any trust step);
-        # GitHub's runner and actions expect it, so it starts here: after kiln-cache mounted and cleaned the cache, before
-        # the runner. A release job's prejob hook detaches the cache and `kiln-cache detach` restarts it on the clean disk.
-        systemctl start docker.service || echo "kiln: docker did not start"
+        # dockerd is not started here (R4 M-1): it would run whatever the cached /var/lib/docker holds before a release
+        # job's prejob hook has decided cold or warm. docker.socket starts it on first use; the job-started hook runs
+        # in "Set up job", before "Initialize containers", so a cold detach always precedes the first docker call.
         /usr/local/sbin/kiln-steps &
         cd /home/runner/actions-runner
         sudo -u runner ./run.sh --jitconfig "$jit"
@@ -703,19 +702,21 @@ write_files:
       esac
       blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb
       mkdir -p /mnt/cache
-      mount -o noatime /dev/vdb /mnt/cache
+      mount -t ext4 -o noatime,nosuid,nodev /dev/vdb /mnt/cache
       # Whole ~/.cargo and ~/.rustup: the Rust toolchain itself is cached, not just crates.
       # Older caches kept ~/.cargo/{registry,git} separately: drop those obsolete dirs.
       rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
       # Container records and managed plugins are what auto-start (restart policies, enabled plugins): images and volumes
       # are what is worth caching. Gone before the bind mounts, so a container planted by a compromised default-branch
       # job cannot run at boot, in any forge (R3 M-2b).
-      rm -rf /mnt/cache/var_lib_docker/containers /mnt/cache/var_lib_docker/plugins
+      find /mnt/cache -maxdepth 1 -type l -delete   # a planted symlink would be chowned or followed below (R4 L-9)
+      # Allow-list (R4 M-1): only image data survives. swarm/ would recreate a root service, network/ and the rest are state.
+      [ -d /mnt/cache/var_lib_docker ] && find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1 \( -type l -o ! \( -name image -o -name overlay2 -o -name volumes -o -name buildkit \) \) -exec rm -rf {} +
       for t in $DIRS; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
         mkdir -p "$src"
         case $t in
-          /home/runner/*) runuser -u runner -- mkdir -p "$t"; chown runner:runner "$src" ;;
+          /home/runner/*) runuser -u runner -- mkdir -p "$t"; chown -h runner:runner "$src" ;;
           *) mkdir -p "$t" ;;
         esac
         mount --bind "$src" "$t"

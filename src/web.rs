@@ -1,7 +1,7 @@
 //! Dashboard + JSON API. Reachable only from loopback and the tailnet.
 
 use crate::{App, Config, mirror, now, platform, update, vm};
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, Path, Query, Request, State},
@@ -821,7 +821,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "host": host_stats(&app).await,
         "version": env!("CARGO_PKG_VERSION"),
         "mirror": mirror::status_json(&app).await,
-        "caches": vm::cache_stats(&app.data, &app.repos()),
+        "caches": vm::cache_stats(&app.data, &app.all_repos()),
         "update": update::compact(&app),
         "restart": update::restart_json(&app, RUNNING_LISTEN.get().map(String::as_str)),
         "serve_socket": SERVE_SOCKET.get() == Some(&true),
@@ -863,6 +863,11 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
     if !bad.is_empty() {
         bail_r(&format!("unknown forge setting(s): {}", bad.join(", ")))?;
     }
+    // Adds and removes go through /api/forges (an add forces a file token; a remove checks for running VMs): a re-added id
+    // with a new address would otherwise keep reading its environment-variable token (R4 M-2, L-2).
+    if let Some(id) = crate::forge::added_or_removed(&old_forges, &new_forges) {
+        bail_r(&format!("forge {id}: forges are added and removed under Forges, not in a config save"))?;
+    }
     let moved = crate::forge::moved(&old_forges, &new_forges);
     if !moved.is_empty() {
         bail_r(&format!(
@@ -887,7 +892,6 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
         bail_r(&errs.join("; "))?;
     }
     c.validate()?;
-    drop_stale_tokens(&app.data, &old_forges, &new_forges);
     app.save_cfg(c)?;
     drop(forge_guard);
     if reprobe {
@@ -1508,19 +1512,27 @@ fn edit_forges(app: &App, edit: impl FnOnce(&mut Vec<crate::forge::ForgeCfg>) ->
     };
     c.forges = if list == [plain] { None } else { Some(list.clone()) };
     c.validate()?;
-    drop_stale_tokens(&app.data, &old, &list);
+    drop_stale_forge_files(&app.data, &old, &list)?;
     app.save_cfg(c)
 }
 
-/// Deletes the saved token of every forge that is in only one of the lists (removed or new). A
-/// token file belongs to the forge id, so one left by a removed forge must never be read by a
-/// later forge of that name at another address. Before the save, so the new forge never loads it.
-fn drop_stale_tokens(data: &std::path::Path, old: &[crate::forge::ForgeCfg], new: &[crate::forge::ForgeCfg]) {
+/// Deletes the saved token and the cache disks of every forge that is in only one of the lists (removed or new).
+/// Both belong to the forge id, so ones left by a removed forge must never be read by a later forge of that name
+/// at another address (R4 M-5). Before the save, so the new forge never loads them. A failed delete fails the save.
+fn drop_stale_forge_files(data: &std::path::Path, old: &[crate::forge::ForgeCfg], new: &[crate::forge::ForgeCfg]) -> anyhow::Result<()> {
     let only_old = old.iter().filter(|o| !new.iter().any(|n| n.id == o.id));
     let only_new = new.iter().filter(|n| !old.iter().any(|o| o.id == n.id));
     for f in only_old.chain(only_new).filter(|f| f.kind != crate::forge::Kind::GitHub) {
-        let _ = std::fs::remove_file(crate::forge::token_path(data, &f.id));
+        let t = crate::forge::token_path(data, &f.id);
+        for p in [t.clone(), t.with_extension("token.tmp")] {
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => bail!("could not delete {}: {e}", p.display()),
+                _ => {}
+            }
+        }
+        vm::drop_forge_caches(data, &f.id)?;
     }
+    Ok(())
 }
 
 /// The stored entry and the live forge for `id`; GitHub is managed elsewhere.
@@ -1719,7 +1731,7 @@ async fn forge_repos(
     Ok((Extension(crate::audit::Note(format!("repos of forge {id}: {}", repos.join(", ")))), Json(json!({ "repos": repos }))))
 }
 
-/// Removes a forge and its token file. Its VMs must be gone first; its cache disks stay (Repos › Clear).
+/// Removes a forge and its token file. Its VMs must be gone first; its cache disks are deleted.
 async fn forge_remove(State(app): S, Path(id): Path<String>) -> R<(Extension<crate::audit::Note>, StatusCode)> {
     let (cfg, _) = managed(&app, &id)?;
     let prefix = format!("{id}:");
@@ -2465,13 +2477,31 @@ mod tests {
         assert!(forge_remove(State(app.clone()), Path("gl".into())).await.is_err());
         app.vms.lock().unwrap().clear();
         assert!(forge_remove(State(app.clone()), Path("github".into())).await.is_err());
+        // Cache disks belong to the forge id (R4 M-5): Repos › Clear reaches them, and removing the forge deletes them.
+        let cdir = app.data.join("cache");
+        std::fs::create_dir_all(&cdir).unwrap();
+        for f in ["gl~g%2Ftwo.qcow2", "gl~g%2Ftwo+pending.qcow2", "gitea~g%2Ftwo.qcow2", "acme__demo.qcow2"] {
+            std::fs::write(cdir.join(f), "x").unwrap();
+        }
+        let clear = |repo: &str| crate::vm::clear_cache(&app, repo);
+        assert!(
+            app.all_repos().contains(&"gl:g/two".to_string())
+                && crate::vm::cache_stats(&app.data, &app.all_repos()).get("gl:g/two").is_some()
+        );
+        assert!(clear("gitea:g/two").is_err(), "not a configured repo");
+        clear("gl:g/two").unwrap();
+        assert!(!cdir.join("gl~g%2Ftwo.qcow2").exists() && !cdir.join("gl~g%2Ftwo+pending.qcow2").exists());
+        std::fs::write(cdir.join("gl~g%2Ftwo.qcow2"), "x").unwrap();
         assert!(forge_remove(State(app.clone()), Path("gl".into())).await.is_ok());
+        assert!(!cdir.join("gl~g%2Ftwo.qcow2").exists(), "removal deletes the forge's caches");
+        assert!(cdir.join("gitea~g%2Ftwo.qcow2").exists() && cdir.join("acme__demo.qcow2").exists(), "other forges' caches stay");
         assert!(!tok.exists() && app.forges.get(&crate::forge::ForgeId::new("gl").unwrap()).is_none());
         assert_eq!(serde_json::to_value(app.cfg()).unwrap(), before, "back to the config a GitHub-only box had");
         // The same, as a fresh add: the stale token is gone.
         std::fs::write(&tok, "old-token").unwrap();
+        std::fs::write(cdir.join("gl~old.qcow2"), "x").unwrap();
         let _ = ok(forge_add(State(app.clone()), Json(add("gl", "https://gitlab.example.org"))).await);
-        assert!(!tok.exists());
+        assert!(!tok.exists() && !cdir.join("gl~old.qcow2").exists(), "a re-added id starts without the old token or caches");
     }
 
     #[tokio::test]
@@ -2594,18 +2624,21 @@ mod tests {
             store_token(&app, &id, &f_old, || g_old.adopt(&cand), "tok-b").is_err() && !tok.exists(),
             "the old forge's token must not bind to the new address"
         );
-        // The same through the settings save: removing a forge there drops its token, and so does adding one by that name.
-        let mut c = app.cfg();
-        let gl = c.forges.take().unwrap().remove(1);
+        // The settings save can neither remove a forge nor add one (R4 M-2, L-2): an environment-token forge removed and
+        // added back at another address would read its token again.
         put("tok-c");
+        let mut c = app.cfg();
+        let mut gl = c.forges.as_ref().unwrap()[1].clone();
         c.forges = None;
-        let _ = set_config(State(app.clone()), Json(c.clone())).await.unwrap_or_else(|e| panic!("{:#}", e.0));
-        assert!(!tok.exists(), "removed through /api/config");
-        put("tok-d"); // residue, as after a crash or an older kiln
+        let e = set_config(State(app.clone()), Json(c.clone())).await.err().unwrap();
+        assert!(format!("{:#}", e.0).contains("not in a config save") && tok.exists() && app.forges.get(&id).is_some());
+        let _ = forge_remove(State(app.clone()), Path("gl".into())).await.unwrap_or_else(|e| panic!("{:#}", e.0));
+        gl.url = Some("https://attacker.example.org".into());
+        gl.credential = Some(crate::forge::Credential::Env);
         c.forges = Some(vec![serde_json::from_value(json!({ "id": "github", "kind": "github" })).unwrap(), gl]);
-        let _ = set_config(State(app.clone()), Json(c)).await.unwrap_or_else(|e| panic!("{:#}", e.0));
-        assert!(!tok.exists(), "a forge added through /api/config starts without a token");
-        assert!(!app.forges.get(&id).unwrap().has_credential());
+        let e = set_config(State(app.clone()), Json(c)).await.err().unwrap();
+        assert!(format!("{:#}", e.0).contains("not in a config save"), "{:#}", e.0);
+        assert!(app.forges.get(&id).is_none(), "nothing was added");
         let _ = m;
     }
 
@@ -2667,8 +2700,8 @@ mod tests {
     /// X-3: one kiln, three forges. A save keeps every untouched client; a forge can only change by
     /// being removed and added again, which drops its token, so the new client needs one.
     #[tokio::test]
-    async fn a_settings_save_keeps_unchanged_forges_and_a_changed_one_starts_without_a_token() {
-        use crate::forge::{Forge, ForgeCfg, ForgeId, token_path};
+    async fn a_settings_save_keeps_unchanged_forges_and_refuses_moving_adding_or_removing_one() {
+        use crate::forge::{ForgeCfg, ForgeId, token_path};
         let (_m, app) = typed("forge-save-mixed").await;
         let f = |id: &str, kind: &str, url: &str| -> ForgeCfg {
             serde_json::from_value(
@@ -2686,7 +2719,9 @@ mod tests {
                 set_config(State(app), Json(c)).await.map(|_| ()).map_err(|e| format!("{:#}", e.0))
             }
         };
-        save(vec![gh.clone(), gt.clone(), gl.clone()]).await.unwrap();
+        let mut c0 = app.cfg();
+        c0.forges = Some(vec![gh.clone(), gt.clone(), gl.clone()]);
+        app.save_cfg(c0).unwrap();
         let id = |s: &str| ForgeId::new(s).unwrap();
         for i in [id("gitea"), id("gl")] {
             std::fs::create_dir_all(token_path(&app.data, &i).parent().unwrap()).unwrap();
@@ -2709,14 +2744,12 @@ mod tests {
         assert!(e.contains("remove the forge and add it again"), "{e}");
         assert!(Arc::ptr_eq(&a_gl, &live("gl")) && token_path(&app.data, &id("gl")).exists());
 
-        // Removed, its token goes and the others are untouched; added again, it is a new client with no token.
-        save(vec![gh.clone(), more(&gt)]).await.unwrap();
-        assert!(app.forges.get(&id("gl")).is_none() && !token_path(&app.data, &id("gl")).exists());
-        save(vec![gh.clone(), more(&gt), moved]).await.unwrap();
-        let new_gl = live("gl");
-        assert!(!Arc::ptr_eq(&a_gl, &new_gl) && !new_gl.has_credential());
-        assert!(matches!(&*new_gl, Forge::GitLab(_)) && new_gl.health().unwrap().contains("no token"));
-        assert!(Arc::ptr_eq(&a_gh, &live("github")) && Arc::ptr_eq(&a_gt, &live("gitea")));
+        // A save neither removes a forge nor adds one (R4 M-2): both go through /api/forges.
+        let e = save(vec![gh.clone(), more(&gt)]).await.unwrap_err();
+        assert!(e.contains("not in a config save"), "{e}");
+        let e = save(vec![gh.clone(), more(&gt), more(&gl), f("other", "gitea", "https://other.example.org")]).await.unwrap_err();
+        assert!(e.contains("not in a config save"), "{e}");
+        assert!(Arc::ptr_eq(&a_gl, &live("gl")) && token_path(&app.data, &id("gl")).exists());
         assert!(live("gitea").has_credential() && token_path(&app.data, &id("gitea")).exists());
     }
 }
