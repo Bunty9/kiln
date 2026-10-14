@@ -1,12 +1,12 @@
 # Architecture
 
-kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of ephemeral GitHub Actions runners, one KVM virtual machine per job. This page describes the pieces, the life of a job, and the design decisions behind them. For the settings mentioned here see [configuration.md](configuration.md); for the threat model see [../SECURITY.md](../SECURITY.md).
+kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of ephemeral CI runners for GitHub Actions, GitLab CI and Gitea Actions, one KVM virtual machine per job. The lifecycle below is written for GitHub; [GitLab jobs](#gitlab-jobs) and [Gitea jobs](#gitea-jobs) say what differs. This page describes the pieces, the life of a job, and the design decisions behind them. For the settings mentioned here see [configuration.md](configuration.md); for the threat model see [../SECURITY.md](../SECURITY.md).
 
 ```
-   GitHub (REST API)
+   Forge: GitHub, GitLab or Gitea (REST API)
      ^   |
-     |   | poll queued/in_progress runs and jobs (ETag-cached),
-     |   | generate-jitconfig, delete runner, job + run details
+     |   | poll queued jobs (GitHub: ETag-cached runs and jobs),
+     |   | register a single-use runner, delete runner, job + run details
      |   v
  +--------------------------------------------------------------+
  | kiln serve (one process)                                     |
@@ -35,7 +35,9 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 ## Components
 
-**Scheduler and poller** (`main.rs`). A loop that runs a "tick" every `poll_secs`. Each tick checks the token, rate-limit pause and base image, asks GitHub which jobs are queued, decides how many VMs to launch or drop per repo and size, and publishes the poll status that the dashboard shows. At startup, before the first tick, it deletes offline idle `kiln-*` runners that a crashed kiln left registered.
+**Scheduler and poller** (`main.rs`). A loop that runs a "tick" every `poll_secs`. Each tick checks the token, rate-limit pause and base image, asks each forge which jobs are queued, decides how many VMs to launch or drop per repo and size, and publishes the poll status that the dashboard shows. At startup, before the first tick, it deletes offline idle `kiln-*` runners that a crashed kiln left registered.
+
+**Forge clients** (`forge/`: `gitlab.rs`, `gitea.rs`, plus the shared `mod.rs`). One per configured GitLab or Gitea forge, behind the same trait as GitHub: demand, runner registration and retirement, the facts for the verdict, runs, jobs and logs for the dashboard. Tokens are read from `<data>/forges/<id>.token` or the environment, sent only in sensitive headers, with no redirects followed and no proxy.
 
 **GitHub client** (`github.rs`). A small `reqwest` wrapper. GET responses are cached by ETag, so a 304 is free against the rate limit. It tracks `x-ratelimit-*` headers and pauses on a rate-limit 403 or a 429, per auth identity: the token, or in App mode each installation. A paused token stops the whole tick; a paused installation only skips its repos, each with a repo error. It also does JIT config generation, runner deletion, the cache trust lookup, the optional hello PR and the dashboard's proxied calls.
 
@@ -47,7 +49,7 @@ kiln is one Rust binary (`kiln serve`) that turns a Linux box into a pool of eph
 
 **Web and API** (`web.rs`). An axum server that serves the dashboard (one HTML file embedded in the binary with `include_str!`) and a JSON API, behind an access guard. See [API](#api).
 
-**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-job` also has a GitLab branch (`run_gitlab`) and a Gitea one; `kiln-exec` is the GitLab custom executor and `kiln-verdict-wait` the guest side of the host verdict (see [GitLab jobs](#gitlab-jobs)). `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk, detaches it again (`detach`), and removes login tokens from it after a job (`scrub`). `kiln-prejob.sh` is the runner's job-started hook: it fails a job whose event is a pull request, or a `workflow_run` triggered by one, from another repository, and runs tag pushes and `release` events without the cache. `kiln-bake` is the one-time setup.
+**Guest scripts** (inside `guest/user-data.yaml`, installed in the image). `kiln-job` is the boot entry: it reads the JIT config, runs one job and powers off. `kiln-job` also has a GitLab branch (`run_gitlab`) and a Gitea one (`run_gitea`); `kiln-exec` is the GitLab custom executor, `kiln-verdict-wait` the guest side of the host verdict (see [GitLab jobs](#gitlab-jobs)), and `kiln-gate` the Gitea root exec gate (see [Gitea jobs](#gitea-jobs)). `kiln-steps` copies the runner's live step logs to the second serial port. `kiln-cache` formats and bind-mounts the cache disk, detaches it again (`detach`), and removes login tokens from it after a job (`scrub`). `kiln-prejob.sh` is the runner's job-started hook: it fails a job whose event is a pull request, or a `workflow_run` triggered by one, from another repository, and runs tag pushes and `release` events without the cache. `kiln-bake` is the one-time setup.
 
 ## Job lifecycle
 
@@ -119,7 +121,7 @@ Not busy: `idle_timeout_mins` from VM start, which covers boot as well as waitin
 
 ## Cache
 
-Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2`, created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository` and `/var/cache/apt/archives`. `/opt/hostedtoolcache` is not cached because the baked Node versions (`bake_node_versions`) live there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip. dockerd is not started at boot (the unit is disabled; `docker.socket` stays): the job's path starts it after the cache is mounted and its container records and plugins are deleted (so a planted restart-always container cannot run), and after its trust step where the forge has one.
+Each repo has one persistent cache disk, `cache/<owner>__<name>.qcow2` (GitLab and Gitea repos: `cache/<forge-id>~<path>.qcow2`, `/` written `%2F`), created blank at `cache_gb` virtual size. The guest formats it on first use and bind-mounts it over `/var/lib/docker`, `~/.cache`, `~/.npm`, `~/.cargo`, `~/.rustup`, `~/go/pkg/mod`, `~/.gradle/caches`, `~/.m2/repository` and `/var/cache/apt/archives`. `/opt/hostedtoolcache` is not cached because the baked Node versions (`bake_node_versions`) live there. Docker layers, package downloads and the Rust toolchain are therefore warm with no `actions/cache` round trip. dockerd is not started at boot (the unit is disabled; `docker.socket` stays and starts it on first use). At mount everything in the cached `/var/lib/docker` except `image`, `overlay2`, `volumes` and `buildkit` is deleted (container records, plugins, swarm state, networks), so a planted restart-always container or swarm service has nothing to restore. On GitHub the first container step starts dockerd after the job-started hook has decided cold or warm; GitLab and Gitea start it only after their verdict. The cache disk is mounted ext4 with `nosuid,nodev`.
 
 ### Trust model: trusted writer, throwaway readers
 
@@ -130,11 +132,11 @@ Every job VM gets its own private qcow2 overlay of the repo's cache as a second 
 - the run's event is `push` and its branch is the repo's default branch (looked up through the API, cached for an hour) or one of its `cache_branches`;
 - the pushed commit is really on that branch: the branch tip is resolved through `git/ref/heads/<branch>` and the compare API says the commit is identical to it or behind it. A pushed tag named like a writer branch also arrives as `event=push` with that name, and resolving the bare name could pick the tag.
 
-On GitLab the same rule is read from the job API: source `push` on a branch of this project, the default branch or a protected `cache_branches` branch, a job `success` on this VM's own runner, and an `ok` verdict for that job. Merge request, tag, child (`parent_pipeline`), schedule and other sources never save. Anything else is discarded with the overlay, and the job page says why ("cache not saved: pull_request event"). This mirrors GitHub's branch-scope rule for `actions/cache`: a PR can read the cache but can never poison it.
+On Gitea the rule is read from the job API for this VM's own runner, with a `push` to the default branch or a `cache_branches` entry (not required to be protected) and a recorded `ok` verdict. On GitLab the same rule is read from the job API: source `push` on a branch of this project, the default branch or a protected `cache_branches` branch, a job `success` on this VM's own runner, and an `ok` verdict for that job. Merge request, tag, child (`parent_pipeline`), schedule and other sources never save. Anything else is discarded with the overlay, and the job page says why ("cache not saved: pull_request event"). This mirrors GitHub's branch-scope rule for `actions/cache`: a PR can read the cache but can never poison it.
 
 ### Release builds run cold
 
-A job for a pushed tag (`GITHUB_REF_TYPE=tag`) or a `release` event builds what gets shipped, so its job-started hook detaches the cache before the first step (Docker is stopped, every bind mount and the cache disk unmounted, Docker started again) and the job runs on the clean base image. Every successful default-branch job writes the cache, including whatever its dependencies run, so without this a dependency compromised once on the default branch could plant a toolchain in `~/.rustup` or `~/.cargo/bin` that a later release build would use (the "Cacheract" pattern). If the cache cannot be detached, the job fails.
+A job for a pushed tag (`GITHUB_REF_TYPE=tag`) or a `release` event builds what gets shipped, so its job-started hook detaches the cache before the first step (Docker is stopped, every bind mount and the cache disk unmounted, Docker started again on first use) and the job runs on the clean base image. GitLab and Gitea get the same result from their verdict (`cold`), where the cache disk is detached before dockerd starts. Every successful default-branch job writes the cache, including whatever its dependencies run, so without this a dependency compromised once on the default branch could plant a toolchain in `~/.rustup` or `~/.cargo/bin` that a later release build would use (the "Cacheract" pattern). If the cache cannot be detached, the job fails.
 
 After every job, before the overlay may be committed, `kiln-cache scrub` deletes login tokens that tools write under cached paths (`~/.cargo/credentials{,.toml}`, `~/.cache/huggingface/token`), so a trusted job's `cargo login` never reaches a later pull request. Other credentials written under cached directories would persist the same way: keep secrets out of `~/.cache`, `~/.cargo`, `/var/lib/docker` and the other cached paths, as with `actions/cache`.
 
@@ -202,6 +204,18 @@ GitLab (`forge/gitlab.rs`) shares the scheduler, VM supervisor, cache and egress
 6. **Result and cache.** The runner's exit status and console say nothing the host believes. When the VM ends, kiln asks the job API for the job, only if the console bound exactly one job on a runner that started exactly one, with a recorded `ok` or `cold` verdict for that id and the job's runner id equal to this VM's runner: `success` is a pass, any other end a failure. The cache overlay is merged only for source `push` on the default branch (or a protected `cache_branches` branch) with an `ok` verdict (see [Cache](#cache)).
 7. **Retire and sweep.** When a VM ends for any reason its runner is deleted (`DELETE /runners/{id}`), whatever the job did, with no pause since the VM is over. Retiring a live idle VM (surplus, warm recycling) pauses the runner first and keeps it if it already holds a job; a recycle after a security-settings change deletes it at once, since the VM is killed either way. A runner is never unpaused: it runs one job at most, and an unpause could undo the gate's pause. At startup, and about hourly, the sweep deletes this install's runners (`<install id>-` prefix, not registered by this process) that no VM can own: older than 24 hours and 10 minutes, or never contacted for over 10 minutes, never judged by status. A dashboard cancel kills the pipeline's VMs first, then asks GitLab to cancel (needs the `api` scope); the runner would only notice a cancel after about a minute.
 
+## Gitea jobs
+
+Gitea (`forge/gitea.rs`) shares the scheduler, VM supervisor, cache and egress code too. A Gitea runner cannot be told which job to take, and it starts the job the moment it fetches it, so the guard is inside the VM instead of in a runner hook.
+
+1. **Demand.** Each tick lists the repo's queued jobs (the jobs listing needs Gitea 1.25), matching labels client-side and joining each job to its run. A fork pull request, `pull_request_target` from a fork and every `workflow_run` are flagged and are not demand; a banner names the repo while one is queued, but launches go on, since a VM that is handed the job refuses it.
+2. **Registration.** kiln asks `repos/{repo}/actions/runners/registration-token` (Owner only) and registers an ephemeral runner with the `Register` RPC for that one job. The registration token stays in kiln's memory; the VM gets only the resulting per-runner `.runner` credential, passed as a guest secret like GitLab's.
+3. **Run and gate.** `run_gitea` writes the credential, arms two independent `kiln-gate` processes (fanotify `FAN_OPEN_EXEC_PERM` on every filesystem) and starts `gitea-runner daemon --once` under the gate. Every exec of the `runner` user is held until the host's verdict. dockerd is down (`gate-docker`) until the verdict, and `vm.memfd_noexec=2` is set for the job.
+4. **Verdict.** kiln reads the job id from the runner's `task started` console line, requires from the API that the job is in progress on this VM's own runner and belongs to the served repo, reads the run's event and head repository, and answers `ok`, `cold` (tag, release) or `refuse` on the console input. A refused VM gets about 10 s and is killed. If either gate dies before a verdict, the runner's processes are killed, the guest prints `kiln.gate=dead` and kiln kills the VM; a VM that ends between job start and verdict counts as a dead gate.
+5. **Result, cache and cleanup.** The job's result comes from the Gitea job API for this VM's runner, never the console. The cache overlay is merged only for a `push` to the default branch or a cache branch with an `ok` verdict. The runner is deleted when the VM ends (disabled at once and deleted later if Gitea still shows its job running), and a startup and hourly sweep deletes this install's leftovers.
+
+Gitea's own `actions/cache` does not persist: its server and work directory live on the VM's disk, so a cold run can unmount the cache disk.
+
 ## Console parsing
 
 The runner's console lines drive the VM's state: "Listening for Jobs" (booting to idle), "Running job: <name>" (to busy), "completed with result: <r>". Because a job is root in the guest and can print anything, each step is accepted once and only forward. Lines are read in chunks of at most 64 KiB, and a longer line and its remainder are never parsed. `console.log` and `steps.log` stop growing at 64 MiB while parsing continues. Console lines can shape the timeline but never extend a VM's life beyond the hard cap. Steps output travels over the second serial port (`ttyS1`; a virtio-serial port named `kiln.steps` on arm64) to a unix socket that kiln copies into `steps.log`.
@@ -243,7 +257,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `GET /api/log?src=<bake or vm id>&file=<console or steps>&from=<offset>` | Incremental log read (up to 512 KiB per call) |
 | `POST /api/vms/{id}/kill` | Kill a VM |
 | `POST /api/vms/{id}/release` | End a debug hold early |
-| `POST /api/cache/clear` | Delete a repo's cache (`{"repo":"o/n"}`) |
+| `POST /api/cache/clear` | Delete a repo's cache (`{"repo":"o/n"}`; `<forge-id>:<path>` for GitLab and Gitea) |
 | `GET /api/onboard` | Hello PRs this kiln has opened |
 | `POST /api/onboard/hello` | Open a PR adding `.github/workflows/kiln-hello.yml` to a configured repo |
 | `POST /api/bake` | Start a bake (202; refused while one runs) |
@@ -259,6 +273,7 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 | `POST /api/tailscale/ping` | Ping a peer (`{"peer": "..."}`, restricted characters) |
 | `POST /api/tailscale/serve` | Turn HTTPS serve on or off (port 8443) |
 | `GET /api/forges` | Each forge: id, kind, web URL, caps, auth source, served repos, health |
+| `POST /api/forges`, `POST /api/forges/{id}/token`, `/check`, `/repos`, `DELETE /api/forges/{id}` | Add a GitLab or Gitea forge, try and save its token, test it, replace its project list, remove it (refused while it has running VMs). Removing deletes the token and cache disks. Audited; add, remove and token changes raise a security alert |
 | `GET /api/runs?repo=` | Recent runs of a served repo (`status`, `branch`, `page` filter), in kiln's own shape with server-built links |
 | `GET /api/runs/{id}?repo=` | One run with its jobs |
 | `GET /api/jobs/{id}/log?repo=&from=` | A page of the forge's log for a job (`text`, `next`, `complete`) |

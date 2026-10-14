@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn kvm_group_parsing() {
-        assert_eq!(kvm_gid("root:x:0:\nkvm:x:993:kame\n"), Some(993));
+        assert_eq!(kvm_gid("root:x:0:\nkvm:x:993:alice\n"), Some(993));
         assert_eq!(kvm_gid("root:x:0:\n"), None);
         let st = "Name:\tkiln\nUid:\t1000\t1000\t1000\t1000\nGroups:\t4 27 993 1000\n";
         assert!(has_gid(st, 993) && !has_gid(st, 994));
