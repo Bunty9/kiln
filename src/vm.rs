@@ -4015,6 +4015,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The cold-detach half of kiln-prejob.sh, with a fake `sudo` that logs its argv and fails on request.
+    #[test]
+    fn prejob_hook_detaches_the_cache_for_tags_and_releases() {
+        let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
+        if !need(&["bash", "jq"]) || !bash4() {
+            return;
+        }
+        let dir = crate::forge_test_mock::scratch("prejob-detach");
+        let script = guest_script("/usr/local/sbin/kiln-prejob.sh", &dir);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(&sudo, format!("#!/bin/bash\necho \"$@\" >> {0}/sudo.log\n[ -e {0}/fail-sudo ] && exit 1\nexit 0\n", dir.display()))
+            .unwrap();
+        std::fs::set_permissions(&sudo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = |env: &[(&str, &str)], event: serde_json::Value, fail: bool| {
+            let _ = std::fs::remove_file(dir.join("sudo.log"));
+            let _ = std::fs::remove_file(dir.join("fail-sudo"));
+            if fail {
+                std::fs::write(dir.join("fail-sudo"), "").unwrap();
+            }
+            std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+            let mut c = std::process::Command::new("bash");
+            c.args(["-c", &script]).env("GITHUB_EVENT_PATH", dir.join("event.json")).env("GITHUB_REPOSITORY", "Acme/kiln");
+            c.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+            for (k, v) in env {
+                c.env(k, v);
+            }
+            let o = c.output().unwrap();
+            let log = std::fs::read_to_string(dir.join("sudo.log")).unwrap_or_default();
+            (o.status.code(), String::from_utf8_lossy(&o.stdout).to_string(), log)
+        };
+        let push = serde_json::json!({ "ref": "refs/heads/main", "head_commit": {} });
+        let detach = "/usr/local/sbin/kiln-cache detach\n";
+        assert_eq!(
+            run(&[("GITHUB_REF_TYPE", "branch")], push.clone(), false),
+            (Some(0), String::new(), String::new()),
+            "a branch push keeps the cache"
+        );
+        assert_eq!(run(&[("GITHUB_REF_TYPE", "tag")], push.clone(), false), (Some(0), String::new(), detach.into()));
+        assert_eq!(run(&[("GITHUB_EVENT_NAME", "release")], push.clone(), false), (Some(0), String::new(), detach.into()));
+        let (rc, out, log) = run(&[("GITHUB_REF_TYPE", "tag")], push.clone(), true);
+        assert_eq!((rc, log.as_str()), (Some(1), detach));
+        assert!(out.contains("::error::kiln could not detach"), "{out}");
+        // The fork check stays first: a fork PR on a tag ref is refused without calling sudo.
+        let fork = serde_json::json!({ "pull_request": { "head": { "repo": { "full_name": "evil/kiln" } } } });
+        let (rc, out, log) = run(&[("GITHUB_REF_TYPE", "tag")], fork, false);
+        assert_eq!((rc, log.as_str()), (Some(1), ""));
+        assert!(out.contains("refuses code from forks"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A guest script cut out of the recipe, with its fixed paths pointed into `dir`.
     fn guest_script(path: &str, dir: &std::path::Path) -> String {
         let yaml = include_str!("../guest/user-data.yaml");
