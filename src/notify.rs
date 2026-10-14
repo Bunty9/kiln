@@ -86,7 +86,7 @@ pub struct JobInfo {
     pub job: String,
     pub branch: Option<String>,
     pub event: Option<String>,
-    /// "failed", "cancelled", "killed", "lost" or "succeeded".
+    /// "failed", "cancelled", "killed", "lost", "refused" or "succeeded".
     pub outcome: String,
     pub duration_s: Option<u64>,
     pub url: Option<String>,
@@ -618,9 +618,6 @@ fn action_for(path: &str) -> Option<&'static str> {
         p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/token") && r.matches('/').count() == 1) => {
             Some("forge token replaced")
         }
-        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/onboard") && r.matches('/').count() == 1) => {
-            Some("forge onboarded")
-        }
         // Adding, removing or re-pointing a forge's repos: where kiln sends a token, and what it serves.
         "/api/forges" => Some("forge added"),
         p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/repos") && r.matches('/').count() == 1) => {
@@ -1030,7 +1027,8 @@ pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
     })
 }
 
-/// Alert for a VM that just ended: `job.failed` for any non-success, `job.finished` for a
+/// Alert for a VM that just ended: `job.failed` for any non-success, `job.refused` for a job kiln
+/// refused because it failed closed (a policy refusal sends nothing), `job.finished` for a
 /// success matching a rule. At most once per VM id.
 pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     // A job the verdict gate refused (a fork pull request, a workflow_run, ...) is policy, not a failure: no alert.
@@ -1989,7 +1987,7 @@ mod tests {
             to: vec![],
             detail: Detail::Job(JobInfo {
                 repo: clean(repo),
-                // forge and forge_kind are ADDED to every payload (forge support X-2); the rest is unchanged.
+                // forge and forge_kind are ADDED to every payload; the rest is unchanged.
                 forge: "github".into(),
                 forge_kind: "github".into(),
                 workflow: Some(clean("ci.yml")),
@@ -2140,7 +2138,7 @@ mod tests {
 
     #[test]
     fn links_only_to_forge_origins() {
-        // github_link became forge_link(url, origins) (forge support P0-8); github.com is one origin.
+        // github_link became forge_link(url, origins); github.com is one origin.
         let gh = ["https://github.com".to_string()];
         assert!(forge_link("https://github.com/acme/kiln/actions/runs/1/job/2", &gh).is_some());
         for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://github.com/x|y>", "javascript:alert(1)"] {
@@ -2159,7 +2157,6 @@ mod tests {
         assert_eq!(action_for("/api/forges/gl"), Some("forge removed"));
         assert_eq!(action_for("/api/forges/gl/repos"), Some("forge repos changed"));
         assert_eq!(action_for("/api/forges/gl/check"), None);
-        assert_eq!(action_for("/api/forges/gl/onboard"), Some("forge onboarded"));
         assert_eq!(action_for("/api/forges/gl/other"), None);
         assert_eq!(action_for("/api/forges/a/b/token"), None);
     }

@@ -1,9 +1,7 @@
-//! The GitLab forge, demand side (GL-2): which of the project's pending jobs are ours, which
-//! running jobs belong to our runners, and whether a job's code came from a fork.
-//!
-//! Registration, retire, sweep and pause are here (GL-3), and verdict facts, cache trust and the
-//! dashboard API (GL-4). The guest side is GL-6. `LAUNCH_READY` is the kill switch: when false, `register`
-//! refuses and demand reports no launchable jobs, so no VM boots for GitLab.
+//! The GitLab forge: which of a project's pending jobs are ours, which running jobs belong to our
+//! runners, and whether a job's code came from a fork; single-use project runner registration,
+//! retire, sweep and pause; verdict facts, cache trust and the dashboard API (runs, logs, rerun,
+//! cancel, run pipeline).
 //!
 //! Everything the API says is data, never instructions: fork detection reads the job's `ref`,
 //! `tag` and pipeline `source` plus one MR or branch lookup, never a `CI_*` value (a job's own
@@ -30,10 +28,7 @@ use std::sync::{Mutex, RwLock};
 const REQUIRED_SCOPES: [&str; 3] = ["create_runner", "manage_runner", "read_api"];
 /// How long the token's scopes are trusted before `refresh` reads them again.
 const INFO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-pub const LATER: &str = "GitLab runners arrive in a later version";
-/// GitLab VMs launch (GL-8: the end-to-end matrix passed on a local GitLab CE).
-pub const LAUNCH_READY: bool = true;
-/// After pausing, one in-flight `jobs/request` can still win for up to about 1 s (SP-7).
+/// After pausing, one in-flight `jobs/request` can still win for up to about 1 s.
 const PAUSE_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long `cache_trust` waits for a job to finish: the VM powers off a moment before GitLab records the result.
 const TRUST_LOOKS: usize = 7;
@@ -41,13 +36,13 @@ const TRUST_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Pipelines per dashboard page.
 const RUNS_PAGE: usize = 30;
 /// A runner with no VM record is orphaned once older than the longest `job_timeout_mins` (1440,
-/// the config ceiling) plus 10 minutes: whatever its status, which lies for hours (SP-7).
+/// the config ceiling) plus 10 minutes: whatever its status, which lies for hours.
 const ORPHAN_SECS: u64 = (1440 + 10) * 60;
 /// A runner that never polled belongs to a VM that died before its runner started.
 const NEVER_CONTACTED_SECS: u64 = 600;
 /// Labels the GitHub-shaped runner label list carries that GitLab has no use for.
 const IMPLICIT_LABELS: [&str; 4] = ["self-hosted", "linux", "x64", "ARM64"];
-/// A 403 on `POST /user/runners` cannot be told apart by the response (SP-6).
+/// A 403 on `POST /user/runners` cannot be told apart by the response.
 const REGISTER_403: &str = "the token's user must be at least Maintainer on the project, the instance setting \
 valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) must include `project`, and runner \
 registration must be enabled for the project and its group (a toggle with no API field); one of these is not met";
@@ -140,7 +135,7 @@ fn role_name(level: u64) -> &'static str {
     }
 }
 
-/// Why a role below Maintainer fails, with the other causes of the same 403 (SP-6).
+/// Why a role below Maintainer fails, with the other causes of the same 403.
 fn low_role(level: u64) -> String {
     format!(
         "{} is below Maintainer, which creating a project runner needs; also check the instance setting valid_runner_registrars (Admin > Settings > CI/CD > Runner registration) and the project's runner registration toggle",
@@ -405,9 +400,6 @@ impl GitLab {
     /// Registers a single-use project runner for the VM `name` and returns its guest secret.
     /// A refusal or an unreachable GitLab is a `MintError`.
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
-        if !LAUNCH_READY {
-            bail!(LATER);
-        }
         self.mint(repo, name, labels).await
     }
 
@@ -419,7 +411,7 @@ impl GitLab {
             false => e,
         };
         let pid = self.project_id(&repo.path, false).await.map_err(unreachable)?;
-        // The label list is GitHub-shaped; GitLab matches `kiln-Ncpu` and `kiln` only (`runner_tags`).
+        // The label list is GitHub-shaped; GitLab matches `kiln-Ncpu` and `kiln` only (`job_size`).
         let tags: Vec<&String> = labels.iter().filter(|l| !IMPLICIT_LABELS.contains(&l.as_str())).collect();
         // ponytail: no `maximum_timeout` (the runner's job cap): kiln stops the VM at job_timeout_mins itself.
         let body = json!({
@@ -484,9 +476,9 @@ impl GitLab {
         }
     }
 
-    /// Pause, check, delete (3.3): `Busy` when the runner holds a job. A runner is never unpaused
-    /// (R2 C-1): it runs one job at most, and an unpause could undo the verdict gate's pause on a
-    /// job whose code is already running. `Unused` (the VM is over) deletes with no pause. A stale
+    /// Pause, check, delete: `Busy` when the runner holds a job. A runner is never unpaused
+    /// (it runs one job at most, and an unpause could undo the verdict gate's pause on a
+    /// job whose code is already running). `Unused` (the VM is over) deletes with no pause. A stale
     /// policy never waits for the job: the VM is killed either way, and a job that raced in fails
     /// and is retried (security beats availability). The caller's VM record already names the
     /// runner id and job id, so deleting the runner loses nothing.
@@ -727,11 +719,7 @@ impl GitLab {
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        let mut d = self.demand_for(repo, label, default_cpus, crate::host_threads()).await?;
-        if !LAUNCH_READY {
-            d.by_size.clear();
-        }
-        Ok(d)
+        self.demand_for(repo, label, default_cpus, crate::host_threads()).await
     }
 
     async fn demand_for(&self, repo: &RepoRef, label: &str, default_cpus: u32, host: u32) -> Result<Demand> {
@@ -764,7 +752,7 @@ impl GitLab {
                         }
                     }
                 }
-                // A runner kiln deleted leaves `runner: null`; GL-3 counts those from its own record.
+                // A runner kiln deleted leaves `runner: null`; the count comes from kiln's own record.
                 Some("running") => {
                     if let Some(vm) = j["runner"]["description"].as_str().and_then(|d| d.strip_prefix(&prefix)).filter(|v| !v.is_empty()) {
                         claimed.insert(vm.to_string(), self.job_info(repo, pid, j).await);
@@ -806,7 +794,7 @@ impl GitLab {
     }
 
     async fn origin_lookup(&self, pid: u64, j: &Value) -> Result<Origin> {
-        // `pipeline` (multi-project downstream) is refused by the verdict like Gitea's workflow_run (R2b B-M1): its ref is a
+        // `pipeline` (multi-project downstream) is refused by the verdict like Gitea's workflow_run: its ref is a
         // plain branch whatever the upstream was, but the variables come from a trigger job in another
         // project that kiln never inspects. `parent_pipeline` (a child) is allowed, through the ref rules
         // below only: a child of an MR pipeline keeps `refs/merge-requests/<iid>/head` (so the fork and MR
@@ -932,7 +920,7 @@ impl GitLab {
         Ok((pid, j))
     }
 
-    /// The VM's job result (R2b section 4), from the project's job API only, never a console line: `Succeeded`
+    /// The VM's job result, from the project's job API only, never a console line: `Succeeded`
     /// only for status `success`, `Failed` for any other end, None while unfinished or when the job's runner
     /// is not `runner_id` (a missing runner field counts as a mismatch). Called before the runner is deleted,
     /// which nulls the job's runner. The read is kept for `cache_trust`.
@@ -1099,7 +1087,7 @@ impl GitLab {
         self.act(repo, "cancel", &format!("pipelines/{id}/cancel"), None).await
     }
 
-    /// A new pipeline on `git_ref`. No variables in v1, and no workflow: there is one file.
+    /// A new pipeline on `git_ref`. No variables (refused), and no workflow: there is one file.
     pub async fn dispatch(&self, repo: &RepoRef, _workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         if !inputs.is_empty() {
             bail!("GitLab pipelines are started without variables for now");
@@ -1210,8 +1198,9 @@ fn stat(s: &str) -> (RunStatus, Option<Outcome>) {
 /// The tags a runner of `cpus` vCPUs carries: `kiln-Ncpu`, and `kiln` too for the default size.
 /// GitLab runs a job only on a runner whose tags include all the job's, so a job is ours exactly
 /// when its tags are a subset of one size's set. `register` sends the same tags: the runner label list
-/// minus the GitHub-only labels.
-pub fn runner_tags(label: &str, cpus: u32, default_cpus: u32) -> Vec<String> {
+/// minus the GitHub-only labels. Test-only: it pins what `job_size` accepts against what `register` sends.
+#[cfg(test)]
+fn runner_tags(label: &str, cpus: u32, default_cpus: u32) -> Vec<String> {
     let mut t = vec![format!("{label}-{cpus}cpu")];
     if cpus == default_cpus {
         t.push(label.to_string());
@@ -1873,7 +1862,7 @@ mod tests {
     async fn register_errors_name_the_cause_and_keep_the_token_out() {
         let m = Mock::start().await;
         let g = gl_ready("regerr", &m);
-        // Developer and below, the instance setting and the toggle all look the same (SP-6).
+        // Developer and below, the instance setting and the toggle all look the same.
         m.on("POST", "user/runners", 403, fx("err_403_role.json"));
         let e = mint_err(&g).await;
         let me = mint_error(&e);
@@ -1953,7 +1942,7 @@ mod tests {
         assert!(matches!(g.deregister(&repo(), 79, Reason::Surplus).await, Dereg::Gone));
         assert_eq!(m.calls(), ["PUT runners/79", "GET runners/79/jobs?status=running", "DELETE runners/79"]);
         assert!(g.mine.lock().unwrap().is_empty());
-        // It got a job meanwhile: not deleted, and never unpaused (R2 C-1: the gate may have paused it too).
+        // It got a job meanwhile: not deleted, and never unpaused (the gate may have paused it too).
         serve_runner(&m, "runner_jobs_running.json");
         m.sent.lock().unwrap().clear();
         assert!(matches!(g.deregister(&repo(), 79, Reason::Warm).await, Dereg::Busy));
@@ -1976,7 +1965,7 @@ mod tests {
         assert_eq!(m.count("DELETE"), 0);
         // No path ever sends paused=false.
         assert!(m.sent.lock().unwrap().iter().all(|(_, b)| !b.contains("false")));
-        // The VM is over (R2 H-1): the runner is deleted at once, with no pause and no job check.
+        // The VM is over: the runner is deleted at once, with no pause and no job check.
         serve_runner(&m, "runner_jobs_running.json");
         m.sent.lock().unwrap().clear();
         assert!(matches!(g.deregister(&repo(), 79, Reason::Unused).await, Dereg::Gone));
@@ -2086,7 +2075,7 @@ mod tests {
         assert!(out.iter().all(|c| !c.2.contains(TOKEN)));
     }
 
-    // ---- GL-4: verdict facts, cache trust, dashboard API ----
+    // ---- verdict facts, cache trust, dashboard API ----
 
     use super::super::{Call, Verdict, gate};
 
@@ -2324,7 +2313,7 @@ mod tests {
         assert!(trust(&g, &b, &["feat"]).await.is_err(), "protected lookup failed");
     }
 
-    /// The job result is the project's job API alone (R2b section 4): success only, on the VM's own runner.
+    /// The job result is the project's job API alone: success only, on the VM's own runner.
     #[tokio::test]
     async fn job_result_comes_from_the_job_api_for_the_vms_runner() {
         let m = Mock::start().await;
@@ -2367,7 +2356,7 @@ mod tests {
         assert_eq!(m.count("projects/1/jobs/1009"), 2);
     }
 
-    /// R2b B-L2: a restart deletes the runners of the records it finds ended, whatever ended them.
+    /// A restart deletes the runners of the records it finds ended, whatever ended them.
     #[tokio::test]
     async fn startup_deletes_the_runners_of_ended_records() {
         let m = Mock::start().await;
@@ -2527,7 +2516,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&posts[3].1).unwrap(), json!({"ref": "main"}));
         assert_eq!(serde_json::from_str::<Value>(&posts[4].1).unwrap(), json!({"ref": "feat/x"}), "no variables, whatever was asked");
         assert_eq!(posts.len(), 5);
-        // No variables in v1: refused before anything is sent.
+        // Variables are refused before anything is sent.
         let inputs = HashMap::from([("A".to_string(), "1".to_string())]);
         assert!(g.dispatch(&repo(), None, "main", &inputs).await.unwrap_err().to_string().contains("variables"));
         assert_eq!(m.sent.lock().unwrap().iter().filter(|(c, _)| c.starts_with("POST")).count(), 5);
@@ -2543,7 +2532,7 @@ mod tests {
         assert!(g.workflows(&repo()).await.unwrap().is_empty());
     }
 
-    // ---- GL-7: the setup check, and caps that follow the token's scopes ----
+    // ---- the setup check, and caps that follow the token's scopes ----
 
     fn serve_check(m: &Mock, scopes: &[&str], role: u64) {
         m.ok("version", "version.json");

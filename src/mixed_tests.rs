@@ -1,11 +1,10 @@
-//! X-3: one kiln serving a GitHub, a GitLab and a Gitea repo at once, ticked against three mock forges.
+//! One kiln serving a GitHub, a GitLab and a Gitea repo at once, ticked against three mock forges.
 //!
 //! Deterministic by construction: every test has its own data dir, `vm_cpus` is 1 and memory 64 MB
 //! (so budgets fit a 3-thread host), no GitHub registration succeeds (no VM reaches QEMU), and
 //! anything that depends on how many VMs are alive mid-tick is either seeded (`seed-*` Busy VMs,
 //! which never exit) or counted from records that outlive their task. Tests wait on `app.kills`,
-//! never on a sleep. GitLab and Gitea launches are still off in some builds (`LAUNCH_READY`): their
-//! expectations follow the constant, so the file stays green when it flips.
+//! never on a sleep.
 
 use super::*;
 use crate::forge_test_mock::{Mock, fixture, fixture_in};
@@ -18,14 +17,6 @@ const GH_REPO: &str = "acme/demo";
 const GT_REPO: &str = "gitea:acme/demo";
 const GL_REPO: &str = "gl:acme/demo";
 const GL_JOBS: &str = "/api/v4/projects/1/jobs?scope%5B%5D=pending&scope%5B%5D=running&per_page=100&pagination=keyset";
-
-fn ready(k: forge::Kind) -> usize {
-    usize::from(match k {
-        forge::Kind::GitLab => forge::gitlab::LAUNCH_READY,
-        forge::Kind::Gitea => forge::gitea::LAUNCH_READY,
-        forge::Kind::GitHub => true,
-    })
-}
 
 struct Trio {
     app: Arc<App>,
@@ -219,8 +210,8 @@ async fn demand_is_counted_per_forge() {
     let q = t.tick().await.unwrap();
     let n = |repo: &str| q[repo].get(&1).copied().unwrap_or(0);
     assert_eq!(n(GH_REPO), 2);
-    assert_eq!(n(GT_REPO), 3 * ready(forge::Kind::Gitea));
-    assert_eq!(n(GL_REPO), ready(forge::Kind::GitLab));
+    assert_eq!(n(GT_REPO), 3);
+    assert_eq!(n(GL_REPO), 1);
     assert_eq!(q.len(), 3, "{q:?}");
     // Each forge was read through its own API only, and only read.
     assert!(calls(&t.gh).iter().all(|r| r.starts_with("GET /repos/")), "{:?}", calls(&t.gh));
@@ -255,7 +246,7 @@ async fn a_queued_fork_job_blocks_no_repo() {
         let p = t.app.poll.lock().unwrap();
         assert!(p.repo_errors.is_empty(), "{:?}", p.repo_errors);
         assert_eq!((p.refused_forks.len(), p.refused_forks[GT_REPO], p.refused_forks[GL_REPO]), (2, 1, 1), "{:?}", p.refused_forks);
-        // Gitea reports its queued fork (a banner only); GitLab refuses the MR job. Neither holds anything (R4 M-3).
+        // Gitea reports its queued fork (a banner only); GitLab refuses the MR job. Neither holds anything.
         assert_eq!(p.fork_queued, [GT_REPO]);
     }
     assert!(!killed(&gt_kill).await, "the idle Gitea VM is kept: the exec gate refuses a fork job on any VM");
@@ -630,19 +621,10 @@ async fn the_vms_forge_picks_the_guest_secret() {
     assert!(gh.starts_with("kiln.jit=") && !gh.contains('\n'), "{gh}");
     let gt = mint(GT_REPO).await.unwrap().guest_secret;
     assert!(gt.starts_with("kiln.forge=gitea\nkiln.cred="), "{gt}");
-    match mint(GL_REPO).await {
-        Ok(r) => {
-            assert_eq!(ready(forge::Kind::GitLab), 1);
-            assert!(
-                r.guest_secret.starts_with("kiln.forge=gitlab\nkiln.url=") && r.guest_secret.contains("\nkiln.cred="),
-                "{}",
-                r.guest_secret
-            );
-            // The GitLab guest gets the runner's own token, never kiln's personal access token.
-            assert!(!r.guest_secret.contains("gl-tok"));
-        }
-        Err(e) => assert_eq!((ready(forge::Kind::GitLab), e.to_string().as_str()), (0, forge::gitlab::LATER)),
-    }
+    let r = mint(GL_REPO).await.unwrap();
+    assert!(r.guest_secret.starts_with("kiln.forge=gitlab\nkiln.url=") && r.guest_secret.contains("\nkiln.cred="), "{}", r.guest_secret);
+    // The GitLab guest gets the runner's own token, never kiln's personal access token.
+    assert!(!r.guest_secret.contains("gl-tok"));
     assert!(!gt.contains("gt-tok"), "kiln's Gitea token never reaches the guest");
     // Each registration went to its own forge.
     assert!(t.gh.requests().iter().all(|r| r.contains("generate-jitconfig") || r.starts_with("GET ")), "{:?}", t.gh.requests());

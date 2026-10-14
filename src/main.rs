@@ -355,7 +355,7 @@ pub struct PollStatus {
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
-    /// Repos kiln starts no VMs for because a fork job is queued (Gitea runners take the oldest job).
+    /// Repos with a fork job queued (Gitea runners take the oldest job). Informational: launches go on.
     pub fork_queued: Vec<String>,
     /// Every launch blocker active this tick, (kind, message), in priority order.
     pub health: Vec<(String, String)>,
@@ -1081,7 +1081,7 @@ impl Cleanup {
 async fn scheduler(app: Arc<App>) {
     refresh_app(&app).await;
     // Runners a crashed kiln or a reboot left registered (offline) would otherwise linger for a day: those of the
-    // VMs it lost, a gated forge's ended VMs (never removed by the runner itself, R2b B-L2), then every repo's
+    // VMs it lost, a gated forge's ended VMs (never removed by the runner itself), then every repo's
     // orphans. Before the first tick, so nothing launched since is swept; retried while the network is not up.
     let mut cleanup = Cleanup::default();
     cleanup.step(&app).await;
@@ -1384,7 +1384,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             errors.push(format!("{repo}: {m}"));
             repo_errors.insert(repo.clone(), m);
         }
-        // Informational only (R4 M-3): a VM that is handed the fork job is refused by the exec gate and
+        // Informational only: a VM that is handed the fork job is refused by the exec gate and
         // killed, so a queued fork job can burn one VM but never stops the repo's launches.
         if fork_job {
             fork_queued.push(repo.clone());
@@ -1491,11 +1491,11 @@ fn attach_jobs(app: &App, repo: &str, runners: &HashMap<String, forge::JobInfo>)
         .lock()
         .unwrap()
         .iter_mut()
-        // A job listing speaks only for the repo it was read from: another repo's runner may carry any name (R4 M-4).
+        // A job listing speaks only for the repo it was read from: another repo's runner may carry any name.
         .filter(|v| v.repo.eq_ignore_ascii_case(repo))
         .filter_map(|v| {
             let job = runners.get(&v.id)?;
-            // A gated forge's job id comes from the console alone: it starts the verdict gate (R2 M-1).
+            // A gated forge's job id comes from the console alone: it starts the verdict gate.
             // The API only compares: a mismatch is a second job, but a lagging console must not be beaten to the id.
             let gated = vm::forge_for(app, &v.repo).is_ok_and(|(f, _)| f.gated());
             if v.job_id.as_deref().is_some_and(|id| id != job.id) {
@@ -1596,7 +1596,7 @@ mod tests {
         assert!(!vms[1].fork && vms[1].note.is_none());
     }
 
-    /// Another repo's job listing may name this VM's runner (VM ids are guessable): nothing happens to the VM (R4 M-4).
+    /// Another repo's job listing may name this VM's runner (VM ids are guessable): nothing happens to the VM.
     #[tokio::test]
     async fn another_repos_job_naming_this_vm_changes_nothing() {
         let app = test_app("attach-foreign");
@@ -1806,7 +1806,7 @@ mod tests {
         let count = |app: &App, repo: &str| app.vms.lock().unwrap().iter().filter(|v| v.repo == repo).count();
 
         tick(&app, &cfg).await.unwrap();
-        // The banner names the Gitea repo, but nothing is held (R4 M-3): the warm pool refills like any other repo's.
+        // The banner names the Gitea repo, but nothing is held: the warm pool refills like any other repo's.
         assert_eq!(app.poll.lock().unwrap().fork_queued, ["gitea:acme/demo"]);
         assert!(
             count(&app, "gitea:acme/demo") >= 2,
