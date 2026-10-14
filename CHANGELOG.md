@@ -39,6 +39,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Gitea launches are on. A Gitea repo served by kiln now gets runners and VMs (end-to-end tested against Gitea 28.1.0 with gitea-runner 5.0.0: plain and JavaScript-action jobs, `container:` and `services:`, tag, fork pull request (new and repeat contributor), `pull_request_target`, `workflow_run`, cache poisoning attempt, rerun, cancel, filtered egress, runner cleanup). Gitea needs 1.25 or newer; its `actions/cache` does not persist (the repo cache disk does). The Gitea preview notices are gone from the dashboard, README and docs.
 - A runner registration failure on a forge other than GitHub (Gitea: no answer or a 5xx) now backs off that forge's launches the same way GitHub's does, and recycling a Gitea runner after a security-settings change cancels the job it holds on Gitea 28+.
 - Guest recipe 6: the guest reads kiln's secrets (JIT config, debug SSH keys) through a new `secret()` helper, and the console and step-log devices are per architecture. On x86_64 delivery is still SMBIOS only and the QEMU command line is unchanged, but the recipe changed, so an image baked by an older kiln is rebaked before VMs launch (automatic with `auto_rebake`). arm64 guests get the secrets as fw_cfg files.
 - Settings › GitHub is now Settings › Forges: one card set per forge from `/api/forges`. The GitHub token and App cards are unchanged, the setup wizard's first step is "Connect a forge", and `#/settings/github` still opens the page.
@@ -49,6 +50,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- Gitea jobs ended as `failed` ("runner exited without a result") and never saved the cache even when they passed: the result now comes from Gitea's job API for the VM's own runner (found by the end-to-end test).
 - The Use GitLab guide, the Getting started guide and the GitLab help text no longer say GitLab is in preview (only Gitea is).
 
 - The dashboard refreshes its forge list with every state poll and retries after a failed load, so a restart or a newly installed App repo no longer leaves Rerun, Cancel and the forge links missing until a reload.

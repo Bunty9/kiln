@@ -14,7 +14,7 @@ kiln is a single Rust binary with an embedded dashboard. It polls GitHub (or Git
 
 - **x86_64 Linux with KVM** (`/dev/kvm`, user in the `kvm` group). Jobs run in Ubuntu 24.04 x86_64 guests only: no macOS, Windows or arm64 jobs.
 - **Tailscale.** The dashboard answers only your tailnet (and the box itself, with a key). kiln polls GitHub, so no inbound port or public IP is needed.
-- **GitHub Actions or GitLab CI.** kiln serves GitHub repos through a GitHub App or a token, and GitLab projects (gitlab.com or self-managed) through a bot account's token; see [GitLab](#gitlab). Gitea support is in preview (it does not run jobs yet); Forgejo is not supported.
+- **GitHub Actions, GitLab CI or Gitea Actions.** kiln serves GitHub repos through a GitHub App or a token, and GitLab projects (gitlab.com or self-managed) through a bot account's token; see [GitLab](#gitlab), and Gitea repos (1.25 or newer) through a service account's token; see [Gitea](#gitea). Forgejo is not supported.
 
 Full list: [Requirements](#requirements).
 
@@ -83,7 +83,16 @@ kiln serves GitLab projects on gitlab.com and on self-managed GitLab (16.0 or ne
 - **Setup:** a dedicated bot user as Maintainer on only the served projects, with a token that has `create_runner`, `manage_runner` and `read_api`. A Maintainer's `read_api` token can read the project's CI/CD variables, so read the [token power](SECURITY.md#gitlab) note first. Steps and every setting: [docs/configuration.md](docs/configuration.md#gitlab).
 - **Safety:** merge requests from forks, multi-project downstream pipelines and anything kiln cannot classify are refused before any job code runs; see [SECURITY.md](SECURITY.md#gitlab).
 
-Not yet covered: `docker:dind`, gitlab.com's own tier and rate-limit behaviour, and arm64 hosts. Gitea is in preview and runs no jobs yet.
+Not yet covered: `docker:dind`, gitlab.com's own tier and rate-limit behaviour, and arm64 hosts.
+
+## Gitea
+
+kiln serves Gitea repos on your own server: **1.25 or newer** (1.26.3 or newer recommended; end-to-end tested against Gitea 28.1.0 with `gitea-runner` 5.0.0, pinned in the image). One fresh VM per job, deleted afterwards.
+
+- **What works:** plain jobs, JavaScript actions such as `actions/checkout`, job-level `container:` and `services:` (Docker runs inside the VM), tags (run cold), rerun (1.26+) and cancel (28+) from the dashboard. A job asks for kiln with `runs-on: [kiln]` (or `kiln-4cpu` and the other sizes) in `.gitea/workflows` or `.github/workflows`.
+- **Cache:** the repo cache disk works as on GitHub with the same trust rule. Gitea's `actions/cache` does **not** persist between jobs (the runner's cache server lives on the VM's disk); rely on the cache disk.
+- **Setup:** a dedicated service account that is the repo's **Owner** (Gitea gives the runner registration token only to an Owner), with a token that has `write:repository` and `read:user`. That account can change or delete the repo, so read the [account power](SECURITY.md#gitea) note first. Steps: [docs/configuration.md](docs/configuration.md#gitea).
+- **Safety:** every Gitea job waits behind a root exec gate in the VM until kiln's host verdict; fork pull requests, `pull_request_target` from a fork and every `workflow_run` are refused before any job code runs; see [SECURITY.md](SECURITY.md#fork-pull-requests).
 
 ## Why
 

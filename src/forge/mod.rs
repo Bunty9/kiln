@@ -711,11 +711,12 @@ impl Forge {
             Self::Gitea(g) => g.cache_trust(job, writers).await,
         }
     }
-    /// GitLab only: the job's result from the API (see `GitLab::job_result`); None elsewhere.
+    /// GitLab and Gitea: the job's result from the API (see `GitLab::job_result`); None for GitHub.
     pub async fn job_result(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<Option<&'static str>> {
         match self {
             Self::GitLab(g) => g.job_result(repo, job_id, runner_id).await,
-            _ => Ok(None),
+            Self::Gitea(g) => g.job_result(repo, job_id, runner_id).await,
+            Self::GitHub(_) => Ok(None),
         }
     }
     pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
