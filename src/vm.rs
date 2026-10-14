@@ -105,6 +105,13 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
+impl Vm {
+    /// The verdict gate refused this VM's job on purpose (a fork pull request, a `workflow_run`, ...): kiln working as designed, not a failure.
+    pub fn refused(&self) -> bool {
+        self.verdict.as_ref().is_some_and(|(c, _)| c == "refuse") || self.note.as_deref().is_some_and(|n| n.starts_with("refused:"))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Vm {
     pub id: String,

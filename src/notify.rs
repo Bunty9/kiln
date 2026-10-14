@@ -961,8 +961,9 @@ pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
 /// Alert for a VM that just ended: `job.failed` for any non-success, `job.finished` for a
 /// success matching a rule. At most once per VM id.
 pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
-    // A fork PR job kiln refused itself is policy, not a failure.
-    if v.fork || v.note.as_deref().is_some_and(|n| n.starts_with("refused: pull request from a fork")) {
+    // A job the verdict gate refused (a fork pull request, a workflow_run, ...) is policy, not a failure: no alert.
+    // The Overview banner and the job page carry the reason.
+    if v.fork || v.refused() {
         return;
     }
     let Some(oc) = outcome(v) else { return };
@@ -1705,6 +1706,11 @@ mod tests {
         let noted =
             Vm { id: "kiln-9-3".into(), note: Some("refused: pull request from a fork".into()), ..vm_end(crate::vm::State::Killed, None) };
         job_ended(&app, &noted);
+        let gated = Vm { id: "kiln-9-5".into(), verdict: Some(("refuse".into(), "7".into())), ..vm_end(crate::vm::State::Killed, None) };
+        job_ended(&app, &gated);
+        let other =
+            Vm { id: "kiln-9-6".into(), note: Some("refused: unknown job source".into()), ..vm_end(crate::vm::State::Killed, None) };
+        job_ended(&app, &other);
         assert!(q.q.lock().unwrap().is_empty(), "kiln refused these jobs itself");
         job_ended(&app, &Vm { id: "kiln-9-4".into(), ..vm_end(crate::vm::State::Killed, None) });
         assert_eq!(q.q.lock().unwrap().len(), 1, "a plain kill still alerts");
