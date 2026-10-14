@@ -31,6 +31,7 @@ Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Ap
 
 ### Changed
 
+- **Overview: running VM cards burn at the edges while a job runs** (stops with reduced motion).
 - **macOS plist `ExitTimeOut` is 600** (was 30), matching the systemd unit's `TimeoutStopSec`, so launchd no longer SIGKILLs kiln inside the default 25 s stop grace plus cleanup. Docs now say plainly that on macOS QEMU runs without seccomp and Landlock.
 - The guest reads kiln's secrets (JIT config, runner credentials, debug SSH keys) through one helper: SMBIOS strings on x86_64 (command line unchanged), fw_cfg files on arm64. The console and step-log devices are per architecture.
 - **Docker starts on first use.** dockerd is no longer started at boot on any forge; `docker.socket` activates it on GitHub. There the job-started hook decides cold or warm before the first container step; GitLab and Gitea start it only after their verdict, and a cold run only after the cache disk is detached.
