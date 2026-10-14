@@ -1354,7 +1354,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         vm::recycle_warm(app, repo, cfg.warm_recycle_mins).await;
         vm::recycle_stale_policy(app, repo, &vm::policy_id(cfg)).await;
         // A parked cache save whose readers are gone (or that hit a lock last time).
-        vm::commit_pending(app, repo, "").await;
+        if let Some((vm::CacheUse::Discarded, Some(why))) = vm::commit_pending(app, repo, "").await {
+            tracing::warn!("{repo}: parked cache commit: {why}");
+        }
+        vm::check_parked(app, repo);
         // Sizes with demand, plus sizes with waiting VMs (which may now be surplus).
         let mut sizes: Vec<u32> = by_size.keys().copied().collect();
         if cfg.warm_target(repo, cfg.vm_cpus) > 0 {

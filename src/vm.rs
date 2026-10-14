@@ -3178,6 +3178,183 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
     }
 
+    /// A `qemu-img` that logs its argv and answers per the files next to it: `mode` (ok | fail | lock) for any command,
+    /// `info.json` for `info`. No process-global state, so tests run side by side.
+    fn fake_qemu(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("qemu-img");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nd=$(dirname \"$0\"); echo \"$@\" >> \"$d/argv\"\n[ \"$1\" = info ] && { cat \"$d/info.json\"; exit 0; }\n\
+             case $(cat \"$d/mode\" 2>/dev/null) in\n fail) echo 'Could not write to the backing file' >&2; exit 1;;\n \
+             lock) echo 'qemu-img: Failed to get \"write\" lock' >&2; exit 1;;\nesac\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("mode"), "ok").unwrap();
+        bin
+    }
+
+    /// An app whose `qemu-img` is the fake, serving acme/demo; returns the fake's directory.
+    fn cache_app(name: &str) -> (Arc<App>, PathBuf) {
+        let d = std::env::temp_dir().join(format!("kiln-test-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let cfg = crate::Config { repos: vec!["acme/demo".into()], cache_gb: 1, ..crate::Config::default() };
+        let mut app = App::for_tests();
+        let a = Arc::get_mut(&mut app).unwrap();
+        a.qemu_img = fake_qemu(&d);
+        *a.cfg.write().unwrap() = cfg;
+        std::fs::create_dir_all(app.data.join("cache")).unwrap();
+        (app, d)
+    }
+
+    fn mode(d: &Path, m: &str) {
+        std::fs::write(d.join("mode"), m).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_pending_commits_resets_or_keeps_parked() {
+        let (app, d) = cache_app("commit");
+        let (pending, backing) = (pending_file(&app.data, "acme/demo"), cache_file(&app.data, "acme/demo"));
+        let park = || {
+            std::fs::write(&pending, "overlay").unwrap();
+            std::fs::write(&backing, "cache").unwrap();
+        };
+        let committing = || app.committing.lock().unwrap().len();
+        // 1. success
+        park();
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, Some((CacheUse::Committed, None)));
+        assert!(!pending.exists() && backing.exists() && committing() == 0);
+        assert!(std::fs::read_to_string(d.join("argv")).unwrap().contains(&format!("commit -q {}", pending.display())));
+        // 2. a failed commit resets the cache and surfaces it
+        park();
+        mode(&d, "fail");
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!(c, CacheUse::Discarded);
+        assert!(n.unwrap().starts_with("cache commit failed, cache reset: "));
+        assert!(!pending.exists() && !backing.exists() && committing() == 0);
+        assert!(app.notices.lock().unwrap().values().any(|(k, m)| *k == "cache" && m.contains("cache commit failed for acme/demo")));
+        // 3. a lock refusal keeps the overlay parked, and a later commit works (and clears the notice)
+        park();
+        mode(&d, "lock");
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!((c, n.as_deref()), (CacheUse::Committed, Some("cache queued: still in use, saving shortly")));
+        assert!(pending.exists() && backing.exists() && committing() == 0);
+        mode(&d, "ok");
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, Some((CacheUse::Committed, None)));
+        assert!(app.notices.lock().unwrap().is_empty());
+        // 4. a reader of the same repo (any case) holds the commit back; its own id does not
+        park();
+        app.vms.lock().unwrap().push(Vm { repo: "ACME/Demo".into(), cache: CacheUse::Read, ..vm("rd", State::Busy, None) });
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, None);
+        assert!(pending.exists());
+        assert_eq!(commit_pending(&app, "acme/demo", "rd").await, Some((CacheUse::Committed, None)));
+        // 5. while a commit runs (the key is held): nothing else starts, attaches or clears
+        park();
+        app.committing.lock().unwrap().insert("acme/demo".into());
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, None);
+        app.vms.lock().unwrap().push(vm("late", State::Booting, None));
+        assert_eq!(setup_cache(&app, "late", "acme/demo", &d.join("late"), 1).await, None);
+        assert!(app.vms.lock().unwrap().iter().find(|v| v.id == "late").unwrap().cache_note.as_deref().unwrap().starts_with("cache busy"));
+        assert!(clear_cache(&app, "acme/demo").is_err());
+        app.committing.lock().unwrap().clear();
+        // 7. repo `x` and repo `x.pending` never share a parked file
+        assert_ne!(pending_file(&app.data, "acme/x"), pending_file(&app.data, "acme/x.pending"));
+        assert_ne!(pending_file(&app.data, "acme/x.pending"), cache_file(&app.data, "acme/x.pending"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 6. A cache that grew past 1.2x its size is reset after a good commit.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cache_that_grew_too_big_is_reset_after_the_commit() {
+        let (app, d) = cache_app("grew");
+        let (pending, backing) = (pending_file(&app.data, "acme/demo"), cache_file(&app.data, "acme/demo"));
+        std::fs::write(&pending, "overlay").unwrap();
+        let f = std::fs::File::create(&backing).unwrap();
+        let len = (1.3 * (1u64 << 30) as f64) as i64;
+        assert_eq!(unsafe { libc::posix_fallocate(std::os::unix::io::AsRawFd::as_raw_fd(&f), 0, len) }, 0);
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!(c, CacheUse::Committed);
+        assert!(n.unwrap().contains("grew past"));
+        assert!(!backing.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A trusted job ends `Committed` through the real header check; the same job under a cold verdict leaves no file.
+    #[tokio::test]
+    async fn finish_cache_commits_through_the_header_check_on_a_gated_forge() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let (gh, gl) = (Mock::github().await, Mock::start().await);
+        let (mut app, d) = cache_app("gated-commit");
+        let _ = &gh;
+        let a = Arc::get_mut(&mut app).unwrap();
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        let g = crate::forge::gitlab::GitLab::for_mock(&cfg, &a.data, &gl.base, "tok");
+        a.forges.insert(cfg, Forge::GitLab(Box::new(g)));
+        gl.route("GET", "/api/v4/projects/acme%2Fdemo", 200, crate::forge_test_mock::fixture_in("gitlab", "project.json"));
+        gl.route("GET", "/api/v4/projects/1/repository/branches/ci", 200, crate::forge_test_mock::fixture_in("gitlab", "branch_ci.json"));
+        let mut job = (1..=4)
+            .flat_map(|n| {
+                serde_json::from_str::<Vec<serde_json::Value>>(&crate::forge_test_mock::fixture_in("gitlab", &format!("jobs_p{n}.json")))
+                    .unwrap()
+            })
+            .find(|j| j["id"] == 215)
+            .unwrap();
+        job["id"] = 42.into();
+        job["status"] = "success".into();
+        job["ref"] = "main".into();
+        job["tag"] = false.into();
+        job["pipeline"]["source"] = "push".into();
+        gl.route("GET", "/api/v4/projects/1/repository/branches/main", 200, crate::forge_test_mock::fixture_in("gitlab", "branch_ci.json"));
+        gl.route("GET", "/api/v4/projects/1/jobs/42", 200, job.to_string());
+        let backing = cache_file(&app.data, "gl:acme/demo");
+        std::fs::create_dir_all(backing.parent().unwrap()).unwrap();
+        std::fs::write(
+            d.join("info.json"),
+            serde_json::json!({"format": "qcow2", "format-specific": {"type": "qcow2", "data": {"corrupt": false}},
+            "backing-filename": backing.to_str(), "backing-filename-format": "qcow2"})
+            .to_string(),
+        )
+        .unwrap();
+        let ran = |id: &str, verdict: &str, jid: &str| {
+            let dir = app.data.join("vms").join(id);
+            std::fs::create_dir_all(qemu_dir(&dir)).unwrap();
+            std::fs::write(qemu_dir(&dir).join("cache.qcow2"), "overlay").unwrap();
+            app.vms.lock().unwrap().push(Vm {
+                repo: "gl:acme/demo".into(),
+                job: Some("build".into()),
+                result: Some("Succeeded".into()),
+                job_id: Some("42".into()),
+                verdict: Some((verdict.into(), jid.into())),
+                starts: 1,
+                cache: CacheUse::Read,
+                ..vm(id, State::Done, None)
+            });
+            dir
+        };
+        for (id, verdict, jid, want) in [
+            ("ok", "ok", "42", CacheUse::Committed),
+            ("cold", "cold", "42", CacheUse::Discarded),
+            ("other", "ok", "41", CacheUse::Discarded),
+        ] {
+            let dir = ran(id, verdict, jid);
+            finish_cache(&app, id, "gl:acme/demo", &dir, true).await;
+            let v = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap();
+            assert_eq!(v.cache, want, "{id}: {:?}", v.cache_note);
+            assert!(!qemu_dir(&dir).join("cache.qcow2").exists(), "{id}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_failed_token_scrub_discards_the_overlay_on_the_host() {
         let mut v = Vm { cache: CacheUse::Read, ..vm("kiln-5-0", State::Busy, None) };
