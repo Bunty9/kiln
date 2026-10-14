@@ -2011,7 +2011,8 @@ mod tests {
         for p in ["runs/2001/rerun", "runs/2001/rerun-failed-jobs", "runs/2001/cancel", "workflows/ci.yml/dispatches"] {
             m.route("POST", &format!("{r}/{p}"), 204, "");
         }
-        let cfg = Config { repos: vec!["acme/demo".into()], ..Config::default() };
+        // vm_cpus must fit the host: a hosted Mac runner has 3 threads.
+        let cfg = Config { repos: vec!["acme/demo".into()], vm_cpus: crate::host_threads().min(4), ..Config::default() };
         let app = mock_app(name, &m, cfg);
         (m, app)
     }

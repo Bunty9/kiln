@@ -1812,7 +1812,8 @@ mod tests {
         serve_one_page(&m, vec![job(1, |_| {})]).await;
         let g = gl("off", &m);
         assert_eq!(sizes(&g.demand_for(&repo(), "kiln", 4, 16).await.unwrap()), [(4, 1)], "the queue is read");
-        assert_eq!(sizes(&g.demand(&repo(), "kiln", 4).await.unwrap()), [(4, 1)], "and it is launchable");
+        let n = crate::host_threads().min(4); // a 3-thread host cannot launch a 4-cpu job
+        assert_eq!(sizes(&g.demand(&repo(), "kiln", n).await.unwrap()), [(n, 1)], "and it is launchable");
     }
 
     fn mint_error(e: &anyhow::Error) -> &MintError {
