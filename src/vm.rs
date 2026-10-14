@@ -1659,7 +1659,7 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
             let reset = reset_cache(app, repo, &backing).await;
             tracing::warn!("{repo}: cache commit failed, cache reset: {e:#}");
             // Surfaced until the next commit works.
-            app.notice(&notice, "cache", format!("cache commit failed for {repo}: {e:#}{reset}"));
+            app.notice(&notice, "cache", format!("cache commit failed for {repo} (details in the VM's cache note and kiln's log)"));
             (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}{reset}")))
         }
         Ok(()) if cache_too_big(big, cfg.cache_gb_for(repo)) => {

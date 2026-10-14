@@ -823,6 +823,23 @@ fn reraise(app: &crate::App, id: &str) {
     q.wake.notify_one();
 }
 
+/// The reason a destination is told for a fail-closed refusal: one of a fixed set of phrases, never the forge's or the
+/// network's own error text (a URL, an internal host name, a response body). The VM's note keeps the detail for the owner.
+fn fixed_reason(note: &str) -> String {
+    let n = note.trim();
+    if n.starts_with("API error") {
+        "API error".into()
+    } else if n.starts_with("pause failed") {
+        "pause failed".into()
+    } else if n == "verdict timed out" || n == "console job id is not numeric" {
+        n.into()
+    } else if n.starts_with("runner holds ") && n.ends_with("job(s), not only the one it started") {
+        "runner holds more than the job it started".into()
+    } else {
+        "failed closed".into()
+    }
+}
+
 /// Deliver one event with the retry schedule, recording the outcome.
 async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     let waits = [5u64, 30, 120];
@@ -1073,7 +1090,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
         url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
-        reason: refusal.then(|| clean(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
+        reason: refusal.then(|| fixed_reason(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
         class: refusal.then_some("failure"),
         vm_id: v.id.clone(),
     };
@@ -1780,10 +1797,19 @@ mod tests {
         // Every reason kiln fails closed on alerts once, as job.refused with the reason.
         let reasons = [
             "verdict timed out",
-            "API error: 500",
-            "pause failed: 500",
+            "API error: GET https://git.corp.example:8443/api/v4/projects/9?private_token=glpat-SECRET: 500 {\"body\":1}",
+            "pause failed: connection refused to 10.1.2.3:443",
             "runner holds 2 job(s), not only the one it started",
             "console job id is not numeric",
+            "something new with https://internal.example/x",
+        ];
+        let wants = [
+            "verdict timed out",
+            "API error",
+            "pause failed",
+            "runner holds more than the job it started",
+            "console job id is not numeric",
+            "failed closed",
         ];
         for (i, why) in reasons.iter().enumerate() {
             let v = Vm {
@@ -1797,11 +1823,15 @@ mod tests {
         }
         let got: Vec<_> = q.q.lock().unwrap().iter().skip(1).cloned().collect();
         assert_eq!(got.len(), reasons.len());
-        for (e, why) in got.iter().zip(reasons) {
+        for (e, want) in got.iter().zip(wants) {
             assert_eq!(e.ty, "job.refused");
             assert!(matches!(e.class, Class::Job));
             let Detail::Job(j) = &e.detail else { panic!() };
-            assert_eq!((j.outcome.as_str(), j.class, j.reason.as_deref()), ("refused", Some("failure"), Some(clean(why).as_str())));
+            assert_eq!(
+                (j.outcome.as_str(), j.class, j.reason.as_deref()),
+                ("refused", Some("failure"), Some(want)),
+                "no raw error text reaches a destination"
+            );
         }
         let j = serde_json::to_value(match &got[0].detail {
             Detail::Job(j) => j,

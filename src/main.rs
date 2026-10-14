@@ -1022,7 +1022,9 @@ async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections:
 /// A cleanup step that failed `fails + 1` rounds in a row, outside the boot grace, is a health item (cleared when it works).
 fn note_cleanup_failure(app: &App, key: &str, what: &str, fails: u32, why: &str, starting: bool) {
     if fails >= 2 && !starting {
-        app.notice(key, "cleanup", format!("{what} keeps failing ({} attempts): {why}", fails + 1));
+        // The cause stays in kiln's log: a health item goes to webhook destinations, and forge errors carry URLs.
+        tracing::warn!("{what}: {why}");
+        app.notice(key, "cleanup", format!("{what} keeps failing ({} attempts); see kiln's log", fails + 1));
     }
 }
 
@@ -1562,7 +1564,10 @@ mod tests {
         note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 2, "403", false);
         let kinds = notice_kinds(&app.notices.lock().unwrap());
         assert_eq!(kinds.len(), 1);
-        assert!(kinds[0].0 == "cleanup" && kinds[0].1.contains("keeps failing (3 attempts): 403"), "{kinds:?}");
+        assert!(
+            kinds[0].0 == "cleanup" && kinds[0].1.contains("keeps failing (3 attempts); see") && !kinds[0].1.contains("403"),
+            "{kinds:?}"
+        );
     }
 
     use super::*;
