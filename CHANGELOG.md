@@ -46,6 +46,7 @@ Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Ap
 - Notification job links are checked against the forge origins when a message is built. Branch links no longer accept `.` or `..` segments.
 - `kiln doctor` no longer reports "not enough for all slots at once" whenever every slot is busy: it counted the memory held by kiln's own running VMs twice.
 - Filtered egress no longer stays "unavailable" after kiln starts before the network is up: a failing probe is retried after 5 s, doubling up to every 2 minutes, and a save that changes `egress`, `listen` or `docker_mirror` while filtered re-probes at once. `deploy/kiln.service` drops `After=network-online.target`, which a user unit cannot order against (#44).
+- On a phone, swiping right to left between the bottom tabs no longer makes the tab bar jump or the page scroll glitch. The slide-in moved the whole page 32px past the right edge for a moment, which widened the page; it now moves only the page's content, which stays clipped.
 
 ### Security
 
