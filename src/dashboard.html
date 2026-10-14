@@ -42,6 +42,7 @@
  /* surfaces, low to high: page, card, raised (buttons, menus), overlay; sunk = wells (code, logs) */
  --bg:#0A0A0A;--s1:#171717;--s2:#202020;--s3:#242424;--sunk:#000;
  /* per-VM series, fixed order (validated for CVD on #171717): identity only, never state */
+ --g1:#4da3e0;--g2:#f08a3c;--g3:#2fc49a;--g4:#e8c23a;--g5:#a98be0;--g6:#e57db0;
  --v1:#3987e5;--v2:#d95926;--v3:#199e70;--v4:#c98500;--v5:#d55181;--v6:#008300;--v7:#9085e9;--v8:#e66767;
  --surface:var(--s1);--raised:var(--s2);--muted:#262626;--field:rgb(255 255 255/.035);--seg-on:#0A0A0A;
  --line:rgb(255 255 255/.18);--line-strong:rgb(255 255 255/.36);
@@ -69,6 +70,7 @@
 }
 :root[data-scheme=light]{color-scheme:light;
  --bg:#F5F5F5;--s1:#FFF;--s2:#FFF;--s3:#FAFAFA;--sunk:#EBEBEB;--muted:#EBEBEB;--field:#FFF;--seg-on:#FFF;
+ --g1:#0072b2;--g2:#d55e00;--g3:#00805f;--g4:#9c7a00;--g5:#7f4fb5;--g6:#b83b80;
  --v1:#2a78d6;--v2:#eb6834;--v3:#1baf7a;--v4:#eda100;--v5:#e87ba4;--v6:#008300;--v7:#4a3aa7;--v8:#e34948;
  --line:rgb(0 0 0/.21);--line-strong:rgb(0 0 0/.45);
  --hover:rgb(0 0 0/.04);--active:rgb(0 0 0/.07);
@@ -1266,7 +1268,9 @@ function meter(l, val, max, txt, t) {
 // the chart interpolates, never guesses, and scrolls every frame instead of jumping per sample.
 const LAG = 4500, HV = { open: lsGet('kiln-hostx') === '1', win: +lsGet('kiln-hostwin') || 300, buf: [], base: -Infinity, shown: null, raf: 0, hover: null, tipKey: '' };
 const still = () => { const m = document.documentElement.dataset.motion; return m === 'reduce' || (m !== 'full' && matchMedia('(prefers-reduced-motion: reduce)').matches); };
-const vcol = k => `var(--v${k + 1})`;
+// Six colours rotate over the per-VM sequence number the sampler gives each new VM.
+const gcol = k => `var(--g${k % 6 + 1})`;
+const vcol = gcol;
 const vmName = id => { const v = S.vms.find(x => x.id === id); return v ? `${v.repo.split('/').pop()} / ${jt(v)}` : id; };
 const fmtC = c => c.toFixed(1) + ' cores', fmtM = mb => (mb / 1024).toFixed(1) + ' GB';
 const winTxt = w => w < 3600 ? w / 60 + 'm' : '1h';
@@ -1288,10 +1292,29 @@ async function hvLoad() {
   hvKick();
 }
 function hvKick() { if (HV.open && !HV.raf) HV.raf = requestAnimationFrame(hvDraw); }
-// Stack layers of one sample, bottom to top: VMs by colour slot, then the rest of the host.
+// Stack layers of one sample, bottom to top: VMs by sequence number, then the rest of the host.
 function layers(s, key) {
   const i = key === 'cpu' ? 2 : 3, out = s.vms.map(v => ({ k: v[0], id: v[1], v: v[i] }));
   out.push({ k: 'h', id: 'h', v: Math.max(0, s[key] - out.reduce((a, l) => a + l.v, 0)) });
+  return out;
+}
+// Stacked columns {t, L: [{id, k, lo, hi}]} for samples `vis`. A VM exists only in the columns
+// of samples that list it: where the set of VMs changes, an extra column steps the other
+// layers at the VM's last (or first) sample, so its band ends (or starts) with a vertical edge
+// and is never carried to the next sample.
+function hvCols(vis, key) {
+  const col = (s, t, only) => { let acc = 0; return { t, L: layers(s, key).filter(l => l.k === 'h' || !only || only.has(l.id)).map(l => ({ id: l.id, k: l.k, lo: acc, hi: acc += l.v })) }; };
+  const out = [];
+  vis.forEach((s, i) => {
+    const p = vis[i - 1];
+    if (p) {
+      const a = new Set(p.vms.map(v => v[1])), b = new Set(s.vms.map(v => v[1])), com = new Set([...a].filter(x => b.has(x)));
+      const ended = a.size > com.size, started = b.size > com.size;
+      if (ended && !started) out.push(col(s, p.t, com));
+      else if (started && !ended) out.push(col(p, s.t, com));
+    }
+    out.push(col(s, s.t));
+  });
   return out;
 }
 function chart(id, key, max, tR, cs) {
@@ -1308,23 +1331,31 @@ function chart(id, key, max, tR, cs) {
   let a = HV.buf.findIndex(s => s.t >= t0); if (a < 0) return; a = Math.max(0, a - 1);
   let b = HV.buf.findIndex(s => s.t > tR); b = b < 0 ? HV.buf.length : b + 1;
   const vis = HV.buf.slice(a, b); if (vis.length < 2) return;
-  const keys = [...new Set(vis.flatMap(s => s.vms.map(v => v[0])))].sort((x, y) => x - y).concat('h');
-  const stacks = vis.map(s => { const m = new Map(layers(s, key).map(l => [l.k, l.v])); let acc = 0; return keys.map(k => [acc, acc += m.get(k) || 0]); });
-  const xs = vis.map(s => X(s.t));
-  keys.forEach((k, j) => {
-    const c = k === 'h' ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--v${k + 1}`);
-    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
-    for (let i = xs.length - 1; i >= 0; i--) g.lineTo(xs[i], Y(stacks[i][j][0]));
-    g.closePath(); g.fillStyle = c; g.globalAlpha = k === 'h' ? .18 : .32; g.fill();
-    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
-    g.strokeStyle = c; g.globalAlpha = k === 'h' ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
-  });
+  const cols = hvCols(vis, key), xs = cols.map(c => X(c.t));
+  const ids = [...new Set(cols.flatMap(c => c.L.map(l => l.id)))];
+  for (const vid of ids) {
+    // A band is one run of consecutive columns that list this VM.
+    let run = [];
+    const flush = () => {
+      if (run.length) {
+        const k = run[0][1].k, host = k === 'h', c = host ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--g${k % 6 + 1}`);
+        g.beginPath(); run.forEach(([x, l]) => g.lineTo(x, Y(l.hi)));
+        for (let i = run.length - 1; i >= 0; i--) g.lineTo(run[i][0], Y(run[i][1].lo));
+        g.closePath(); g.fillStyle = c; g.globalAlpha = host ? .18 : .32; g.fill();
+        g.beginPath(); run.forEach(([x, l]) => g.lineTo(x, Y(l.hi)));
+        g.strokeStyle = c; g.globalAlpha = host ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
+      }
+      run = [];
+    };
+    cols.forEach((c, i) => { const l = c.L.find(l => l.id === vid); if (l) run.push([xs[i], l]); else flush(); });
+    flush();
+  }
   const h = HV.hover; if (!h || h.id !== id) return;
   // Only samples on screen: vis also holds one past each edge, for the interpolation.
   const t = t0 + h.x / r.width * win; let n = -1;
   vis.forEach((s, i) => { if (s.t >= t0 && s.t <= tR && (n < 0 || Math.abs(s.t - t) < Math.abs(vis[n].t - t))) n = i; });
   if (n < 0) return hvTip(null);
-  const x = Math.round(xs[n]) + .5;
+  const x = Math.round(X(vis[n].t)) + .5;
   g.strokeStyle = cs.getPropertyValue('--fg-2'); g.lineWidth = dpr; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
   hvTip(vis[n], key, r.left + x / dpr, r.top);
 }
@@ -1369,6 +1400,14 @@ function stackBar(el, parts) {
   }
   parts.forEach((p, i) => { el.children[i].style.width = Math.min(100, p.w).toFixed(2) + '%'; });
 }
+// Legend rows: every VM seen in the window (newest first) with its values now, if still running, then the host.
+function hvLegend(last) {
+  const t0 = last.t - HV.win * 1000, seen = new Map();
+  for (const s of HV.buf) if (s.t >= t0) for (const v of s.vms) seen.set(v[1], v[0]);
+  const now = Object.fromEntries(layers(last, 'cpu').map((l, i) => [l.id, [l.v, layers(last, 'mem')[i].v]]));
+  const rows = [...seen].reverse().map(([id, k]) => ({ k, id, cpu: now[id]?.[0], mem: now[id]?.[1] }));
+  return [...rows, { k: 'h', id: 'h', cpu: now.h[0], mem: now.h[1] }];
+}
 function hostCard() {
   const h = S.host, s = h.samples?.at(-1), used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
   if (hvMerge(h.samples) && HV.open) hvLoad();
@@ -1383,7 +1422,7 @@ function hostCard() {
   m('hm-mem', mem, h.mem_total_mb, `${fmtM(mem)} / ${fmtM(h.mem_total_mb)}`, s ? layers(s, 'mem').map(x => ({ k: x.k, w: x.v / h.mem_total_mb * 100 })) : [{ k: 'h', w: used / h.mem_total_mb * 100 }],
     "Host memory in use, coloured by job VM (its QEMU's resident memory); grey is the rest. kiln holds back launches when there isn't enough left for another VM.");
   $('#hm-disk [data-v]').textContent = h.disk_free_gb + ' GB';
-  setHTML($('#hlg'), s ? layers(s, 'cpu').map((x, i) => `<li><span class="k" style="--c:${x.k === 'h' ? 'var(--fg-3)' : vcol(x.k)}"></span><span class="n">${esc(x.k === 'h' ? 'Host, not VMs' : vmName(x.id))}</span><b>${x.v.toFixed(1)}</b><span class="fg2">· ${fmtM(layers(s, 'mem')[i].v)}</span></li>`).reverse().join('') : '<li class="fg2">Collecting samples…</li>');
+  setHTML($('#hlg'), s ? hvLegend(s).map(x => `<li><span class="k" style="--c:${x.k === 'h' ? 'var(--fg-3)' : vcol(x.k)}"></span><span class="n">${esc(x.k === 'h' ? 'Host, not VMs' : vmName(x.id))}</span>${x.cpu == null ? '<span class="fg2">ended</span>' : `<b>${x.cpu.toFixed(1)}</b><span class="fg2">· ${fmtM(x.mem)}</span>`}</li>`).join('') : '<li class="fg2">Collecting samples…</li>');
   if (still()) hvKick();
 }
 const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="${HV.open}" aria-controls="hx">Host${ic('next')}</button></h2>
@@ -2223,7 +2262,7 @@ function bars(cols, ser, fmt, label, k) {
 }
 // One colour per VM size on every chart: by its place among all sizes kiln has seen.
 const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
-const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', vcol(all.indexOf(c) % 8)]); };
+const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', `var(--v${all.indexOf(c) % 8 + 1})`]); };
 function anHTML() {
   const B = anBuckets(AN.r), t0 = B[0][0], st = (l, v, t, x = '') => `<div class="stat"${kt(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
   const jobs = S.vms.filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
@@ -2746,7 +2785,7 @@ const ACT = {
   },
   hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
   hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
-    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
+    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hostCard(); hvKick(); },
   async mkapp() {
     const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;

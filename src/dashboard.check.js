@@ -242,3 +242,24 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
   assert.equal(K.tipKey('overview', {}, { seg: [] }), null, 'a dismissed tip is not shown again');
 }
 console.log('dashboard analytics ok');
+
+// Host graphs: a VM's band exists only in the columns of samples that list it, and the
+// per-VM sequence number the sampler hands out rotates six colours over consecutive VMs.
+{
+  const { hvCols, gcol } = new Function(['layers', 'hvCols', 'gcol'].map(grab).join('\n') + '\nreturn { hvCols, gcol };')();
+  const smp = (t, ...vms) => ({ t, cpu: 4, mem: 9000, vms: vms.map(([k, id]) => [k, id, 1, 2000]) });
+  // vm-a (seq 0) ends after t=4000; vm-b (seq 1) starts at t=8000; one slot throughout.
+  const S = [smp(0, [0, 'a']), smp(2000, [0, 'a']), smp(4000, [0, 'a']), smp(6000), smp(8000, [1, 'b']), smp(10000, [1, 'b'])];
+  const cols = hvCols(S, 'mem'), has = id => cols.filter(c => c.L.some(l => l.id === id)).map(c => c.t);
+  assert.deepEqual(has('a'), [0, 2000, 4000], 'a ended VM has no columns after its last sample');
+  assert.deepEqual(has('b'), [8000, 10000], 'a new VM has no columns before its first sample');
+  assert(cols.every(c => c.L.at(-1).id === 'h'), 'host sits on top');
+  const top = id => cols.filter(c => c.L.some(l => l.id === id)).map(c => c.L.find(l => l.id === id).hi);
+  assert(top('a').every(v => v === 2000), 'values are the samples, not carried forward');
+  // Two VMs ending together and one starting in the same tick: no step columns, bands still bounded.
+  const c2 = hvCols([smp(0, [0, 'a']), smp(2000, [1, 'b'])], 'cpu');
+  assert.equal(c2.length, 2); assert.deepEqual(c2.map(c => c.L.map(l => l.id)), [['a', 'h'], ['b', 'h']]);
+  const cs = [0, 1, 2, 3, 4, 5, 6, 7].map(gcol);
+  assert.equal(new Set(cs.slice(0, 6)).size, 6, 'six distinct colours'); assert.equal(cs[6], cs[0]);
+  assert.notEqual(gcol(0), gcol(1), 'consecutive VMs differ even on a 2-slot box');
+}
