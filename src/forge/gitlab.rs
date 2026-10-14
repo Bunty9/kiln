@@ -745,7 +745,7 @@ impl GitLab {
                 }
             }
         };
-        let (mut by_size, mut claimed, mut refused_forks) = (HashMap::new(), HashMap::new(), 0);
+        let (mut by_size, mut claimed, mut refused_forks, mut lookup_error) = (HashMap::new(), HashMap::new(), 0, None);
         let prefix = format!("{}-", self.install);
         // arm64 hosts tag their runners `<label>-arm64[-Ncpu]`, so x64 jobs never match them.
         let label = &super::arch_label(label, crate::platform::host_arm64());
@@ -754,10 +754,14 @@ impl GitLab {
                 Some("pending") => {
                     let tags: Vec<&str> = j["tag_list"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                     let Some(n) = job_size(&tags, label, default_cpus).filter(|&n| n <= host) else { continue };
-                    if self.origin(pid, j).await.0 {
-                        refused_forks += 1;
-                    } else {
-                        *by_size.entry(n).or_default() += 1;
+                    match self.origin_cached(pid, j).await {
+                        Ok((true, _)) => refused_forks += 1,
+                        Ok(_) => *by_size.entry(n).or_default() += 1,
+                        // Fail closed (no VM for it), but not "a fork": the repo shows the API error.
+                        Err(e) => {
+                            tracing::warn!("GitLab {}: job {}: {e:#}", self.id.as_str(), j["id"]);
+                            lookup_error.get_or_insert_with(|| format!("could not check where job {} comes from: {e:#}", j["id"]));
+                        }
                     }
                 }
                 // A runner kiln deleted leaves `runner: null`; GL-3 counts those from its own record.
@@ -769,32 +773,36 @@ impl GitLab {
                 _ => {}
             }
         }
-        Ok(Demand { by_size, claimed, refused_forks, ..Default::default() })
+        Ok(Demand { by_size, claimed, refused_forks, lookup_error, ..Default::default() })
     }
 
     /// Whether the job's code came from a fork (true on any doubt), and the MR's source branch
     /// for display. Cached per (project, pipeline, ref); a failed lookup counts as a fork now
     /// and is asked again next tick.
     async fn origin(&self, pid: u64, j: &Value) -> Origin {
-        let key = (pid, j["pipeline"]["id"].as_u64().unwrap_or(0), j["ref"].as_str().unwrap_or("").to_string());
-        if let Some(o) = self.origins.lock().unwrap().get(&key) {
-            return o.clone();
-        }
-        match self.origin_lookup(pid, j).await {
-            Ok(o) => {
-                let mut c = self.origins.lock().unwrap();
-                // ponytail: wholesale reset keeps this bounded; an LRU if refetching ever shows in the rate limit.
-                if c.len() >= 4096 {
-                    c.clear();
-                }
-                c.insert(key, o.clone());
-                o
-            }
+        match self.origin_cached(pid, j).await {
+            Ok(o) => o,
             Err(e) => {
                 tracing::warn!("GitLab {}: treating job {} as a fork: {e:#}", self.id.as_str(), j["id"]);
                 (true, None)
             }
         }
+    }
+
+    /// `origin_lookup`, remembered per (project, pipeline, ref); an error is not remembered.
+    async fn origin_cached(&self, pid: u64, j: &Value) -> Result<Origin> {
+        let key = (pid, j["pipeline"]["id"].as_u64().unwrap_or(0), j["ref"].as_str().unwrap_or("").to_string());
+        if let Some(o) = self.origins.lock().unwrap().get(&key) {
+            return Ok(o.clone());
+        }
+        let o = self.origin_lookup(pid, j).await?;
+        let mut c = self.origins.lock().unwrap();
+        // ponytail: wholesale reset keeps this bounded; an LRU if refetching ever shows in the rate limit.
+        if c.len() >= 4096 {
+            c.clear();
+        }
+        c.insert(key, o.clone());
+        Ok(o)
     }
 
     async fn origin_lookup(&self, pid: u64, j: &Value) -> Result<Origin> {
@@ -805,7 +813,8 @@ impl GitLab {
         // checks apply), and a child on a branch ref is this project's own branch pipeline. It is never a
         // cache writer (`cache_trust` only lets source `push` write). Residual: a child of a downstream
         // pipeline looks like a child on a branch.
-        let source = j["pipeline"]["source"].as_str().context("no pipeline source")?;
+        // Missing or odd data is a fork (refused); only an API error is a failed lookup.
+        let source = j["pipeline"]["source"].as_str().unwrap_or("");
         if j["pipeline"]["id"].as_u64().is_none() || !SOURCES.contains(&source) {
             return Ok((true, None));
         }
@@ -1578,12 +1587,19 @@ mod tests {
         serve_one_page(&m, jobs).await;
         let g = gl("forks", &m);
         let d = g.demand_for(&repo(), "kiln", 4, 16).await.unwrap();
-        let (forks, ours) = (want.iter().filter(|&&f| f).count(), want.iter().filter(|&&f| !f).count());
+        let failed = |name: &str| name.starts_with("MR not found") || name.starts_with("MR lookup fails");
+        let (forks, ours) = (cases.iter().filter(|c| c.2 && !failed(c.0)).count(), want.iter().filter(|&&f| !f).count());
+        assert!(d.lookup_error.as_deref().is_some_and(|e| e.contains("could not check where job")), "{:?}", d.lookup_error);
         assert_eq!((d.refused_forks, d.by_size.get(&4).copied().unwrap_or(0)), (forks, ours));
         // One case at a time, so a swapped pair cannot hide behind equal totals.
         for (name, j, fork) in &cases {
             serve_one_page(&m, vec![j.clone()]).await;
             let d = g.demand_for(&repo(), "kiln", 4, 16).await.unwrap();
+            if failed(name) {
+                // An API error is neither a refused fork nor demand: the repo shows the error.
+                assert!(d.lookup_error.is_some() && d.refused_forks == 0 && d.by_size.is_empty(), "{name}");
+                continue;
+            }
             assert_eq!(d.refused_forks == 1, *fork, "{name}");
             assert_eq!(d.by_size.get(&4).copied().unwrap_or(0) == 1, !*fork, "{name}");
         }

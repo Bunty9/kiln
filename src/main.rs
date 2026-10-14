@@ -965,14 +965,17 @@ async fn refresh_app(app: &Arc<App>) {
 
 const SWEEP_EVERY: u64 = 3600;
 
-async fn sweep_runners(app: &App, gated_only: bool) {
-    sweep_pending(app, gated_only, &mut Default::default(), false).await;
+/// The hourly sweep; `fails` counts the consecutive failed hours. True when no sweep failed.
+async fn sweep_runners(app: &App, gated_only: bool, fails: u32) -> bool {
+    sweep_pending(app, gated_only, &mut Default::default(), fails).await
 }
 
 /// Sweeps the repos not in `done` yet and adds each that worked, so a repo whose sweep failed
 /// (no network yet) or that was not known yet (an App not discovered yet) is tried again.
-/// True when no sweep failed. `quiet`: this is a retry, whose failures are not worth a warning.
-async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, quiet: bool) -> bool {
+/// True when no sweep failed. `fails`: how many rounds failed before this one; a retry's failures are not
+/// worth a warning each time (every tenth is), but a sweep that keeps failing becomes a health item.
+async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, fails: u32) -> bool {
+    let quiet = fails % 10 != 0;
     let cfg = app.cfg();
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
     let mut ok = true;
@@ -987,12 +990,21 @@ async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections:
             match f.sweep(&rr, &keep).await {
                 Ok(n) => {
                     done.insert(repo.clone());
+                    app.clear_notice(&format!("sweep:{repo}"));
                     if n > 0 {
                         tracing::info!("{repo}: removed {n} stale runner(s)");
                     }
                 }
                 Err(e) => {
                     ok = false;
+                    note_cleanup_failure(
+                        app,
+                        &format!("sweep:{repo}"),
+                        &format!("runner cleanup of {repo}"),
+                        fails,
+                        &format!("{e:#}"),
+                        boot::starting(),
+                    );
                     if boot::waiting_for_network() {
                         tracing::info!("{repo}: runner sweep waits for the network: {e:#}");
                     } else if quiet {
@@ -1005,6 +1017,13 @@ async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections:
         }
     }
     ok
+}
+
+/// A cleanup step that failed `fails + 1` rounds in a row, outside the boot grace, is a health item (cleared when it works).
+fn note_cleanup_failure(app: &App, key: &str, what: &str, fails: u32, why: &str, starting: bool) {
+    if fails >= 2 && !starting {
+        app.notice(key, "cleanup", format!("{what} keeps failing ({} attempts): {why}", fails + 1));
+    }
 }
 
 /// Seconds before the n-th retry of a failed startup cleanup.
@@ -1031,8 +1050,20 @@ impl Cleanup {
         }
         if !self.retired {
             self.retired = vm::retire_ended(app).await;
+            if self.retired {
+                app.clear_notice("retire");
+            } else {
+                note_cleanup_failure(
+                    app,
+                    "retire",
+                    "deleting the runners of ended VMs",
+                    self.fails,
+                    "the forge refused or was unreachable",
+                    boot::starting(),
+                );
+            }
         }
-        let swept = sweep_pending(app, false, &mut self.swept, self.fails > 0).await;
+        let swept = sweep_pending(app, false, &mut self.swept, self.fails).await;
         if self.retired && swept {
             if self.fails > 0 {
                 tracing::info!("startup cleanup of stale runners done after {} retries", self.fails);
@@ -1052,13 +1083,13 @@ async fn scheduler(app: Arc<App>) {
     // orphans. Before the first tick, so nothing launched since is swept; retried while the network is not up.
     let mut cleanup = Cleanup::default();
     cleanup.step(&app).await;
-    let mut swept = now();
+    let (mut swept, mut sweep_fails) = (now(), 0u32);
     while !app.stopping.load(Ordering::SeqCst) {
         cleanup.step(&app).await;
         // GitLab and Gitea runners that a failed delete left behind; GitHub's JIT runners go by the startup sweep alone.
         if now() >= swept + SWEEP_EVERY {
             swept = now();
-            sweep_runners(&app, true).await;
+            sweep_fails = if sweep_runners(&app, true, sweep_fails).await { 0 } else { sweep_fails + 1 };
         }
         let cfg = app.cfg();
         let res = tick(&app, &cfg).await;
@@ -1332,17 +1363,24 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             repo_errors.insert(repo.clone(), m);
             continue;
         }
-        let (by_size, runners, forks, fork_job) =
-            match forge.demand(rr, &cfg.label, cfg.vm_cpus).await.map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued)) {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(format!("{repo}: {e:#}"));
-                    repo_errors.insert(repo.clone(), format!("{e:#}"));
-                    continue;
-                }
-            };
+        let (by_size, runners, forks, fork_job, lookup_error) = match forge
+            .demand(rr, &cfg.label, cfg.vm_cpus)
+            .await
+            .map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued, d.lookup_error))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("{repo}: {e:#}"));
+                repo_errors.insert(repo.clone(), format!("{e:#}"));
+                continue;
+            }
+        };
         if forks > 0 {
             refused_forks.insert(repo.clone(), forks);
+        }
+        if let Some(m) = lookup_error {
+            errors.push(format!("{repo}: {m}"));
+            repo_errors.insert(repo.clone(), m);
         }
         // Informational only (R4 M-3): a VM that is handed the fork job is refused by the exec gate and
         // killed, so a queued fork job can burn one VM but never stops the repo's launches.
@@ -1514,6 +1552,19 @@ pub fn test_app(name: &str) -> Arc<App> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cleanup_that_keeps_failing_becomes_a_health_item() {
+        let app = App::for_tests();
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 1, "403", false);
+        assert!(app.notices.lock().unwrap().is_empty(), "two failures are not yet a pattern");
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 2, "403", true);
+        assert!(app.notices.lock().unwrap().is_empty(), "not while the box is still starting");
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 2, "403", false);
+        let kinds = notice_kinds(&app.notices.lock().unwrap());
+        assert_eq!(kinds.len(), 1);
+        assert!(kinds[0].0 == "cleanup" && kinds[0].1.contains("keeps failing (3 attempts): 403"), "{kinds:?}");
+    }
+
     use super::*;
 
     #[test]

@@ -382,6 +382,8 @@ pub struct Demand {
     /// Gitea: a queued (not `waiting`) fork job with our labels exists. A fork job runs on any
     /// matching runner, warm ones included, so kiln launches nothing for the repo meanwhile.
     pub fork_queued: bool,
+    /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
+    pub lookup_error: Option<String>,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.

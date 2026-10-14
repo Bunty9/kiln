@@ -550,7 +550,7 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     gt_runner(&t.gt, false);
     t.gt.route("GET", &list, 500, "{}");
 
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gl.requests().iter().any(|r| r == &format!("DELETE {GL}/runners/301")), "{:?}", t.gl.requests());
     assert!(!t.gt.requests().iter().any(|r| r.starts_with("DELETE")));
     assert!(t.gh.requests().is_empty(), "GitHub's runners go by the startup sweep alone: {:?}", t.gh.requests());
@@ -558,12 +558,12 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     t.gl.clear_log();
     t.gt.route("GET", &list, 200, fixture_in("gitea", "runners_one.json"));
     t.gl.route("GET", &format!("{GL}/projects/1/runners?type=project_type&per_page=100&page=1"), 200, "[]");
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gt.requests().iter().any(|r| r == &format!("DELETE {GT}/runners/52")), "{:?}", t.gt.requests());
     assert!(t.gl.requests().iter().all(|r| r.starts_with("GET ")), "nothing left to delete: {:?}", t.gl.requests());
 
     // The startup sweep covers GitHub too.
-    sweep_runners(&t.app, false).await;
+    sweep_runners(&t.app, false, 0).await;
     assert!(t.gh.requests().iter().any(|r| r.starts_with("GET /repos/acme/demo/actions/runners")), "{:?}", t.gh.requests());
 }
 
