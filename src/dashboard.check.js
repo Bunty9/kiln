@@ -169,7 +169,7 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
   const g = { document: doc, window: { isSecureContext: false }, location: { hash: '', search: '', hostname: 'box', pathname: '/', protocol: 'http:' }, history: { replaceState() {} }, localStorage: ls, matchMedia: () => ({ matches: false }),
     addEventListener() {}, setInterval: () => 0, setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {}, CSS: { escape: x => x }, navigator: {}, fetch: async u => ({ ok: true, status: 200, text: async () => JSON.stringify(u === '/api/forges' ? serve.forges : {}) }),
     innerHeight: 800, innerWidth: 1000, scrollTo() {}, getComputedStyle: () => ({}), getSelection: () => '', kilnAppearance() {}, Notification: undefined };
-  const hooks = `return { pages, G, GROUPS, GUIDES, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
+  const hooks = `return { pages, G, GROUPS, GUIDES, GROUP_ORDER, GD, HELP, TIPS, TIPL, tipKey, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
   const K = new Function(...Object.keys(g), main.replace(tail, hooks))(...Object.values(g));
   const cfg = { listen: '100.64.0.7:7878', repos: ['acme/api'], label: 'kiln', max_vms: 2, vm_cpus: 2, vm_mem_mb: 4096, vm_disk_gb: 40, size_mem_mb: {}, poll_secs: 5, job_timeout_mins: 60, idle_timeout_mins: 10, allowed_users: [], notify_rules: [], docker_mirror: true,
     auto_rebake: true, bake_node_versions: ['24'], bake_apt_packages: [], cache: true, cache_branches: {}, cache_gb: 30, repo_cache_gb: {}, debug_hold_mins: 0, debug_ssh_keys: [], egress: 'open', warm: {}, warm_recycle_mins: 30, auto_update: false,
@@ -203,5 +203,42 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     at(() => { K.pages.repos.mount({ seg: [], q: new URLSearchParams() }); K.pages.repos.update(); });
     for (const gd of K.GUIDES) at(() => K.pages.guides.mount({ seg: [gd[0]], q: new URLSearchParams() }));
   }
+  // Help content: every popover has an entry, every link lands on a guide, every tip can be shown.
+  const ids = new Set(K.GUIDES.map(g => g[0])), sprite = new Set([...src.matchAll(/<symbol id="i-([a-z0-9-]+)"/g)].map(m => m[1]));
+  assert.equal(ids.size, K.GUIDES.length, 'guide ids are unique');
+  for (const m of src.matchAll(/\bhq(?:If)?\(\s*(?:[^()'"]*\?\s*)?'([a-z0-9]+)'(?:\s*:\s*'([a-z0-9]+)')?\)/g)) for (const id of [m[1], m[2]].filter(Boolean)) assert(K.HELP[id], `hq('${id}') has a HELP entry`);
+  for (const m of src.matchAll(/\bfld\([^\n]*?, '([a-z0-9]+)'(?:, '[^']*')?\)\}/g)) if (!/^(f-|cb-)/.test(m[1])) assert(K.HELP[m[1]], `fld help '${m[1]}' has a HELP entry`);
+  for (const [id, h] of Object.entries(K.HELP)) {
+    assert(h.length === 3 && h[0] && h[1] && ids.has(h[2]), `HELP.${id} has a title, text and an existing guide (${h[2]})`);
+    assert(h[1].length < 520, `HELP.${id} stays a short popover`);
+  }
+  for (const m of src.matchAll(/#\/guides\/([a-z0-9-]+)/g)) assert(ids.has(m[1]), `a link to guide ${m[1]} resolves`);
+  for (const [k, g] of Object.entries(K.TIPL)) assert(ids.has(g), `tip ${k} links to guide ${g}`);
+  for (const g of K.GUIDES) {
+    assert(g.length === 5 && K.GROUP_ORDER.includes(g[3]), `${g[0]} is in a group`);
+    for (const r of g[4]) assert(ids.has(r) && r !== g[0], `${g[0]} relates to a real guide: ${r}`);
+    assert(sprite.has(K.GD[g[0]]), `${g[0]} has an icon`);
+  }
+  for (const grp of K.GROUP_ORDER) assert(K.GUIDES.some(g => g[3] === grp), `group ${grp} has guides`);
+  // Search finds a guide by a word in its body.
+  K.set(mkS({ token_set: true, image_ready: true, vms }), [fg('github', 'github')]);
+  K.pages.guides.mount({ seg: ['start'], q: new URLSearchParams() }); K.pages.guides.find('refused fork');
+  assert(els.get('#gres').innerHTML.includes('#/guides/gate'), 'search finds the gate guide'); K.pages.guides.find('zzzqq');
+  assert(els.get('#gres').innerHTML.includes('No guide'), 'search says when nothing matches');
+  // Every tip key is reachable: some page, in some state, shows it (and none is dead).
+  const shown = new Set(), job = id => ({ seg: [id] }), t0j = Math.floor(Date.now() / 1000);
+  const seen = (s, f, pk, pg, r) => { K.set(s, f); store.clear(); const k = K.tipKey(pk, pg, r); if (k) shown.add(k); };
+  const base = mkS({ token_set: true, image_ready: true, vms }), mixF = [fg('github', 'github'), fg('gitlab', 'gitlab')];
+  for (const pk of ['overview', 'jobs', 'repos', 'setup', 'guides']) seen(base, [fg('github', 'github')], pk, {}, { seg: [] });
+  for (const grp of Object.keys(K.GROUPS)) seen(base, [fg('github', 'github')], 'settings', { g: grp }, { seg: [] });
+  for (const v of vms) seen(base, mixF, 'jobs', {}, job(v.id));
+  seen({ ...base, vms: [{ ...vms[0], id: 'plain' }] }, mixF, 'jobs', {}, job('plain'));
+  seen(mkS({ token_set: true, image_ready: true, vms, update: { available: true, latest: '9.9.9' } }), mixF, 'overview', {}, { seg: [] });
+  seen(mkS({ token_set: true, image_ready: true, vms, job_label: 'kiln-arm64' }), mixF, 'overview', {}, { seg: [] });
+  seen(base, mixF, 'jobs', {}, { seg: [] });
+  for (const k of Object.keys(K.TIPS)) assert(shown.has(k), `tip ${k} is shown somewhere`);
+  for (const k of shown) assert(K.TIPS[k], `shown tip ${k} exists`);
+  store.clear(); K.set(base, [fg('github', 'github')]); store.set('kiln-tip-overview', '1');
+  assert.equal(K.tipKey('overview', {}, { seg: [] }), null, 'a dismissed tip is not shown again');
 }
 console.log('dashboard analytics ok');
