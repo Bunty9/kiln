@@ -374,7 +374,7 @@ fn host_ok(host: Option<&str>) -> bool {
     name.parse::<IpAddr>().is_ok()
         || name == "localhost"
         || name.ends_with(".ts.net")
-        // MagicDNS short name, e.g. http://ryzen7:7878
+        // MagicDNS short name, e.g. http://mybox:7878
         || (!name.is_empty() && !name.contains('.'))
 }
 
@@ -2120,7 +2120,7 @@ mod tests {
     fn host_header() {
         assert!(host_ok(Some("100.64.0.7:7878")));
         assert!(host_ok(Some("[fd7a:115c:a1e0::7001:307a]:7878")));
-        assert!(host_ok(Some("ryzen7:7878")));
+        assert!(host_ok(Some("mybox:7878")));
         assert!(host_ok(Some("box.example.ts.net:8443")));
         assert!(host_ok(Some("localhost:7878")));
         assert!(!host_ok(Some("evil.example.com:7878")));
@@ -2282,7 +2282,7 @@ mod tests {
         let sock = std::path::Path::new("/home/k/.local/share/kiln/serve.sock");
         let check = |v: Value| serve_use(&v, sock);
         let host = "box.example.ts.net";
-        // Shape seen on ryzen7 (tailscale 1.102): unrelated loopback proxies only.
+        // Shape seen on mybox (tailscale 1.102): unrelated loopback proxies only.
         let unrelated = json!({
             "TCP": { "443": { "HTTPS": true }, "8443": { "HTTPS": true } },
             "Web": {

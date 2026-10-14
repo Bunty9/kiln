@@ -19,7 +19,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `listen` | string | `"0.0.0.0:7878"` | `host:port` socket address | restart | Address the dashboard and API bind to. The dashboard refuses anything that is not a tailnet peer or the box itself regardless of the bind address, but prefer a narrower address if the box has a public interface. After saving a new address the Overview shows "Restart needed to apply: listen" with **Restart when idle** (see [Restarting kiln](#restarting-kiln)). kiln test-binds a new address before saving it and again before a restart, and refuses one it could not serve on (not an address of this machine, a port below 1024, a port another program holds). If the configured address still cannot be bound at startup (an interface that went away, a hand edit), kiln serves on the last address that worked (`<data>/listen.last`) or else `127.0.0.1:7878`, logs it, and shows "listen X could not be bound (...); serving on Y" on the Overview. |
-| `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | Repositories kiln serves jobs for. |
+| `repos` | string array | `[]` | `owner/name`, using letters, digits, `-`, `_`, `.`; no duplicates (case-insensitive) | live | GitHub repositories kiln serves jobs for. Other forges' repos are in `forges`. |
 | `forges` | object array | absent | each `{id, kind, url, credential, network, repos}`; see [Forges](#forges) | live | Other forges kiln serves besides GitHub (GitLab and Gitea). Absent means GitHub only, from `repos`. Set it from Settings › Forges rather than by hand. |
 | `label` | string | `"kiln"` | non-empty; `A-Z a-z 0-9 _ . -` | live (new VMs) | Label jobs put in `runs-on`. VMs also register `<label>-<N>cpu`. On an arm64 host (Apple Silicon) VMs register `<label>-arm64` and `<label>-arm64-<N>cpu` instead, never the plain label. |
 | `allowed_users` | string array | `[]` | Tailscale login names | live | Tailnet users allowed to use the dashboard. Empty means only the owner of the CI box. Nodes tagged `tagged-devices` get in only if you list `tagged-devices` explicitly. |
@@ -38,7 +38,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `poll_secs` | integer | `5` | at least `3` | live | Seconds between GitHub polls. 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. With a GitHub App each installation has its own limit: only the repos of the limited installation pause (shown as a repo error), the rest keep polling, and the 20% check uses the most constrained installation. |
+| `poll_secs` | integer | `5` | at least `3` | live | Seconds between polls of each forge. On GitHub, 304 responses do not count against the rate limit, so 5 is cheap. When under 20% of the rate limit is left kiln slows to every 30 s; after a rate-limit 403 or a 429 it pauses until GitHub says to resume. With a GitHub App each installation has its own limit: only the repos of the limited installation pause (shown as a repo error), the rest keep polling, and the 20% check uses the most constrained installation. |
 | `job_timeout_mins` | integer | `60` | `1` to `1440` | live (VMs started after the change) | Longest a job may run, counted from when the runner reports "Running job". |
 | `idle_timeout_mins` | integer | `10` | `1` to `1440` | live (VMs started after the change) | A VM that never gets a job (boot included) is killed after this. |
 | `stop_grace_secs` | integer | `25` | `0` to `570` | live | On SIGTERM (`systemctl stop` or `restart`), how long running jobs get to finish before their VMs are killed. The cap is the shipped unit's `TimeoutStopSec=600` minus about 30 s of cleanup. A host shutdown, reboot or logout of the user manager waits up to this long too. See [Restarting kiln](#restarting-kiln). |
@@ -161,6 +161,7 @@ kiln must be able to write the directory its binary lives in (`~/.local/bin` in 
 |---|---|
 | `KILN_DATA` | Data directory. Default `$HOME/.local/share/kiln`. |
 | `KILN_GITHUB_TOKEN` | GitHub token, highest precedence. |
+| `KILN_FORGE_<ID>_TOKEN` | Token of a GitLab or Gitea forge with `credential: "env"` (id upper-cased, `-` as `_`). Used only when set in the environment; the dashboard cannot set it, and it is never saved to disk. |
 | `GITHUB_TOKEN` | GitHub token, used when `KILN_GITHUB_TOKEN` is unset. |
 | `HOME` | Used to find the default data directory. |
 | `DO_NOT_TRACK` | `1`, `true` or `yes`: no usage or crash reports, whatever `usage_stats` and `crash_reports` say. |
@@ -220,7 +221,7 @@ The token stays on the host. A job VM only ever receives a single-use JIT runner
 - `network`: `public` (default) or `internal`. `internal` allows http and addresses on your LAN or tailnet, and opens each job VM's network to that address and port: a reverse proxy there exposes every site behind it. Loopback, this machine's own addresses and link-local addresses are refused whatever the mode, so bind the forge to a non-loopback address.
 - `repos`: the projects kiln serves on that forge, as paths (`group/subgroup/project` on GitLab, `owner/repo` on Gitea). Elsewhere in the config (`warm`, `cache_branches`, `notify_rules[].repo`) such a repo is written `<id>:<path>`; GitHub repos stay bare `owner/name`.
 
-A forge's address, kind, token source and network cannot be changed by a settings save, because its saved token would go to the new address: remove the forge and add it again (removing deletes the token file). Only `repos` can change in place.
+A settings save cannot add or remove a forge, or change an existing forge's address, kind, token source or network, because its saved token would go to the new address. Add a forge on Settings › Forges (`POST /api/forges`); to change its address, remove it and add it again. Removing a forge deletes its token file and its cache disks, so an id that is reused inherits nothing from the old server. Only `repos` can change in place. Two entries for one server (same kind and canonical address) are refused.
 
 **Rolling back.** A kiln release that has the `extra` catch-all keeps `forges` it does not understand when it saves settings, so a downgrade still starts and the entry comes back on the next upgrade. Remove `notify_rules` that name a `<id>:<path>` repo before downgrading: an older kiln refuses them. Releases before that one drop `forges` on a settings save.
 
@@ -274,7 +275,7 @@ build:
 
 ### Gitea
 
-kiln needs Gitea **1.25 or newer** (end-to-end tested on 28.1) (the jobs listing it reads the queue from does not exist before). 1.26.3 or newer is recommended: before it, approving one fork pull request once trusts that user's later ones, and the Test warns. Rerun and retiring a runner safely need 1.26, Cancel and approving a run need 28; the dashboard hides a button the server cannot do. Versions are compared as numbers: Gitea 28 is newer than 1.26.
+kiln needs Gitea **1.25 or newer** (the jobs listing it reads the queue from does not exist before); it was tested end to end on 28.1 with gitea-runner 5.0.0. 1.26.3 or newer is recommended: before it, approving one fork pull request once trusts that user's later ones, and the Test warns. Rerun and retiring a runner safely need 1.26, Cancel and approving a run need 28; the dashboard hides a button the server cannot do. Versions are compared as numbers: Gitea 28 is newer than 1.26.
 
 Create a **service account** (a user dedicated to kiln) and give it the **Owner** role on every repo kiln serves: it owns the repo (a personal namespace, or an organisation it belongs to as a member of the **Owners** team). Gitea hands the runner registration token to an Owner only, and a collaborator with Admin permission gets 403. Then create an access token for it (Settings › Applications) with exactly:
 
@@ -326,7 +327,7 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 
 **Delivery:** each destination has its own queue (256 events; the oldest are dropped and counted) and is limited to 30 messages a minute, with the overflow folded into one "+N more events" message; `security.changed` is never folded. A failed send is retried up to 3 times after about 5 s, 30 s and 2 min (±20 %). A 429 honours `Retry-After` (1–300 s). 408, 429 and 5xx responses, timeouts and connection errors are retried; 3xx responses (redirects are never followed), other 4xx responses, refused addresses and an invalid signing secret are permanent. The client follows no redirects, ignores proxy environment variables, and uses a 5 s connect and 10 s total timeout. A destination whose failures have gone on for an hour (from its first failure to its latest, with no success in between), or that failed permanently 3 times in a row, is "failing": the Overview shows a banner and it is announced through the destinations that are not themselves failing. On shutdown, alerts get up to 2 s to go out.
 
-**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped, `mrkdwn` off and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In Slack, Discord and ntfy a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are kiln's own GitHub job URLs on `https://github.com/`. The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
+**Text from repos** (repo, job, branch, workflow and actor names) is stripped of control, bidi and invisible characters, collapsed and cut to 100 characters, then escaped for the target. Slack gets `& < >` escaped, `mrkdwn` off and link previews off. Discord gets markdown and `<` escaped, `@` neutralised and `allowed_mentions: {parse: []}`. ntfy gets repo text only in the body. In Slack, Discord and ntfy a zero-width space follows every `.` and `:` in repo text, so nothing auto-links; the only clickable links are job links on the forge's own address (`https://github.com/`, or a GitLab or Gitea server's own address, plain `http://` included for an internal forge). The "include dashboard link" option is disabled for now; it needs a cached Serve over HTTPS URL.
 
 **Limits:** names are 1–40 characters; an ntfy token is up to 200 visible ASCII characters (no spaces).
 
@@ -412,7 +413,8 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
     bake.log, bake.lock          last bake log; lock so only one bake runs
   bin/registry                   pinned Docker registry binary
   registry/                      config.yml, registry.log, data/ (the pull cache)
-  cache/<owner>__<name>.qcow2    per-repo cache disk (lowercase names)
+  cache/<owner>__<name>.qcow2    per-repo cache disk of a GitHub repo (lowercase names); other forges use <forge-id>~<path>.qcow2 with `/` as %2F
+                                 (<stem>+pending.qcow2 beside it is a parked overlay)
   rk/<id>/                       rootlesskit state of a filtered VM (deleted when it exits)
   vms/<id>/                      one directory per VM
     meta.json                    VM record
@@ -434,6 +436,6 @@ kiln --version    print the version (also -V and version)
 ```
 
 - `kiln serve` is what the systemd unit runs. Only `serve` touches leftovers from a previous run, so `bake` and `doctor` are safe to run next to a live `serve`.
-- `kiln bake` downloads the Ubuntu 24.04 cloud image and matching kernel (re-downloading only changed files), fetches the latest actions/runner version, boots a bake VM that runs the recipe in `guest/user-data.yaml`, and swaps the result into `images/` atomically. It takes about 5 minutes and times out after 30. Bake VMs always use open networking. Running job VMs keep using the old base until they exit.
-- `kiln doctor` checks: KVM (Hypervisor.framework on macOS), `qemu-system-x86_64` (`qemu-system-aarch64` on arm64 hosts), `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing) and whether GitHub registers runners for it, the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
+- `kiln bake` downloads the Ubuntu 24.04 cloud image and matching kernel (re-downloading only changed files), fetches the latest actions/runner version, boots a bake VM that runs the recipe in `guest/user-data.yaml`, and swaps the result into `images/` atomically. It takes 5 to 10 minutes and times out after 30. Bake VMs always use open networking. Running job VMs keep using the old base until they exit.
+- `kiln doctor` checks: KVM (Hypervisor.framework on macOS), `qemu-system-x86_64` (`qemu-system-aarch64` on arm64 hosts), `qemu-img`, `xorriso`, `curl` and `tailscale`, free disk (at least 15 GB), memory against `max_vms` x `vm_mem_mb`, the image (and whether it is stale), the baked Node versions, the token (and its expiry, when GitHub reports one), each repo's permissions (runners, actions and contents, naming any that is missing) and whether GitHub registers runners for it, each GitLab or Gitea forge's token (version, scopes or expiry, and its role on every project), the Docker mirror, filtered egress, Tailscale state, and stray QEMU processes. The dashboard's Diagnostics page shows the same checks.
 - Any other argument prints usage and exits with status 2.

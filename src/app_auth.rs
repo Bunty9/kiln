@@ -311,13 +311,13 @@ mod tests {
 
     #[test]
     fn manifest_shape() {
-        let m = manifest("http://ryzen7.tail1234.ts.net:7878", "ryzen7");
+        let m = manifest("http://mybox.tail1234.ts.net:7878", "mybox");
         // GitHub appends ?code&state: a plain path keeps them in location.search
-        assert_eq!(m["redirect_url"], "http://ryzen7.tail1234.ts.net:7878/");
+        assert_eq!(m["redirect_url"], "http://mybox.tail1234.ts.net:7878/");
         // the dashboard behind tailscale serve is https
         assert_eq!(origin("box.ts.net:8443", true), "https://box.ts.net:8443");
         assert_eq!(origin("127.0.0.1:7878", false), "http://127.0.0.1:7878");
-        assert_eq!(m["name"], "kiln-ryzen7");
+        assert_eq!(m["name"], "kiln-mybox");
         assert_eq!(m["public"], false);
         assert_eq!(m["hook_attributes"]["active"], false);
         assert_eq!(
