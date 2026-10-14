@@ -5,7 +5,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const grab = n => { const m = src.match(new RegExp(`^(?:const ${n} = .*|function ${n}\\([\\s\\S]*?\\n})$`, 'm')); assert(m, n); return m[0]; };
 const esc = x => String(x);
 const { pctl, jobMins, timed, outcome, anBuckets, runStatus, forgeOf, can, runActs, forgeUrl } = new Function('esc',
-  ['hhmm', 'pctl', 'jobEnd', 'jobMins', 'status', 'isFail', 'timed', 'outcome', 'anBuckets', 'runStatus', 'forgeOf', 'can', 'runActs', 'forgeUrl'].map(grab).join('\n') +
+  ['hhmm', 'pctl', 'jobEnd', 'jobMins', 'refusedBy', 'refusedWhy', 'status', 'isFail', 'timed', 'outcome', 'anBuckets', 'runStatus', 'forgeOf', 'can', 'runActs', 'forgeUrl'].map(grab).join('\n') +
   '\nreturn { pctl, jobMins, timed, outcome, anBuckets, runStatus, forgeOf, can, runActs, forgeUrl };')(esc);
 
 assert.equal(pctl([], .95), null);
@@ -24,6 +24,7 @@ assert.equal(jobMins({ busy_since: 100, done_at: 50 }), 1, 'clock skew');
 const o = (state, result, x = {}) => outcome({ state, result, busy_since: 1, ...x });
 assert.equal(o('done', 'succeeded'), 0); assert.equal(o('done', ''), 0);
 assert.equal(o('done', 'failure'), 1); assert.equal(o('failed'), 1); assert.equal(o('killed'), 1); assert.equal(o('lost'), 1);
+assert.equal(o('killed', '', { note: 'refused: pull request from a fork' }), 2, 'a refusal is neither passed nor failed');
 assert.equal(o('done', 'cancelled'), 2); assert.equal(o('unknown'), 2); assert.equal(o('failed', '', { mint_failed: true }), 2);
 assert.equal(timed({ state: 'lost', busy_since: 1, ended: 1 }), false, 'a lost job has no real duration');
 assert.equal(timed({ state: 'lost', busy_since: 1, done_at: 9 }), true);
@@ -72,8 +73,8 @@ assert.equal(repoPath('gl', 'gl2:g/p'), 'gl2:g/p', 'only this forge prefix');
 const glNoApi = { id: 'gl', url: 'https://gitlab.example', repos: ['gl:g/p'], caps: { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false } };
 assert.deepEqual(runActs(true, glNoApi), []); assert.deepEqual(runActs(false, glNoApi), []); assert(!can(glNoApi, 'dispatch'));
 // Forge-aware Repos page, banners and job text (X-5).
-const X = new Function('esc', ['FN', 'forgeOf', 'GL_SCOPES', 'glScopes', 'daysLeft', 'repoPath', 'jobEnd', 'jobMins', 'fl', 'kindOf', 'mixed', 'fbadge', 'credsOk', 'ghErr', 'ciSnippet', 'sizeNote', 'otherMins', 'repoErr', 'forgeBanners'].map(grab).join('\n') +
-  '\nreturn { fl, kindOf, mixed, fbadge, credsOk, ghErr, ciSnippet, sizeNote, otherMins, repoErr, forgeBanners };')(esc);
+const X = new Function('esc', ['tip', 'FN', 'fname', 'forgeOf', 'GL_SCOPES', 'glScopes', 'daysLeft', 'repoPath', 'jobEnd', 'jobMins', 'fl', 'kindOf', 'mixed', 'fbadge', 'forgeByKey', 'keyPath', 'repoText', 'repoLabel', 'labelHint', 'credsOk', 'ghErr', 'ciSnippet', 'sizeNote', 'otherMins', 'repoErr', 'forgeBanners'].map(grab).join('\n') +
+  '\nreturn { fl, kindOf, mixed, fbadge, forgeByKey, keyPath, repoText, repoLabel, labelHint, credsOk, ghErr, ciSnippet, sizeNote, otherMins, repoErr, forgeBanners };')(esc);
 const gl1 = { id: 'gitlab', kind: 'gitlab', url: 'https://gitlab.example', repos: ['gitlab:g/s/p'], health: null, auth: { source: 'file', scopes: ['create_runner', 'manage_runner', 'read_api'] } };
 const ge1 = { id: 'gitea', kind: 'gitea', url: 'https://gitea.example', repos: ['gitea:o/n'], health: null, auth: { source: 'env' } };
 const gh1 = { id: 'github', kind: 'github', url: 'https://github.com', repos: ['acme/demo'], health: null, auth: {} };
@@ -102,10 +103,11 @@ assert.equal(er('401', gh1, false), 'GitHub rejected the token. Replace it in Se
 assert.equal(er('401', gl1, false), 'GitLab rejected the token. Replace it in Settings › Forges.'); assert.equal(er('404', ge1), 'Project not found, or the Gitea token lacks access.');
 assert.equal(er('500', gl1), 'GET x: 500');
 // Per-forge banners: each names its forge; GitHub gets none here.
-const bn = (F, p, vms = []) => X.forgeBanners(F, { repo_errors: {}, fork_queued: [], ...p }, vms, NOW).map(b => b.join(' | '));
+const bn = (F, p, vms = []) => X.forgeBanners(F, { repo_errors: {}, fork_queued: [], ...p }, vms, NOW).map(b => b.slice(0, 2).join(' | '));
 assert.deepEqual(bn([gh1], {}), []); assert.deepEqual(bn(null, {}), []); assert.deepEqual(bn(FF, {}), []);
 assert.deepEqual(bn([{ ...gl1, auth: { source: 'none' } }], {}), ["fail | GitLab: no token. kiln can't see its queued jobs."]);
-assert.deepEqual(bn([{ ...gl1, health: 'GitLab rate limit: paused until 5' }], {}), ['warn | GitLab: GitLab rate limit: paused until 5']);
+assert.deepEqual(bn([{ ...gl1, health: 'GitLab rate limit: paused until 5' }], {}), ['warn | GitLab rate limit: paused until 5'], 'the forge is named once');
+assert.deepEqual(bn([{ ...gl1, health: 'cannot reach it' }], {}), ['warn | GitLab: cannot reach it']);
 assert.deepEqual(bn(FF, { repo_errors: { 'gitlab:g/s/p': 'HTTP 401 x', 'acme/demo': '401' } }), ['fail | GitLab rejected the token. Replace it in Settings › Forges.']);
 assert.deepEqual(bn(FF, { repo_errors: { 'gitea:o/n': 'could not reach gitea.example' } }), ['warn | Gitea: o/n: could not reach gitea.example']);
 assert.deepEqual(bn([{ ...gl1, auth: { source: 'file', scopes: ['read_api'] } }], {}), ['fail | GitLab: the token lacks create_runner, manage_runner.']);
@@ -118,5 +120,88 @@ assert(bn(FF, {}, [mint('gitea:o/n', 'runner registration failed: Gitea returned
 assert.deepEqual(bn(FF, {}, [mint('gitlab:g/s/p', 'Maintainer', { ended: NOW - 7200 })]), [], 'an old failure is gone');
 assert.deepEqual(bn(FF, {}, [{ repo: 'gitlab:g/s/p', ended: NOW }, mint('gitlab:g/s/p', 'Maintainer')]), [], 'only the newest VM of a repo counts');
 assert.deepEqual(bn(FF, {}, [mint('gitlab:g/s/p', 'lacks the create_runner scope')]), [], 'a scope failure is not a role failure');
-assert.deepEqual(bn(FF, { fork_queued: ['gitea:o/n'] }), ['warn | gitea:o/n: a pull request from a fork is waiting. kiln refuses it, and a VM that is handed it is killed; close or cancel it on Gitea to stop that.']);
+assert.deepEqual(bn(FF, { fork_queued: ['gitea:o/n'] }), ['warn | Gitea · o/n: a pull request from a fork is waiting. kiln refuses it, and a VM that is handed it is killed; close or cancel it on Gitea to stop that.']);
+// UI-FIX: a refused job is its own status, never a failure; one repo label everywhere; alerts merge per forge.
+const refusedVm = (x = {}) => ({ state: 'killed', busy_since: 1, note: 'refused: pull request from a fork', verdict: ['refuse', '7'], ...x });
+const { status: st2, isFail: fail2, stTip: tip2 } = new Function('mixed', 'F', ['refusedBy', 'refusedWhy', 'status', 'isFail', 'stTip'].map(grab).join('\n') + '\nconst STATE = { refused: [0, "declined on purpose"] };\nreturn { status, isFail, stTip };')(() => false, null);
+assert.equal(st2(refusedVm()), 'refused'); assert.equal(st2(refusedVm({ verdict: undefined })), 'refused', 'the note alone is enough');
+assert.equal(st2(refusedVm({ note: 'x', verdict: ['refuse', '7'] })), 'refused', 'the verdict alone is enough');
+assert.equal(st2({ state: 'killed', busy_since: 1, note: 'job timeout' }), 'killed'); assert(fail2({ state: 'killed', busy_since: 1, note: 'job timeout' }));
+assert(!fail2(refusedVm()), 'a refusal is not a failure: no count, no title flip, no alert');
+assert.equal(st2({ state: 'done', result: 'failure', note: 'refused: x' }), 'failed', 'only a killed VM can be a refusal');
+// Alerts: tiers, the top of the list first, one card per forge, dismissed ones gone.
+const { bnMerge } = new Function('esc', ['bnMerge'].map(grab).join('\n') + '\nreturn { bnMerge };')(esc);
+const nm = id => ({ gl: 'GitLab', github: 'GitHub' })[id];
+const it = (t, msg, o = {}) => ({ t, col: 'warn', msg, act: '', ...o });
+const mg = (items, gone = () => false) => bnMerge(items, gone, nm);
+assert.deepEqual(mg([it(2, 'fyi'), it(1, 'act'), it(0, 'block'), it(1, 'act2')]).map(i => i.msg), ['block', 'act', 'act2', 'fyi'], 'by tier, the order kept inside one');
+assert.deepEqual(mg([it(2, 'update', { dismiss: 'u1' }), it(1, 'x')], k => k === 'u1').map(i => i.msg), ['x'], 'dismissed');
+const one = mg([it(1, 'GitLab: the token expired', { forge: 'gl' }), it(0, 'Down', { forge: 'gl', col: 'fail' }), it(1, 'c')]);
+assert.equal(one.length, 2, 'two GitLab problems are one card'); assert.equal(one[0].t, 0, 'the card takes its worst tier'); assert.equal(one[0].col, 'fail');
+assert(one[0].msg.includes('GitLab needs attention') && one[0].msg.includes('<li>The token expired</li>') && one[0].msg.includes('<li>Down</li>') && one[0].act.includes('Open the GitLab card'));
+assert.equal(mg([it(1, 'only', { forge: 'gl', act: '<a>Forges</a>' })])[0].act, '<a>Forges</a>', 'a lone problem keeps its own text and button');
+assert.equal(mg([it(1, 'a', { forge: 'gl' }), it(1, 'b', { forge: 'github' }), it(1, 'c', { forge: 'gl' })]).length, 2, 'one card per forge');
+// One label for a repo: path without the forge prefix, a chip only on a mixed box.
+const rl = (F, k) => X.repoLabel(F, k), rt = (F, k) => X.repoText(F, k);
+assert.equal(X.keyPath(FF, 'gitlab:g/s/p'), 'g/s/p'); assert.equal(X.keyPath(FF, 'acme/demo'), 'acme/demo'); assert.equal(X.keyPath(FF, 'gitea:gone/x'), 'gone/x', 'a project no longer listed keeps its prefix rule');
+assert.equal(X.keyPath(null, 'gitlab:g/p'), 'gitlab:g/p', 'forges not loaded: the key as it is');
+assert.equal(rt(FF, 'gitlab:g/s/p'), 'GitLab · g/s/p'); assert.equal(rt(FF, 'acme/demo'), 'GitHub · acme/demo', 'a mixed box names GitHub too, so a list reads the same all the way down');
+assert.equal(rt([gh1], 'acme/demo'), 'acme/demo');
+assert(rl(FF, 'gitlab:g/s/p').includes('<span class="fb">GitLab</span>g/s/p') && rl(FF, 'gitlab:g/s/p').includes('data-tip="gitlab:g/s/p"'), 'chip, clean path, full key in the tip');
+assert.equal(rl([gh1], 'acme/demo'), '<span class="rl">acme/demo</span>', 'GitHub alone: no chip');
+// What a job writes to opt in, per forge served.
+assert.equal(X.labelHint([gh1], 'kiln'), 'Jobs opt in with runs-on: [self-hosted, kiln]'); assert.equal(X.labelHint(null, 'kiln'), 'Jobs opt in with runs-on: [self-hosted, kiln]');
+assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-hosted, kiln] · GitLab: tags: [kiln] · Gitea: runs-on: [kiln]');
+
+// Smoke: run the page's own script on a stub DOM and mount every setup path (GitHub, GitLab, Gitea) and every Settings group,
+// so a page that throws while it draws (the blank setup wizard, once) fails here and not in a user's browser.
+{
+  const main = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).pop();
+  const tail = "$('#fav').href = FAV(null);\nroute(); poll();";
+  assert(main.includes(tail), 'the page still ends by routing and polling');
+  const els = new Map(), box = () => {
+    const o = { dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, querySelectorAll: () => [], querySelector: s => qs(s), closest: () => null, matches: () => false, contains: () => false,
+      getAttribute: () => null, hasAttribute: () => false, getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }), animate() {}, focus() {}, select() {} };
+    return new Proxy(o, { get: (t, k) => k in t ? t[k] : typeof k === 'symbol' || k === 'then' ? undefined : (...a) => box(), set: (t, k, v) => ((t[k] = v), true) });
+  }, qs = s => els.get(s) || els.set(s, box()).get(s);
+  const serve = { forges: [] }, store = new Map(), ls = { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) };
+  const doc = { querySelector: qs, querySelectorAll: () => [], addEventListener() {}, createElement: () => box(), createDocumentFragment: () => box(), documentElement: box(), body: box(), hidden: false, activeElement: null, title: '' };
+  const g = { document: doc, window: { isSecureContext: false }, location: { hash: '', search: '', hostname: 'box', pathname: '/', protocol: 'http:' }, history: { replaceState() {} }, localStorage: ls, matchMedia: () => ({ matches: false }),
+    addEventListener() {}, setInterval: () => 0, setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {}, CSS: { escape: x => x }, navigator: {}, fetch: async u => ({ ok: true, status: 200, text: async () => JSON.stringify(u === '/api/forges' ? serve.forges : {}) }),
+    innerHeight: 800, innerWidth: 1000, scrollTo() {}, getComputedStyle: () => ({}), getSelection: () => '', kilnAppearance() {}, Notification: undefined };
+  const hooks = `return { pages, G, GROUPS, GUIDES, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
+  const K = new Function(...Object.keys(g), main.replace(tail, hooks))(...Object.values(g));
+  const cfg = { listen: '100.64.0.7:7878', repos: ['acme/api'], label: 'kiln', max_vms: 2, vm_cpus: 2, vm_mem_mb: 4096, vm_disk_gb: 40, size_mem_mb: {}, poll_secs: 5, job_timeout_mins: 60, idle_timeout_mins: 10, allowed_users: [], notify_rules: [], docker_mirror: true,
+    auto_rebake: true, bake_node_versions: ['24'], bake_apt_packages: [], cache: true, cache_branches: {}, cache_gb: 30, repo_cache_gb: {}, debug_hold_mins: 0, debug_ssh_keys: [], egress: 'open', warm: {}, warm_recycle_mins: 30, auto_update: false,
+    update_repo: 'o/k', usage_stats: null, crash_reports: null, stop_grace_secs: 25 };
+  const t0 = Math.floor(Date.now() / 1000);
+  const vms = [{ id: 'kiln-1', repo: 'acme/api', state: 'done', result: 'Succeeded', job: 'test', started: t0 - 900, busy_since: t0 - 890, done_at: t0 - 800, ended: t0 - 800, cpus: 2, run: { branch: 'main', sha: 'abc1234', event: 'push' } },
+    { id: 'kiln-2', repo: 'gitlab:g/p', state: 'killed', job: 'rspec', started: t0 - 600, busy_since: t0 - 590, ended: t0 - 580, note: 'refused: pull request from a fork', verdict: ['refuse', '9'], cpus: 2 },
+    { id: 'kiln-3', repo: 'gitea:o/r', state: 'held', job: 'build', started: t0 - 300, busy_since: t0 - 290, hold_until: t0 + 600, ssh: 'ssh -p 2201 runner@100.64.0.7', cpus: 4 }];
+  const mkS = (o = {}) => ({ config: cfg, job_label: 'kiln', platform: { os: 'linux', arch: 'x86_64' }, token_set: false, app: null, poll: { queued: {}, repo_errors: {}, refused_forks: {}, fork_queued: [] }, vms: [], notify: { dests: [] }, usage: [], usage_other: [],
+    image: null, image_ready: false, baking: false, host: { load: [0, 0, 0], cpus: 8, mem_total_mb: 32768, mem_avail_mb: 20000, disk_free_gb: 100, samples: [] }, version: '0.0.0', mirror: null, caches: {}, update: {}, restart: {}, ...o });
+  const fg = (kind, id, x = {}) => ({ id, kind, url: `https://${id}.example`, repos: [], health: null, caps: {}, auth: { source: 'none' }, launches: true, network: 'public', ...x });
+  const boxes = {
+    'fresh GitHub': [mkS(), [fg('github', 'github', { repos: ['acme/api'] })]],
+    'fresh, forges not loaded yet': [mkS(), null],
+    'fresh with a GitLab': [mkS(), [fg('github', 'github'), fg('gitlab', 'gitlab')]],
+    'GitLab and Gitea with tokens, running jobs, a refusal': [mkS({ token_set: true, image_ready: true, vms, image: { runner_version: '2.328.0' }, poll: { queued: { 'gitlab:g/p': 1 }, repo_errors: { 'gitea:o/r': 'HTTP 500' }, refused_forks: { 'gitlab:g/p': 1 }, fork_queued: ['gitea:o/r'] } }),
+      [fg('github', 'github', { repos: ['acme/api'], auth: { source: 'file' } }), fg('gitlab', 'gitlab', { repos: ['gitlab:g/p'], auth: { source: 'file', scopes: ['read_api'] } }), fg('gitea', 'gitea', { repos: ['gitea:o/r'], auth: { source: 'file' }, launches: false })]],
+    'a Mac with the GitHub App': [mkS({ token_set: true, platform: { os: 'macos', arch: 'aarch64' }, app: { id: 1, slug: 'kiln', html_url: 'https://github.com/apps/kiln', repos: ['acme/api'], owner: 'acme' }, update: { flavor: 'macos' } }), [fg('github', 'github', { repos: ['acme/api'] })]],
+  };
+  for (const [name, [s, f]] of Object.entries(boxes)) {
+    const at = what => { try { return what(); } catch (e) { throw new Error(`${name}: ${e.stack.split('\n').slice(0, 3).join(' / ')}`); } };
+    serve.forges = f || []; at(() => K.set(s, f));
+    for (const kind of ['github', 'gitlab', 'gitea']) at(() => {
+      K.setupAs(kind); K.pages.setup.mount(); K.pages.setup.update();
+      const body = els.get('#su').innerHTML;
+      assert(typeof body === 'string' && (body.includes('class="stp"') || body.includes('ran its first job')), `${kind} setup path draws its steps`);
+    });
+    for (const grp of Object.keys(K.GROUPS)) at(() => { K.pages.settings.mount({ seg: [grp], q: new URLSearchParams() }); assert(typeof els.get('#set-body').innerHTML === 'string', `settings/${grp} draws`); });
+    at(() => { K.banners(); K.stats(); K.pages.overview.mount(); K.pages.jobs.mount({ seg: [], q: new URLSearchParams() }); K.pages.jobs.update(); });
+    for (const v of s.vms) at(() => { K.pages.job.mount({ seg: [v.id], q: new URLSearchParams() }); K.pages.job.update(); });
+    at(() => { K.pages.repos.mount({ seg: [], q: new URLSearchParams() }); K.pages.repos.update(); });
+    for (const gd of K.GUIDES) at(() => K.pages.guides.mount({ seg: [gd[0]], q: new URLSearchParams() }));
+  }
+}
 console.log('dashboard analytics ok');

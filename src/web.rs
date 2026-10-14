@@ -803,6 +803,8 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "config": app.cfg(),
         // `runs-on` label for the default size: `label`, or `<label>-arm64` on an arm64 host.
         "job_label": app.cfg().job_label(),
+        // What this kiln runs on, so the dashboard can hide what the host refuses (filtered egress and the Docker mirror on macOS).
+        "platform": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
         "token_set": app.gh.has_token(),
         "app": app_json(&app),
         "token_source": app.gh.source(),
@@ -1771,6 +1773,7 @@ mod tests {
                 "listen_fallback",
                 "mirror",
                 "notify",
+                "platform",
                 "poll",
                 "restart",
                 "serve_socket",

@@ -318,7 +318,7 @@ kiln can send alerts to up to 20 destinations (Settings › Notifications). They
 
 | Type | When |
 |---|---|
-| `job.failed` | A job failed, was cancelled, was killed after it started, timed out, or was lost when kiln restarted. Once per VM. Runner-registration failures are not jobs and are never sent, and neither are fork pull request jobs that kiln refuses. |
+| `job.failed` | A job failed, was cancelled, was killed after it started, timed out, or was lost when kiln restarted. Once per VM. Runner-registration failures are not jobs and are never sent, and neither are jobs the verdict gate refuses on purpose (a fork pull request, a `workflow_run`, a job kiln cannot classify): kiln working as designed is not a failure, and no other event is sent for it. The dashboard shows such a job as `refused` with the reason, and Overview keeps its banner for refused forks. |
 | `job.finished` | A job succeeded and a workflow rule (below) matches it. |
 | `health.raised`, `health.cleared` | A launch blocker (old image, GitHub registration outage, egress filtering broken, low memory or disk), a poll error, Landlock missing, or a failing destination. Sent only after the state has held for 2 scheduler ticks and 60 s. "Draining" is not announced. |
 | `security.changed` | Settings saved (the names of the changed settings, never values), GitHub token replaced, GitHub App changed (created, converted or removed). A settings save that changes nothing is not announced; saving a destination always is. Destination changes (added, changed with the names of the changed fields, removed, secret rotated) go to every destination, including one being removed, before the change applies. |
