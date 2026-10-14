@@ -250,6 +250,7 @@ fn scrub_vm_dir(dir: &Path) {
 pub fn load_history(data: &Path) -> Vec<Vm> {
     // GitLab and Gitea jobs never create usage.json: seed only when neither ledger exists.
     let seed = !data.join("usage.json").exists() && !data.join(USAGE_OTHER).exists();
+    let seed_jobs = !data.join(crate::history::FILE).exists();
     let mut vms: Vec<Vm> = std::fs::read_dir(data.join("vms"))
         .into_iter()
         .flatten()
@@ -294,7 +295,11 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
     vms.sort_by_key(|v| v.started);
     // First start with the ledger: seed it from the history still on disk.
     if seed {
-        vms.iter().for_each(|v| record_usage(data, v));
+        vms.iter().for_each(|v| bump_usage(data, v));
+    }
+    // First start with the job history: seed it from every record on disk, once per VM id.
+    if seed_jobs {
+        crate::history::backfill(data, &vms);
     }
     vms
 }
@@ -321,6 +326,11 @@ fn read_ledger<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str
 /// result, rounded up to the minute. A debug hold after the result is not counted.
 /// GitHub jobs go to `usage.json`, other forges' to `usage-other.json`.
 pub fn record_usage(data: &Path, v: &Vm) {
+    crate::history::append(data, v);
+    bump_usage(data, v);
+}
+
+fn bump_usage(data: &Path, v: &Vm) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let (Some(from), Some(to)) = (v.busy_since, v.done_at.or(v.ended)) else { return };
     let _g = LOCK.lock().unwrap();
@@ -3557,6 +3567,86 @@ mod tests {
         let mut seen: Vec<_> = String::from_utf8(out).unwrap().lines().map(String::from).collect();
         seen.sort();
         assert_eq!(seen, ["HOME=/h", "PATH=/usr/bin:/bin"], "only the allow list reaches QEMU");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn job_history_appends_prunes_skips_corrupt_lines_and_backfills_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("kiln-test-job-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let now = crate::now();
+        let job = |id: &str, repo: &str, ago: u64, secs: u64| Vm {
+            id: id.into(),
+            repo: repo.into(),
+            cpus: 4,
+            job: Some("build".into()),
+            note: Some("branch main, a secret title".into()),
+            job_url: Some("https://forge.example/x".into()),
+            started: now - ago - 20,
+            busy_since: Some(now - ago),
+            done_at: Some(now - ago + secs),
+            ended: Some(now - ago + secs + 3),
+            ..vm(id, State::Done, None)
+        };
+        crate::history::append(&d, &job("a", "acme/demo", 100, 60));
+        crate::history::append(&d, &job("b", "gl:g/p", 50, 30));
+        let raw = std::fs::read_to_string(d.join("jobs.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 2);
+        assert!(!raw.contains("forge.example") && !raw.contains("secret"), "no URLs, notes or titles: {raw}");
+        assert_eq!(std::fs::metadata(d.join("jobs.jsonl")).unwrap().permissions().mode() & 0o777, 0o600);
+        // A torn line, garbage and a blank line are skipped; the rest still reads.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(d.join("jobs.jsonl")).unwrap();
+        f.write_all(b"{\"id\":\"torn\n\nnot json\n").unwrap();
+        crate::history::append(&d, &job("c", "acme/demo", 10, 5));
+        let ids = |since| crate::history::read(&d, since).into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(0), ["a", "b", "c"]);
+        assert_eq!(ids(now - 30), ["b", "c"], "window by end time");
+        // Prune: older than 90 days goes, and so does the garbage once the file is rewritten.
+        crate::history::append(&d, &job("old", "acme/demo", 91 * 86400, 5));
+        crate::history::prune_locked(&d, now);
+        assert_eq!(ids(0), ["a", "b", "c"]);
+        assert_eq!(std::fs::read_to_string(d.join("jobs.jsonl")).unwrap().lines().count(), 3);
+        // A VM that never ran a job, or has not ended, is not a history row.
+        crate::history::append(&d, &Vm { busy_since: None, ..job("n", "acme/demo", 1, 1) });
+        crate::history::append(&d, &Vm { done_at: None, ended: None, ..job("n", "acme/demo", 1, 1) });
+        assert_eq!(ids(0).len(), 3);
+        // Backfill: every record on disk, none twice (a, b are already there).
+        std::fs::create_dir_all(d.join("vms")).unwrap();
+        for v in ["a", "b", "z"] {
+            std::fs::create_dir_all(d.join("vms").join(v)).unwrap();
+            write_meta(&d, &job(v, "acme/demo", 500, 5));
+        }
+        crate::history::backfill(&d, &load_history(&d));
+        assert_eq!(ids(0), ["z", "a", "b", "c"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn job_history_is_seeded_from_every_record_on_first_start_only() {
+        let d = std::env::temp_dir().join(format!("kiln-test-job-history-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let now = crate::now();
+        for i in 0..150 {
+            let id = format!("kiln-{i}-0");
+            std::fs::create_dir_all(d.join("vms").join(&id)).unwrap();
+            write_meta(
+                &d,
+                &Vm {
+                    busy_since: Some(now - 1000 + i),
+                    done_at: Some(now - 990 + i),
+                    ended: Some(now - 980 + i),
+                    cpus: 4,
+                    ..vm(&id, State::Done, None)
+                },
+            );
+        }
+        load_history(&d);
+        assert_eq!(crate::history::read(&d, 0).len(), 150, "all of them, not the newest 100");
+        load_history(&d);
+        assert_eq!(crate::history::read(&d, 0).len(), 150, "a restart adds nothing");
         let _ = std::fs::remove_dir_all(&d);
     }
 

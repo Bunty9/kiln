@@ -432,6 +432,7 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     GitHub job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)
   usage-other.json               the same per UTC day and forge id for GitLab and Gitea jobs: counted, never priced (older kiln versions ignore this file)
+  jobs.jsonl                     one compact line per finished job (repo, job name, size, outcome, timings; no URLs, logs or commit text), kept 90 days and at most 50,000 lines, mode 0600; feeds Settings > Analytics. Created on first start from the VM records on disk (older kiln versions ignore this file)
   notify.json                    notification destinations and their secrets, mode 0600
   telemetry_id                   random install id for usage and crash reports; created at the first send, deleted as soon as both are off
   telemetry_last                 when the last usage report was sent

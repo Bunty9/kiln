@@ -121,6 +121,7 @@ fn api_router() -> Router<Arc<App>> {
         .route("/icons/{name}", get(|Path(name): Path<String>| async move { icon_file(&name) }))
         .route("/burn/{name}", get(|Path(name): Path<String>| async move { burn_file(&name) }))
         .route("/api/state", get(state))
+        .route("/api/analytics", get(analytics))
         .route("/api/host", get(|| async { Json(crate::host::recent(usize::MAX)) }))
         .route("/api/config", post(set_config))
         .route("/api/token", post(set_token))
@@ -858,6 +859,33 @@ async fn host_stats(app: &App) -> Value {
         // A few, so a poll that lands between samples still gets every one.
         "samples": crate::host::recent(3),
     })
+}
+
+#[derive(Deserialize)]
+struct AnalyticsQuery {
+    /// 1, 7 or 30 (anything else reads as 30).
+    #[serde(default)]
+    days: u64,
+    repo: Option<String>,
+    cpus: Option<u32>,
+}
+
+/// Finished jobs of the last `days` from the 90-day history (jobs.jsonl), for Settings › Analytics.
+/// The dashboard aggregates the rows with the helpers it already has. `repos` and `sizes` list
+/// everything the history knows, so the menus don't shrink with the filter; `first` is when it begins.
+async fn analytics(State(app): S, Query(q): Query<AnalyticsQuery>) -> Json<Value> {
+    let days = if matches!(q.days, 1 | 7) { q.days } else { 30 };
+    let all = crate::history::read(&app.data, 0);
+    // A day of slack: the dashboard's buckets start at local midnight.
+    let since = now().saturating_sub((days + 1) * 86400);
+    let repos: std::collections::BTreeSet<_> = all.iter().map(|r| &r.repo).collect();
+    let sizes: std::collections::BTreeSet<_> = all.iter().map(|r| r.cpus).collect();
+    let first = all.iter().map(|r| r.busy_since).min();
+    let rows: Vec<_> = all
+        .iter()
+        .filter(|r| r.end() >= since && q.repo.as_ref().is_none_or(|x| *x == r.repo) && q.cpus.is_none_or(|c| c == r.cpus))
+        .collect();
+    Json(json!({ "first": first, "repos": repos, "sizes": sizes, "rows": rows }))
 }
 
 async fn state(State(app): S) -> R<Json<Value>> {
@@ -2178,12 +2206,44 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let server = tokio::spawn(axum::serve(l, router.into_make_service_with_connect_info::<Via>()).into_future());
         let c = reqwest::Client::new();
-        for (m, p) in [(Method::GET, "/api/jobs/1/log?repo=acme/demo"), (Method::GET, "/api/notify"), (Method::POST, "/api/notify/1/test")]
-        {
+        for (m, p) in [
+            (Method::GET, "/api/jobs/1/log?repo=acme/demo"),
+            (Method::GET, "/api/notify"),
+            (Method::GET, "/api/analytics?days=7"),
+            (Method::POST, "/api/notify/1/test"),
+        ] {
             let r = c.request(m.clone(), format!("http://127.0.0.1:{port}{p}")).header("x-kiln", "1").send().await.unwrap();
             assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{m} {p}");
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn analytics_serves_the_window_and_filters_from_the_history() {
+        let app = App::for_tests();
+        let (now, d) = (now(), &app.data);
+        let job = |id: &str, repo: &str, cpus: u32, ago: u64| vm::Vm {
+            repo: repo.into(),
+            cpus,
+            busy_since: Some(now - ago),
+            ended: Some(now - ago + 10),
+            ..serde_json::from_value(json!({ "id": id, "repo": repo, "state": "done", "started": now - ago })).unwrap()
+        };
+        for v in [job("a", "acme/demo", 4, 3600), job("b", "gl:g/p", 8, 3 * 86400), job("c", "acme/demo", 4, 20 * 86400)] {
+            crate::history::append(d, &v);
+        }
+        let get = |q: AnalyticsQuery| async { analytics(State(app.clone()), Query(q)).await.0 };
+        let ids = |j: &Value| j["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let q = |days, repo: Option<&str>, cpus| AnalyticsQuery { days, repo: repo.map(Into::into), cpus };
+        assert_eq!(ids(&get(q(1, None, None)).await), ["a"]);
+        assert_eq!(ids(&get(q(7, None, None)).await), ["b", "a"]);
+        assert_eq!(ids(&get(q(0, None, None)).await), ["c", "b", "a"], "anything but 1 or 7 reads as 30");
+        let j = get(q(30, Some("gl:g/p"), None)).await;
+        assert_eq!(ids(&j), ["b"]);
+        assert_eq!(j["repos"], json!(["acme/demo", "gl:g/p"]), "menus ignore the filter");
+        assert_eq!(j["sizes"], json!([4, 8]));
+        assert_eq!(j["first"], json!(now - 20 * 86400));
+        assert_eq!(ids(&get(q(30, None, Some(4))).await), ["c", "a"]);
     }
 
     #[tokio::test]
