@@ -1487,15 +1487,26 @@ async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoPara
     // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel, which is
     // also why this comes before the caps check), because the runner only notices a cancel after about a minute.
     // The job lookup also catches a job that started since the last poll.
+    let (mut killed, mut lookup_failed) = (0, None);
     if f.kind() == crate::forge::Kind::GitLab {
-        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_default();
-        vm::kill_pipeline(&app, &repo.key(), id, &jobs);
+        // A failed lookup still kills the VMs the pipeline link identifies; the failure is reported, not swallowed.
+        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_else(|e| {
+            tracing::warn!("{}: pipeline {id}: job lookup failed: {e:#}", repo.key());
+            lookup_failed = Some(format!("{e:#}"));
+            vec![]
+        });
+        killed = vm::kill_pipeline(&app, &repo.key(), id, &jobs);
     }
+    let suffix = match (&lookup_failed, killed) {
+        (None, 0) => String::new(),
+        (None, n) => format!(" ({n} VM(s) killed)"),
+        (Some(e), n) => format!(" ({n} VM(s) killed; job lookup failed: {e})"),
+    };
     if !f.caps().cancel {
-        bail_r(&cannot(&f, "cancel runs"))?;
+        bail_r(&format!("{}{suffix}", cannot(&f, "cancel runs")))?;
     }
     f.cancel(&repo, id).await?;
-    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
+    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}{suffix}", repo.key()))), StatusCode::NO_CONTENT))
 }
 
 #[derive(Deserialize)]
@@ -2031,6 +2042,40 @@ mod tests {
         let bad_status = RunsParam { repo: "acme/demo".into(), status: Some("x&y=1".into()), branch: None, page: None };
         assert!(runs_list(State(app), Query(bad_status)).await.is_err());
         assert!(m.requests().is_empty(), "a refusal must not reach the forge: {:?}", m.requests());
+    }
+
+    /// A failed job lookup still kills the VMs the pipeline link names, and the answer says what happened.
+    #[tokio::test]
+    async fn a_gitlab_cancel_reports_the_kills_when_the_job_lookup_fails() {
+        let gh = crate::forge_test_mock::Mock::github().await;
+        let gl = crate::forge_test_mock::Mock::start().await;
+        let forges: Vec<crate::forge::ForgeCfg> = serde_json::from_value(json!([
+            { "id": "github", "kind": "github", "repos": ["acme/demo"] },
+            { "id": "gl", "kind": "gitlab", "url": "https://gitlab.example.org", "repos": ["acme/demo"] },
+        ]))
+        .unwrap();
+        let (mut app, _) = crate::tests::tick_app("web-gl-cancel", &gh, Some(forges.clone()));
+        let g = crate::forge::gitlab::GitLab::for_mock(&forges[1], &app.data, &gl.base, "tok");
+        Arc::get_mut(&mut app).unwrap().forges.insert(forges[1].clone(), crate::forge::Forge::GitLab(Box::new(g)));
+        let mut v: crate::vm::Vm = serde_json::from_value(json!({
+            "id": "kiln-1-0", "repo": "gl:acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        let mut run = crate::vm::Run::default();
+        run.links.run = Some("https://gitlab.example.org/acme/demo/-/pipelines/127".into());
+        v.run = Some(run);
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
+        // No route for the pipeline's jobs: the lookup fails.
+        let r = run_cancel(State(app.clone()), Path(127), repo("gl:acme/demo")).await;
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok(), "the linked VM is killed");
+        let said = match r {
+            Ok(a) => a.0.0.0,
+            Err(e) => format!("{:#}", e.0),
+        };
+        assert!(said.contains("1 VM(s) killed; job lookup failed"), "{said}");
     }
 
     #[tokio::test]
