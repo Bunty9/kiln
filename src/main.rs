@@ -6,6 +6,7 @@ mod forge;
 #[cfg(test)]
 mod forge_test_mock;
 mod github;
+mod history;
 mod host;
 mod mirror;
 #[cfg(test)]

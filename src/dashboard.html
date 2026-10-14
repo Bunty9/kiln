@@ -515,7 +515,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .ft>input:nth-of-type(1):checked~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):checked~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):checked~.ftl label:nth-of-type(3){color:var(--fg);background:var(--active);box-shadow:inset 0 0 0 1px var(--accent)}
 .ft>input:nth-of-type(1):checked~.fp:nth-of-type(1),.ft>input:nth-of-type(2):checked~.fp:nth-of-type(2),.ft>input:nth-of-type(3):checked~.fp:nth-of-type(3){display:block}
 .ft>input:nth-of-type(1):focus-visible~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):focus-visible~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):focus-visible~.ftl label:nth-of-type(3){outline:2px solid var(--accent);outline-offset:2px}
-@media(max-width:719px){.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
+@media(max-width:719px){.hq{width:24px;height:24px}.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
 /* installed app: content clears the notch, status bar and rounded corners (viewport-fit=cover) */
 .hlp.inst{border:0;background:none;cursor:pointer;font:inherit;font-size:14px;font-weight:500}
 .hlp.inst:hover{background:var(--hover)}
@@ -788,7 +788,7 @@ const HELP = {
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only (Linux only). Use filtered for pull requests you don't trust. A forge set to Internal gets one extra exception: its own address and port.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
-  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min. Only GitHub jobs are priced; GitLab and Gitea minutes are shown as minutes, from their own ledger.", "usage"],
+  analytics: ["Analytics", "Built from kiln's job history (90 days of finished jobs). Days from before it began are hatched. The last chart reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min. Only GitHub jobs are priced; GitLab and Gitea minutes are shown as minutes, from their own ledger.", "usage"],
   privacy: ["Privacy", "Usage statistics and crash reports stay off unless you turn them on. This box sends them, never your browser, and they never include repo, account or host names, IPs, file paths, tokens or logs. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever is set here.", "privacy"],
   runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when the forge hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
   failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes (not jobs kiln refused on purpose). The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
@@ -832,7 +832,7 @@ const TIPS = {
   'settings-appearance': "These choices are kept in this browser only, not on the box.",
   // Shown instead of the page's own tip when they apply (see tipKey).
   setup: "Setup detects each step on its own, so you can close this page and come back. It is also under Help, and in Settings › Forges.",
-  analytics: "Charts use the newest 100 VMs. The last chart uses the full usage ledger.",
+  analytics: "Charts use the job history, 90 days kept. The last chart uses the usage ledger.",
   refused: "kiln refused this job on purpose, and no job code ran. The note says why.",
   held: "This VM stays up until the time shown. Release it when you are done: it holds a slot.",
   arm64: "This box runs arm64 jobs. Ask for the -arm64 label (kiln-arm64), not plain kiln.",
@@ -1045,7 +1045,7 @@ function notifyState() {
 
 /* ---------- doctor + bake log (global) ---------- */
 let doctor = null;
-async function runDoctor() { try { doctor = { ...(await api('/api/doctor')), at: now() }; } catch (e) { doctor = { checks: [], err: e.message, at: now() }; } if (cur?.live) cur.live(); }
+async function runDoctor() { const vk = doctor?.vk; try { doctor = { ...(await api('/api/doctor')), at: now(), vk }; } catch (e) { doctor = { checks: [], err: e.message, at: now(), vk }; } if (cur?.live) cur.live(); }
 const bk = { text: '', next: 0, t0: 0, was: false, busy: false, checked: false };
 async function pollBake() {
   if (bk.busy) return; bk.busy = true;
@@ -1095,7 +1095,7 @@ function route() {
   if (new URLSearchParams(location.search).get('code') && !appConv) return void appCallback();
   cur?.unmount?.(); closePop();
   const sd = swipeDir; swipeDir = 0;
-  const r = parse(), pg = pages[r.page] || pages.overview;
+  const r = parse(), pg = pages[r.page] || pages.notfound;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   cur = pg; scrollTo(0, 0);
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
@@ -1121,7 +1121,10 @@ function onState() {
   if (!S.baking && !bk.was && bk.next === 0 && !bk.checked) pollBake();
   if (S.baking) { if (!bk.was) { bk.t0 = Date.now(); bk.text = ''; bk.next = 0; } pollBake(); } else if (bk.was) pollBake();
   bk.was = S.baking;
-  if (!doctor || now() - doctor.at > 300) { doctor = { checks: [], at: now() }; runDoctor(); }
+  // The doctor's VM checks depend on which VMs are active: re-run when that set changes (at most every 20 s), else every 5 min.
+  const vk = S.vms.filter(v => ['booting', 'idle', 'busy', 'held'].includes(v.state)).map(v => v.id).sort().join();
+  if (!doctor || now() - doctor.at > 300) { doctor = { checks: [], at: now(), vk }; runDoctor(); }
+  else if (doctor.vk !== vk && now() - doctor.at > 20 && !doctor.busy) { doctor.busy = 1; doctor.vk = vk; runDoctor(); }
   if (!mounted) {
     const r = parse();
     if (!onState.auto && r.page === 'overview' && !location.hash.replace('#', '').replace('/', '') && setupNeeded() && !lsGet('kiln-skip-setup')) { onState.auto = 1; location.hash = '#/setup'; return; }
@@ -1467,6 +1470,9 @@ function hostWire() {
   });
 }
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
+pages.notfound = {
+  mount() { $('#app').innerHTML = `<div class="ph"><h1>Page not found</h1></div><div class="empty">${ic('jobs')}<p>There is no page at this address.</p><a class="btn" href="#/">Back to the Overview</a></div>`; },
+};
 pages.overview = {
   mount() {
     $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host">${hostSkel()}</div></aside></div>`;
@@ -1562,7 +1568,7 @@ pages.job = {
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     const rfd = refusedBy(v), ci = cacheInfo(v);
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), stTip(status(v), v), 1)}<h1>${repoLabel(F, v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on ' + fname(fg) + '.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. ' + fname(fg) + ' marks the job failed after a few minutes.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<p class="sm" style="margin-top:4px">Needs your SSH key (Settings › Debugging) and a tailnet connection. Release now frees the slot.</p><div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
@@ -2252,9 +2258,10 @@ document.addEventListener('input', e => {
 });
 
 /* ---------- analytics (Settings › Analytics) ---------- */
-// Every card but the last uses the VMs /api/state sends (the newest 100, web.rs state()). The last reads the
-// usage ledger: /api/state sends 32 days of it (all repos) and the card shows 30.
-const AN = { r: 7, repo: '', cpus: 0, open: {} };
+// Every card but the last uses the job history (GET /api/analytics, 90 days kept in jobs.jsonl): rows with the
+// VM record's field names, so the helpers below read them as they are. The last card reads the usage ledger:
+// /api/state sends 32 days of it (all repos) and the card shows 30.
+const AN = { r: 7, repo: '', cpus: 0, open: {}, h: null, hk: '', ht: 0, err: '', mk: '' };
 const pctl = (a, p) => { if (!a.length) return null; a = [...a].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
 const jobEnd = v => v.done_at || v.ended;
 // Matches vm.rs record_usage: start to result, rounded up to the minute (how GitHub bills).
@@ -2277,24 +2284,30 @@ function anBuckets(r) {
 function bars(cols, ser, fmt, label, k) {
   const tot = c => c.v.reduce((a, b) => a + b, 0), max = Math.max(...cols.map(tot)) || 1, n = cols.length;
   return `<div class="lgd">${ser.map(s => `<span><i style="--c:${s[2]}"></i>${esc(s[1])}</span>`).join('')}</div>
-    <div class="bc" aria-hidden="true"><span class="mx">${fmt(max)}</span>${cols.map(c => `<i${c.x ? ' class="x"' : ''}${tip(c.l + '\n' + (c.x ? 'Older than the newest 100 VMs: not counted' : tot(c) ? ser.map((s, j) => c.v[j] ? `${s[1]}: ${fmt(c.v[j])}` : '').filter(Boolean).join('\n') : 'None'))}>${ser.map((s, j) => c.v[j] ? `<b style="--c:${s[2]};height:${(c.v[j] / max * 100).toFixed(2)}%"></b>` : '').join('')}</i>`).join('')}</div>
+    <div class="bc" aria-hidden="true"><span class="mx">${fmt(max)}</span>${cols.map(c => `<i${c.x ? ' class="x"' : ''}${tip(c.l + '\n' + (c.x ? 'Before the job history began: not counted here' : tot(c) ? ser.map((s, j) => c.v[j] ? `${s[1]}: ${fmt(c.v[j])}` : '').filter(Boolean).join('\n') : 'None'))}>${ser.map((s, j) => c.v[j] ? `<b style="--c:${s[2]};height:${(c.v[j] / max * 100).toFixed(2)}%"></b>` : '').join('')}</i>`).join('')}</div>
     <div class="ax" aria-hidden="true"><span>${esc(cols[0].l)}</span><span>${esc(cols[n >> 1].l)}</span><span>${esc(cols[n - 1].l)}</span></div>
     <details class="dt" data-k="${k}"${AN.open[k] ? ' open' : ''}><summary>Show numbers</summary><div class="tw"><table><caption class="sr">${esc(label)}</caption><tr><th>Period</th>${ser.map(s => `<th class="an-n">${esc(s[1])}</th>`).join('')}</tr>${cols.filter(c => !c.x && tot(c)).map(c => `<tr><td>${esc(c.l)}</td>${c.v.map(x => `<td class="an-n">${fmt(x)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
 }
 // One colour per VM size on every chart: by its place among all sizes kiln has seen.
-const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
+const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(AN.h?.sizes || []), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
 const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', `var(--v${all.indexOf(c) % 8 + 1})`]); };
+// A job the dashboard still holds links to its page; an older one from the history shows without a link.
+const slowest = tj => `<ul class="list">${[...tj].sort((a, b) => (jobEnd(b) - b.busy_since) - (jobEnd(a) - a.busy_since)).slice(0, 5).map(r => { const v = S.vms.find(x => x.id === r.id); return v ? jobRow(v) : jobRow({ ...r, run: undefined }).replace(/ href="#\/jobs\/[^"]*"/, ''); }).join('')}</ul>`;
 function anHTML() {
   const B = anBuckets(AN.r), t0 = B[0][0], st = (l, v, t, x = '') => `<div class="stat"${kt(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
-  const jobs = S.vms.filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
-  const oldest = Math.min(...S.vms.map(v => v.started)), cut = S.vms.length >= 100 && oldest > t0;
-  const note = cut ? `<div class="cal neu" style="margin-top:0">The dashboard gets the newest 100 VMs, which reach back to ${esc(when(oldest))}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched; the minutes chart at the bottom isn't limited to these VMs.</div>` : '';
-  const ld = Math.floor(Date.now() / 86400000), use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
+  const ld = Math.floor(Date.now() / 86400000), h = AN.h;
+  const jobs = (h?.rows || []).filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
+  // The history starts at its oldest row (a box's first start seeds it from the VM records on disk). Days before that that the
+  // ledger knows jobs for are hatched; a box that simply had no jobs then is not.
+  const oldest = h?.first ?? Infinity, cut = (S.usage || []).concat((S.usage_other || []).map(u => [u[0]])).some(u => (u[0] + 1) * 86400 <= oldest && (u[0] + 1) * 86400 > t0);
+  const note = cut ? `<div class="cal neu" style="margin-top:0">Job history starts on ${new Date(oldest * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched and not counted here; the minutes chart at the bottom covers them.</div>` : AN.err ? `<div class="cal" style="margin-top:0">Job history could not be loaded: ${esc(AN.err)}</div>` : '';
+  const use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
   const lom = Object.entries(otherMins((S.usage_other || []).filter(u => u[0] > ld - 30), F, 0)).map(([k, n]) => `${k} ${n} min`).join(', ');
   const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
-    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. ${lom ? ` Not priced: ${esc(lom)}.` :''} From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
+    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. ${lom ? ` Not priced: ${esc(lom)}.` :''} From the usage ledger, which keeps every job.</p>`
     : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
-  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}. Charts need finished jobs, so they fill in after the first one ends.</p><a href="#/guides/analytics">How analytics work</a></div>` + ledger;
+  if (!h) return note + `<div class="empty card">${ic('chart')}<p>${AN.err ? 'No job history.' : 'Loading the job history…'}</p></div>` + ledger;
+  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range. Charts need finished jobs, so they fill in after the first one ends.</p><a href="#/guides/analytics">How analytics work</a></div>` + ledger;
   const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };
   const x = i => cut && (B[i + 1]?.[0] ?? Infinity) <= oldest;
   const n = [0, 0, 0]; jobs.forEach(v => n[outcome(v)]++);
@@ -2320,12 +2333,13 @@ function anHTML() {
     <div class="card"><h2>Where the time goes <span class="fg2 sm" style="font-weight:400">median per phase</span>${hq('timeline')}</h2>${timeline(ph)}</div>
     <div class="card"><h2>By repository</h2><div class="tw"><table><tr><th>Repository</th><th class="an-n">Jobs</th><th class="an-n">Success</th><th class="an-n">Median</th><th class="an-n">p95</th><th class="an-n">Minutes</th></tr>
     ${rp.map(x => `<tr><td><button class="lnk" data-act="anpick" data-id="${esc(x.r)}"${tip('Show only ' + repoText(F, x.r))}>${repoLabel(F, x.r)}</button></td><td class="an-n">${x.n}</td><td class="an-n ${x.sr != null && x.sr < .8 ? 'fail' : ''}">${pc(x.sr)}</td><td class="an-n">${dd(x.md)}</td><td class="an-n">${dd(x.p)}</td><td class="an-n">${x.m}</td></tr>`).join('')}</table></div></div>
-    <div class="card"><h2>Slowest jobs</h2>${jobList([...tj].sort((a, b) => (jobEnd(b) - b.busy_since) - (jobEnd(a) - a.busy_since)).slice(0, 5))}</div>${ledger}`;
+    <div class="card"><h2>Slowest jobs</h2>${slowest(tj)}</div>${ledger}`;
 }
 addEventListener('toggle', e => { if (e.target.matches?.('.dt')) AN.open[e.target.dataset.k] = e.target.open; else if (e.target.matches?.('.bnm')) bnOpen = e.target.open; else if (e.target.matches?.('.fcb')) FOPEN[e.target.dataset.id] = e.target.open; }, true);
 G.analytics = {
   html() {
-    const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo)])].sort(), sizes = allSizes().filter(Boolean);
+    const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo), ...(AN.h?.repos || [])])].sort(), sizes = allSizes().filter(Boolean);
+    AN.mk = repos.join() + sizes.join();
     // A filter whose repo or size has aged out would filter while the menu shows "All".
     if (!repos.includes(AN.repo)) AN.repo = ''; if (!sizes.includes(AN.cpus)) AN.cpus = 0;
     return `<div class="an"><div class="bar"><div class="seg" role="radiogroup" aria-label="Range">${[[1, '24 hours'], [7, '7 days'], [30, '30 days']].map(([v, l]) => `<button role="radio" aria-checked="${v === AN.r}" data-act="anr" data-v="${v}">${l}</button>`).join('')}</div>
@@ -2333,8 +2347,22 @@ G.analytics = {
       <label class="sr" for="an-cpu">VM size</label><select id="an-cpu" data-act="ancpu"><option value="0">All sizes</option>${sizes.map(c => `<option value="${c}" ${c === AN.cpus ? 'selected' : ''}>${c} cpu</option>`).join('')}</select>${hq('analytics')}</div><div id="an"></div></div>`;
   },
   // Runs inside the poll: a drawing bug must not read as "kiln unreachable".
-  live() { try { setHTML($('#an'), anHTML()); } catch (e) { console.error('analytics', e); setHTML($('#an'), `<div class="cal">Analytics could not be drawn: ${esc(e.message)}</div>`); } },
+  live() { try { setHTML($('#an'), anHTML()); } catch (e) { console.error('analytics', e); setHTML($('#an'), `<div class="cal">Analytics could not be drawn: ${esc(e.message)}</div>`); } anLoad(); },
 };
+// The history for the chosen range, refetched at most every 30 s while the page is open, and at once when range or filters change.
+let anBusy = false;
+async function anLoad() {
+  const k = `${AN.r}|${AN.repo}|${AN.cpus}`;
+  if (anBusy || (AN.hk === k && Date.now() - AN.ht < 30000)) return;
+  anBusy = true;
+  try { AN.h = await api(`/api/analytics?days=${AN.r}${AN.repo ? '&repo=' + encodeURIComponent(AN.repo) : ''}${AN.cpus ? '&cpus=' + AN.cpus : ''}`); AN.err = ''; }
+  catch (e) { AN.err = e.message; }
+  finally { anBusy = false; AN.hk = k; AN.ht = Date.now(); }
+  if (cur !== pages.settings || pages.settings.g !== 'analytics') return;
+  // The menus list what the history knows: redraw the bar once if that is more than it showed.
+  const rs = [...new Set([...REPOS(), ...S.vms.map(v => v.repo), ...(AN.h?.repos || [])])].sort(), ss = allSizes().filter(Boolean);
+  if (rs.join() + ss.join() !== AN.mk) pages.settings.render(); else G.analytics.live();
+}
 // GET /api/update: the full update status (release notes included); /api/state carries a compact copy.
 let UP = null, upBusy = false;
 async function loadUpd() {
@@ -2710,7 +2738,7 @@ const GUIDES = [
     <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled and refused jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from the forge queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try <a href="#/guides/warm">warm VMs</a>.</li>
     <li><b>Job minutes and Saved:</b> see <a href="#/guides/usage">Usage and savings by forge</a>.</li>
     <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
-    <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
+    <p><b>Job history:</b> kiln writes one small line per finished job to <code>jobs.jsonl</code> in its data directory (repo, job name, size, outcome and timings; no logs, URLs or commit text) and keeps 90 days. The first start with this version fills it from the VM records still on disk, so days before that show as hatched columns and are left out; the usage ledger still counts them. The last chart, <i>Job minutes, last 30 days</i>, reads the usage ledger, which keeps every job.</p>
     <p>Each chart's numbers are also a table under <b>Show numbers</b>. Charts need finished jobs: a new box shows none until the first job ends.</p>`, 'Alerts and usage', ['usage', 'warm']],
 
   ['usage', 'Usage and savings by forge', () => `<h2>Usage and savings by forge</h2>
@@ -2719,7 +2747,7 @@ const GUIDES = [
     <p><b>Only GitHub is priced.</b> The price is the GitHub-hosted Linux rate for the job's VM size per minute: 2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042. GitLab and Gitea have no hosted-runner price to compare with, so their minutes are shown as minutes, with no dollars: for example "GitLab: 40 min, not priced". They sit in their own ledger, so they never change the GitHub total.</p>
     <p><b>This month.</b> The month is a UTC calendar month, like GitHub's billing.</p>
     <p><b>Your own rate.</b> Click the rate under the Overview stats to use one flat $/min for GitHub jobs instead. It is saved in this browser only.</p>
-    <p><b>Why numbers differ.</b> Overview "Jobs today" counts today's jobs in the newest 100 VMs. Analytics counts finished jobs in the range you pick. The 30-day minutes chart reads the full ledger.</p>`, 'Alerts and usage', ['analytics', 'forges']],
+    <p><b>Why numbers differ.</b> Overview "Jobs today" counts today's jobs in the newest 100 VMs. Analytics counts finished jobs in the range you pick, from the job history. The 30-day minutes chart reads the usage ledger.</p>`, 'Alerts and usage', ['analytics', 'forges']],
 
   ['arm64', 'Apple Silicon (arm64)', L => { const A = /-arm64$/.test(L) ? L : L + '-arm64'; return `<h2>Apple Silicon (arm64)</h2>
     <p>On a Mac with Apple Silicon, kiln runs native linux/arm64 job VMs: one fresh Ubuntu 24.04 arm64 VM per job, started by QEMU with Apple's Hypervisor.framework (HVF). It is the same kiln, with the differences below. An aarch64 Linux box with KVM works the same way. This support has been tested in emulation, not yet on a real Mac, so treat it as experimental.</p>
@@ -2791,7 +2819,7 @@ pages.guides = {
     gq = q.trim().toLowerCase();
     const w = gq.split(/\s+/).filter(Boolean), hits = w.length ? GUIDES.filter(g => w.every(x => guideText(g).toLowerCase().includes(x))) : [];
     $('#gres').hidden = !w.length; $('#gbody').hidden = !!w.length;
-        $('#gres').innerHTML = w.length ? (hits.length ? `<ul class="list">${hits.map(g => { const t = guideText(g), k = t.toLowerCase().indexOf(w[0]), s = t.slice(Math.max(0, k - 40), k + 90); return `<li><a class="gr" href="#/guides/${g[0]}" data-act="gclear"><b>${esc(g[1])}</b><span>${k > 0 ? '…' : ''}${esc(s)}…</span></a></li>`; }).join('')}</ul>` : `<div class="empty">${ic('help')}<p>No guide mentions "${esc(gq)}". Try fewer words.</p></div>`) : '';
+        $('#gres').innerHTML = w.length ? (hits.length ? `<ul class="list">${hits.map(g => { const t = guideText(g).slice(g[1].length + 1), k = Math.max(0, t.toLowerCase().indexOf(w[0])), s = t.slice(Math.max(0, k - 40), k + 90); return `<li><a class="gr" href="#/guides/${g[0]}" data-act="gclear"><b>${esc(g[1])}</b><span>${k > 0 ? '…' : ''}${esc(s)}…</span></a></li>`; }).join('')}</ul>` : `<div class="empty">${ic('help')}<p>No guide mentions "${esc(gq)}". Try fewer words.</p></div>`) : '';
   },
 };
 
@@ -2860,7 +2888,7 @@ const ACT = {
   },
   async kill() {
     const v = S.vms.find(x => x.id === pages.job.id);
-    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The job fails on ${fname(forgeOf(F, v.repo))}.`, action: 'Kill VM', danger: 1 })) return;
+    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The VM stops now. ${fname(forgeOf(F, v.repo))} marks the job failed or cancelled once its runner times out, which can take several minutes. A VM killed while booting leaves the job queued, so kiln may start another VM for it.`, action: 'Kill VM', danger: 1 })) return;
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() {
@@ -3133,7 +3161,12 @@ document.addEventListener('submit', async e => {
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'addforge') {
       const v = n => $('#af-' + n, f).value.trim(), repo = v('repo'), id = v('id');
-      await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] });
+      try { await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] }); }
+      catch (err) { // say it next to the field as well as in the toast
+        const x = $(/id|name/i.test(err.message) && !/url|address/i.test(err.message) ? '#af-id' : '#af-url', f); let m = f.querySelector('.ferr');
+        if (!m) { m = document.createElement('p'); m.className = 'ferr'; m.id = 'ferr-addforge'; m.setAttribute('role', 'alert'); f.append(m); }
+        m.textContent = err.message; x.setAttribute('aria-invalid', 'true'); x.setAttribute('aria-describedby', m.id); x.focus(); throw err;
+      }
       toast(`${FX[v('kind')]?.name || 'Forge'} added. Now give it a token.`); await poll();
       if (cur === pages.settings) { pages.settings.render(); $(`#fc-${id}`)?.scrollIntoView({ block: 'start' }); } else forgeUI();
     }

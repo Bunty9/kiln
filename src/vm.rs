@@ -250,6 +250,7 @@ fn scrub_vm_dir(dir: &Path) {
 pub fn load_history(data: &Path) -> Vec<Vm> {
     // GitLab and Gitea jobs never create usage.json: seed only when neither ledger exists.
     let seed = !data.join("usage.json").exists() && !data.join(USAGE_OTHER).exists();
+    let seed_jobs = !data.join(crate::history::FILE).exists();
     let mut vms: Vec<Vm> = std::fs::read_dir(data.join("vms"))
         .into_iter()
         .flatten()
@@ -294,7 +295,11 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
     vms.sort_by_key(|v| v.started);
     // First start with the ledger: seed it from the history still on disk.
     if seed {
-        vms.iter().for_each(|v| record_usage(data, v));
+        vms.iter().for_each(|v| bump_usage(data, v));
+    }
+    // First start with the job history: seed it from every record on disk, once per VM id.
+    if seed_jobs {
+        crate::history::backfill(data, &vms);
     }
     vms
 }
@@ -321,6 +326,11 @@ fn read_ledger<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str
 /// result, rounded up to the minute. A debug hold after the result is not counted.
 /// GitHub jobs go to `usage.json`, other forges' to `usage-other.json`.
 pub fn record_usage(data: &Path, v: &Vm) {
+    crate::history::append(data, v);
+    bump_usage(data, v);
+}
+
+fn bump_usage(data: &Path, v: &Vm) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let (Some(from), Some(to)) = (v.busy_since, v.done_at.or(v.ended)) else { return };
     let _g = LOCK.lock().unwrap();
@@ -3151,18 +3161,18 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());
-    let stray = platform::process_cmdlines().iter().filter(|c| c.contains("qemu-system") && c.contains(&vms_dir)).count();
-    let active = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count();
+    let active: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
+    let (qemus, stray) = count_qemus(&platform::process_cmdlines(), &vms_dir, &active);
     let serving =
         cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
-    out.push(if stray > 0 && serving {
-        check("stray qemu", true, format!("{stray} qemu process(es) owned by running kiln serve"))
-    } else if stray > active {
+    out.push(if qemus > 0 && serving {
+        check("stray qemu", true, format!("{qemus} qemu process(es) owned by running kiln serve"))
+    } else if stray > 0 {
         check(
             "stray qemu",
             false,
             format!(
-                "{stray} qemu process(es) running from {vms_dir}, {active} active VM(s) (expected only if another kiln serve is running jobs)"
+                "{stray} qemu process(es) running from {vms_dir} that no active VM owns (expected only if another kiln serve is running jobs)"
             ),
         )
     } else {
@@ -3171,8 +3181,36 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     out
 }
 
+/// (qemu processes under `vms_dir`, those whose `<id>/q/` path is no active VM's). Only argv[0]
+/// `qemu-system*` counts: rootlesskit and its `/proc/self/exe` helper carry QEMU's command line as arguments.
+fn count_qemus(cmdlines: &[String], vms_dir: &str, active: &[String]) -> (usize, usize) {
+    let ours: Vec<&String> = cmdlines
+        .iter()
+        .filter(|c| {
+            let argv0 = c.split(['\0', ' ']).next().unwrap_or("");
+            argv0.rsplit('/').next().unwrap_or("").starts_with("qemu-system") && c.contains(vms_dir)
+        })
+        .collect();
+    let owned = |c: &str| c.split(vms_dir).skip(1).any(|r| r.split_once("/q/").is_some_and(|(id, _)| active.iter().any(|a| a == id)));
+    (ours.len(), ours.iter().filter(|c| !owned(c)).count())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stray_qemu_counts_only_unowned_qemu_processes() {
+        let d = "/data/vms/";
+        let q = |id: &str| format!("/usr/bin/qemu-system-x86_64\0-drive\0file={d}{id}/q/disk.qcow2");
+        let wrap = |p: &str, id: &str| format!("{p}\0--\0{}", q(id).replace('\0', " "));
+        let active = vec!["kiln-1".to_string()];
+        let one_vm = [wrap("rootlesskit", "kiln-1"), wrap("/proc/self/exe", "kiln-1"), q("kiln-1")];
+        assert_eq!(count_qemus(&one_vm, d, &active), (1, 0));
+        let orphan = [one_vm[2].clone(), q("kiln-9")];
+        assert_eq!(count_qemus(&orphan, d, &active), (2, 1));
+        let foreign = ["qemu-system-x86_64\0-drive\0file=/home/u/vm/q/disk".to_string()];
+        assert_eq!(count_qemus(&foreign, d, &active), (0, 0));
+    }
+
     #[tokio::test]
     async fn cancelling_a_gitlab_pipeline_kills_its_active_vms() {
         let app = crate::test_app("kill-pipeline");
@@ -3559,6 +3597,86 @@ mod tests {
         let mut seen: Vec<_> = String::from_utf8(out).unwrap().lines().map(String::from).collect();
         seen.sort();
         assert_eq!(seen, ["HOME=/h", "PATH=/usr/bin:/bin"], "only the allow list reaches QEMU");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn job_history_appends_prunes_skips_corrupt_lines_and_backfills_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("kiln-test-job-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let now = crate::now();
+        let job = |id: &str, repo: &str, ago: u64, secs: u64| Vm {
+            id: id.into(),
+            repo: repo.into(),
+            cpus: 4,
+            job: Some("build".into()),
+            note: Some("branch main, a secret title".into()),
+            job_url: Some("https://forge.example/x".into()),
+            started: now - ago - 20,
+            busy_since: Some(now - ago),
+            done_at: Some(now - ago + secs),
+            ended: Some(now - ago + secs + 3),
+            ..vm(id, State::Done, None)
+        };
+        crate::history::append(&d, &job("a", "acme/demo", 100, 60));
+        crate::history::append(&d, &job("b", "gl:g/p", 50, 30));
+        let raw = std::fs::read_to_string(d.join("jobs.jsonl")).unwrap();
+        assert_eq!(raw.lines().count(), 2);
+        assert!(!raw.contains("forge.example") && !raw.contains("secret"), "no URLs, notes or titles: {raw}");
+        assert_eq!(std::fs::metadata(d.join("jobs.jsonl")).unwrap().permissions().mode() & 0o777, 0o600);
+        // A torn line, garbage and a blank line are skipped; the rest still reads.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(d.join("jobs.jsonl")).unwrap();
+        f.write_all(b"{\"id\":\"torn\n\nnot json\n").unwrap();
+        crate::history::append(&d, &job("c", "acme/demo", 10, 5));
+        let ids = |since| crate::history::read(&d, since).into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(0), ["a", "b", "c"]);
+        assert_eq!(ids(now - 30), ["b", "c"], "window by end time");
+        // Prune: older than 90 days goes, and so does the garbage once the file is rewritten.
+        crate::history::append(&d, &job("old", "acme/demo", 91 * 86400, 5));
+        crate::history::prune_locked(&d, now);
+        assert_eq!(ids(0), ["a", "b", "c"]);
+        assert_eq!(std::fs::read_to_string(d.join("jobs.jsonl")).unwrap().lines().count(), 3);
+        // A VM that never ran a job, or has not ended, is not a history row.
+        crate::history::append(&d, &Vm { busy_since: None, ..job("n", "acme/demo", 1, 1) });
+        crate::history::append(&d, &Vm { done_at: None, ended: None, ..job("n", "acme/demo", 1, 1) });
+        assert_eq!(ids(0).len(), 3);
+        // Backfill: every record on disk, none twice (a, b are already there).
+        std::fs::create_dir_all(d.join("vms")).unwrap();
+        for v in ["a", "b", "z"] {
+            std::fs::create_dir_all(d.join("vms").join(v)).unwrap();
+            write_meta(&d, &job(v, "acme/demo", 500, 5));
+        }
+        crate::history::backfill(&d, &load_history(&d));
+        assert_eq!(ids(0), ["z", "a", "b", "c"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn job_history_is_seeded_from_every_record_on_first_start_only() {
+        let d = std::env::temp_dir().join(format!("kiln-test-job-history-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let now = crate::now();
+        for i in 0..150 {
+            let id = format!("kiln-{i}-0");
+            std::fs::create_dir_all(d.join("vms").join(&id)).unwrap();
+            write_meta(
+                &d,
+                &Vm {
+                    busy_since: Some(now - 1000 + i),
+                    done_at: Some(now - 990 + i),
+                    ended: Some(now - 980 + i),
+                    cpus: 4,
+                    ..vm(&id, State::Done, None)
+                },
+            );
+        }
+        load_history(&d);
+        assert_eq!(crate::history::read(&d, 0).len(), 150, "all of them, not the newest 100");
+        load_history(&d);
+        assert_eq!(crate::history::read(&d, 0).len(), 150, "a restart adds nothing");
         let _ = std::fs::remove_dir_all(&d);
     }
 

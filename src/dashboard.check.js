@@ -169,7 +169,7 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
   const g = { document: doc, window: { isSecureContext: false }, location: { hash: '', search: '', hostname: 'box', pathname: '/', protocol: 'http:' }, history: { replaceState() {} }, localStorage: ls, matchMedia: () => ({ matches: false }),
     addEventListener() {}, setInterval: () => 0, setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {}, CSS: { escape: x => x }, navigator: {}, fetch: async u => ({ ok: true, status: 200, text: async () => JSON.stringify(u === '/api/forges' ? serve.forges : {}) }),
     innerHeight: 800, innerWidth: 1000, scrollTo() {}, getComputedStyle: () => ({}), getSelection: () => '', kilnAppearance() {}, Notification: undefined };
-  const hooks = `return { pages, G, GROUPS, GUIDES, GROUP_ORDER, GD, HELP, TIPS, TIPL, tipKey, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
+  const hooks = `return { pages, G, AN, anHTML, GROUPS, GUIDES, GROUP_ORDER, GD, HELP, TIPS, TIPL, tipKey, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
   const K = new Function(...Object.keys(g), main.replace(tail, hooks))(...Object.values(g));
   const cfg = { listen: '100.64.0.7:7878', repos: ['acme/api'], label: 'kiln', max_vms: 2, vm_cpus: 2, vm_mem_mb: 4096, vm_disk_gb: 40, size_mem_mb: {}, poll_secs: 5, job_timeout_mins: 60, idle_timeout_mins: 10, allowed_users: [], notify_rules: [], docker_mirror: true,
     auto_rebake: true, bake_node_versions: ['24'], bake_apt_packages: [], cache: true, cache_branches: {}, cache_gb: 30, repo_cache_gb: {}, debug_hold_mins: 0, debug_ssh_keys: [], egress: 'open', warm: {}, warm_recycle_mins: 30, auto_update: false,
@@ -202,6 +202,22 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     for (const v of s.vms) at(() => { K.pages.job.mount({ seg: [v.id], q: new URLSearchParams() }); K.pages.job.update(); });
     at(() => { K.pages.repos.mount({ seg: [], q: new URLSearchParams() }); K.pages.repos.update(); });
     for (const gd of K.GUIDES) at(() => K.pages.guides.mount({ seg: [gd[0]], q: new URLSearchParams() }));
+  }
+  // Analytics over 30 days of job history rows (GET /api/analytics): counts, hatching only where the ledger knows older jobs, a clean empty state.
+  {
+    const day = 86400, T = Math.floor(Date.now() / 1000), row = (i, o = {}) => ({ id: 'kiln-h' + i, repo: i % 3 ? 'acme/api' : 'gitlab:g/p', state: 'done', result: i % 5 ? 'Succeeded' : 'failure', job: 'build', cpus: i % 2 ? 2 : 4,
+      started: T - i * 4 * 3600 - 40, queued_at: T - i * 4 * 3600 - 50, online_at: T - i * 4 * 3600 - 30, busy_since: T - i * 4 * 3600, done_at: T - i * 4 * 3600 + 120, ended: T - i * 4 * 3600 + 125, ...o });
+    const rows = Array.from({ length: 150 }, (_, i) => row(i)), draw = (h, usage = []) => { K.set(mkS({ token_set: true, image_ready: true, vms, usage }), [fg('github', 'github', { repos: ['acme/api'] })]); K.AN.h = h; K.AN.r = 30; K.AN.repo = ''; K.AN.cpus = 0; return K.anHTML(); };
+    const html = draw({ first: rows[149].busy_since, repos: ['acme/api', 'gitlab:g/p'], sizes: [2, 4], rows });
+    assert(html.includes('<div class="l">Jobs</div><div class="v ">150</div>'), 'all 150 history rows are counted, not the newest 100');
+    assert(!html.includes('Job history starts on') && !html.includes('newest 100'), 'no note when nothing older is known');
+    assert(html.includes('By repository') && html.includes('Slowest jobs') && html.includes('Where the time goes'));
+    assert(!/href="#\/jobs\/kiln-h/.test(html), 'a job the dashboard no longer holds is listed without a link');
+    const cut = draw({ first: T - 5 * day, repos: [], sizes: [], rows: rows.slice(0, 20) }, [[Math.floor(T / day) - 10, 4, 7, 90]]);
+    assert(cut.includes('Job history starts on') && cut.includes('<i class="x"'), 'days before the history that the ledger knows are hatched and noted');
+    assert(!draw({ first: T - 5 * day, repos: [], sizes: [], rows: [] }).includes('Job history starts on'), 'a new box with no older jobs shows no note');
+    assert(draw({ first: null, repos: [], sizes: [], rows: [] }).includes('No finished jobs'), 'empty history: the empty state');
+    K.AN.h = null; assert(K.anHTML().includes('Loading the job history'), 'before the first answer');
   }
   // Help content: every popover has an entry, every link lands on a guide, every tip can be shown.
   const ids = new Set(K.GUIDES.map(g => g[0])), sprite = new Set([...src.matchAll(/<symbol id="i-([a-z0-9-]+)"/g)].map(m => m[1]));
