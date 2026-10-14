@@ -1204,10 +1204,10 @@ async fn reload_token(app: &Arc<App>) {
     LAST.store(now(), Ordering::Relaxed);
     let data = app.data.clone();
     let only_file = app.gh.source() == "file";
-    if let Ok((t, src)) = tokio::task::spawn_blocking(move || load_token(&data, only_file)).await
-        && !t.is_empty()
-    {
-        app.gh.set_token(t, src);
+    match tokio::task::spawn_blocking(move || load_token(&data, only_file)).await {
+        Ok((t, src)) if !t.is_empty() => app.gh.set_token(t, src),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("GitHub token reload: {e}"),
     }
 }
 

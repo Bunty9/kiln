@@ -156,6 +156,7 @@ write_files:
       check "docker present" sudo -u runner bash -c 'command -v docker'
       check "docker.service not enabled at boot" bash -c '! systemctl is-enabled docker.service'
       check "docker.socket enabled" systemctl is-enabled docker.socket
+      check "sysrq enabled (the gate's fail-closed fallbacks)" bash -c 'test "$(cat /proc/sys/kernel/sysrq)" -ne 0'
       check "sshd off" bash -c '! systemctl is-enabled ssh.service ssh.socket'
       check "no linger for runner" test ! -e /var/lib/systemd/linger/runner
       if [ -r "/boot/config-$(uname -r)" ]; then KCONF="cat /boot/config-$(uname -r)"
@@ -392,7 +393,8 @@ write_files:
           while p > 1:
               if p == root: return True
               p = ppid(p)
-          return uid in uids(pid)    # reparented orphans keep the uid
+          u = uids(pid)
+          return not u or uid in u   # reparented orphans keep the uid; an unreadable status cannot be told apart: hold
 
       def answer(fan, fd, resp):
           try: os.write(fan, struct.pack("=ii", fd, resp))

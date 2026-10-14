@@ -1280,11 +1280,16 @@ fn query(pairs: &[(&str, &str)]) -> String {
 /// descriptions are `<install>-<vm id>`, so a sweep never touches another install's runners.
 pub fn install_id(data: &Path) -> Result<String> {
     let p = data.join("install_id");
-    if let Ok(s) = std::fs::read_to_string(&p) {
-        let s = s.trim();
-        if s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-            return Ok(s.to_string());
+    match std::fs::read_to_string(&p) {
+        Ok(s) => {
+            let s = s.trim();
+            if s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+                return Ok(s.to_string());
+            }
         }
+        // A new id would orphan every runner registered under the old one from the sweep: only a missing file makes one.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(anyhow!("read {}: {e}", p.display())),
+        Err(_) => {}
     }
     let mut b = [0u8; 3];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b).map_err(|_| anyhow!("no random bytes"))?;

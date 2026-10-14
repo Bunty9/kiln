@@ -231,11 +231,19 @@ pub fn image_ready(data: &Path) -> bool {
 /// Remove what a VM directory may hold that must not outlive the VM: its disks, JIT secret
 /// and rootlesskit state. Goes by the directory, never by what a record inside it claims.
 fn scrub_vm_dir(dir: &Path) {
-    let _ = std::fs::remove_dir_all(qemu_dir(dir));
-    let _ = std::fs::remove_dir_all(rk_dir(dir));
+    let gone = |r: std::io::Result<()>, p: &Path| {
+        if let Err(e) = r
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            // A credential or disk that stays on disk must not stay unseen.
+            tracing::warn!("{}: not removed: {e}", p.display());
+        }
+    };
+    gone(std::fs::remove_dir_all(qemu_dir(dir)), &qemu_dir(dir));
+    gone(std::fs::remove_dir_all(rk_dir(dir)), &rk_dir(dir));
     // Layout before 0.2.4: QEMU's files sat in the VM directory itself.
     for f in ["disk.qcow2", "cache.qcow2", "jit", "ssh"] {
-        let _ = std::fs::remove_file(dir.join(f));
+        gone(std::fs::remove_file(dir.join(f)), &dir.join(f));
     }
 }
 
@@ -2338,14 +2346,28 @@ async fn egress_probe(app: &App) -> Result<()> {
     // Every private forge that resolves is opened for the probe; one that does not is refused at its own launches.
     let forges = crate::forge::effective(&cfg.forges, &cfg.repos);
     // A refused forge is left out of both the rule and the checks (its own launches fail).
-    let (mut allow, mut forges) = (vec![], forges);
+    let (mut allow, mut forges, mut dropped) = (vec![], forges, vec![]);
     forges.retain(|f| {
         if f.network != Some(crate::forge::Network::Internal) {
             return true;
         }
         let ok = f.url.as_deref().map(|a| crate::forge::net::resolve_forge(a, crate::forge::Network::Internal));
-        ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok())
+        let kept = ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok());
+        if !kept {
+            dropped.push(f.id.as_str().to_string());
+        }
+        kept
     });
+    // Its jobs fail at launch; "filtered egress OK" must not be the whole story.
+    if dropped.is_empty() {
+        app.clear_notice("egress-forge");
+    } else {
+        app.notice(
+            "egress-forge",
+            "egress_forge",
+            format!("forge(s) {} could not be resolved for the egress rule: their jobs fail at launch", dropped.join(", ")),
+        );
+    }
     let targets = probe_targets(&forges);
     // The namespace resolves through the host: with the host's DNS down the probe can only fail,
     // after `curl -m8` per target. Not started then (boot, before the network is up).
@@ -3128,17 +3150,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());
     let stray = platform::process_cmdlines().iter().filter(|c| c.contains("qemu-system") && c.contains(&vms_dir)).count();
-    let active = app.vms.lock().unwrap().iter().any(|v| v.state.is_active());
+    let active = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count();
     let serving =
         cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
     out.push(if stray > 0 && serving {
         check("stray qemu", true, format!("{stray} qemu process(es) owned by running kiln serve"))
-    } else if stray > 0 && !active {
+    } else if stray > active {
         check(
             "stray qemu",
             false,
             format!(
-                "{stray} qemu process(es) running from {vms_dir} with no active VM (expected only if another kiln serve is running jobs)"
+                "{stray} qemu process(es) running from {vms_dir}, {active} active VM(s) (expected only if another kiln serve is running jobs)"
             ),
         )
     } else {
