@@ -3159,18 +3159,18 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());
-    let stray = platform::process_cmdlines().iter().filter(|c| c.contains("qemu-system") && c.contains(&vms_dir)).count();
-    let active = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count();
+    let active: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
+    let (qemus, stray) = count_qemus(&platform::process_cmdlines(), &vms_dir, &active);
     let serving =
         cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
-    out.push(if stray > 0 && serving {
-        check("stray qemu", true, format!("{stray} qemu process(es) owned by running kiln serve"))
-    } else if stray > active {
+    out.push(if qemus > 0 && serving {
+        check("stray qemu", true, format!("{qemus} qemu process(es) owned by running kiln serve"))
+    } else if stray > 0 {
         check(
             "stray qemu",
             false,
             format!(
-                "{stray} qemu process(es) running from {vms_dir}, {active} active VM(s) (expected only if another kiln serve is running jobs)"
+                "{stray} qemu process(es) running from {vms_dir} that no active VM owns (expected only if another kiln serve is running jobs)"
             ),
         )
     } else {
@@ -3179,8 +3179,36 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     out
 }
 
+/// (qemu processes under `vms_dir`, those whose `<id>/q/` path is no active VM's). Only argv[0]
+/// `qemu-system*` counts: rootlesskit and its `/proc/self/exe` helper carry QEMU's command line as arguments.
+fn count_qemus(cmdlines: &[String], vms_dir: &str, active: &[String]) -> (usize, usize) {
+    let ours: Vec<&String> = cmdlines
+        .iter()
+        .filter(|c| {
+            let argv0 = c.split(['\0', ' ']).next().unwrap_or("");
+            argv0.rsplit('/').next().unwrap_or("").starts_with("qemu-system") && c.contains(vms_dir)
+        })
+        .collect();
+    let owned = |c: &str| c.split(vms_dir).skip(1).any(|r| r.split_once("/q/").is_some_and(|(id, _)| active.iter().any(|a| a == id)));
+    (ours.len(), ours.iter().filter(|c| !owned(c)).count())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stray_qemu_counts_only_unowned_qemu_processes() {
+        let d = "/data/vms/";
+        let q = |id: &str| format!("/usr/bin/qemu-system-x86_64\0-drive\0file={d}{id}/q/disk.qcow2");
+        let wrap = |p: &str, id: &str| format!("{p}\0--\0{}", q(id).replace('\0', " "));
+        let active = vec!["kiln-1".to_string()];
+        let one_vm = [wrap("rootlesskit", "kiln-1"), wrap("/proc/self/exe", "kiln-1"), q("kiln-1")];
+        assert_eq!(count_qemus(&one_vm, d, &active), (1, 0));
+        let orphan = [one_vm[2].clone(), q("kiln-9")];
+        assert_eq!(count_qemus(&orphan, d, &active), (2, 1));
+        let foreign = ["qemu-system-x86_64\0-drive\0file=/home/u/vm/q/disk".to_string()];
+        assert_eq!(count_qemus(&foreign, d, &active), (0, 0));
+    }
+
     #[tokio::test]
     async fn cancelling_a_gitlab_pipeline_kills_its_active_vms() {
         let app = crate::test_app("kill-pipeline");
