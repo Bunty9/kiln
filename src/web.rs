@@ -110,9 +110,10 @@ async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(to
     Err(e).with_context(|| format!("bind {listen}"))
 }
 
-pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    load_key(&app.data)?;
-    let router = Router::new()
+/// Every route of the dashboard. The guard layer is added by `serve`, around all of them: a route added here is guarded,
+/// and `no_route_answers_without_the_key` reads this very function's text to test each one.
+fn api_router() -> Router<Arc<App>> {
+    Router::new()
         .route("/", get(|| async { Html(PAGE.as_str()) }))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(sw))
@@ -158,8 +159,11 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/workflows", get(workflows))
         .route("/api/dispatch", post(dispatch))
         .merge(crate::notify::routes())
-        .layer(middleware::from_fn_with_state(app.clone(), guard))
-        .with_state(app.clone());
+}
+
+pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
+    load_key(&app.data)?;
+    let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
     let configured = app.cfg().listen;
     let (listener, addr) = bind_listen(&app.data, &configured).await?;
     *RUNNING_LISTEN.lock().unwrap() = Some(addr.clone());
@@ -2110,6 +2114,49 @@ mod tests {
             assert!(audited(&Method::POST, p, true), "{p}");
         }
         assert!(!audited(&Method::GET, "/api/runs", true));
+    }
+
+    /// A job VM reaches the dashboard port as a loopback peer. With a valid Host and `x-kiln` but no dashboard key, no
+    /// route may answer, whatever the method. The route list is read from the router's own source, so a new route is covered.
+    #[tokio::test]
+    async fn no_route_answers_without_the_key() {
+        let src = [include_str!("web.rs"), include_str!("notify.rs")];
+        let mut paths: Vec<String> = vec![];
+        for s in src {
+            for l in s.lines().filter(|l| l.trim_start().starts_with(".route(\"/api/")) {
+                let p = l.trim_start().trim_start_matches(".route(\"").split('"').next().unwrap();
+                let mut p = p.to_string();
+                while let (Some(a), Some(b)) = (p.find('{'), p.find('}')) {
+                    p.replace_range(a..=b, "1");
+                }
+                paths.push(p);
+            }
+        }
+        assert!(
+            paths.len() >= 40 && paths.contains(&"/api/runs/1/cancel".to_string()) && paths.contains(&"/api/notify/1/test".to_string()),
+            "{paths:?}"
+        );
+        let app = App::for_tests();
+        for p in &paths {
+            for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+                let req = Request::builder().method(m.clone()).uri(p.as_str()).header(header::HOST, "localhost:7878").header("x-kiln", "1");
+                let (r, _) =
+                    admission(&app, Via::Tcp("127.0.0.1:5555".parse().unwrap()), req.body(axum::body::Body::empty()).unwrap()).await;
+                assert_eq!(r.err().map(|r| r.status()), Some(StatusCode::UNAUTHORIZED), "{m} {p}");
+            }
+        }
+        // And through the real layer, on a socket: a merged router is guarded too.
+        let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = tokio::spawn(axum::serve(l, router.into_make_service_with_connect_info::<Via>()).into_future());
+        let c = reqwest::Client::new();
+        for (m, p) in [(Method::GET, "/api/jobs/1/log?repo=acme/demo"), (Method::GET, "/api/notify"), (Method::POST, "/api/notify/1/test")]
+        {
+            let r = c.request(m.clone(), format!("http://127.0.0.1:{port}{p}")).header("x-kiln", "1").send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{m} {p}");
+        }
+        server.abort();
     }
 
     #[tokio::test]
