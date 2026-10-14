@@ -13,7 +13,7 @@ pub mod net;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, RwLock};
 
@@ -732,11 +732,12 @@ impl Forge {
             Self::GitHub(_) => Ok(None),
         }
     }
-    pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
+    /// Deletes the stale runners of `repo`, never one named in `keep` (the active VMs').
+    pub async fn sweep(&self, repo: &RepoRef, keep: &HashSet<String>) -> Result<usize> {
         match self {
-            Self::GitHub(g) => g.gh.sweep_runners(&repo.path).await,
+            Self::GitHub(g) => g.gh.sweep_runners(&repo.path, keep).await,
             Self::GitLab(g) => g.sweep(repo).await,
-            Self::Gitea(g) => g.sweep(repo).await,
+            Self::Gitea(g) => g.sweep(repo, keep).await,
         }
     }
     /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no

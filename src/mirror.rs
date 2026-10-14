@@ -30,6 +30,8 @@ const SHA256: &str = RELEASE.1;
 const SUPPORTED: bool = !crate::platform::MACOS;
 const UNSUPPORTED_MSG: &str = "not available on macOS; VMs pull from Docker Hub directly";
 pub const ADDR: &str = "127.0.0.1:5000";
+/// The registry (a proxy) contacts this as it starts and panics (exit status 2) if it does not resolve.
+const HUB: &str = "registry-1.docker.io";
 
 #[derive(Default)]
 pub struct Status {
@@ -159,10 +161,23 @@ pub async fn supervise(app: Arc<App>) {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
+        // Not at boot, before the network is up: the registry would only crash and be restarted with a growing delay.
+        if !crate::boot::dns_ok(HUB).await {
+            set(&app, false, Some(format!("{HUB} does not resolve yet (waiting for the network)")));
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
         let began = Instant::now();
         let err = match start(&app).await {
             Err(e) => Some(format!("{e:#}")),
             Ok(mut child) => {
+                // "Running" means answering, so the egress probe never meets a registry that is still starting.
+                for _ in 0..20 {
+                    if port_busy().await || child.try_wait().is_ok_and(|s| s.is_some()) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
                 set(&app, true, None);
                 let mut err = None;
                 let mut checked = Instant::now();

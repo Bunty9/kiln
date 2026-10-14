@@ -245,6 +245,14 @@ pub fn load_history(data: &Path) -> Vec<Vm> {
             None
         })
         .collect();
+    // A reboot or crash skipped the normal cleanup of every run: no disk, JIT secret or rootlesskit state
+    // may outlive its VM, whatever state its record ended in.
+    for v in &vms {
+        scrub_vm_dir(&data.join("vms").join(&v.id));
+    }
+    // rootlesskit state of VMs whose directory is gone (pruned history, a kill in between).
+    let _ = std::fs::remove_dir_all(data.join("rk"));
+    let _ = std::fs::remove_dir_all(data.join("egress-check"));
     for v in &mut vms {
         if v.state.is_active() {
             v.state = State::Lost;
@@ -551,11 +559,16 @@ pub(crate) fn forge_for(app: &App, repo: &str) -> Result<(Arc<crate::forge::Forg
 /// The one way a runner (and so its VM) is dropped: every caller of it goes through here.
 /// Deregistering is the arbiter: if the forge refuses (Busy), the runner just got a job and
 /// its VM must live. Otherwise the VM is killed, except for `Unused` (its VM is already over).
-async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
+/// False when the forge could not be asked (a call failed), so the caller may try again.
+async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) -> bool {
     let (forge, rr) = match forge_for(app, repo) {
         Ok(f) => f,
-        Err(e) => return tracing::warn!("{repo}: {e:#}"),
+        Err(e) => {
+            tracing::warn!("{repo}: {e:#}");
+            return true;
+        }
     };
+    let mut ok = true;
     for (id, rid) in c {
         match forge.deregister(&rr, rid, reason).await {
             Dereg::Gone => {}
@@ -565,7 +578,12 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
                 continue;
             }
             Dereg::Err(e) => {
-                tracing::warn!("{id}: {e:#}");
+                ok = false;
+                if crate::boot::waiting_for_network() {
+                    tracing::info!("{id}: runner {rid} not deleted yet, waiting for the network: {e:#}");
+                } else {
+                    tracing::warn!("{id}: {e:#}");
+                }
                 continue;
             }
         }
@@ -577,24 +595,30 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) {
             k.notify_one();
         }
     }
+    ok
 }
 
-/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2).
-/// A failed delete at the VM's end is not retried, and a record lost in a crash never ran its delete.
-/// Only the last day is tried: older runners fall to the orphan sweep, and a 404 is as good as a delete.
-pub async fn retire_ended(app: &App) {
+/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2),
+/// and of VMs the last run lost (a crash or reboot) on any forge: their runners are known by id, so no
+/// sweep by name has to guess. A failed delete at the VM's end is not retried, and a record lost in a
+/// crash never ran its delete. Only the last day is tried: older runners fall to the orphan sweep, and a
+/// 404 is as good as a delete. False when a delete failed (no network yet): the caller tries again.
+pub async fn retire_ended(app: &App) -> bool {
     let t = now();
     let mut by_repo: std::collections::HashMap<String, Vec<(String, u64)>> = Default::default();
     for v in app.vms.lock().unwrap().iter().filter(|v| v.ended.is_some_and(|e| e + 86400 > t)) {
         if let Some(rid) = v.runner_id {
-            by_repo.entry(v.repo.clone()).or_default().push((v.id.clone(), rid));
+            let gated = forge_for(app, &v.repo).is_ok_and(|(f, _)| f.gated());
+            if gated || v.state == State::Lost {
+                by_repo.entry(v.repo.clone()).or_default().push((v.id.clone(), rid));
+            }
         }
     }
+    let mut ok = true;
     for (repo, c) in by_repo {
-        if forge_for(app, &repo).is_ok_and(|(f, _)| f.gated()) {
-            retire(app, &repo, c, Reason::Unused).await;
-        }
+        ok &= retire(app, &repo, c, Reason::Unused).await;
     }
+    ok
 }
 
 /// (demand launches, warm launches) for one repo at the default size: demand is
@@ -2037,6 +2061,15 @@ type Target = (String, String, bool);
 
 /// What the probe must reach: each public forge's origin (GitHub keeps `api.github.com`), a neutral
 /// public URL when there is none, and each `internal` forge's own origin.
+/// The host name whose resolution says the network is up: where the probe's first target lives.
+pub fn probe_host(cfg: &crate::Config) -> String {
+    let t = probe_targets(&crate::forge::effective(&cfg.forges, &cfg.repos));
+    t.first()
+        .and_then(|t| reqwest::Url::parse(&t.1).ok())
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| "github.com".into())
+}
+
 fn probe_targets(forges: &[crate::forge::ForgeCfg]) -> Vec<Target> {
     use crate::forge::{Kind, Network};
     let origin = |f: &crate::forge::ForgeCfg| format!("{}/", f.url.as_deref().unwrap_or_default().trim_end_matches('/'));
@@ -2105,6 +2138,10 @@ fn next_fails(ok: bool, prev: Option<u32>, force: bool) -> u32 {
     }
 }
 
+/// The probe's failure while name resolution is down: no namespace is started for it, and it is
+/// retried every 5 s however often it failed before, so it runs a few seconds after DNS is back.
+pub const NET_WAIT: &str = "waiting for the network";
+
 /// Whether a config save can change the probe's result, so it must run again now.
 pub fn egress_reprobe(old: &crate::Config, new: &crate::Config) -> bool {
     new.egress == "filtered"
@@ -2125,7 +2162,11 @@ pub async fn egress_ready(app: &App, force: bool) -> Result<(), String> {
         return r.clone();
     }
     let r = egress_probe(app).await.map_err(|e| format!("{e:#}"));
-    let fails = next_fails(r.is_ok(), g.as_ref().map(|p| p.1), force);
+    let waiting = r.as_ref().is_err_and(|e| e.starts_with(NET_WAIT));
+    let fails = if waiting { 1 } else { next_fails(r.is_ok(), g.as_ref().map(|p| p.1), force) };
+    if r.is_ok() && g.as_ref().is_some_and(|p| p.1 > 0) {
+        tracing::info!("filtered egress is available");
+    }
     *g = Some((now(), fails, r.clone()));
     r
 }
@@ -2159,6 +2200,16 @@ async fn egress_probe(app: &App) -> Result<()> {
         ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok())
     });
     let targets = probe_targets(&forges);
+    // The namespace resolves through the host: with the host's DNS down the probe can only fail,
+    // after `curl -m8` per target. Not started then (boot, before the network is up).
+    for (_, url, _) in &targets {
+        if let Some(h) = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from))
+            && !crate::boot::dns_ok(&h).await
+        {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            bail!("{NET_WAIT}: {h} does not resolve yet");
+        }
+    }
     tokio::fs::write(&nft, egress_nft(cfg.docker_mirror, &allow)).await?;
     let mut cmd = Command::new("rootlesskit");
     cmd.args(rk_base(&dir.join("rk")))
@@ -2683,6 +2734,17 @@ fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
     Check { name: name.into(), ok, detail: detail.into() }
 }
 
+/// While kiln is starting, a failing check that only waits for something (the network, tailscaled)
+/// is reported as "starting: waiting for `what`: ..." and passes. After the grace period it fails
+/// with its own text.
+fn soften(checks: &mut [Check], starting: bool, what: &str) {
+    if starting {
+        for c in checks.iter_mut().filter(|c| !c.ok) {
+            (c.ok, c.detail) = (true, crate::boot::waiting_for(what, &c.detail));
+        }
+    }
+}
+
 async fn output(bin: &str, args: &[&str]) -> Result<String> {
     // Every tailscale call is bounded: the CLI can wait forever on a wedged tailscaled.
     let o = if bin == platform::tailscale() {
@@ -2823,6 +2885,10 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         }
     });
 
+    // While the box is starting and the network is not up, what needs the network is "starting", not failed.
+    let waiting_net =
+        if cli { crate::boot::starting() && !crate::boot::dns_ok(&probe_host(&cfg)).await } else { crate::boot::waiting_for_network() };
+    let net_from = out.len();
     // Credential, permissions and expiry, per configured forge.
     for f in app.forges.all() {
         match &*f {
@@ -2842,6 +2908,8 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     let (ok, detail) = crate::mirror::check(app).await;
     out.push(check("docker mirror", ok, detail));
+    let last = out.len() - 1;
+    soften(&mut out[last..], crate::boot::starting(), "the docker mirror");
 
     // Cached unless run from the CLI; a failure only matters when jobs are filtered.
     out.push(match egress_ready(app, cli).await {
@@ -2852,7 +2920,13 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") },
         ),
     });
+    // Retried by the scheduler: not a failure while kiln is still starting.
+    let last = out.len() - 1;
+    soften(&mut out[last..], cfg.egress == "filtered" && crate::boot::starting(), "filtered egress");
 
+    soften(&mut out[net_from..], waiting_net, "the network");
+
+    let ts_from = out.len();
     let mut no_certs = false;
     out.push(match crate::web::tailscale(&["status", "--json"]).await {
         Ok(o) if o.status.success() => {
@@ -2872,6 +2946,8 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
         None => {}
     }
+    // tailscaled starts in parallel with kiln and needs a moment before it reports Running.
+    soften(&mut out[ts_from..], crate::boot::starting(), "tailscaled");
 
     // An old unit (TimeoutStopSec=30) would SIGKILL kiln mid-cleanup: the grace is clamped.
     if let Some(t) = crate::unit_stop_timeout().await {
@@ -3152,6 +3228,38 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// A reboot kills every QEMU and rootlesskit without any cleanup: at the next start nothing of
+    /// the VMs may be left, whatever state their records were in, and the records say what happened.
+    #[test]
+    fn a_reboot_leaves_no_secret_disk_or_namespace_state() {
+        let d = std::env::temp_dir().join(format!("kiln-test-reboot_leftovers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for (id, state) in [("kiln-1-0", State::Busy), ("kiln-1-1", State::Idle), ("kiln-1-2", State::Done)] {
+            let dir = d.join("vms").join(id);
+            std::fs::create_dir_all(dir.join("q")).unwrap();
+            std::fs::create_dir_all(d.join("rk").join(id)).unwrap();
+            std::fs::write(d.join("rk").join(id).join("api.sock"), "").unwrap();
+            // The SMBIOS secret files, the disk and an overlay.
+            for f in ["jit", "jit.1", "disk.qcow2", "cache.qcow2"] {
+                std::fs::write(dir.join("q").join(f), "secret").unwrap();
+            }
+            std::fs::write(dir.join("console.log"), "log").unwrap();
+            std::fs::write(dir.join("meta.json"), serde_json::to_vec(&vm(id, state, None)).unwrap()).unwrap();
+        }
+        // rootlesskit state of a VM whose directory was pruned, and an interrupted probe.
+        std::fs::create_dir_all(d.join("rk/kiln-0-9")).unwrap();
+        std::fs::create_dir_all(d.join("egress-check/rk")).unwrap();
+        let h = load_history(&d);
+        let state = |id: &str| h.iter().find(|v| v.id == id).unwrap().state;
+        assert_eq!([state("kiln-1-0"), state("kiln-1-1"), state("kiln-1-2")], [State::Lost, State::Lost, State::Done]);
+        for id in ["kiln-1-0", "kiln-1-1", "kiln-1-2"] {
+            assert!(!d.join("vms").join(id).join("q").exists(), "{id}: disks and secrets are gone");
+            assert!(d.join("vms").join(id).join("console.log").exists(), "{id}: the log stays");
+        }
+        assert!(!d.join("rk").exists() && !d.join("egress-check").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn tampered_overlays_never_commit() {
         let b = Path::new("/d/cache/o__n.qcow2");
@@ -3356,6 +3464,26 @@ mod tests {
         let n = egress_nft(true, &["192.168.7.7:8080".parse().unwrap()]);
         assert_eq!(n.matches("accept").count(), egress_nft(true, &[]).matches("accept").count() + 1);
         assert!(!n.contains("saddr") && n.contains("ip daddr 192.168.7.7 tcp dport 8080 accept") && n.contains("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn a_starting_box_does_not_fail_the_doctor() {
+        let mk = || vec![check("a", true, "fine"), check("b", false, "dns error: no")];
+        let mut c = mk();
+        soften(&mut c, false, "the network");
+        assert!(!c[1].ok && c[1].detail == "dns error: no", "after the grace period the failure shows");
+        soften(&mut c, true, "the network");
+        assert!(c[1].ok && c[1].detail == "starting: waiting for the network (dns error: no)");
+        assert!(c[0].ok && c[0].detail == "fine", "passing checks are left alone");
+    }
+
+    #[test]
+    fn egress_waiting_for_dns_is_a_start_message() {
+        assert!(
+            crate::boot::waiting_msg(&format!("{NET_WAIT}: api.github.com does not resolve yet"))
+                .starts_with("starting: waiting for the network: api")
+        );
+        assert!(!"step: internet unreachable".starts_with(NET_WAIT));
     }
 
     #[test]

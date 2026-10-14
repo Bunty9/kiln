@@ -646,7 +646,7 @@ impl Gitea {
 
     /// Removes this install's offline runners (a crashed kiln leaves them), by the same
     /// check-then-delete sequence. Returns how many were deleted.
-    pub async fn sweep(&self, repo: &RepoRef) -> Result<usize> {
+    pub async fn sweep(&self, repo: &RepoRef, keep: &HashSet<String>) -> Result<usize> {
         repo.check_kind(Kind::Gitea)?;
         let disable = self.version().await?.rerun();
         let prefix = format!("{}-", self.install);
@@ -659,7 +659,7 @@ impl Gitea {
                 let runners = v["runners"].as_array().context("runner listing has no runners")?;
                 for r in runners {
                     let Some(id) = r["id"].as_u64().filter(|&id| seen.insert(id)) else { continue };
-                    if r["name"].as_str().is_some_and(|n| n.starts_with(&prefix)) && r["status"] == "offline" {
+                    if r["name"].as_str().is_some_and(|n| n.starts_with(&prefix) && !keep.contains(n)) && r["status"] == "offline" {
                         stale.push(id);
                     }
                 }
@@ -1572,7 +1572,7 @@ mod tests {
         m.route("DELETE", &format!("{RUNNERS}/63"), 204, "");
         // 63 has a job in progress: it is left alone.
         m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, jobs_running(63));
-        assert_eq!(g.sweep(&repo()).await.unwrap(), 1);
+        assert_eq!(g.sweep(&repo(), &HashSet::new()).await.unwrap(), 1);
         let reqs = m.requests();
         assert!(reqs.contains(&format!("DELETE {RUNNERS}/52")), "{reqs:?}");
         assert!(!reqs.contains(&format!("DELETE {RUNNERS}/63")), "{reqs:?}");
@@ -1581,9 +1581,9 @@ mod tests {
         }
         // Nothing listed, or an unreadable listing.
         m.route("GET", &page, 200, fx("runners_empty.json"));
-        assert_eq!(g.sweep(&repo()).await.unwrap(), 0);
+        assert_eq!(g.sweep(&repo(), &HashSet::new()).await.unwrap(), 0);
         m.route("GET", &page, 500, "{}");
-        assert!(g.sweep(&repo()).await.is_err());
+        assert!(g.sweep(&repo(), &HashSet::new()).await.is_err());
     }
 
     #[test]

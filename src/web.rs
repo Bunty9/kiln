@@ -35,9 +35,14 @@ impl IntoResponse for Error {
 type R<T> = Result<T, Error>;
 
 /// The address actually bound; a config change to `listen` needs a restart.
-static RUNNING_LISTEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-/// Set when the configured listen could not be bound and kiln serves elsewhere (banner).
-static LISTEN_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static RUNNING_LISTEN: Mutex<Option<String>> = Mutex::new(None);
+/// Set when the configured listen could not be bound and kiln serves elsewhere (banner). Cleared
+/// when `serve_when_bindable` gets the configured address after all.
+static LISTEN_FALLBACK: Mutex<Option<String>> = Mutex::new(None);
+
+fn running_listen() -> Option<String> {
+    RUNNING_LISTEN.lock().unwrap().clone()
+}
 /// Where kiln serves when neither the configured nor the last working listen binds.
 const LOCAL_LISTEN: &str = "127.0.0.1:7878";
 
@@ -63,7 +68,7 @@ fn bind_refusal(new: &str, running: Option<&str>, e: Option<&std::io::Error>) ->
 /// Test-bind `new` (then release it): why a kiln restarted on it would not serve, if it would not.
 pub fn listen_refusal(new: &str) -> Option<String> {
     let e = new.parse::<SocketAddr>().ok().and_then(|a| std::net::TcpListener::bind(a).err());
-    bind_refusal(new, RUNNING_LISTEN.get().map(String::as_str), e.as_ref())
+    bind_refusal(new, running_listen().as_deref(), e.as_ref())
 }
 
 /// Startup: addresses to try when `configured` fails to bind with `kind`. Only an address
@@ -98,7 +103,7 @@ async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(to
         if let Ok(l) = tokio::net::TcpListener::bind(&alt).await {
             let msg = format!("listen {listen} could not be bound ({e}); serving on {alt}");
             tracing::error!("{msg}. Fix the listen address in Settings › Access");
-            let _ = LISTEN_FALLBACK.set(msg);
+            *LISTEN_FALLBACK.lock().unwrap() = Some(msg);
             return Ok((l, alt));
         }
     }
@@ -155,8 +160,13 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .merge(crate::notify::routes())
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app.clone());
-    let (listener, addr) = bind_listen(&app.data, &app.cfg().listen).await?;
-    let _ = RUNNING_LISTEN.set(addr.clone());
+    let configured = app.cfg().listen;
+    let (listener, addr) = bind_listen(&app.data, &configured).await?;
+    *RUNNING_LISTEN.lock().unwrap() = Some(addr.clone());
+    if addr != configured {
+        // A tailnet address is not there yet when tailscaled comes up after kiln: serve on it as soon as it is.
+        tokio::spawn(serve_when_bindable(app.data.clone(), configured, router.clone()));
+    }
     let sock = app.data.join("serve.sock");
     // Without the socket (e.g. a KILN_DATA path past the ~108-byte unix socket limit) kiln still
     // serves; HTTPS via tailscale serve then proxies to loopback, where the API needs the key.
@@ -176,6 +186,30 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Waits (5 s, doubling to 30 s) until `listen` can be bound, then serves `router` on it as well, and
+/// the banner and "restart needed" follow it. Runs only when startup had to fall back from it.
+async fn serve_when_bindable(data: std::path::PathBuf, listen: String, router: Router) {
+    let l = bind_when_possible(&listen, |n| Duration::from_secs(crate::boot::retry_secs(n, 30))).await;
+    tracing::info!("listen {listen} can be bound now: serving on it too");
+    let _ = std::fs::write(data.join("listen.last"), &listen);
+    *LISTEN_FALLBACK.lock().unwrap() = None;
+    *RUNNING_LISTEN.lock().unwrap() = Some(listen);
+    if let Err(e) = axum::serve(l, router.into_make_service_with_connect_info::<Via>()).await {
+        tracing::error!("dashboard listener: {e}");
+    }
+}
+
+/// Tries `listen` again after `wait(1)`, `wait(2)`, ... until it binds.
+async fn bind_when_possible(listen: &str, wait: impl Fn(u32) -> Duration) -> tokio::net::TcpListener {
+    for n in 1.. {
+        tokio::time::sleep(wait(n)).await;
+        if let Ok(l) = tokio::net::TcpListener::bind(listen).await {
+            return l;
+        }
+    }
+    unreachable!()
 }
 
 /// Whether `<data>/serve.sock` is listening (set once at startup).
@@ -611,13 +645,25 @@ async fn serve_check(sock: &std::path::Path) -> ServeUse {
     {
         return v.clone();
     }
-    let v = serve_status(sock).await.unwrap_or_else(ServeUse::Unsafe);
+    let (v, at) = match serve_status(sock).await {
+        Ok(v) => (v, now()),
+        // Unreadable counts as unsafe, but at boot it only means tailscaled is not ready: look again in 5 s, not 60.
+        Err(why) => {
+            if prev.as_ref().map(|p| &p.0) != Some(&ServeUse::Unsafe(why.clone())) {
+                tracing::info!(
+                    "tailscale serve status is not readable ({why}): requests through the serve socket need the dashboard key until it is"
+                );
+            }
+            (ServeUse::Unsafe(why), now().saturating_sub(55))
+        }
+    };
     if let ServeUse::Unsafe(why) = &v
+        && at == now()
         && prev.as_ref().map(|p| &p.0) != Some(&v)
     {
         tracing::warn!("tailscale serve config exposes kiln's socket unsafely ({why}): requests through it need the dashboard key");
     }
-    *SERVE_CHECK.lock().unwrap() = Some((v.clone(), now()));
+    *SERVE_CHECK.lock().unwrap() = Some((v.clone(), at));
     v
 }
 
@@ -823,9 +869,9 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.all_repos()),
         "update": update::compact(&app),
-        "restart": update::restart_json(&app, RUNNING_LISTEN.get().map(String::as_str)),
+        "restart": update::restart_json(&app, running_listen().as_deref()),
         "serve_socket": SERVE_SOCKET.get() == Some(&true),
-        "listen_fallback": LISTEN_FALLBACK.get(),
+        "listen_fallback": LISTEN_FALLBACK.lock().unwrap().clone(),
     })))
 }
 
@@ -875,7 +921,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
             moved.join(", ")
         ))?;
     }
-    let needed = update::restart_needed(RUNNING_LISTEN.get().map(String::as_str), &c);
+    let needed = update::restart_needed(running_listen().as_deref(), &c);
     let reprobe = vm::egress_reprobe(&app.cfg(), &c);
     let changed = crate::audit::config_changes(&serde_json::to_value(app.cfg())?, &serde_json::to_value(&c)?);
     // Only new or changed rules are checked: an unrelated save never fails on an old rule.
@@ -1199,7 +1245,8 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
         format!("unix:{}", app.data.join("serve.sock").display())
     } else {
         // Fallback: loopback proxy (the API then needs the dashboard key, as before 0.2.2).
-        let port = RUNNING_LISTEN.get().and_then(|l| l.rsplit_once(':')).map_or("7878", |(_, p)| p).to_string();
+        let port =
+            running_listen().as_deref().and_then(|l| l.rsplit_once(':').map(|(_, p)| p.to_string())).unwrap_or_else(|| "7878".into());
         format!("http://127.0.0.1:{port}")
     };
     if b.on
@@ -1828,6 +1875,20 @@ mod tests {
         assert!(r("0.0.0.0:7878", None, Some(AddrInUse)).is_some(), "not serving: someone else holds it");
         assert!(r("nope", None, None).is_some());
         assert!(r("1.2.3.4:5", None, Some(Other)).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_listen_address_that_appears_late_is_bound_then() {
+        // Held by this test, like a tailnet address tailscaled has not assigned yet.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap().to_string();
+        let free = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            drop(held);
+        });
+        let l = bind_when_possible(&addr, |_| Duration::from_millis(20)).await;
+        assert_eq!(l.local_addr().unwrap().to_string(), addr);
+        free.await.unwrap();
     }
 
     #[test]

@@ -78,7 +78,11 @@ fn set(app: &App, state: &'static str, progress: Option<String>) {
 }
 
 fn fail(app: &App, e: &anyhow::Error) {
-    tracing::warn!("update: {e:#}");
+    if crate::boot::waiting_for_network() {
+        tracing::info!("update: waiting for the network: {e:#}");
+    } else {
+        tracing::warn!("update: {e:#}");
+    }
     let mut s = app.update.lock().unwrap();
     if s.state != "stopping" {
         s.state = "error";
@@ -580,16 +584,31 @@ pub fn on_start(data: &Path) {
     }
 }
 
-/// Confirms a just-applied update after 60 s of serving, then checks every 6 h; with
-/// `auto_update`, applies a newer release once the box is idle.
+/// Seconds until the next update check: 6 hours, or after `fails` failed checks in a row 5
+/// minutes doubling up to the 6 hours.
+fn check_wait(fails: u32) -> u64 {
+    match fails {
+        0 => 6 * 3600,
+        n => crate::boot::retry_secs(n, 6 * 60) * 60,
+    }
+}
+
+/// Confirms a just-applied update after 60 s of serving, then checks every 6 h (sooner after a
+/// failed check); with `auto_update`, applies a newer release once the box is idle.
 pub async fn supervise(app: Arc<App>) {
     tokio::time::sleep(Duration::from_secs(60)).await;
     let _ = std::fs::remove_file(app.data.join("update/pending.json"));
-    let mut next = 0;
+    let (mut next, mut fails) = (0, 0u32);
     while !app.stopping.load(Ordering::SeqCst) {
         if now() >= next {
-            next = now() + 6 * 3600;
             check(&app).await;
+            // A check that failed (the network was not up at boot) is retried in 5 minutes, then less often.
+            if app.update.lock().unwrap().error.is_some() {
+                fails += 1;
+            } else {
+                fails = 0;
+            }
+            next = now() + check_wait(fails);
         }
         let ready = {
             let s = app.update.lock().unwrap();
@@ -700,6 +719,11 @@ fn boot(p: Option<Pending>, current: &str) -> Boot {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_failed_check_is_retried_sooner() {
+        assert_eq!([0, 1, 2, 3, 20].map(check_wait), [6 * 3600, 300, 600, 1200, 6 * 3600]);
+    }
 
     #[test]
     fn versions() {
