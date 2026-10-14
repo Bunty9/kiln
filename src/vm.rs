@@ -4738,6 +4738,41 @@ assert bad(rec(24, perm, 5, 1) + rec(24, 0x4000, -1, 0)), "overflow after a good
 assert bad(b"\0" * 10), "short"
 assert bad(rec(0, perm, 5, 1)), "zero length would loop"
 assert bad(rec(48, perm, 5, 1)), "length past the buffer"
+# The policy: what an exec event gets, and when and how the verdict is read.
+boom = lambda: 1 / 0
+assert m.event_response(None, True, boom) == 1, "the primary's own exec, whatever the mode"
+assert m.event_response("ok", False, boom) == 1, "after ok nothing asks who the process is"
+assert m.event_response(None, False, lambda: False) == 1, "not the job's: infrastructure"
+assert m.event_response("refuse", False, lambda: False) == 1
+assert m.event_response(None, False, lambda: True) == 0, "the job's exec is held"
+assert m.event_response("cold", False, lambda: True) == 0
+assert m.event_response("refuse", False, lambda: True) == 2
+assert m.verdict_mode("ok 5\n") == "ok" and m.verdict_mode("cold 5") == "cold" and m.verdict_mode("refuse 5") == "refuse"
+assert m.verdict_mode("") == "refuse" and m.verdict_mode("   \n") == "refuse" and m.verdict_mode("OK 5") == "refuse" and m.verdict_mode("\x00junk") == "refuse"
+assert not m.verdict_due(False, None, 100.0), "nothing held, no verdict: keep waiting"
+assert m.verdict_due(True, None, 100.0), "a verdict file"
+assert not m.verdict_due(False, 100.0, 100.0 + m.TIMEOUT), "exactly TIMEOUT is not yet over"
+assert m.verdict_due(False, 100.0, 100.0 + m.TIMEOUT + 0.1), "timeout from the first held exec: the mode then falls to refuse"
+# A job()-style check against a fake /proc: ancestry, uid, and an unreadable status holds.
+import os, tempfile
+root = tempfile.mkdtemp()
+real_read = m.read
+def fake_read(path):
+    if path.startswith("/proc/"):
+        try: return open(root + path).read()
+        except OSError: return ""
+    return real_read(path)
+m.read = fake_read
+def proc(pid, ppid=None, uid=None):
+    os.makedirs(f"{root}/proc/{pid}", exist_ok=True)
+    if ppid is not None: open(f"{root}/proc/{pid}/stat", "w").write(f"{pid} (x) S {ppid} 0")
+    if uid is not None: open(f"{root}/proc/{pid}/status", "w").write(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+proc(10, 1, 0); proc(20, 10, 1000); proc(30, 1, 1000); proc(40, 1, 0); proc(50, 1)
+assert m.job(20, 10, 1000), "a descendant of the runner"
+assert m.job(30, 999, 1000), "a reparented orphan keeps the uid"
+assert not m.job(40, 999, 1000), "another user's process"
+assert m.job(50, 999, 1000), "an unreadable status cannot be told apart: hold"
+assert m.job(-1, 0, 1000), "another pid namespace: hold"
 m.crash()
 assert open(sys.argv[2]).read() == "b"
 print("ok")

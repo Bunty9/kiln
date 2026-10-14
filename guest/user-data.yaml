@@ -432,6 +432,22 @@ write_files:
               yield fd, pid
               off += evlen
 
+      def event_response(mode, primary, is_job):
+          # What one exec event gets: 1 allow, 2 deny, 0 hold until the verdict. is_job runs only when it can matter.
+          if primary: return 1
+          if mode == "ok" or not is_job(): return 1   # infrastructure (kiln-job, kernel helpers) or after the verdict
+          if mode == "refuse": return 2
+          return 0
+
+      def verdict_due(exists, t0, now):
+          # The verdict file is there, or the first held exec has waited TIMEOUT.
+          return bool(exists or (t0 and now - t0 > TIMEOUT))
+
+      def verdict_mode(text):
+          # The first word of the verdict file; anything but ok or cold (empty, garbage) is refuse.
+          v = (text.split() or ["refuse"])[0]
+          return "cold" if v == "cold" else "ok" if v == "ok" else "refuse"
+
       def main():
           user, cmd = sys.argv[1], sys.argv[2:]
           pw = pwd.getpwnam(user)
@@ -479,20 +495,16 @@ write_files:
                           try:
                               # L-5: safe only because the primary does not reap CMD while it holds an exec (t0 set), so the pid
                               # is not reused by a job-uid python3 meanwhile; a one-shot flag would make it explicit.
-                              if pid > 0 and pid == (child or int(read(CHILD) or 0)) and os.readlink(f"/proc/{pid}/exe") == me:   # the primary's exec of CMD (binary + interpreter)
-                                  answer(fan, fd, 1)
-                              elif mode == "ok" or not job(pid, child, pw.pw_uid):
-                                  answer(fan, fd, 1)                       # infrastructure (kiln-job, kernel helpers) or after the verdict
-                              elif mode == "refuse": answer(fan, fd, 2)
-                              else:
-                                  pending.append(fd); t0 = t0 or time.time()
+                              primary = pid > 0 and pid == (child or int(read(CHILD) or 0)) and os.readlink(f"/proc/{pid}/exe") == me   # the primary's exec of CMD (binary + interpreter)
+                              resp = event_response(mode, primary, lambda: job(pid, child, pw.pw_uid))
+                              if resp: answer(fan, fd, resp)
+                              else: pending.append(fd); t0 = t0 or time.time()
                           except Exception:
                               answer(fan, fd, 2)                           # any handler bug: deny, never crash open
                   if child and mode is None and not t0 and os.waitpid(child, os.WNOHANG)[0]:
                       kill_user(pw.pw_uid); print("kiln-gate: the runner exited before the verdict", file=sys.stderr); sys.exit(75)
-                  if mode is None and (os.path.exists(VERDICT) or (t0 and time.time() - t0 > TIMEOUT)):
-                      v = (read(VERDICT).split() or ["refuse"])[0]
-                      mode, t0 = ("cold" if v == "cold" else "ok" if v == "ok" else "refuse"), time.time()
+                  if mode is None and verdict_due(os.path.exists(VERDICT), t0, time.time()):
+                      mode, t0 = verdict_mode(read(VERDICT)), time.time()
                       if mode == "cold" and cmd:   # a plain fork: Popen or system() would wait for the exec event we have yet to answer
                           det = os.fork()
                           if det == 0:
