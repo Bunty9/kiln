@@ -4485,6 +4485,8 @@ case "$STUB:${twin:-p}" in
   noarm:1) exit 1 ;;
   twindead:1) exit 1 ;;
   race:1) primary_done; echo "twin finished" >> "$REC"; exit 77 ;;
+  refuse:1) primary_done; exit 77 ;;   # the real twin denies too; wait -n may reap either one first, so both say 77
+  gone:1) primary_done; exec sleep 30 ;;   # the wrapper kills the twin; never an exit that could be reaped first
   *:1) primary_done; exit 0 ;;
   ok:p) echo "ok 5" > "$V"; exit 3 ;;
   cold:p) echo "cold 5" > "$V"; exit 0 ;;
@@ -4501,11 +4503,12 @@ esac
             std::fs::write(dir.join("gate"), gate).unwrap();
             std::process::Command::new("chmod").args(["755"]).arg(dir.join("gate")).status().unwrap();
             let script = format!(
-                "{src}\nsecret(){{ case $1 in cred) printf '%s' \"$JSON\" | base64 -w0;; timeout) printf '%s' \"$MINS\";; esac; }}\n\
+                "{}\nsecret(){{ case $1 in cred) printf '%s' \"$JSON\" | base64 -w0;; timeout) printf '%s' \"$MINS\";; esac; }}\n\
                  start_verdict_reader(){{ echo reader >> \"$REC\"; }}; harden_gitea(){{ echo harden >> \"$REC\"; }}\n\
                  systemctl(){{ echo \"systemctl $*\" >> \"$REC\"; }}; chown(){{ :; }}; id(){{ echo 4000000000; }}\n\
                  kill_uid(){{ echo \"kill_uid $1\" >> \"$REC\"; }}\n\
-                 run_gitea; echo \"rc=$?\""
+                 run_gitea; echo \"rc=$?\"",
+                source_line(&src, "rge-src") // sourced, not inlined: inlined, the script's `main` would run first
             );
             let o = std::process::Command::new("bash")
                 .args(["-c", &script])

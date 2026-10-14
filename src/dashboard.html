@@ -945,7 +945,7 @@ function rebindPop() {
 // Replace HTML only when changed; keep typed values and keyboard focus.
 function rove(r = document) { $$('.seg', r).forEach(g => { const b = $$('[role=radio]', g), c = b.find(x => x.getAttribute('aria-checked') === 'true' && !x.disabled) || b.find(x => !x.disabled); b.forEach(x => (x.tabIndex = x === c ? 0 : -1)); }); }
 function setHTML(el, html) {
-  if (el._h === html) return; el._h = html;
+  if (!el || el._h === html) return; el._h = html; // no element: a poll landed after navigating away
   const fl = () => $$('a,button,input,select', el), a = document.activeElement, idx = el.contains(a) ? fl().indexOf(a) : -1;
   const vals = $$('input[id]', el).map(x => [x.id, x.type === 'checkbox' ? x.checked : x.value]);
   el.innerHTML = html;
@@ -1474,6 +1474,7 @@ pages.overview = {
   },
   unmount() { cancelAnimationFrame(HV.raf); HV.raf = 0; HV.hover = null; hvTip(null); },
   update() {
+    if (!$('#ov-now')) return; // a poll landed after navigating away
     const c = S.config, h = S.host, act = S.vms.filter(ACTIVE).sort((a, b) => a.started - b.started), bn = banners();
     setHTML($('#ov-st'), bnList(bn)); setHTML($('#ov-hl'), statusLine(bn.length));
     const sl = new Map((S.host.samples?.at(-1)?.vms || []).map(v => [v[1], v[0]]));

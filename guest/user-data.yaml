@@ -268,7 +268,7 @@ write_files:
       # the start and its workdir becomes its cwd at pickup, so both are off the cache disk: a cold run's detach fails on a busy mount. The exit status says nothing
       # (0 after a failed job), kiln takes the result from the API.
       run_gitea() {
-        local cred mins dot=/home/runner/.runner cfg=/run/kiln/gitea.yaml g=/usr/local/sbin/kiln-gate ruid A B rc v
+        local cred mins dot=/home/runner/.runner cfg=/run/kiln/gitea.yaml g=/usr/local/sbin/kiln-gate ruid A B rc v w
         cred=$(secret cred | head -n1); mins=$(secret timeout | head -n1)
         [[ $mins =~ ^[0-9]{1,5}$ ]] && [ "$mins" -ge 1 ] || mins=180
         if ! printf '%s' "$cred" | base64 -d 2>/dev/null | jq -e '(.id | type) == "number" and (.uuid | type) == "string"
@@ -289,7 +289,7 @@ write_files:
         for _ in $(seq 100); do [ -e /run/kiln/gate.armed ] && break; kill -0 "$B" 2>/dev/null || break; sleep 0.1; done
         [ -e /run/kiln/gate.armed ] || { kill_uid "$ruid"; kill "$B" 2>/dev/null; echo "kiln: exec gate did not arm, powering off"; return 1; }
         "$g" runner gitea-runner daemon --once -c "$cfg" & A=$!
-        wait -n "$A" "$B"; rc=$?
+        wait -n -p w "$A" "$B"; rc=$?
         case $rc in
           77) kill_uid "$ruid"; echo "kiln: job refused"; return 1 ;;
           75) kill "$B" 2>/dev/null; echo "kiln: runner exited before taking a job"; return 1 ;;
@@ -299,7 +299,7 @@ write_files:
           echo o > /proc/sysrq-trigger   # builtins only, no sync: a hung gate would hold any exec
           return 1
         fi
-        kill -0 "$A" 2>/dev/null && { wait "$A"; rc=$?; }   # the twin finished first
+        [ "$w" = "$B" ] && { wait "$A"; rc=$?; }   # the twin finished first (bash keeps A's status even if A is done too)
         # Never kill the twin: it exits by itself after any verdict, and killing it frees its fanotify group, which
         # allows every exec it still holds, a refused job's included. On refuse, kill the job's uid first.
         wait "$B" 2>/dev/null
