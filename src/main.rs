@@ -465,6 +465,28 @@ pub struct App {
     pub update: Mutex<update::Status>,
     /// Outbound webhook notifications (destinations, queues, delivery status).
     pub notify: notify::Hub,
+    /// Background problems nobody is waiting on (a cache that will not save, a cleanup that keeps failing), by what
+    /// raised them: the tick adds them to the health list. Cleared by whoever raised them when it works again.
+    pub notices: Mutex<std::collections::BTreeMap<String, (&'static str, String)>>,
+    /// The `qemu-img` binary; tests point it at a script or at nothing.
+    pub qemu_img: PathBuf,
+    /// Fixed machine readings for tests: a tick gates launches on them, and a loaded or small box must not change a result.
+    pub host_fixed: Option<HostReadings>,
+}
+
+/// What a tick reads from the machine.
+#[derive(Clone, Copy)]
+pub struct HostReadings {
+    pub mem_total_mb: u64,
+    pub mem_avail_mb: u64,
+    pub disk_free_gb: Option<u64>,
+    pub threads: u32,
+}
+
+impl HostReadings {
+    /// A roomy, fixed host for tests: 8 threads, 64 GB of memory, 500 GB of disk.
+    #[cfg(test)]
+    pub const TEST: HostReadings = HostReadings { mem_total_mb: 65536, mem_avail_mb: 65536, disk_free_gb: Some(500), threads: 8 };
 }
 
 impl App {
@@ -478,7 +500,9 @@ impl App {
         std::fs::create_dir_all(&d).unwrap();
         // A default config must validate on a small host (a 3-core CI Mac) too.
         let cfg = Config { vm_cpus: host_threads().min(4), ..Config::default() };
-        Arc::new(App::new(d, cfg, github::Gh::new(String::new(), "none")))
+        let mut app = App::new(d, cfg, github::Gh::new(String::new(), "none"));
+        (app.qemu_img, app.host_fixed) = ("/nonexistent/qemu-img".into(), Some(HostReadings::TEST));
+        Arc::new(app)
     }
 
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
@@ -504,7 +528,31 @@ impl App {
             draining: Default::default(),
             update: Mutex::new(update::Status::load(&data)),
             notify: Default::default(),
+            notices: Mutex::default(),
+            qemu_img: "qemu-img".into(),
+            host_fixed: None,
             data,
+        }
+    }
+
+    pub fn notice(&self, key: &str, kind: &'static str, msg: impl Into<String>) {
+        self.notices.lock().unwrap().insert(key.into(), (kind, msg.into()));
+    }
+
+    pub fn clear_notice(&self, key: &str) {
+        self.notices.lock().unwrap().remove(key);
+    }
+
+    /// The machine's memory, disk and thread count now (or the fixed readings of a test).
+    async fn host_readings(&self) -> HostReadings {
+        match self.host_fixed {
+            Some(h) => h,
+            None => HostReadings {
+                mem_total_mb: platform::mem_total_mb(),
+                mem_avail_mb: platform::mem_avail_mb(),
+                disk_free_gb: vm::disk_free_gb(&self.data).await,
+                threads: host_threads(),
+            },
         }
     }
 
@@ -917,14 +965,17 @@ async fn refresh_app(app: &Arc<App>) {
 
 const SWEEP_EVERY: u64 = 3600;
 
-async fn sweep_runners(app: &App, gated_only: bool) {
-    sweep_pending(app, gated_only, &mut Default::default(), false).await;
+/// The hourly sweep; `fails` counts the consecutive failed hours. True when no sweep failed.
+async fn sweep_runners(app: &App, gated_only: bool, fails: u32) -> bool {
+    sweep_pending(app, gated_only, &mut Default::default(), fails).await
 }
 
 /// Sweeps the repos not in `done` yet and adds each that worked, so a repo whose sweep failed
 /// (no network yet) or that was not known yet (an App not discovered yet) is tried again.
-/// True when no sweep failed. `quiet`: this is a retry, whose failures are not worth a warning.
-async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, quiet: bool) -> bool {
+/// True when no sweep failed. `fails`: how many rounds failed before this one; a retry's failures are not
+/// worth a warning each time (every tenth is), but a sweep that keeps failing becomes a health item.
+async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, fails: u32) -> bool {
+    let quiet = !fails.is_multiple_of(10);
     let cfg = app.cfg();
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
     let mut ok = true;
@@ -939,12 +990,21 @@ async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections:
             match f.sweep(&rr, &keep).await {
                 Ok(n) => {
                     done.insert(repo.clone());
+                    app.clear_notice(&format!("sweep:{repo}"));
                     if n > 0 {
                         tracing::info!("{repo}: removed {n} stale runner(s)");
                     }
                 }
                 Err(e) => {
                     ok = false;
+                    note_cleanup_failure(
+                        app,
+                        &format!("sweep:{repo}"),
+                        &format!("runner cleanup of {repo}"),
+                        fails,
+                        &format!("{e:#}"),
+                        boot::starting(),
+                    );
                     if boot::waiting_for_network() {
                         tracing::info!("{repo}: runner sweep waits for the network: {e:#}");
                     } else if quiet {
@@ -957,6 +1017,15 @@ async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections:
         }
     }
     ok
+}
+
+/// A cleanup step that failed `fails + 1` rounds in a row, outside the boot grace, is a health item (cleared when it works).
+fn note_cleanup_failure(app: &App, key: &str, what: &str, fails: u32, why: &str, starting: bool) {
+    if fails >= 2 && !starting {
+        // The cause stays in kiln's log: a health item goes to webhook destinations, and forge errors carry URLs.
+        tracing::warn!("{what}: {why}");
+        app.notice(key, "cleanup", format!("{what} keeps failing ({} attempts); see kiln's log", fails + 1));
+    }
 }
 
 /// Seconds before the n-th retry of a failed startup cleanup.
@@ -983,8 +1052,20 @@ impl Cleanup {
         }
         if !self.retired {
             self.retired = vm::retire_ended(app).await;
+            if self.retired {
+                app.clear_notice("retire");
+            } else {
+                note_cleanup_failure(
+                    app,
+                    "retire",
+                    "deleting the runners of ended VMs",
+                    self.fails,
+                    "the forge refused or was unreachable",
+                    boot::starting(),
+                );
+            }
         }
-        let swept = sweep_pending(app, false, &mut self.swept, self.fails > 0).await;
+        let swept = sweep_pending(app, false, &mut self.swept, self.fails).await;
         if self.retired && swept {
             if self.fails > 0 {
                 tracing::info!("startup cleanup of stale runners done after {} retries", self.fails);
@@ -1004,13 +1085,13 @@ async fn scheduler(app: Arc<App>) {
     // orphans. Before the first tick, so nothing launched since is swept; retried while the network is not up.
     let mut cleanup = Cleanup::default();
     cleanup.step(&app).await;
-    let mut swept = now();
+    let (mut swept, mut sweep_fails) = (now(), 0u32);
     while !app.stopping.load(Ordering::SeqCst) {
         cleanup.step(&app).await;
         // GitLab and Gitea runners that a failed delete left behind; GitHub's JIT runners go by the startup sweep alone.
         if now() >= swept + SWEEP_EVERY {
             swept = now();
-            sweep_runners(&app, true).await;
+            sweep_fails = if sweep_runners(&app, true, sweep_fails).await { 0 } else { sweep_fails + 1 };
         }
         let cfg = app.cfg();
         let res = tick(&app, &cfg).await;
@@ -1045,6 +1126,18 @@ async fn scheduler(app: Arc<App>) {
             app.forges.all().iter().map(|f| poll_sleep(cfg.poll_secs, f.rate())).max().unwrap_or_else(|| poll_sleep(cfg.poll_secs, None));
         tokio::time::sleep(Duration::from_secs(sleep)).await;
     }
+}
+
+/// The notices grouped by kind, their messages joined (the health tracker holds one message per kind).
+fn notice_kinds(n: &std::collections::BTreeMap<String, (&'static str, String)>) -> Vec<(&'static str, String)> {
+    let mut by: Vec<(&'static str, Vec<&str>)> = vec![];
+    for (kind, msg) in n.values() {
+        match by.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, v)) => v.push(msg),
+            None => by.push((kind, vec![msg])),
+        }
+    }
+    by.into_iter().map(|(k, v)| (k, v.join("; "))).collect()
 }
 
 /// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
@@ -1111,10 +1204,10 @@ async fn reload_token(app: &Arc<App>) {
     LAST.store(now(), Ordering::Relaxed);
     let data = app.data.clone();
     let only_file = app.gh.source() == "file";
-    if let Ok((t, src)) = tokio::task::spawn_blocking(move || load_token(&data, only_file)).await
-        && !t.is_empty()
-    {
-        app.gh.set_token(t, src);
+    match tokio::task::spawn_blocking(move || load_token(&data, only_file)).await {
+        Ok((t, src)) if !t.is_empty() => app.gh.set_token(t, src),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("GitHub token reload: {e}"),
     }
 }
 
@@ -1166,6 +1259,7 @@ fn auto_rebake(app: &Arc<App>, cfg: &Config) {
 async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u32, usize>>> {
     static TICK: AtomicUsize = AtomicUsize::new(0);
     reload_token(app).await;
+    app.forges.reload_changed(&app.data);
     refresh_app(app).await;
     // A forge with no credential or rate-limited skips its repos; when none can poll the tick fails.
     let (live, down): (Vec<_>, Vec<_>) = app.forges.all().into_iter().partition(|f| f.health().is_none());
@@ -1180,7 +1274,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     }
     // Launching during a bake is fine: new VMs use the old base until the atomic swap.
     auto_rebake(app, cfg);
-    let (mem_avail, disk) = (platform::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
+    let host = app.host_readings().await;
+    let (mem_avail, disk) = (host.mem_avail_mb, host.disk_free_gb);
     // Shown on the dashboard; each size is gated on its own memory below.
     let mirror_mb = cfg.docker_mirror.then(|| mirror::cache_mb(app)).flatten();
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
@@ -1233,11 +1328,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         problems.push(g);
     }
     let mut blocked = problems.first().cloned();
+    // Background failures (cache saves, the startup cleanup), one health item per kind.
+    for (kind, msgs) in notice_kinds(&app.notices.lock().unwrap()) {
+        problems.push((kind, msgs));
+    }
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
         let (mb, cpus) = act.fold((0, 0), |(m, c), v| (m + v.mem_mb as u64, c + v.cpus as u64));
-        vm::Budget::new(platform::mem_total_mb(), mb, cpus, host_threads())
+        vm::Budget::new(host.mem_total_mb, mb, cpus, host.threads)
     };
 
     let mut queued_by_repo = HashMap::new();
@@ -1266,17 +1365,24 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             repo_errors.insert(repo.clone(), m);
             continue;
         }
-        let (by_size, runners, forks, fork_job) =
-            match forge.demand(rr, &cfg.label, cfg.vm_cpus).await.map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued)) {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(format!("{repo}: {e:#}"));
-                    repo_errors.insert(repo.clone(), format!("{e:#}"));
-                    continue;
-                }
-            };
+        let (by_size, runners, forks, fork_job, lookup_error) = match forge
+            .demand(rr, &cfg.label, cfg.vm_cpus)
+            .await
+            .map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued, d.lookup_error))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("{repo}: {e:#}"));
+                repo_errors.insert(repo.clone(), format!("{e:#}"));
+                continue;
+            }
+        };
         if forks > 0 {
             refused_forks.insert(repo.clone(), forks);
+        }
+        if let Some(m) = lookup_error {
+            errors.push(format!("{repo}: {m}"));
+            repo_errors.insert(repo.clone(), m);
         }
         // Informational only (R4 M-3): a VM that is handed the fork job is refused by the exec gate and
         // killed, so a queued fork job can burn one VM but never stops the repo's launches.
@@ -1288,7 +1394,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         vm::recycle_warm(app, repo, cfg.warm_recycle_mins).await;
         vm::recycle_stale_policy(app, repo, &vm::policy_id(cfg)).await;
         // A parked cache save whose readers are gone (or that hit a lock last time).
-        vm::commit_pending(app, repo, "").await;
+        if let Some((vm::CacheUse::Discarded, Some(why))) = vm::commit_pending(app, repo, "").await {
+            tracing::warn!("{repo}: parked cache commit: {why}");
+        }
+        vm::check_parked(app, repo);
         // Sizes with demand, plus sizes with waiting VMs (which may now be surplus).
         let mut sizes: Vec<u32> = by_size.keys().copied().collect();
         if cfg.warm_target(repo, cfg.vm_cpus) > 0 {
@@ -1445,6 +1554,22 @@ pub fn test_app(name: &str) -> Arc<App> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_cleanup_that_keeps_failing_becomes_a_health_item() {
+        let app = App::for_tests();
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 1, "403", false);
+        assert!(app.notices.lock().unwrap().is_empty(), "two failures are not yet a pattern");
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 2, "403", true);
+        assert!(app.notices.lock().unwrap().is_empty(), "not while the box is still starting");
+        note_cleanup_failure(&app, "sweep:a", "runner cleanup of a", 2, "403", false);
+        let kinds = notice_kinds(&app.notices.lock().unwrap());
+        assert_eq!(kinds.len(), 1);
+        assert!(
+            kinds[0].0 == "cleanup" && kinds[0].1.contains("keeps failing (3 attempts); see") && !kinds[0].1.contains("403"),
+            "{kinds:?}"
+        );
+    }
+
     use super::*;
 
     #[test]

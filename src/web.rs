@@ -110,9 +110,10 @@ async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(to
     Err(e).with_context(|| format!("bind {listen}"))
 }
 
-pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    load_key(&app.data)?;
-    let router = Router::new()
+/// Every route of the dashboard. The guard layer is added by `serve`, around all of them: a route added here is guarded,
+/// and `no_route_answers_without_the_key` reads this very function's text to test each one.
+fn api_router() -> Router<Arc<App>> {
+    Router::new()
         .route("/", get(|| async { Html(PAGE.as_str()) }))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(sw))
@@ -158,8 +159,11 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/workflows", get(workflows))
         .route("/api/dispatch", post(dispatch))
         .merge(crate::notify::routes())
-        .layer(middleware::from_fn_with_state(app.clone(), guard))
-        .with_state(app.clone());
+}
+
+pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
+    load_key(&app.data)?;
+    let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
     let configured = app.cfg().listen;
     let (listener, addr) = bind_listen(&app.data, &configured).await?;
     *RUNNING_LISTEN.lock().unwrap() = Some(addr.clone());
@@ -667,19 +671,23 @@ async fn serve_check(sock: &std::path::Path) -> ServeUse {
     v
 }
 
-/// Doctor's (ok, detail); None when tailscale serve can't be read (the tailscale check covers that).
-pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
-    Some(match serve_status(&data.join("serve.sock")).await.ok()? {
-        ServeUse::Unsafe(why) => {
-            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
+/// Doctor's (ok, detail, soft). `soft` is true only for an unreadable config, which at boot can mean tailscaled is
+/// not up yet; an unsafe one is never soft. Admission fails closed on the same failure.
+pub async fn serve_doctor(data: &std::path::Path) -> (bool, String, bool) {
+    match serve_status(&data.join("serve.sock")).await {
+        Err(why) => (false, format!("could not read the tailscale serve config: {why}"), true),
+        Ok(ServeUse::Unsafe(why)) => {
+            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"), false)
         }
         // Identity headers are trusted only from a root peer (see `Via`).
-        ServeUse::Proxied if !tailscaled_is_root() => {
-            (false, "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into())
-        }
-        ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
-        ServeUse::Unused => (true, "kiln's socket is not served".into()),
-    })
+        Ok(ServeUse::Proxied) if !tailscaled_is_root() => (
+            false,
+            "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into(),
+            false,
+        ),
+        Ok(ServeUse::Proxied) => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into(), false),
+        Ok(ServeUse::Unused) => (true, "kiln's socket is not served".into(), false),
+    }
 }
 
 /// Whether a process named tailscaled runs as root (true when none is found: the tailscale check covers that).
@@ -1483,15 +1491,26 @@ async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoPara
     // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel, which is
     // also why this comes before the caps check), because the runner only notices a cancel after about a minute.
     // The job lookup also catches a job that started since the last poll.
+    let (mut killed, mut lookup_failed) = (0, None);
     if f.kind() == crate::forge::Kind::GitLab {
-        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_default();
-        vm::kill_pipeline(&app, &repo.key(), id, &jobs);
+        // A failed lookup still kills the VMs the pipeline link identifies; the failure is reported, not swallowed.
+        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_else(|e| {
+            tracing::warn!("{}: pipeline {id}: job lookup failed: {e:#}", repo.key());
+            lookup_failed = Some(format!("{e:#}"));
+            vec![]
+        });
+        killed = vm::kill_pipeline(&app, &repo.key(), id, &jobs);
     }
+    let suffix = match (&lookup_failed, killed) {
+        (None, 0) => String::new(),
+        (None, n) => format!(" ({n} VM(s) killed)"),
+        (Some(e), n) => format!(" ({n} VM(s) killed; job lookup failed: {e})"),
+    };
     if !f.caps().cancel {
-        bail_r(&cannot(&f, "cancel runs"))?;
+        bail_r(&format!("{}{suffix}", cannot(&f, "cancel runs")))?;
     }
     f.cancel(&repo, id).await?;
-    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
+    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}{suffix}", repo.key()))), StatusCode::NO_CONTENT))
 }
 
 #[derive(Deserialize)]
@@ -2029,6 +2048,40 @@ mod tests {
         assert!(m.requests().is_empty(), "a refusal must not reach the forge: {:?}", m.requests());
     }
 
+    /// A failed job lookup still kills the VMs the pipeline link names, and the answer says what happened.
+    #[tokio::test]
+    async fn a_gitlab_cancel_reports_the_kills_when_the_job_lookup_fails() {
+        let gh = crate::forge_test_mock::Mock::github().await;
+        let gl = crate::forge_test_mock::Mock::start().await;
+        let forges: Vec<crate::forge::ForgeCfg> = serde_json::from_value(json!([
+            { "id": "github", "kind": "github", "repos": ["acme/demo"] },
+            { "id": "gl", "kind": "gitlab", "url": "https://gitlab.example.org", "repos": ["acme/demo"] },
+        ]))
+        .unwrap();
+        let (mut app, _) = crate::tests::tick_app("web-gl-cancel", &gh, Some(forges.clone()));
+        let g = crate::forge::gitlab::GitLab::for_mock(&forges[1], &app.data, &gl.base, "tok");
+        Arc::get_mut(&mut app).unwrap().forges.insert(forges[1].clone(), crate::forge::Forge::GitLab(Box::new(g)));
+        let mut v: crate::vm::Vm = serde_json::from_value(json!({
+            "id": "kiln-1-0", "repo": "gl:acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        let mut run = crate::vm::Run::default();
+        run.links.run = Some("https://gitlab.example.org/acme/demo/-/pipelines/127".into());
+        v.run = Some(run);
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
+        // No route for the pipeline's jobs: the lookup fails.
+        let r = run_cancel(State(app.clone()), Path(127), repo("gl:acme/demo")).await;
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok(), "the linked VM is killed");
+        let said = match r {
+            Ok(a) => a.0.0.0,
+            Err(e) => format!("{:#}", e.0),
+        };
+        assert!(said.contains("1 VM(s) killed; job lookup failed"), "{said}");
+    }
+
     #[tokio::test]
     async fn typed_writes_are_only_rerun_cancel_dispatch() {
         let (m, app) = typed("typed-writes").await;
@@ -2061,6 +2114,49 @@ mod tests {
             assert!(audited(&Method::POST, p, true), "{p}");
         }
         assert!(!audited(&Method::GET, "/api/runs", true));
+    }
+
+    /// A job VM reaches the dashboard port as a loopback peer. With a valid Host and `x-kiln` but no dashboard key, no
+    /// route may answer, whatever the method. The route list is read from the router's own source, so a new route is covered.
+    #[tokio::test]
+    async fn no_route_answers_without_the_key() {
+        let src = [include_str!("web.rs"), include_str!("notify.rs")];
+        let mut paths: Vec<String> = vec![];
+        for s in src {
+            for l in s.lines().filter(|l| l.trim_start().starts_with(".route(\"/api/")) {
+                let p = l.trim_start().trim_start_matches(".route(\"").split('"').next().unwrap();
+                let mut p = p.to_string();
+                while let (Some(a), Some(b)) = (p.find('{'), p.find('}')) {
+                    p.replace_range(a..=b, "1");
+                }
+                paths.push(p);
+            }
+        }
+        assert!(
+            paths.len() >= 40 && paths.contains(&"/api/runs/1/cancel".to_string()) && paths.contains(&"/api/notify/1/test".to_string()),
+            "{paths:?}"
+        );
+        let app = App::for_tests();
+        for p in &paths {
+            for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+                let req = Request::builder().method(m.clone()).uri(p.as_str()).header(header::HOST, "localhost:7878").header("x-kiln", "1");
+                let (r, _) =
+                    admission(&app, Via::Tcp("127.0.0.1:5555".parse().unwrap()), req.body(axum::body::Body::empty()).unwrap()).await;
+                assert_eq!(r.err().map(|r| r.status()), Some(StatusCode::UNAUTHORIZED), "{m} {p}");
+            }
+        }
+        // And through the real layer, on a socket: a merged router is guarded too.
+        let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = tokio::spawn(axum::serve(l, router.into_make_service_with_connect_info::<Via>()).into_future());
+        let c = reqwest::Client::new();
+        for (m, p) in [(Method::GET, "/api/jobs/1/log?repo=acme/demo"), (Method::GET, "/api/notify"), (Method::POST, "/api/notify/1/test")]
+        {
+            let r = c.request(m.clone(), format!("http://127.0.0.1:{port}{p}")).header("x-kiln", "1").send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{m} {p}");
+        }
+        server.abort();
     }
 
     #[tokio::test]

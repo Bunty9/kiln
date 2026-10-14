@@ -397,7 +397,7 @@ async fn two_of_three(name: &str, seed_cpus: u32, seed_mem: u32) -> Trio {
 #[tokio::test]
 async fn the_cpu_budget_is_shared_across_forges() {
     // The host budget is 1.5 vCPUs per thread; leave exactly two vCPUs.
-    let max = host_threads() * 3 / 2;
+    let max = HostReadings::TEST.threads * 3 / 2;
     let t = two_of_three("mixed-cpu", max - 2, 0).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("cpu budget"), "{why}");
@@ -406,8 +406,7 @@ async fn the_cpu_budget_is_shared_across_forges() {
 #[tokio::test]
 async fn the_memory_budget_is_shared_across_forges() {
     // 2 GB stay reserved for the host; leave exactly two 64 MB VMs.
-    let total = platform::mem_total_mb();
-    assert!(total > 2048 + 128, "this host has too little memory ({total} MB) for the budget test");
+    let total = HostReadings::TEST.mem_total_mb;
     let t = two_of_three("mixed-mem", 0, (total - 2048 - 128) as u32).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("memory budget"), "{why}");
@@ -469,6 +468,37 @@ async fn retire_reaches_the_right_forge_with_the_right_reason() {
     assert!(t.gh.requests().is_empty(), "GitHub is not gated: {:?}", t.gh.requests());
 }
 
+/// A security recycle must not be undone by a forge that cannot delete the runner: the idle VM dies anyway,
+/// and `retire` still reports the failure so the delete is tried again.
+#[tokio::test]
+async fn a_stale_policy_vm_dies_even_when_its_runner_cannot_be_deleted() {
+    let t = Trio::new("mixed-retire-err", 99, |_| {}).await;
+    t.gh.fail("DELETE", "/repos/acme/demo/actions/runners/11", 500, "boom");
+    t.gl.route("PUT", &format!("{GL}/runners/79"), 500, "{}");
+    let vms = [("seed-gh", GH_REPO, 11), ("seed-gl", GL_REPO, 79), ("seed-none", "gl2:acme/demo", 5)];
+    let kills: Vec<_> = vms
+        .iter()
+        .map(|&(id, repo, rid)| {
+            seed(&t.app, id, repo, "idle", rid, 1, 64);
+            watch(&t.app, id)
+        })
+        .collect();
+    // A VM that already has a job is not a candidate.
+    seed(&t.app, "seed-job", GH_REPO, "idle", 12, 1, 64);
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-job").unwrap().job_url = Some("https://x/1".into());
+    let busy = watch(&t.app, "seed-job");
+    for (_, repo, _) in vms {
+        vm::recycle_stale_policy(&t.app, repo, "new").await;
+    }
+    for k in &kills {
+        assert!(killed(k).await);
+    }
+    assert!(!killed(&busy).await);
+    let note = |id: &str| t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().note.clone().unwrap();
+    assert!(note("seed-gh").contains("runner delete failed"), "{}", note("seed-gh"));
+    // The forge recovers: the next recycle finds nothing left to do, and a retry of the delete is the sweep's.
+}
+
 /// A reboot loses the VMs and the network is not up when kiln starts: the lost VMs' runners are deleted
 /// on every forge, and the sweep of GitHub's repo that failed is retried, not skipped for good.
 #[tokio::test]
@@ -520,7 +550,7 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     gt_runner(&t.gt, false);
     t.gt.route("GET", &list, 500, "{}");
 
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gl.requests().iter().any(|r| r == &format!("DELETE {GL}/runners/301")), "{:?}", t.gl.requests());
     assert!(!t.gt.requests().iter().any(|r| r.starts_with("DELETE")));
     assert!(t.gh.requests().is_empty(), "GitHub's runners go by the startup sweep alone: {:?}", t.gh.requests());
@@ -528,12 +558,12 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     t.gl.clear_log();
     t.gt.route("GET", &list, 200, fixture_in("gitea", "runners_one.json"));
     t.gl.route("GET", &format!("{GL}/projects/1/runners?type=project_type&per_page=100&page=1"), 200, "[]");
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gt.requests().iter().any(|r| r == &format!("DELETE {GT}/runners/52")), "{:?}", t.gt.requests());
     assert!(t.gl.requests().iter().all(|r| r.starts_with("GET ")), "nothing left to delete: {:?}", t.gl.requests());
 
     // The startup sweep covers GitHub too.
-    sweep_runners(&t.app, false).await;
+    sweep_runners(&t.app, false, 0).await;
     assert!(t.gh.requests().iter().any(|r| r.starts_with("GET /repos/acme/demo/actions/runners")), "{:?}", t.gh.requests());
 }
 

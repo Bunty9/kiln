@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -382,6 +382,8 @@ pub struct Demand {
     /// Gitea: a queued (not `waiting`) fork job with our labels exists. A fork job runs on any
     /// matching runner, warm ones included, so kiln launches nothing for the repo meanwhile.
     pub fork_queued: bool,
+    /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
+    pub lookup_error: Option<String>,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.
@@ -890,7 +892,7 @@ pub async fn gate(
 /// The live forges. A settings save keeps the same `Arc<Forge>` for every forge whose config did
 /// not change, so client state (ETags, rate limits, App tokens) survives.
 #[derive(Default)]
-pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>);
+pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>, Mutex<HashMap<ForgeId, Option<std::time::SystemTime>>>);
 
 impl Forges {
     /// Match the registry to `list`. A forge that cannot be built (bad config) is logged and left out.
@@ -923,6 +925,23 @@ impl Forges {
     pub fn load_tokens(&self, data: &std::path::Path) {
         for f in self.all() {
             f.load_token(data);
+        }
+    }
+
+    /// The tick's cheap re-read: a file credential placed by hand after start, or rotated by a secrets manager,
+    /// is picked up when its file's modification time changes (a stat per forge). A missing file seen first is no change.
+    pub fn reload_changed(&self, data: &std::path::Path) {
+        for f in self.all() {
+            let id = f.id();
+            let at = match std::fs::metadata(token_path(data, &id)) {
+                Ok(m) => m.modified().ok(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                // Unreadable: keep the token in use rather than clearing it on a transient error.
+                Err(_) => continue,
+            };
+            if self.1.lock().unwrap().insert(id, at).flatten() != at {
+                f.load_token(data);
+            }
         }
     }
 
@@ -1000,6 +1019,31 @@ mod tests {
         let mut v = VerdictFacts { ours: true, ..Default::default() };
         f(&mut v);
         v
+    }
+
+    /// A token file placed by hand while kiln runs is picked up by the tick; so is a rotated or removed one.
+    #[test]
+    fn a_hand_placed_token_file_is_read_without_a_restart() {
+        let data = std::env::temp_dir().join(format!("kiln-test-reload-tokens-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(data.join("forges")).unwrap();
+        let cfg: ForgeCfg = serde_json::from_value(json!({"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.org"})).unwrap();
+        let forges = Forges::default();
+        let gh = Arc::new(crate::github::Gh::for_mock("http://127.0.0.1:1"));
+        forges.sync(std::slice::from_ref(&cfg), &gh, &data);
+        let f = forges.get(&cfg.id).unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().unwrap().contains("no token"), "{:?}", f.health());
+        let path = token_path(&data, &cfg.id);
+        std::fs::write(&path, "glpat-abc\n").unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().is_none(), "{:?}", f.health());
+        // Unchanged: no re-read. Removed: the credential goes.
+        forges.reload_changed(&data);
+        std::fs::remove_file(&path).unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().is_some());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

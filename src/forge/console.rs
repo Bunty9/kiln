@@ -107,11 +107,25 @@ fn gitea_line(line: &str) -> Option<Line> {
 /// Whether `line` is kiln-job's own `kiln: decide`: the whole remainder after the journal prefix
 /// (`[ts] kiln-job[<pid>]: `), so a job name containing the words cannot mark it early (R3 L-3).
 pub fn is_decide(line: &str) -> bool {
+    is_job_line(line, "kiln: decide")
+}
+
+/// kiln-job's own `kiln: cache scrub failed` (the guest could not delete login tokens from the cache disk), anchored like `is_decide`.
+pub fn is_scrub_failed(line: &str) -> bool {
+    is_job_line(line, "kiln: cache scrub failed")
+}
+
+/// kiln-job's own `kiln: cache scrub ok`: the only proof the guest scrubbed the cache disk's login tokens.
+pub fn is_scrub_ok(line: &str) -> bool {
+    is_job_line(line, "kiln: cache scrub ok")
+}
+
+fn is_job_line(line: &str, msg: &str) -> bool {
     let l = line.trim_end();
     let l = l.strip_prefix('[').and_then(|r| r.split_once("] ")).map_or(l, |(_, rest)| rest);
     l.strip_prefix("kiln-job[")
         .and_then(|r| r.split_once("]: "))
-        .is_some_and(|(pid, rest)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest == "kiln: decide")
+        .is_some_and(|(pid, rest)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest == msg)
 }
 
 /// The raw value of the first unquoted `key=value` field of a logrus text line (quoted values are skipped whole,
@@ -276,6 +290,27 @@ mod tests {
             "echo kiln: decide",
         ] {
             assert!(!is_decide(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_failed_scrub_is_the_whole_journal_line() {
+        assert!(is_scrub_failed("[   50.1] kiln-job[1395]: kiln: cache scrub failed"));
+        for l in [
+            "kiln: cache scrub failed",
+            "[ 1.0] kiln-job[7]: kiln: cache scrub failed!",
+            "[ 1.0] runner[7]: kiln: cache scrub failed",
+            "kiln-job[7]: kiln: decide",
+        ] {
+            assert!(!is_scrub_failed(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_scrub_ok_is_the_whole_journal_line() {
+        assert!(is_scrub_ok("[   50.1] kiln-job[1395]: kiln: cache scrub ok"));
+        for l in ["kiln: cache scrub ok", "[ 1.0] kiln-job[7]: kiln: cache scrub ok.", "[ 1.0] kiln-job[7]: kiln: cache scrub failed"] {
+            assert!(!is_scrub_ok(l), "{l}");
         }
     }
 }

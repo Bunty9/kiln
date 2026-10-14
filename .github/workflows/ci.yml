@@ -25,9 +25,10 @@ jobs:
       - name: Lint
         run: . "$HOME/.cargo/env" && cargo clippy --locked --tests -- -D warnings
       - name: Test
-        # The Landlock test must not skip on a kernel without it.
+        # The Landlock and guest-script tests must not skip on a kernel or an image without what they drive.
         env:
           KILN_REQUIRE_LANDLOCK: "1"
+          KILN_REQUIRE_GUEST_TESTS: "1"
         run: . "$HOME/.cargo/env" && cargo test --locked
       - name: Dependency audit
         # ~/.cargo persists on the cache disk, so the pinned cargo-deny is usually already there.

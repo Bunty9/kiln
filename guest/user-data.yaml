@@ -156,6 +156,7 @@ write_files:
       check "docker present" sudo -u runner bash -c 'command -v docker'
       check "docker.service not enabled at boot" bash -c '! systemctl is-enabled docker.service'
       check "docker.socket enabled" systemctl is-enabled docker.socket
+      check "sysrq enabled (the gate's fail-closed fallbacks)" bash -c 'test "$(cat /proc/sys/kernel/sysrq)" -ne 0'
       check "sshd off" bash -c '! systemctl is-enabled ssh.service ssh.socket'
       check "no linger for runner" test ! -e /var/lib/systemd/linger/runner
       if [ -r "/boot/config-$(uname -r)" ]; then KCONF="cat /boot/config-$(uname -r)"
@@ -309,7 +310,8 @@ write_files:
 
       # After the runner exits: the same for every forge.
       finish() {
-        /usr/local/sbin/kiln-cache scrub || echo "kiln: cache scrub failed"
+        # The host commits the cache only after the positive line: a failure, or no line at all, discards it.
+        if /usr/local/sbin/kiln-cache scrub; then echo "kiln: cache scrub ok"; else echo "kiln: cache scrub failed"; fi
         sleep 1 # let kiln-steps flush the last page
         if [ -n "${reader-}" ]; then kill "$reader" 2>/dev/null; else open_tty; fi
         echo "kiln: decide"
@@ -391,7 +393,8 @@ write_files:
           while p > 1:
               if p == root: return True
               p = ppid(p)
-          return uid in uids(pid)    # reparented orphans keep the uid
+          u = uids(pid)
+          return not u or uid in u   # reparented orphans keep the uid; an unreadable status cannot be told apart: hold
 
       def answer(fan, fd, resp):
           try: os.write(fan, struct.pack("=ii", fd, resp))
@@ -428,6 +431,22 @@ write_files:
               if fd < 0 or mask & 0x4000: raise RuntimeError("kiln-gate: fanotify queue overflow")   # FAN_Q_OVERFLOW
               yield fd, pid
               off += evlen
+
+      def event_response(mode, primary, is_job):
+          # What one exec event gets: 1 allow, 2 deny, 0 hold until the verdict. is_job runs only when it can matter.
+          if primary: return 1
+          if mode == "ok" or not is_job(): return 1   # infrastructure (kiln-job, kernel helpers) or after the verdict
+          if mode == "refuse": return 2
+          return 0
+
+      def verdict_due(exists, t0, now):
+          # The verdict file is there, or the first held exec has waited TIMEOUT.
+          return bool(exists or (t0 and now - t0 > TIMEOUT))
+
+      def verdict_mode(text):
+          # The first word of the verdict file; anything but ok or cold (empty, garbage) is refuse.
+          v = (text.split() or ["refuse"])[0]
+          return "cold" if v == "cold" else "ok" if v == "ok" else "refuse"
 
       def main():
           user, cmd = sys.argv[1], sys.argv[2:]
@@ -476,20 +495,16 @@ write_files:
                           try:
                               # L-5: safe only because the primary does not reap CMD while it holds an exec (t0 set), so the pid
                               # is not reused by a job-uid python3 meanwhile; a one-shot flag would make it explicit.
-                              if pid > 0 and pid == (child or int(read(CHILD) or 0)) and os.readlink(f"/proc/{pid}/exe") == me:   # the primary's exec of CMD (binary + interpreter)
-                                  answer(fan, fd, 1)
-                              elif mode == "ok" or not job(pid, child, pw.pw_uid):
-                                  answer(fan, fd, 1)                       # infrastructure (kiln-job, kernel helpers) or after the verdict
-                              elif mode == "refuse": answer(fan, fd, 2)
-                              else:
-                                  pending.append(fd); t0 = t0 or time.time()
+                              primary = pid > 0 and pid == (child or int(read(CHILD) or 0)) and os.readlink(f"/proc/{pid}/exe") == me   # the primary's exec of CMD (binary + interpreter)
+                              resp = event_response(mode, primary, lambda: job(pid, child, pw.pw_uid))
+                              if resp: answer(fan, fd, resp)
+                              else: pending.append(fd); t0 = t0 or time.time()
                           except Exception:
                               answer(fan, fd, 2)                           # any handler bug: deny, never crash open
                   if child and mode is None and not t0 and os.waitpid(child, os.WNOHANG)[0]:
                       kill_user(pw.pw_uid); print("kiln-gate: the runner exited before the verdict", file=sys.stderr); sys.exit(75)
-                  if mode is None and (os.path.exists(VERDICT) or (t0 and time.time() - t0 > TIMEOUT)):
-                      v = (read(VERDICT).split() or ["refuse"])[0]
-                      mode, t0 = ("cold" if v == "cold" else "ok" if v == "ok" else "refuse"), time.time()
+                  if mode is None and verdict_due(os.path.exists(VERDICT), t0, time.time()):
+                      mode, t0 = verdict_mode(read(VERDICT)), time.time()
                       if mode == "cold" and cmd:   # a plain fork: Popen or system() would wait for the exec event we have yet to answer
                           det = os.fork()
                           if det == 0:
