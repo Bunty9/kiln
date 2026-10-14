@@ -79,7 +79,7 @@ write_files:
       BAKE_DATE=$(date +%Y%m%d)
       printf 'RUNNER_TOOL_CACHE=/opt/hostedtoolcache\nAGENT_TOOLSDIRECTORY=/opt/hostedtoolcache\nLANG=C.UTF-8\nImageOS=ubuntu24\nImageVersion=kiln-%s\nACCEPT_EULA=Y\n' "$BAKE_DATE" \
         | tee /home/runner/actions-runner/.env >> /etc/environment
-      # Runs before a job's first step (runner job hook): refuses fork pull requests.
+      # Runs before a job's first step (runner job hook): refuses fork pull requests and detaches the cache for release builds.
       echo ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/sbin/kiln-prejob.sh >> /home/runner/actions-runner/.env
       # Sysctls for Elasticsearch, kind, file watchers (same as GitHub hosted image)
       mkdir -p /etc/sysctl.d
@@ -137,7 +137,7 @@ write_files:
       apt-get clean
       systemctl enable kiln-job.service kiln-cache.service
       # dockerd must not start at boot from the cached /var/lib/docker: docker.socket stays (it activates dockerd), and
-      # the job's own path starts docker.service after its trust step (R3 M-2c).
+      # the job's own path starts docker.service after its trust step.
       systemctl disable docker.service
       # sshd only exists for held (failed) jobs: kiln-job starts it. Noble socket-activates it, so disable both.
       # No baked host keys: kiln-job generates fresh ones per boot, at hold time.
@@ -213,7 +213,7 @@ write_files:
           echo "kiln: no JIT config passed, powering off"
           return 1
         fi
-        # dockerd is not started here (R4 M-1): it would run whatever the cached /var/lib/docker holds before a release
+        # dockerd is not started here: it would run whatever the cached /var/lib/docker holds before a release
         # job's prejob hook has decided cold or warm. docker.socket starts it on first use; the job-started hook runs
         # in "Set up job", before "Initialize containers", so a cold detach always precedes the first docker call.
         /usr/local/sbin/kiln-steps &
@@ -225,7 +225,7 @@ write_files:
       # verdict). No config.toml (run-single ignores -c): flags, and the token in CI_SERVER_TOKEN so it never shows
       # in `ps`. sudo's env_reset drops everything else. The exit status says nothing (it is 0 after a failed job
       # too), so it is ignored: kiln takes the result from the API. The runner's stdout is the unit's console, and
-      # its `received ... job=<id>` line is how kiln learns which job this is. Gitea gets its own branch later.
+      # its `received ... job=<id>` line is how kiln learns which job this is.
       # --wait-timeout is a backstop only; the host's own idle deadline ends an idle VM first.
       run_gitlab() {
         local url cred tok x=/usr/local/bin/kiln-exec
@@ -300,7 +300,7 @@ write_files:
         fi
         kill -0 "$A" 2>/dev/null && { wait "$A"; rc=$?; }   # the twin finished first
         # Never kill the twin: it exits by itself after any verdict, and killing it frees its fanotify group, which
-        # allows every exec it still holds, a refused job's included (R3 M-3). On refuse, kill the job's uid first.
+        # allows every exec it still holds, a refused job's included. On refuse, kill the job's uid first.
         wait "$B" 2>/dev/null
         read -r v _ < /run/kiln/verdict
         [ "$v" != refuse ] || { kill_uid "$ruid"; return 1; }
@@ -356,7 +356,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/usr/bin/env python3
-      # kiln-gate USER [CMD...]: the exec gate of Gitea job VMs (design 5.3). Arms fanotify FAN_OPEN_EXEC_PERM on every
+      # kiln-gate USER [CMD...]: the exec gate of Gitea job VMs. Arms fanotify FAN_OPEN_EXEC_PERM on every
       # mounted filesystem, then runs CMD as USER under it (no CMD = twin: watches only). Every execve by USER's process
       # tree, or by any process whose real or effective uid is USER, is held until $KILN_VERDICT says ok, cold or refuse.
       # ok: release. cold: the primary runs $KILN_DETACH, then writes $KILN_VERDICT.go (ok|refuse); the twin follows it.
@@ -412,7 +412,7 @@ write_files:
 
       def crash():
           # A gate that dies frees its fanotify group, and the kernel then ALLOWS every exec still held or queued. The VM must
-          # die first: sysrq `b` is a synchronous emergency restart and QEMU runs with -no-reboot (R3 L-1). The host sees the
+          # die first: sysrq `b` is a synchronous emergency restart and QEMU runs with -no-reboot. The host sees the
           # VM end between a job start and its verdict and treats it as a gate death.
           try: open("/proc/sysrq-trigger", "w").write("b")
           except OSError: pass
@@ -440,8 +440,8 @@ write_files:
           if fan < 0: sys.exit(f"kiln-gate: fanotify_init: {os.strerror(ctypes.get_errno())}")
           bad = []
           # One FILESYSTEM mark per mount. fsnotify delivers an exec event from the exec'd file's own superblock, inode and
-          # mount marks only, so every filesystem needs its own mark; the GT-5 log's "one mark covered every filesystem" was
-          # a control that did not test that (R3 L-7), and the battery only proves the per-mount marks below.
+          # mount marks only, so every filesystem needs its own mark; an earlier test log's "one mark covered every filesystem" was
+          # a control that did not test that, and the battery only proves the per-mount marks below.
           for l in open("/proc/self/mountinfo"):
               f = l.split()
               m = re.sub(r"\\([0-7]{3})", lambda x: chr(int(x.group(1), 8)), f[4])
@@ -537,7 +537,7 @@ write_files:
       # docker.service ExecStartPre. Outside Gitea job VMs (no /run/kiln/gate-docker) it passes at once. In one: wait for the
       # host's verdict. ok passes. cold passes only once /mnt/cache is unmounted (`kiln-cache detach` unmounts it before its
       # own `systemctl start docker.service`, so this cannot deadlock), else a queued request could start dockerd on the
-      # cache disk's /var/lib/docker before the detach stops it (R3 M-2a). refuse, no verdict and a stuck detach fail.
+      # cache disk's /var/lib/docker before the detach stops it. refuse, no verdict and a stuck detach fail.
       [ -e /run/kiln/gate-docker ] || exit 0
       v=$(/usr/local/sbin/kiln-verdict-wait) || exit 1
       [ "$v" = ok ] && exit 0
@@ -550,7 +550,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/bash
-      # The guest gate (kiln-exec, kiln-gate) calls this: waits for the host's
+      # The guest gates (kiln-exec, kiln-docker-gate) call this: waits for the host's
       # verdict in /run/kiln/verdict (written by kiln-job's reader). Prints ok,
       # cold or refuse; exit 0 for ok and cold. A missing file after the wait or
       # anything unreadable is refuse. The wait is 60 s at most; KILN_VERDICT_WAIT
@@ -579,7 +579,7 @@ write_files:
       # decision, and names go to docker after `--`. The gate reads only the verdict file, via
       # kiln-verdict-wait, and the job id used for container names comes from that file, not from the job.
       #
-      # Exit codes (SP-8): BUILD_FAILURE_EXIT_CODE (1) = the job failed, one attempt, no runner retry.
+      # Exit codes: BUILD_FAILURE_EXIT_CODE (1) = the job failed, one attempt, no runner retry.
       # SYSTEM_FAILURE_EXIT_CODE (2) = kiln infrastructure broke; the runner retries prepare 3 times.
       # So refuse, timeout and a garbage verdict exit 1 (never 2), and any non-zero script exit maps to 1.
       #
@@ -598,7 +598,7 @@ write_files:
       NAME='^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'    # image, service and alias names: no leading '-', no shell or docker option syntax
       gate() {
         local v id jid
-        # One-shot (R2 M-3): the runner takes one job per VM, so a second prepare is a job the host never judged.
+        # One-shot: the runner takes one job per VM, so a second prepare is a job the host never judged.
         [ -e "$S/gate-ok" ] && refuse "a second job in this VM, job not run"
         v=$(/usr/local/sbin/kiln-verdict-wait) || refuse "kiln did not allow this job (refused, or no verdict from the kiln host in time). No job code was run."
         case $v in ok | cold) ;; *) refuse "unreadable verdict, job not run" ;; esac
@@ -614,7 +614,7 @@ write_files:
           sudo /usr/local/sbin/kiln-cache detach >&2 || refuse "cache detach failed, job not run"
           sudo systemctl restart docker.service >&2 || refuse "docker restart failed, job not run"
         else
-          # dockerd is not started at boot (R3 M-2c): it starts now, after the trust step, on the cache the mount path cleaned.
+          # dockerd is not started at boot: it starts now, after the trust step, on the cache the mount path cleaned.
           sudo systemctl start docker.service >&2 || refuse "docker start failed, job not run"
         fi
         mkdir -p "$S" && echo "$v $id" > "$S/gate-ok" || exit "$SFEC"
@@ -678,7 +678,7 @@ write_files:
       # kiln attaches the repo's cache as a second virtio disk (no disk = no cache).
       # First use of a repo: it is blank, so format it. Then bind the usual cache
       # dirs onto it. /opt/hostedtoolcache stays off: the pre-seeded Node lives there.
-      # `kiln-cache detach` (the job-started hook, for release builds) unmounts it all again.
+      # `kiln-cache detach` (the job-started hook, for release builds; kiln-exec and kiln-gate on a cold verdict) unmounts it all again.
       # `kiln-cache scrub` (after the job) deletes known login-token files (cargo, huggingface-cli).
       [ -b /dev/vdb ] || exit 0
       set -eu
@@ -708,9 +708,9 @@ write_files:
       rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
       # Container records and managed plugins are what auto-start (restart policies, enabled plugins): images and volumes
       # are what is worth caching. Gone before the bind mounts, so a container planted by a compromised default-branch
-      # job cannot run at boot, in any forge (R3 M-2b).
-      find /mnt/cache -maxdepth 1 -type l -delete   # a planted symlink would be chowned or followed below (R4 L-9)
-      # Allow-list (R4 M-1): only image data survives. swarm/ would recreate a root service, network/ and the rest are state.
+      # job cannot run at boot, in any forge.
+      find /mnt/cache -maxdepth 1 -type l -delete   # a planted symlink would be chowned or followed below
+      # Allow-list: only image data survives. swarm/ would recreate a root service, network/ and the rest are state.
       [ -d /mnt/cache/var_lib_docker ] && find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1 \( -type l -o ! \( -name image -o -name overlay2 -o -name volumes -o -name buildkit \) \) -exec rm -rf {} +
       for t in $DIRS; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
@@ -792,7 +792,7 @@ write_files:
   - path: /etc/systemd/system/kiln-job.service
     content: |
       [Unit]
-      Description=kiln: run one GitHub Actions job
+      Description=kiln: run one CI job
       Wants=network-online.target
       After=network-online.target docker.service
 

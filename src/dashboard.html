@@ -749,7 +749,7 @@ function forgeBanners(F, p, vms, t) {
   }
   return out;
 }
-// A refused job has its own status (`refused`), so it is never a failure here: no red count, no title flip, no alert.
+// A refused job has its own status (`refused`), so it is never a failure here: no red count, no title flip, no browser notification.
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -789,7 +789,7 @@ const HELP = {
   autoupdate: ["Updates", "kiln downloads a newer release, checks its signature, waits for running jobs, restarts, and goes back to the old version if the new one fails to start twice. Auto update does this by itself when no job is running.", "updates"],
   restart: ["Restart", "Restart when idle drains first: no new VMs start, running jobs finish, then kiln restarts. Restart now kills running jobs, and they fail on their forge.", "updates"],
   rules: ["Workflow rules", "Send the result of chosen workflows to chosen destinations. A GitLab repo has no workflow files, so its rules use the name `pipeline`.", "notify-rules"],
-  events: ["Alert types", "Jobs: a job failed, timed out, was killed or lost. Health: something stops launches. Security: a setting or a token changed. Refused jobs send nothing.", "alerts"],
+  events: ["Alert types", "Jobs: a job failed, timed out, was killed or lost. Health: something stops launches. Security: a setting, a token or a forge's project list changed. A job refused by policy sends nothing; one kiln refused because it could not decide (it failed closed) sends a job refused alert.", "alerts"],
   warmbudget: ["Warm VM budget", "Warm VMs count against Max VMs: a slot held by a warm VM can't run another job.", "warm"],
   timeouts: ["Timeouts", "Job timeout: longest a job may run. Idle timeout: a VM that gets no job is killed after this. Poll interval: how often kiln asks each forge for queued jobs. Stop grace: how long running jobs get to finish on `systemctl stop`.", "stuck"],
   cachebranches: ["Cache branches", "Besides the default branch, successful pushes to these branches may also save the repo's cache. Pull requests and tags never do.", "cache-trust"],
@@ -1560,7 +1560,7 @@ const jl = new Map();
 // A refused job's note: neutral, not red, with what to do. `?` appears once HELP.refused exists.
 function refusedBox(v, fg) {
   const why = refusedWhy(v), n = fname(fg);
-  return `<div class="cal neu"><b>Refused by kiln:</b> ${esc(why)}${hqIf('refused')}<p class="sm" style="margin-top:4px">No job code ran, and kiln counts this as neither a failure nor an alert. ${/fork/i.test(why) ? `Fork pull requests are never run on this box. Cancel it on ${esc(n)}, or run forks on ${esc(n)}'s own runners.` : 'If you did not expect it, check Settings › Diagnostics.'}</p></div>`;
+  return `<div class="cal neu"><b>Refused by kiln:</b> ${esc(why)}${hqIf('refused')}<p class="sm" style="margin-top:4px">No job code ran, and this is not a failure. A policy refusal sends no alert; if kiln failed closed (it could not decide) you get a job refused alert. ${/fork/i.test(why) ? `Fork pull requests are never run on this box. Cancel it on ${esc(n)}, or run forks on ${esc(n)}'s own runners.` : 'If you did not expect it, check Settings › Diagnostics.'}</p></div>`;
 }
 async function loadLinks(v) {
   jl.set(v.id, null);
@@ -1875,7 +1875,6 @@ const FX = {
   gitlab: { name: 'GitLab', unit: 'project', url: 'https://gitlab.example.com', tok: 'glpat-…', path: 'group/project' },
   gitea: { name: 'Gitea', unit: 'repo', url: 'https://gitea.example.com', tok: 'access token', path: 'owner/repo' },
 };
-const fgPreview = f => f.launches !== false ? '' : `<div class="cal w" style="margin:0 0 16px"><b>${fname(f)} support is in preview:</b> jobs will not run until enabled. kiln reads this ${FX[f.kind].unit}'s queue and ${f.kind === 'gitea' ? 'runs' : 'pipelines'}, but starts no VMs for ${fname(f)} yet.</div>`;
 const fgTokenHelp = f => f.kind === 'gitea'
   ? `Scopes: <code>write:repository</code> and <code>read:user</code>. <a href="${forgeUrl(f, f.url + '/user/settings/applications')}" target="_blank" rel="noopener">Create it ↗</a> opens Gitea's applications page: sign in as the service account first, name the token and tick those two. The account must be the repo's <b>Owner</b> (see below).`
   : `Scopes: <code>create_runner</code>, <code>manage_runner</code>, <code>read_api</code>. <a href="${glTokenUrl(f)}" target="_blank" rel="noopener">Create it ↗</a> opens GitLab with those filled in; sign in as the bot user first.`;
@@ -1938,7 +1937,7 @@ const forgeCard = () => ({
     const id = esc(f.id), gt = f.kind === 'gitea', x = FX[f.kind], ci = gt ? '.gitea/workflows/ci.yml' : '.gitlab-ci.yml', set = f.auth?.source && f.auth.source !== 'none';
     return `<div class="card" id="fc-${id}"><h2>${x.name} <span class="fg2 sm" style="font-weight:400">${id}</span>${hq(f.kind)}<span class="sv">Each button saves at once</span></h2>
         <details class="fcb" data-id="${id}"${FOPEN[f.id] ?? !fgOk(f) ? ' open' : ''}><summary id="fc-${id}-sum"></summary>
-        <div id="fc-${id}-pv"></div><div id="fc-${id}-st"></div>
+        <div id="fc-${id}-st"></div>
         <h3 style="font-size:15px;margin:24px 0 8px">${gt ? 'Repos' : 'Projects'}</h3>
         <div id="fc-${id}-rp"></div>${fgRepoForm(f)}
         <div class="bar" style="margin:20px 0 0"><button class="btn" data-act="forgetest" data-id="${id}"${tip(`Ask ${x.name} who the token is${gt ? ', its version' : ', what it can do'}, and ${gt ? 'whether the account can register runners' : 'its role'} on each ${x.unit}. Creates nothing.`)}>${ic('pulse')}Test</button></div>
@@ -1952,7 +1951,6 @@ const forgeCard = () => ({
     const id = f.id, at = f.auth || {}, gt = f.kind === 'gitea', sc = gt ? null : glScopes(at), set = at.source && at.source !== 'none', dl = at.expires ? daysLeft(at.expires, now()) : null;
     const q = k => $(`#fc-${id}-${k}`), cp = f.caps || {};
     setHTML(q('sum'), `<span>${set ? 'Token set' : '<span class="fail">No token</span>'} · ${f.repos.length} ${FX[f.kind].unit}${f.repos.length === 1 ? '' : 's'} · ${fgOk(f) ? '<span class="ok">healthy</span>' : '<span class="warn">needs attention</span>'}</span>`);
-    setHTML(q('pv'), fgPreview(f));
     const note = [];
     if (!set) note.push('<div class="cal w">No token yet, so kiln cannot see this forge\'s queue. Paste one below.</div>');
     else if (f.health) note.push(`<div class="cal w">${esc(f.health)}</div>`);
@@ -2442,7 +2440,6 @@ pages.setup = {
     const pick = `<div class="seg" role="radiogroup" aria-label="Forge">${[['github', 'GitHub'], ['gitlab', 'GitLab'], ['gitea', 'Gitea']].map(([k, l]) => `<button role="radio" aria-checked="${xk === k}" data-act="sufg" data-id="${k}">${l}</button>`).join('')}</div>`;
     const sum = useGl ? [`${xn} <b>${esc(gl?.id)}</b>${gl?.auth?.login ? ` as <b>${esc(gl.auth.login)}</b>` : ''}`, (gl?.repos || []).map(k => esc(repoPath(gl.id, k))).join(', '), ''] : [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
       S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
-    const prev = `<div class="cal w" style="margin:0">${xn} support is in preview on this kiln: jobs will not run until it is enabled. You can set everything up now.</div>`;
     $('#su-lead').textContent = useGl ? `Three steps, about 5 minutes once your ${xn} server is added in the first one. Progress is detected automatically, so you can leave and come back.` : 'Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.';
     const bot = gt
       ? `<p class="fg2">Use a separate Gitea user for kiln, a <b>service account</b> such as <code>kiln-bot</code>, not yours. Gitea only gives the runner registration token to a repo's <b>Owner</b>, so the account must either <b>own the repo</b> (put the repo under it) or be a member of the <b>Owners</b> team of an organisation that holds only the repos kiln serves. An Owner can push, change settings and delete the repo, so keep this account to those repos.</p>`
@@ -2458,13 +2455,13 @@ pages.setup = {
       return `<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${ic(on ? 'check' : 'dot')}</span><span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>`;
     };
     const glB = !useGl ? null : [
-      `${pick}${gl?.launches === false ? prev : ''}${bot}`
+      `${pick}${bot}`
         + (gl ? `${tokP}${fgTokenForm(gl)}${fgCheckHTML(gl)}${gt ? gtPower() : ''}`
           : `<p class="fg2">Then tell kiln where your ${xn} is (${gt ? 'Gitea 1.25' : 'GitLab 16.0'} or newer). The next thing you do is paste the token.</p>${addForgeForm([], xk)}`),
       gl ? `<p class="fg2">Which ${FX[xk].unit} should kiln take jobs from? Paste its URL or <code>${FX[xk].path}</code>. ${gt ? 'The account must own it or be in its organisation\'s Owners team.' : 'The bot must be Maintainer on it.'}</p>${gl.repos.length ? `<ul class="list" style="width:100%">${gl.repos.map(k => fgRepoRow(gl, k)).join('')}</ul>` : ''}${fgRepoForm(gl)}
         <button class="btn" data-act="forgetest" data-id="${esc(gl.id)}"${tip(`Check the ${gt ? 'account' : 'bot'}'s role on each ${FX[xk].unit}`)}>${ic('pulse')}Test</button>${fgCheckHTML(gl)}${fgWhy403(gl)}` : `<p class="fg2">Connect ${xn || 'a forge'} first.</p>`,
       gl ? `<p class="fg2">Add this as <code>${ciName}</code> in the ${FX[xk].unit} and push. A job ${gt ? `with <code>runs-on: [${esc(JL())}]</code>` : `tagged <code>${esc(JL())}</code>`}, or a size such as <code>${esc(JL())}-4cpu</code>, is for kiln.</p>${cb(ciSnippet(xk, JL()))}
-        ${gl.launches === false ? `<div class="cal w" style="margin:0">${xn} support is in preview on this kiln: jobs will not run until it is enabled. kiln will see the job waiting, but starts no VM for it yet, so it stays ${gt ? 'queued' : 'pending'} in ${xn}.</div>` : jobProgress(gl, xn)}` : '',
+        ${jobProgress(gl, xn)}` : '',
     ];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
@@ -2627,7 +2624,7 @@ const GUIDES = [
   ['gate', 'Fork pull requests and refused jobs', () => `<h2>Fork pull requests and refused jobs</h2>
     <p>kiln never runs code from a fork on your box. A pull request from a fork can contain anything, and a kiln VM can reach your cache and, on an open network, your LAN. So kiln looks at every job before any of its code runs. We call that check the <b>verdict gate</b>.</p>
     <p><b>How the check works.</b> On GitHub, kiln does not count queued fork runs, and a hook in the VM fails a fork job before its first step. On GitLab and Gitea, the host decides: it asks the forge's own API where the job came from, never the job's own variables or claims, and tells the VM <i>run</i>, <i>run clean</i> or <i>refuse</i>. If anything is unclear, kiln refuses.</p>
-    <p><b>What you see.</b> The job gets a <i>refused</i> badge and a neutral note with the reason. No job code ran. A refusal is not a failure: it is not counted in Failed, flips no tab title and sends no alert. The forge usually shows the job as failed or cancelled. Overview may show <i>N jobs from fork pull requests refused</i>, or <i>a pull request from a fork is waiting</i> (on Gitea each such job can still cost a VM, which is refused and killed).</p>
+    <p><b>What you see.</b> The job gets a <i>refused</i> badge and a neutral note with the reason. No job code ran. A refusal is not a failure: it is not counted in Failed and flips no tab title. A policy refusal sends no alert; a refusal because kiln failed closed sends a <i>job refused</i> alert (see below). The forge usually shows the job as failed or cancelled. Overview may show <i>N jobs from fork pull requests refused</i>, or <i>a pull request from a fork is waiting</i> (on Gitea each such job can still cost a VM, which is refused and killed).</p>
     <p><b>Refusals on purpose (policy):</b></p>
     ${table(['Reason', 'What it means', 'What to do'],
       ['pull request from a fork', 'The job came from another repo\'s pull or merge request.', 'Close or cancel it on the forge, or run fork code on the forge\'s own runners. Turn on "approve before run" for forks on the forge.'],
@@ -2668,7 +2665,7 @@ const GUIDES = [
     <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
     <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Start with a Slack or ntfy URL, then click <b>Send test</b>.</p>
     <p>Each destination picks what it gets:</p>
-    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted. A job kiln refused on purpose is not a failure and sends nothing.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears. A check that is only waiting for the network after a restart raises nothing.</li><li><b>Security:</b> settings saved (only the names of what changed), a forge token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted. A job kiln refused on purpose (policy) is not a failure and sends nothing; one kiln failed closed on sends a <i>job refused</i> alert, under Jobs.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears. A check that is only waiting for the network after a restart raises nothing.</li><li><b>Security:</b> settings saved (only the names of what changed), a forge token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
     <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. See <a href="#/guides/notify-rules">Notification rules per forge</a>.</p>
     <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
     <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
@@ -2682,7 +2679,7 @@ const GUIDES = [
     <li><b>outcome</b>: <code>success</code>, <code>failure</code> or <code>any</code>.</li>
     <li><b>to</b>: one to twenty destination ids. The dashboard fills these in.</li></ul>
     <p>A failed job that matches a rule is sent once, to the rules' destinations and to every destination that has Jobs alerts on. A job whose workflow file is unknown matches only <code>*</code>.</p>
-    <p><b>Which events alert.</b> Jobs, Health and Security switches on each destination decide the rest: see <a href="#/guides/alerts">Alerts &amp; webhooks</a>. Refused jobs send no Jobs alert on any forge.</p>
+    <p><b>Which events alert.</b> Jobs, Health and Security switches on each destination decide the rest: see <a href="#/guides/alerts">Alerts &amp; webhooks</a>. Policy refusals send no alert on any forge; fail-closed refusals send a job refused alert under Jobs.</p>
     <p><b>What the message says.</b> For a GitLab or Gitea repo the chat message adds the forge name after the repo, for example <code>gitlab:platform/backend (GitLab)</code>. A link is sent only if it points at that job's own forge. Generic destinations get <code>job.forge</code> (the forge id) and <code>job.forge_kind</code> (<code>github</code>, <code>gitlab</code> or <code>gitea</code>) in the signed JSON.</p>`, 'Alerts and usage', ['alerts', 'forges']],
 
   ['analytics', 'Analytics', () => `<h2>Analytics</h2>
