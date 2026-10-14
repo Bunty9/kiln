@@ -975,7 +975,7 @@ async fn sweep_runners(app: &App, gated_only: bool, fails: u32) -> bool {
 /// True when no sweep failed. `fails`: how many rounds failed before this one; a retry's failures are not
 /// worth a warning each time (every tenth is), but a sweep that keeps failing becomes a health item.
 async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, fails: u32) -> bool {
-    let quiet = fails % 10 != 0;
+    let quiet = !fails.is_multiple_of(10);
     let cfg = app.cfg();
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
     let mut ok = true;
