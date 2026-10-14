@@ -42,6 +42,7 @@ Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Ap
 
 ### Fixed
 
+- **Host graphs end a VM's band when the VM ends.** The colored band (and its line) no longer runs on to "now" after a VM is destroyed: it stops at its last sample with a clean edge, and the legend lists only the VMs in the chosen window. Each new VM takes the next of six rotating colors (blue, vermillion, green, gold, purple, pink), so consecutive jobs differ even with two slots.
 - **kiln is healthy after a reboot without a restart.** It used to start before the network, and several things failed once and stayed failed. Now each retries with backoff until the network, DNS and tailscaled are up, and for the first 3 minutes the dashboard and `kiln doctor` say "starting: waiting for the network" instead of failing (no alerts either); after that a check that still fails shows its real error. See [After a reboot](docs/configuration.md#after-a-reboot).
   - **Docker mirror.** The registry crashed (exit status 2) when Docker Hub did not resolve as it started, and was restarted with a growing delay. It now starts only once `registry-1.docker.io` resolves, and counts as running once it answers (the egress probe could meet it half-started).
   - **Filtered egress.** The probe is no longer run in a namespace while DNS is down (each target cost an 8 s timeout); it retries every 5 s then.
