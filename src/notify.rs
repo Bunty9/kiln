@@ -86,7 +86,7 @@ pub struct JobInfo {
     pub job: String,
     pub branch: Option<String>,
     pub event: Option<String>,
-    /// "failed", "cancelled", "killed", "lost" or "succeeded".
+    /// "failed", "cancelled", "killed", "lost", "refused" or "succeeded".
     pub outcome: String,
     pub duration_s: Option<u64>,
     pub url: Option<String>,
@@ -560,10 +560,10 @@ fn keep_allowed(addrs: impl Iterator<Item = SocketAddr>, tailnet: bool) -> Vec<S
 
 /// The client for one destination. `open_for_tests` allows plain HTTP to the loopback
 /// receiver, and only in test builds: a release build ignores it.
-fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
+fn client(d: &Dest, open_for_tests: bool) -> Result<reqwest::Client, reqwest::Error> {
     let open = open_for_tests && cfg!(test);
     let b = if open { net::base() } else { net::builder(Mode::public(d.tailnet)) };
-    b.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(10)).build().expect("notify http client")
+    b.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(10)).build()
 }
 
 #[derive(Debug)]
@@ -617,9 +617,6 @@ fn action_for(path: &str) -> Option<&'static str> {
         "/api/token" => Some("GitHub token replaced"),
         p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/token") && r.matches('/').count() == 1) => {
             Some("forge token replaced")
-        }
-        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/onboard") && r.matches('/').count() == 1) => {
-            Some("forge onboarded")
         }
         // Adding, removing or re-pointing a forge's repos: where kiln sends a token, and what it serves.
         "/api/forges" => Some("forge added"),
@@ -746,7 +743,21 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_
             }
         }
         Err(err) if err.is_builder() => Outcome::Permanent("request refused (URL)".into()),
-        Err(_) => Outcome::Retry("request failed".into(), None),
+        Err(err) => {
+            // The error's Display carries the URL: classify by the cause chain, never store it.
+            let chain = std::iter::successors(std::error::Error::source(&err), |e| e.source())
+                .map(|e| e.to_string().to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let kind = if chain.contains("certificate") || chain.contains("tls") {
+                "TLS error"
+            } else if chain.contains("dns") || chain.contains("lookup") || chain.contains("resolve") {
+                "DNS error"
+            } else {
+                "request failed"
+            };
+            Outcome::Retry(kind.into(), None)
+        }
     }
 }
 
@@ -797,6 +808,35 @@ fn jitter(d: Duration) -> Duration {
     d.mul_f64(0.8 + 0.4 * r)
 }
 
+/// A destination that was unreachable works again: every health problem still active is announced to it, as its `raised`
+/// may have been lost in the very outage that raised it.
+fn reraise(app: &crate::App, id: &str) {
+    let active: Vec<(String, String)> = app.notify.health.lock().unwrap().active.iter().map(|(k, m)| (k.clone(), m.clone())).collect();
+    let Some(q) = app.notify.queues.lock().unwrap().get(id).cloned() else { return };
+    for (kind, m) in active {
+        let hi = HealthInfo { kind, message: clean(&m), state: "raised" };
+        q.q.lock().unwrap().push_back(Event { ty: "health.raised", class: Class::Health, detail: Detail::Health(hi), to: vec![id.into()] });
+    }
+    q.wake.notify_one();
+}
+
+/// The reason a destination is told for a fail-closed refusal: one of a fixed set of phrases, never the forge's or the
+/// network's own error text (a URL, an internal host name, a response body). The VM's note keeps the detail for the owner.
+fn fixed_reason(note: &str) -> String {
+    let n = note.trim();
+    if n.starts_with("API error") {
+        "API error".into()
+    } else if n.starts_with("pause failed") {
+        "pause failed".into()
+    } else if n == "verdict timed out" || n == "console job id is not numeric" {
+        n.into()
+    } else if n.starts_with("runner holds ") && n.ends_with("job(s), not only the one it started") {
+        "runner holds more than the job it started".into()
+    } else {
+        "failed closed".into()
+    }
+}
+
 /// Deliver one event with the retry schedule, recording the outcome.
 async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     let waits = [5u64, 30, 120];
@@ -810,7 +850,12 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
             let s = st.entry(d.id.clone()).or_default();
             match out {
                 Outcome::Ok => {
+                    let recovered = s.failing_since.is_some();
                     *s = Status { last_ok: Some(now), dropped: s.dropped, ..Default::default() };
+                    drop(st);
+                    if recovered {
+                        reraise(app, &d.id);
+                    }
                     return;
                 }
                 Outcome::Permanent(m) => {
@@ -829,6 +874,10 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
         };
         let Some(w) = waits.get(attempt) else {
             tracing::warn!("notify {}: {m}, giving up after {} attempts", d.label(), attempt + 1);
+            // An event lost for good: the destination counts as failing now, not after an hour.
+            let mut st = app.notify.status.lock().unwrap();
+            let s = st.entry(d.id.clone()).or_default();
+            s.permanent_streak = s.permanent_streak.max(3);
             return;
         };
         tokio::time::sleep(after.unwrap_or_else(|| jitter(Duration::from_secs(*w)))).await;
@@ -856,7 +905,18 @@ pub fn spawn_worker(app: &Arc<crate::App>, d: Dest) {
     }
     let app = app.clone();
     tokio::spawn(async move {
-        let c = client(&d, false);
+        // A client that cannot be built is a destination that is failing, not a worker that vanishes.
+        let c = match client(&d, false) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("notify {}: http client: {e}", d.label());
+                let mut st = app.notify.status.lock().unwrap();
+                let s = st.entry(d.id.clone()).or_default();
+                (s.last_error, s.permanent_streak) = (Some((crate::now(), "cannot build the HTTP client".into())), 3);
+                s.failing_since.get_or_insert(crate::now());
+                return;
+            }
+        };
         let mut sent: VecDeque<std::time::Instant> = VecDeque::new();
         let mut folded = 0u64;
         loop {
@@ -967,7 +1027,8 @@ pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
     })
 }
 
-/// Alert for a VM that just ended: `job.failed` for any non-success, `job.finished` for a
+/// Alert for a VM that just ended: `job.failed` for any non-success, `job.refused` for a job kiln
+/// refused because it failed closed (a policy refusal sends nothing), `job.finished` for a
 /// success matching a rule. At most once per VM id.
 pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     // A job the verdict gate refused (a fork pull request, a workflow_run, ...) is policy, not a failure: no alert.
@@ -1027,7 +1088,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
         url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
-        reason: refusal.then(|| clean(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
+        reason: refusal.then(|| fixed_reason(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
         class: refusal.then_some("failure"),
         vm_id: v.id.clone(),
     };
@@ -1734,10 +1795,19 @@ mod tests {
         // Every reason kiln fails closed on alerts once, as job.refused with the reason.
         let reasons = [
             "verdict timed out",
-            "API error: 500",
-            "pause failed: 500",
+            "API error: GET https://git.corp.example:8443/api/v4/projects/9?private_token=glpat-SECRET: 500 {\"body\":1}",
+            "pause failed: connection refused to 10.1.2.3:443",
             "runner holds 2 job(s), not only the one it started",
             "console job id is not numeric",
+            "something new with https://internal.example/x",
+        ];
+        let wants = [
+            "verdict timed out",
+            "API error",
+            "pause failed",
+            "runner holds more than the job it started",
+            "console job id is not numeric",
+            "failed closed",
         ];
         for (i, why) in reasons.iter().enumerate() {
             let v = Vm {
@@ -1751,11 +1821,15 @@ mod tests {
         }
         let got: Vec<_> = q.q.lock().unwrap().iter().skip(1).cloned().collect();
         assert_eq!(got.len(), reasons.len());
-        for (e, why) in got.iter().zip(reasons) {
+        for (e, want) in got.iter().zip(wants) {
             assert_eq!(e.ty, "job.refused");
             assert!(matches!(e.class, Class::Job));
             let Detail::Job(j) = &e.detail else { panic!() };
-            assert_eq!((j.outcome.as_str(), j.class, j.reason.as_deref()), ("refused", Some("failure"), Some(clean(why).as_str())));
+            assert_eq!(
+                (j.outcome.as_str(), j.class, j.reason.as_deref()),
+                ("refused", Some("failure"), Some(want)),
+                "no raw error text reaches a destination"
+            );
         }
         let j = serde_json::to_value(match &got[0].detail {
             Detail::Job(j) => j,
@@ -1913,7 +1987,7 @@ mod tests {
             to: vec![],
             detail: Detail::Job(JobInfo {
                 repo: clean(repo),
-                // forge and forge_kind are ADDED to every payload (forge support X-2); the rest is unchanged.
+                // forge and forge_kind are ADDED to every payload; the rest is unchanged.
                 forge: "github".into(),
                 forge_kind: "github".into(),
                 workflow: Some(clean("ci.yml")),
@@ -2064,7 +2138,7 @@ mod tests {
 
     #[test]
     fn links_only_to_forge_origins() {
-        // github_link became forge_link(url, origins) (forge support P0-8); github.com is one origin.
+        // github_link became forge_link(url, origins); github.com is one origin.
         let gh = ["https://github.com".to_string()];
         assert!(forge_link("https://github.com/acme/kiln/actions/runs/1/job/2", &gh).is_some());
         for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://github.com/x|y>", "javascript:alert(1)"] {
@@ -2083,7 +2157,6 @@ mod tests {
         assert_eq!(action_for("/api/forges/gl"), Some("forge removed"));
         assert_eq!(action_for("/api/forges/gl/repos"), Some("forge repos changed"));
         assert_eq!(action_for("/api/forges/gl/check"), None);
-        assert_eq!(action_for("/api/forges/gl/onboard"), Some("forge onboarded"));
         assert_eq!(action_for("/api/forges/gl/other"), None);
         assert_eq!(action_for("/api/forges/a/b/token"), None);
     }
@@ -2210,7 +2283,7 @@ mod tests {
     async fn delivers_signed_and_never_follows_redirects() {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
-        let c = client(&d, true);
+        let c = client(&d, true).unwrap();
         assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await, Outcome::Ok));
         let (h, b) = got.lock().unwrap()[0].clone();
         let (id, ts) = (h["webhook-id"].to_str().unwrap(), h["webhook-timestamp"].to_str().unwrap().parse().unwrap());
@@ -2219,7 +2292,7 @@ mod tests {
         let (url, got) = receiver(302).await;
         d.url = url;
         assert!(matches!(
-            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            send_once(&client(&d, true).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
             Outcome::Permanent(_)
         ));
         assert_eq!(got.lock().unwrap().len(), 1, "the redirect target was not requested");
@@ -2229,7 +2302,7 @@ mod tests {
     async fn retries_keep_the_webhook_id() {
         let (url, got) = receiver(503).await;
         let d = dest(Kind::Generic, &url);
-        let c = client(&d, true);
+        let c = client(&d, true).unwrap();
         let e = job("acme/kiln", "t", "main");
         let id = new_msg_id();
         for _ in 0..2 {
@@ -2247,7 +2320,7 @@ mod tests {
         let mut d = dest(Kind::Generic, &url);
         d.secret = Some("whsec_!!bad".into());
         assert!(matches!(
-            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            send_once(&client(&d, true).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
             Outcome::Permanent(_)
         ));
         assert!(got.lock().unwrap().is_empty(), "nothing is sent unsigned");
@@ -2256,10 +2329,25 @@ mod tests {
     #[tokio::test]
     async fn refuses_literal_internal_address_before_connecting() {
         let d = dest(Kind::Generic, "https://169.254.169.254/latest");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
+        match send_once(&client(&d, false).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             _ => panic!("must be refused"),
         }
+    }
+
+    /// A destination that was down when a problem was raised is told again when it is reachable.
+    #[tokio::test]
+    async fn a_recovered_destination_is_told_what_is_still_wrong() {
+        let app = crate::App::for_tests();
+        let d = dest(Kind::Generic, "https://hooks.example.com/k");
+        app.notify.dests.lock().unwrap().push(d.clone());
+        spawn_worker(&app, d.clone());
+        app.notify.health.lock().unwrap().active.insert("egress".into(), "egress filtering unavailable".into());
+        reraise(&app, &d.id);
+        let q = app.notify.queues.lock().unwrap()[&d.id].clone();
+        let g = q.q.lock().unwrap();
+        assert_eq!(g.len(), 1);
+        assert!(matches!(&g[0].detail, Detail::Health(h) if h.kind == "egress" && h.state == "raised"));
     }
 
     #[tokio::test]
@@ -2279,7 +2367,7 @@ mod tests {
     #[tokio::test]
     async fn name_resolving_inward_is_refused_not_retried() {
         let d = dest(Kind::Generic, "https://localhost/hook");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
+        match send_once(&client(&d, false).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2600,7 +2688,7 @@ mod tests {
     #[tokio::test]
     async fn stored_url_is_rechecked_on_send() {
         let d = dest(Kind::Slack, "https://evil.example/x");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
+        match send_once(&client(&d, false).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert_eq!(m, "refused: stored URL no longer allowed"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2611,7 +2699,7 @@ mod tests {
         let (url, got) = receiver(204).await;
         let d = dest(Kind::Generic, &url);
         assert!(matches!(
-            send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await,
+            send_once(&client(&d, false).unwrap(), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await,
             Outcome::Permanent(_)
         ));
         assert!(got.lock().unwrap().is_empty(), "nothing reached the receiver");

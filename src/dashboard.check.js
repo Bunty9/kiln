@@ -72,7 +72,7 @@ assert.equal(repoPath('gl', 'gl2:g/p'), 'gl2:g/p', 'only this forge prefix');
 // A GitLab forge whose token has no `api` scope shows no Rerun, Cancel or Run pipeline (the server's caps say so).
 const glNoApi = { id: 'gl', url: 'https://gitlab.example', repos: ['gl:g/p'], caps: { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false } };
 assert.deepEqual(runActs(true, glNoApi), []); assert.deepEqual(runActs(false, glNoApi), []); assert(!can(glNoApi, 'dispatch'));
-// Forge-aware Repos page, banners and job text (X-5).
+// Forge-aware Repos page, banners and job text.
 const X = new Function('esc', ['tip', 'FN', 'fname', 'forgeOf', 'GL_SCOPES', 'glScopes', 'daysLeft', 'repoPath', 'jobEnd', 'jobMins', 'fl', 'kindOf', 'mixed', 'fbadge', 'forgeByKey', 'keyPath', 'repoText', 'repoLabel', 'labelHint', 'credsOk', 'ghErr', 'ciSnippet', 'sizeNote', 'otherMins', 'repoErr', 'forgeBanners'].map(grab).join('\n') +
   '\nreturn { fl, kindOf, mixed, fbadge, forgeByKey, keyPath, repoText, repoLabel, labelHint, credsOk, ghErr, ciSnippet, sizeNote, otherMins, repoErr, forgeBanners };')(esc);
 const gl1 = { id: 'gitlab', kind: 'gitlab', url: 'https://gitlab.example', repos: ['gitlab:g/s/p'], health: null, auth: { source: 'file', scopes: ['create_runner', 'manage_runner', 'read_api'] } };
@@ -180,7 +180,7 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     { id: 'kiln-3', repo: 'gitea:o/r', state: 'held', job: 'build', started: t0 - 300, busy_since: t0 - 290, hold_until: t0 + 600, ssh: 'ssh -p 2201 runner@100.64.0.7', cpus: 4 }];
   const mkS = (o = {}) => ({ config: cfg, job_label: 'kiln', platform: { os: 'linux', arch: 'x86_64' }, token_set: false, app: null, poll: { queued: {}, repo_errors: {}, refused_forks: {}, fork_queued: [] }, vms: [], notify: { dests: [] }, usage: [], usage_other: [],
     image: null, image_ready: false, baking: false, host: { load: [0, 0, 0], cpus: 8, mem_total_mb: 32768, mem_avail_mb: 20000, disk_free_gb: 100, samples: [] }, version: '0.0.0', mirror: null, caches: {}, update: {}, restart: {}, ...o });
-  const fg = (kind, id, x = {}) => ({ id, kind, url: `https://${id}.example`, repos: [], health: null, caps: {}, auth: { source: 'none' }, launches: true, network: 'public', ...x });
+  const fg = (kind, id, x = {}) => ({ id, kind, url: `https://${id}.example`, repos: [], health: null, caps: {}, auth: { source: 'none' }, network: 'public', ...x });
   const boxes = {
     'fresh GitHub': [mkS(), [fg('github', 'github', { repos: ['acme/api'] })]],
     'fresh, forges not loaded yet': [mkS(), null],
@@ -242,3 +242,24 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
   assert.equal(K.tipKey('overview', {}, { seg: [] }), null, 'a dismissed tip is not shown again');
 }
 console.log('dashboard analytics ok');
+
+// Host graphs: a VM's band exists only in the columns of samples that list it, and the
+// per-VM sequence number the sampler hands out rotates six colours over consecutive VMs.
+{
+  const { hvCols, gcol } = new Function(['layers', 'hvCols', 'gcol'].map(grab).join('\n') + '\nreturn { hvCols, gcol };')();
+  const smp = (t, ...vms) => ({ t, cpu: 4, mem: 9000, vms: vms.map(([k, id]) => [k, id, 1, 2000]) });
+  // vm-a (seq 0) ends after t=4000; vm-b (seq 1) starts at t=8000; one slot throughout.
+  const S = [smp(0, [0, 'a']), smp(2000, [0, 'a']), smp(4000, [0, 'a']), smp(6000), smp(8000, [1, 'b']), smp(10000, [1, 'b'])];
+  const cols = hvCols(S, 'mem'), has = id => cols.filter(c => c.L.some(l => l.id === id)).map(c => c.t);
+  assert.deepEqual(has('a'), [0, 2000, 4000], 'a ended VM has no columns after its last sample');
+  assert.deepEqual(has('b'), [8000, 10000], 'a new VM has no columns before its first sample');
+  assert(cols.every(c => c.L.at(-1).id === 'h'), 'host sits on top');
+  const top = id => cols.filter(c => c.L.some(l => l.id === id)).map(c => c.L.find(l => l.id === id).hi);
+  assert(top('a').every(v => v === 2000), 'values are the samples, not carried forward');
+  // Two VMs ending together and one starting in the same tick: no step columns, bands still bounded.
+  const c2 = hvCols([smp(0, [0, 'a']), smp(2000, [1, 'b'])], 'cpu');
+  assert.equal(c2.length, 2); assert.deepEqual(c2.map(c => c.L.map(l => l.id)), [['a', 'h'], ['b', 'h']]);
+  const cs = [0, 1, 2, 3, 4, 5, 6, 7].map(gcol);
+  assert.equal(new Set(cs.slice(0, 6)).size, 6, 'six distinct colours'); assert.equal(cs[6], cs[0]);
+  assert.notEqual(gcol(0), gcol(1), 'consecutive VMs differ even on a 2-slot box');
+}

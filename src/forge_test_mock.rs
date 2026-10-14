@@ -134,12 +134,28 @@ impl Mock {
     }
 }
 
+/// A fresh, empty directory unique to this call (process id and a counter), for tests that need scratch space:
+/// never `temp_dir()` itself, and no name two tests or two runs of the suite can share.
+pub fn scratch(tag: &str) -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let d = std::env::temp_dir().join(format!(
+        "kiln-test-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 /// An App on a fresh temp data dir whose GitHub client talks to `mock`.
 pub fn app(name: &str, mock: &Mock, cfg: crate::Config) -> Arc<crate::App> {
     let data = std::env::temp_dir().join(format!("kiln-test-mock-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(data.join("update")).unwrap();
-    Arc::new(crate::App::new(data, cfg, crate::github::Gh::for_mock(&mock.base)))
+    let mut app = crate::App::new(data, cfg, crate::github::Gh::for_mock(&mock.base));
+    (app.qemu_img, app.host_fixed) = ("/nonexistent/qemu-img".into(), Some(crate::HostReadings::TEST));
+    Arc::new(app)
 }
 
 /// Byte-exact comparison with `testdata/forge/golden/<name>`. `KILN_BLESS=1` rewrites the file instead.

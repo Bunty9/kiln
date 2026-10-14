@@ -106,7 +106,7 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 }
 
 impl Vm {
-    /// The verdict gate refused this VM's job on purpose (a fork pull request, a `workflow_run`, ...): kiln working as designed, not a failure.
+    /// The verdict gate refused this VM's job (a policy refusal such as a fork pull request or a `workflow_run`, or a fail-closed one): kiln working as designed, not a failure.
     pub fn refused(&self) -> bool {
         self.verdict.as_ref().is_some_and(|(c, _)| c == "refuse") || self.note.as_deref().is_some_and(|n| n.starts_with("refused:"))
     }
@@ -126,7 +126,7 @@ pub struct Vm {
     pub result: Option<String>,
     #[serde(default)]
     pub job_url: Option<String>,
-    /// The forge's id of the job this VM ran: set once (4.3 of the forge design); a second id kills the VM.
+    /// The forge's id of the job this VM ran: set once; a second id kills the VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// "Running job" lines this VM's own console showed, counted even when `apply_line` ignores
@@ -135,7 +135,7 @@ pub struct Vm {
     #[serde(default, skip_serializing_if = "is_default")]
     pub starts: u32,
     /// The host's own call on the bound job, (call, job id): `ok`, `cold` or `refuse`. A gated forge's
-    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits (R2b).
+    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<(String, String)>,
     /// The refusal came from kiln or the forge failing, not from policy (`Verdict::failure`); old records read false.
@@ -231,16 +231,25 @@ pub fn image_ready(data: &Path) -> bool {
 /// Remove what a VM directory may hold that must not outlive the VM: its disks, JIT secret
 /// and rootlesskit state. Goes by the directory, never by what a record inside it claims.
 fn scrub_vm_dir(dir: &Path) {
-    let _ = std::fs::remove_dir_all(qemu_dir(dir));
-    let _ = std::fs::remove_dir_all(rk_dir(dir));
+    let gone = |r: std::io::Result<()>, p: &Path| {
+        if let Err(e) = r
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            // A credential or disk that stays on disk must not stay unseen.
+            tracing::warn!("{}: not removed: {e}", p.display());
+        }
+    };
+    gone(std::fs::remove_dir_all(qemu_dir(dir)), &qemu_dir(dir));
+    gone(std::fs::remove_dir_all(rk_dir(dir)), &rk_dir(dir));
     // Layout before 0.2.4: QEMU's files sat in the VM directory itself.
     for f in ["disk.qcow2", "cache.qcow2", "jit", "ssh"] {
-        let _ = std::fs::remove_file(dir.join(f));
+        gone(std::fs::remove_file(dir.join(f)), &dir.join(f));
     }
 }
 
 pub fn load_history(data: &Path) -> Vec<Vm> {
-    let seed = !data.join("usage.json").exists();
+    // GitLab and Gitea jobs never create usage.json: seed only when neither ledger exists.
+    let seed = !data.join("usage.json").exists() && !data.join(USAGE_OTHER).exists();
     let mut vms: Vec<Vm> = std::fs::read_dir(data.join("vms"))
         .into_iter()
         .flatten()
@@ -502,7 +511,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 persist(&app, &v);
             }
             // A JIT runner that never ran a job stays registered (offline) on GitHub. A gated forge's
-            // runner never removes itself, so it goes whatever the VM did (R2 H-1); the VM is over.
+            // runner never removes itself, so it goes whatever the VM did; the VM is over.
             if let Some(rid) = v.runner_id
                 && (v.job.is_none() || forge_for(&app, &v.repo).is_ok_and(|(f, _)| f.gated()))
             {
@@ -536,7 +545,7 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
     retire(app, repo, c, Reason::Surplus).await;
 }
 
-/// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id` (R2 L-6): the runner only
+/// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id`: the runner only
 /// notices a cancel after about a minute, so a maintainer stopping a suspicious job must stop the VM.
 /// Matched by the pipeline link, or by a console-bound job id in `jobs` (the API's list for the pipeline).
 pub fn kill_pipeline(app: &App, repo: &str, id: u64, jobs: &[String]) -> usize {
@@ -580,7 +589,12 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
         Ok(f) => f,
         Err(e) => {
             tracing::warn!("{repo}: {e:#}");
-            return true;
+            // The forge cannot be asked, but a stale-policy VM must not take a job under the old settings.
+            for (id, _) in &c {
+                kill_idle(app, id, reason, &format!("{e:#}"));
+            }
+            // Startup cleanup has nothing to retry for a forge that is gone.
+            return reason == Reason::Unused;
         }
     };
     let mut ok = true;
@@ -599,6 +613,9 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
                 } else {
                     tracing::warn!("{id}: {e:#}");
                 }
+                // Fail closed: an idle VM that cannot be deregistered is killed anyway. Its runner is deleted
+                // later by the sweep (GitLab/Gitea) or by the forge (a GitHub JIT runner expires).
+                kill_idle(app, &id, reason, &format!("{e:#}"));
                 continue;
             }
         }
@@ -613,7 +630,21 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
     ok
 }
 
-/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2),
+/// Kills an idle VM with no job whose runner could not be deleted (stale policy or warm recycle only).
+fn kill_idle(app: &App, id: &str, reason: Reason, why: &str) {
+    if !matches!(reason, Reason::StalePolicy | Reason::Warm) {
+        return;
+    }
+    let idle = app.vms.lock().unwrap().iter().any(|v| v.id == id && v.state == State::Idle && v.job_url.is_none());
+    if idle {
+        note(app, id, &format!("{} (runner delete failed: {why})", reason.note()));
+        if let Some(k) = app.kills.lock().unwrap().get(id) {
+            k.notify_one();
+        }
+    }
+}
+
+/// Startup: deletes the forge runners of saved records that have ended, for every gated forge,
 /// and of VMs the last run lost (a crash or reboot) on any forge: their runners are known by id, so no
 /// sweep by name has to guess. A failed delete at the VM's end is not retried, and a record lost in a
 /// crash never ran its delete. Only the last day is tried: older runners fall to the orphan sweep, and a
@@ -747,7 +778,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
 
     let base = images(&app.data).join("base.qcow2");
     let disk = q.join("disk.qcow2");
-    let out = Command::new("qemu-img")
+    let out = Command::new(&app.qemu_img)
         .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
         .arg(&base)
         .arg(&disk)
@@ -801,7 +832,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd.arg("-drive").arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", ov.display()));
     }
     // Direct kernel boot without initrd: virtio + ext4 are built into the
-    // Ubuntu kernel, which brings boot-to-runner down to ~4s.
+    // Ubuntu kernel, which brings boot-to-runner down to about 10 s.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
     cmd.args(job_args(&GUEST, &q, ssh_host.is_some(), now_us()));
     if ssh_host.is_some() && publish == Publish::Monitor {
@@ -866,6 +897,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut buf = Vec::new();
     let (mut first, mut logged, mut decided, mut cont) = (true, 0, false, false);
+    // Only the guest's positive `kiln: cache scrub ok` lets a cache overlay be committed.
+    let mut scrub_ok = false;
     // Gitea: the runner is unregistered and never exits by itself; the console said so.
     let mut dropped = false;
     // A job is root in its VM and can write anything to the console, so console lines
@@ -887,7 +920,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         .min(v.started + hard_cap);
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         // `buf` is not cleared here: a line another branch cut off (cancelled mid-line) keeps its bytes in it, and the
-        // next read appends the rest, so its tail is never parsed as a whole line (R3 L-4).
+        // next read appends the rest, so its tail is never parsed as a whole line.
         tokio::select! {
             r = read_capped(&mut lines, &mut buf) => {
                 if r? == 0 {
@@ -950,8 +983,19 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         }
                     }
                 }
+                // The guest's login-token scrub of the cache disk failed: the overlay must not be committed for later jobs.
+                scrub_ok |= crate::forge::console::is_scrub_ok(&text);
+                if crate::forge::console::is_scrub_failed(&text)
+                    && let Some(v) = update(app, id, scrub_failed)
+                {
+                    persist(app, &v);
+                }
                 if crate::forge::console::is_decide(&text) && !std::mem::replace(&mut decided, true) {
-                    let v = update(app, id, |_| {}).context("vm vanished")?;
+                    let mut v = update(app, id, |_| {}).context("vm vanished")?;
+                    // A gated forge prints no result: ask the API once, bounded (the guest waits 20 s). Unknown means release.
+                    if let Some(r) = api_result(app, id, &forge, &rr, &v, Duration::from_secs(10)).await {
+                        v = r;
+                    }
                     let max_vms = app.cfg().max_vms;
                     let held = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Held).count();
                     let mut hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
@@ -1003,7 +1047,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 }
                 if refuse {
                     // The guest fails the job cleanly (kiln-exec exits 1) so the forge shows why; no job
-                    // code can run before an `ok`, so waiting is safe. Bounded, then killed (R2 M-2).
+                    // code can run before an `ok`, so waiting is safe. Bounded, then killed.
                     let _ = tokio::time::timeout(REFUSE_GRACE, child.wait()).await;
                     child.kill().await.ok();
                     return Ok(State::Killed);
@@ -1041,8 +1085,13 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             }
         }
     }
+    // A job that ran but whose guest never proved the token scrub (a failure, a lost line, a guest that died first)
+    // leaves an overlay that must not be committed.
+    if !scrub_ok && let Some(v) = update(app, id, unscrubbed) {
+        persist(app, &v);
+    }
     // A gated VM that ends between its job start and its verdict is a gate death, whether or not `kiln.gate=dead` made it
-    // to the console (the guest powers off right after printing it); the line is only a hint (R3 L-2).
+    // to the console (the guest powers off right after printing it); the line is only a hint.
     let mut lost = false;
     if forge.gated()
         && let Some(v) = update(app, id, |v| {
@@ -1065,25 +1114,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         bail!("qemu exited with {status}; see console log");
     }
     let mut v = update(app, id, |_| {}).context("vm vanished")?;
-    // GitLab never prints a result the host may believe: ask the job API, and only for the one job the console
-    // bound, on a runner that started exactly one, with a recorded ok or cold verdict for that id (R2b section 4).
-    if v.result.is_none()
-        && forge.gated()
-        && v.starts == 1
-        && let (Some(jid), Some(rid)) = (v.job_id.clone(), v.runner_id)
-        && v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold"))
-    {
-        match forge.job_result(&rr, &jid, rid).await {
-            Ok(Some(r)) => {
-                v = update(app, id, |v| {
-                    v.result = Some(r.into());
-                    v.done_at = Some(now());
-                })
-                .context("vm vanished")?;
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!("{id}: job result: {e:#}"),
-        }
+    // GitLab never prints a result the host may believe: ask the job API (see `api_result`).
+    if let Some(r) = api_result(app, id, &forge, &rr, &v, Duration::from_secs(60)).await {
+        v = r;
     }
     if v.result.is_none() {
         let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
@@ -1091,6 +1124,35 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         return Ok(state);
     }
     Ok(State::Done)
+}
+
+/// GitLab and Gitea: the result of the one job the console bound, from the job API, on a runner that started
+/// exactly one, with a recorded ok or cold verdict for that id. Stored on the record and
+/// returned; None when not applicable, unknown, or the API failed or took longer than `limit` (fail closed:
+/// no result means no debug hold).
+async fn api_result(app: &App, id: &str, forge: &crate::forge::Forge, rr: &RepoRef, v: &Vm, limit: Duration) -> Option<Vm> {
+    if v.result.is_some() || !forge.gated() || v.starts != 1 {
+        return None;
+    }
+    let (jid, rid) = (v.job_id.clone()?, v.runner_id?);
+    if !v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold")) {
+        return None;
+    }
+    match tokio::time::timeout(limit, forge.job_result(rr, &jid, rid)).await {
+        Ok(Ok(Some(r))) => update(app, id, |v| {
+            v.result = Some(r.into());
+            v.done_at = Some(now());
+        }),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("{id}: job result: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("{id}: job result: no answer in {}s", limit.as_secs());
+            None
+        }
+    }
 }
 
 async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
@@ -1350,7 +1412,7 @@ pub fn cache_file(data: &Path, repo: &str) -> PathBuf {
     data.join("cache").join(format!("{stem}.qcow2"))
 }
 
-/// Deletes every cache disk and parked overlay of a forge (`{id}~*`), for a removed or re-added id (R4 M-5).
+/// Deletes every cache disk and parked overlay of a forge (`{id}~*`), for a removed or re-added id.
 pub fn drop_forge_caches(data: &Path, id: &crate::forge::ForgeId) -> Result<()> {
     let prefix = format!("{}~", id.as_str());
     for e in std::fs::read_dir(data.join("cache")).into_iter().flatten().flatten() {
@@ -1419,13 +1481,13 @@ fn cache_verdict(cache_on: bool, succeeded: bool, writers: &[String], trust: Res
 
 /// A trusted overlay parked until the repo's other jobs stop reading the cache.
 fn pending_file(data: &Path, repo: &str) -> PathBuf {
-    // "+" cannot be in a repo name, so repo `x` never parks onto the cache file of a repo `x.pending` (R3 L-5).
+    // "+" cannot be in a repo name, so repo `x` never parks onto the cache file of a repo `x.pending`.
     let c = cache_file(data, repo);
     c.with_file_name(format!("{}+pending.qcow2", c.file_stem().unwrap_or_default().to_string_lossy()))
 }
 
-async fn qemu_img(args: &[&str]) -> Result<()> {
-    let out = Command::new("qemu-img").args(args).output().await.context("qemu-img")?;
+async fn qemu_img(app: &App, args: &[&str]) -> Result<()> {
+    let out = Command::new(&app.qemu_img).args(args).output().await.context("qemu-img")?;
     if !out.status.success() {
         bail!("qemu-img {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -1453,9 +1515,10 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
         if !backing.exists() {
             tokio::fs::create_dir_all(backing.parent().unwrap()).await?;
             // Unformatted: the guest runs mkfs on first use.
-            qemu_img(&["create", "-q", "-f", "qcow2", &backing.display().to_string(), &format!("{gb}G")]).await?;
+            qemu_img(app, &["create", "-q", "-f", "qcow2", &backing.display().to_string(), &format!("{gb}G")]).await?;
         }
-        qemu_img(&["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing.display().to_string(), &ov.display().to_string()]).await
+        qemu_img(app, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing.display().to_string(), &ov.display().to_string()])
+            .await
     }
     .await;
     match made {
@@ -1497,7 +1560,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     };
     let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
-        // A gated forge's id is the console's alone: the API-sourced job page never stands in for it (R2 L-5).
+        // A gated forge's id is the console's alone: the API-sourced job page never stands in for it.
         match v.job_id.clone().or_else(|| v.job_url.as_deref().filter(|_| !gated).and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
                 Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
@@ -1530,7 +1593,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     // The overlay file was QEMU's to write: its header (backing file, external data file) is
     // the job's if QEMU was ever compromised, and `qemu-img commit` writes wherever it points.
     let verdict = match verdict {
-        Ok(()) => overlay_header(&ov, &cache_file(&app.data, repo)).await,
+        Ok(()) => overlay_header(app, &ov, &cache_file(&app.data, repo)).await,
         e => e,
     };
     let (state, note) = match verdict {
@@ -1542,10 +1605,18 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
             // Every overlay alive right now shares the same backing state (commits only happen
             // with no readers), so a newer trusted overlay simply supersedes a parked one.
             let pending = pending_file(&app.data, repo);
-            let _ = tokio::fs::rename(&ov, &pending).await;
-            match commit_pending(app, repo, id).await {
-                Some(r) => r,
-                None => (CacheUse::Committed, Some("cache queued: saved when this repo's other jobs finish".into())),
+            match tokio::fs::rename(&ov, &pending).await {
+                Ok(()) => match commit_pending(app, repo, id).await {
+                    Some(r) => r,
+                    None => (CacheUse::Committed, Some("cache queued: saved when this repo's other jobs finish".into())),
+                },
+                // Nothing was queued: say so, rather than promise a save that will never happen.
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&ov).await;
+                    tracing::warn!("{repo}: cache overlay not queued: {e}");
+                    app.notice(&format!("cache:{}", repo.to_ascii_lowercase()), "cache", format!("cache not saved for {repo}: {e}"));
+                    (CacheUse::Discarded, Some(format!("cache not saved: could not queue the overlay: {e}")))
+                }
             }
         }
     };
@@ -1574,7 +1645,7 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
     }
     let cfg = app.cfg();
     let backing = cache_file(&app.data, repo);
-    let r = qemu_img(&["commit", "-q", &pending.display().to_string()]).await;
+    let r = qemu_img(app, &["commit", "-q", &pending.display().to_string()]).await;
     // qemu-img takes the write lock before touching anything: a refusal means some QEMU
     // still has the cache open and nothing was written. Keep it parked; the tick retries.
     if let Err(e) = &r
@@ -1583,32 +1654,85 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
         app.committing.lock().unwrap().remove(&key);
         return Some((CacheUse::Committed, Some("cache queued: still in use, saving shortly".into())));
     }
-    let _ = tokio::fs::remove_file(&pending).await;
+    if let Err(e) = tokio::fs::remove_file(&pending).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("{repo}: parked cache overlay not removed: {e}");
+    }
     let big = disk_bytes(&backing);
+    let notice = format!("cache:{key}");
     let out = match r {
         Err(e) => {
             // A failed commit may leave the backing half-written: start over.
-            let _ = tokio::fs::remove_file(&backing).await;
-            (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}")))
+            let reset = reset_cache(app, repo, &backing).await;
+            tracing::warn!("{repo}: cache commit failed, cache reset: {e:#}");
+            // Surfaced until the next commit works.
+            app.notice(&notice, "cache", format!("cache commit failed for {repo} (details in the VM's cache note and kiln's log)"));
+            (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}{reset}")))
         }
         Ok(()) if cache_too_big(big, cfg.cache_gb_for(repo)) => {
             let gb = cfg.cache_gb_for(repo);
-            let _ = tokio::fs::remove_file(&backing).await;
+            let reset = reset_cache(app, repo, &backing).await;
             tracing::info!("cache for {repo} grew to {} MB, over {gb} GB x 1.2: reset", big >> 20);
-            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB", gb as f64 * 1.2)))
+            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB{reset}", gb as f64 * 1.2)))
         }
-        Ok(()) => (CacheUse::Committed, None),
+        Ok(()) => {
+            app.clear_notice(&notice);
+            (CacheUse::Committed, None)
+        }
     };
     app.committing.lock().unwrap().remove(&key);
     Some(out)
 }
 
+/// Deletes a cache disk that must start over. A disk that stays (it may be half-written, and the next job would mount it)
+/// is a health item for the repo and says so in the VM's note.
+async fn reset_cache(app: &App, repo: &str, backing: &Path) -> String {
+    match tokio::fs::remove_file(backing).await {
+        Ok(()) => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!("{repo}: cache disk not removed: {e}");
+            app.notice(
+                &format!("cache:{}", repo.to_ascii_lowercase()),
+                "cache",
+                format!("cache disk of {repo} could not be reset: {e}; clear it in the dashboard"),
+            );
+            format!(" (the cache disk could not be removed: {e})")
+        }
+    }
+}
+
+/// A parked cache commit nothing reads the cache for, waiting longer than this, is a health item: something else holds the
+/// cache's lock (a stray QEMU) or every commit fails, and the repo's warm VMs wait for it.
+const PARKED_ALERT_SECS: u64 = 15 * 60;
+
+/// Raises or clears the health item for a repo's parked cache commit; called by the tick after it retries the commit.
+pub fn check_parked(app: &App, repo: &str) {
+    let key = format!("cache-parked:{}", repo.to_ascii_lowercase());
+    let age = std::fs::metadata(pending_file(&app.data, repo))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or(0, |d| d.as_secs());
+    let readers = cache_readers(&app.vms.lock().unwrap(), repo, "");
+    if age > PARKED_ALERT_SECS && readers == 0 {
+        app.notice(
+            &key,
+            "cache",
+            format!("cache save for {repo} has waited {} min: its lock is held by another process, or the commit keeps failing (warm VMs of the repo wait for it)", age / 60),
+        );
+    } else {
+        app.clear_notice(&key);
+    }
+}
+
 /// Is `ov` a plain qcow2 overlay of exactly `backing`? Err says why it may not be committed.
-async fn overlay_header(ov: &Path, backing: &Path) -> Result<(), String> {
+async fn overlay_header(app: &App, ov: &Path, backing: &Path) -> Result<(), String> {
     if !tokio::fs::symlink_metadata(ov).await.is_ok_and(|m| m.is_file()) {
         return Err("overlay is not a regular file".into());
     }
-    let o = Command::new("qemu-img")
+    let o = Command::new(&app.qemu_img)
         .args(["info", "--output=json", "-f", "qcow2"])
         .arg(ov)
         .output()
@@ -1745,7 +1869,7 @@ pub(crate) fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u6
 }
 
 /// The host's own record of a verdict. A refused or cold job never commits the cache, whatever the
-/// guest does (R2 L-2): a tag or release job may keep a mounted overlay.
+/// guest does: a tag or release job may keep a mounted overlay.
 fn apply_verdict(v: &mut Vm, jid: &str, vd: &crate::forge::Verdict) {
     use crate::forge::Call;
     if v.job_id.as_deref() == Some(jid) {
@@ -1773,6 +1897,21 @@ fn gate_died(v: &mut Vm) {
     }
 }
 
+/// The guest could not scrub login tokens from the cache disk (`kiln: cache scrub failed`, or it never got that far).
+fn scrub_failed(v: &mut Vm) {
+    if v.cache == CacheUse::Read {
+        v.cache = CacheUse::Discarded;
+        v.cache_note = Some("cache not saved: the guest could not scrub login tokens from it".into());
+    }
+}
+
+/// A VM that ran a job without proof of the scrub: its overlay is discarded.
+fn unscrubbed(v: &mut Vm) {
+    if v.job.is_some() {
+        scrub_failed(v);
+    }
+}
+
 /// A job started on this VM (the console bound its id) but the host recorded no verdict for it.
 fn verdictless(v: &Vm) -> bool {
     v.job_id.is_some() && v.verdict.is_none()
@@ -1788,7 +1927,7 @@ enum Bound {
     Second,
 }
 
-/// Binds the console's job id once, forward only (4.3 of the forge design).
+/// Binds the console's job id once, forward only.
 fn bind_job_id(v: &mut Vm, id: &str) -> Bound {
     match v.job_id.as_deref() {
         None => {
@@ -1877,7 +2016,7 @@ fn now_us() -> u128 {
 /// Secret lines a job VM can be given (`kiln.forge`, `kiln.url`, `kiln.cred`, `kiln.timeout`, ...).
 const MAX_SECRET_LINES: usize = 8;
 
-/// More lines than `MAX_SECRET_LINES` would leave `jit.N` files that are neither passed to QEMU nor deleted (R3 L-6).
+/// More lines than `MAX_SECRET_LINES` would leave `jit.N` files that are neither passed to QEMU nor deleted.
 fn check_secret_lines(secret: &str) -> Result<()> {
     let n = secret.lines().count();
     if n > MAX_SECRET_LINES {
@@ -2207,14 +2346,28 @@ async fn egress_probe(app: &App) -> Result<()> {
     // Every private forge that resolves is opened for the probe; one that does not is refused at its own launches.
     let forges = crate::forge::effective(&cfg.forges, &cfg.repos);
     // A refused forge is left out of both the rule and the checks (its own launches fail).
-    let (mut allow, mut forges) = (vec![], forges);
+    let (mut allow, mut forges, mut dropped) = (vec![], forges, vec![]);
     forges.retain(|f| {
         if f.network != Some(crate::forge::Network::Internal) {
             return true;
         }
         let ok = f.url.as_deref().map(|a| crate::forge::net::resolve_forge(a, crate::forge::Network::Internal));
-        ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok())
+        let kept = ok.is_some_and(|r| r.map(|a| allow.extend(a)).is_ok());
+        if !kept {
+            dropped.push(f.id.as_str().to_string());
+        }
+        kept
     });
+    // Its jobs fail at launch; "filtered egress OK" must not be the whole story.
+    if dropped.is_empty() {
+        app.clear_notice("egress-forge");
+    } else {
+        app.notice(
+            "egress-forge",
+            "egress_forge",
+            format!("forge(s) {} could not be resolved for the egress rule: their jobs fail at launch", dropped.join(", ")),
+        );
+    }
     let targets = probe_targets(&forges);
     // The namespace resolves through the host: with the host's DNS down the probe can only fail,
     // after `curl -m8` per target. Not started then (boot, before the network is up).
@@ -2509,11 +2662,13 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 9: kiln-job runs GitLab jobs (`run_gitlab`).
 /// 10: kiln-exec binds the verdict to the server job id and is one-shot.
 /// 11: kiln-job runs Gitea jobs under the exec gate (`run_gitea`, `kiln-gate`); dockerd waits for the verdict there.
-/// 12: R3 fixes: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
+/// 12: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
 /// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
-/// 13: R4 fixes: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
+/// 13: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
 /// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
-const RECIPE: u64 = 13;
+/// 14: the guest prints `kiln: cache scrub ok` after scrubbing login tokens off the cache disk; the host
+///     commits the cache only after that line.
+const RECIPE: u64 = 14;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -2744,18 +2899,36 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+    /// The failure only means something is not up yet (set by whoever knows), so `soften` may hide it while starting.
+    /// A credential, a scope, a hash mismatch or an unsafe `tailscale serve` is never soft.
+    #[serde(skip)]
+    soft: bool,
 }
 
 fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
-    Check { name: name.into(), ok, detail: detail.into() }
+    Check { name: name.into(), ok, detail: detail.into(), soft: false }
 }
 
-/// While kiln is starting, a failing check that only waits for something (the network, tailscaled)
+/// `check`, whose failure (if any) is soft.
+fn soft_check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
+    Check { soft: true, ..check(name, ok, detail) }
+}
+
+/// Whether a failure text says the network (DNS, a connection, a timeout) is not up, as opposed to a refusal
+/// by a server that answered (a revoked token, a missing scope) or a local fault.
+fn net_down(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    ["dns error", "failed to lookup", "resolve", "error sending request", "connection", "timed out", "timeout", "waiting for the network"]
+        .iter()
+        .any(|k| d.contains(k))
+}
+
+/// While kiln is starting, a failing soft check that only waits for something (the network, tailscaled)
 /// is reported as "starting: waiting for `what`: ..." and passes. After the grace period it fails
-/// with its own text.
+/// with its own text; any other failing check never softens.
 fn soften(checks: &mut [Check], starting: bool, what: &str) {
     if starting {
-        for c in checks.iter_mut().filter(|c| !c.ok) {
+        for c in checks.iter_mut().filter(|c| !c.ok && c.soft) {
             (c.ok, c.detail) = (true, crate::boot::waiting_for(what, &c.detail));
         }
     }
@@ -2922,25 +3095,26 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         }
     }
 
+    // Only a failure that reads as "the network is not up" may soften: a revoked token or a missing scope stays red.
+    out[net_from..].iter_mut().for_each(|c| c.soft = net_down(&c.detail));
+    soften(&mut out[net_from..], waiting_net, "the network");
+
     let (ok, detail) = crate::mirror::check(app).await;
-    out.push(check("docker mirror", ok, detail));
+    // Not started yet, or waiting for DNS, is "starting"; a bad download hash or a busy port is not.
+    let mirror_soft = detail.starts_with("not running") || net_down(&detail);
+    out.push(Check { soft: mirror_soft, ..check("docker mirror", ok, detail) });
     let last = out.len() - 1;
     soften(&mut out[last..], crate::boot::starting(), "the docker mirror");
 
     // Cached unless run from the CLI; a failure only matters when jobs are filtered.
     out.push(match egress_ready(app, cli).await {
         Ok(()) => check("filtered egress", true, "jobs reach the internet and the mirror only"),
-        Err(e) => check(
-            "filtered egress",
-            cfg.egress != "filtered",
-            if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") },
-        ),
+        // Retried by the scheduler: only "waiting for the network" is not a failure while kiln is still starting.
+        Err(e) if cfg.egress == "filtered" => Check { soft: e.starts_with(NET_WAIT), ..check("filtered egress", false, e) },
+        Err(e) => check("filtered egress", true, format!("unavailable (jobs run with open egress): {e}")),
     });
-    // Retried by the scheduler: not a failure while kiln is still starting.
     let last = out.len() - 1;
-    soften(&mut out[last..], cfg.egress == "filtered" && crate::boot::starting(), "filtered egress");
-
-    soften(&mut out[net_from..], waiting_net, "the network");
+    soften(&mut out[last..], crate::boot::starting(), "filtered egress");
 
     let ts_from = out.len();
     let mut no_certs = false;
@@ -2949,18 +3123,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
             no_certs = crate::web::no_certs(&v);
             let st = v["BackendState"].as_str().unwrap_or("unknown");
-            check("tailscale up", st == "Running", format!("BackendState {st}"))
+            soft_check("tailscale up", st == "Running", format!("BackendState {st}"))
         }
-        Ok(o) => check("tailscale up", false, format!("tailscale exited with {}", o.status)),
-        Err(e) => check("tailscale up", false, format!("{e:#}")),
+        Ok(o) => soft_check("tailscale up", false, format!("tailscale exited with {}", o.status)),
+        Err(e) => soft_check("tailscale up", false, format!("{e:#}")),
     });
-    // An unsafe serve config always shows; otherwise a tailnet without certs says so, as
-    // "not served" would read as merely not set up.
+    // An unsafe serve config always shows (never soft); an unreadable one is soft only while tailscaled may not be up yet.
+    // Otherwise a tailnet without certs says so, as "not served" would read as merely not set up.
     match crate::web::serve_doctor(&app.data).await {
-        Some((false, detail)) => out.push(check("tailscale serve", false, detail)),
+        (false, detail, soft) => out.push(Check { soft, ..check("tailscale serve", false, detail) }),
         _ if no_certs => out.push(check("tailscale HTTPS", true, "unavailable on this tailnet (DNS › HTTPS Certificates is off)")),
-        Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
-        None => {}
+        (ok, detail, _) => out.push(check("tailscale serve", ok, detail)),
     }
     // tailscaled starts in parallel with kiln and needs a moment before it reports Running.
     soften(&mut out[ts_from..], crate::boot::starting(), "tailscaled");
@@ -2979,17 +3152,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     // QEMU processes of ours that no VM record accounts for (e.g. after a crash).
     let vms_dir = format!("{}/", app.data.join("vms").display());
     let stray = platform::process_cmdlines().iter().filter(|c| c.contains("qemu-system") && c.contains(&vms_dir)).count();
-    let active = app.vms.lock().unwrap().iter().any(|v| v.state.is_active());
+    let active = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count();
     let serving =
         cli && tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(&cfg.listen)).await.is_ok_and(|r| r.is_ok());
     out.push(if stray > 0 && serving {
         check("stray qemu", true, format!("{stray} qemu process(es) owned by running kiln serve"))
-    } else if stray > 0 && !active {
+    } else if stray > active {
         check(
             "stray qemu",
             false,
             format!(
-                "{stray} qemu process(es) running from {vms_dir} with no active VM (expected only if another kiln serve is running jobs)"
+                "{stray} qemu process(es) running from {vms_dir}, {active} active VM(s) (expected only if another kiln serve is running jobs)"
             ),
         )
     } else {
@@ -3027,6 +3200,202 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), late.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
+    }
+
+    /// A `qemu-img` that logs its argv and answers per the files next to it: `mode` (ok | fail | lock) for any command,
+    /// `info.json` for `info`. No process-global state, so tests run side by side.
+    fn fake_qemu(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("qemu-img");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nd=$(dirname \"$0\"); echo \"$@\" >> \"$d/argv\"\n[ \"$1\" = info ] && { cat \"$d/info.json\"; exit 0; }\n\
+             case $(cat \"$d/mode\" 2>/dev/null) in\n fail) echo 'Could not write to the backing file' >&2; exit 1;;\n \
+             lock) echo 'qemu-img: Failed to get \"write\" lock' >&2; exit 1;;\nesac\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("mode"), "ok").unwrap();
+        bin
+    }
+
+    /// An app whose `qemu-img` is the fake, serving acme/demo; returns the fake's directory.
+    fn cache_app(name: &str) -> (Arc<App>, PathBuf) {
+        let d = std::env::temp_dir().join(format!("kiln-test-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let cfg = crate::Config { repos: vec!["acme/demo".into()], cache_gb: 1, ..crate::Config::default() };
+        let mut app = App::for_tests();
+        let a = Arc::get_mut(&mut app).unwrap();
+        a.qemu_img = fake_qemu(&d);
+        *a.cfg.write().unwrap() = cfg;
+        std::fs::create_dir_all(app.data.join("cache")).unwrap();
+        (app, d)
+    }
+
+    fn mode(d: &Path, m: &str) {
+        std::fs::write(d.join("mode"), m).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_pending_commits_resets_or_keeps_parked() {
+        let (app, d) = cache_app("commit");
+        let (pending, backing) = (pending_file(&app.data, "acme/demo"), cache_file(&app.data, "acme/demo"));
+        let park = || {
+            std::fs::write(&pending, "overlay").unwrap();
+            std::fs::write(&backing, "cache").unwrap();
+        };
+        let committing = || app.committing.lock().unwrap().len();
+        // 1. success
+        park();
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, Some((CacheUse::Committed, None)));
+        assert!(!pending.exists() && backing.exists() && committing() == 0);
+        assert!(std::fs::read_to_string(d.join("argv")).unwrap().contains(&format!("commit -q {}", pending.display())));
+        // 2. a failed commit resets the cache and surfaces it
+        park();
+        mode(&d, "fail");
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!(c, CacheUse::Discarded);
+        assert!(n.unwrap().starts_with("cache commit failed, cache reset: "));
+        assert!(!pending.exists() && !backing.exists() && committing() == 0);
+        assert!(app.notices.lock().unwrap().values().any(|(k, m)| *k == "cache" && m.contains("cache commit failed for acme/demo")));
+        // 3. a lock refusal keeps the overlay parked, and a later commit works (and clears the notice)
+        park();
+        mode(&d, "lock");
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!((c, n.as_deref()), (CacheUse::Committed, Some("cache queued: still in use, saving shortly")));
+        assert!(pending.exists() && backing.exists() && committing() == 0);
+        mode(&d, "ok");
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, Some((CacheUse::Committed, None)));
+        assert!(app.notices.lock().unwrap().is_empty());
+        // 4. a reader of the same repo (any case) holds the commit back; its own id does not
+        park();
+        app.vms.lock().unwrap().push(Vm { repo: "ACME/Demo".into(), cache: CacheUse::Read, ..vm("rd", State::Busy, None) });
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, None);
+        assert!(pending.exists());
+        assert_eq!(commit_pending(&app, "acme/demo", "rd").await, Some((CacheUse::Committed, None)));
+        // 5. while a commit runs (the key is held): nothing else starts, attaches or clears
+        park();
+        app.committing.lock().unwrap().insert("acme/demo".into());
+        assert_eq!(commit_pending(&app, "acme/demo", "").await, None);
+        app.vms.lock().unwrap().push(vm("late", State::Booting, None));
+        assert_eq!(setup_cache(&app, "late", "acme/demo", &d.join("late"), 1).await, None);
+        assert!(app.vms.lock().unwrap().iter().find(|v| v.id == "late").unwrap().cache_note.as_deref().unwrap().starts_with("cache busy"));
+        assert!(clear_cache(&app, "acme/demo").is_err());
+        app.committing.lock().unwrap().clear();
+        // 7. repo `x` and repo `x.pending` never share a parked file
+        assert_ne!(pending_file(&app.data, "acme/x"), pending_file(&app.data, "acme/x.pending"));
+        assert_ne!(pending_file(&app.data, "acme/x.pending"), cache_file(&app.data, "acme/x.pending"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 6. A cache that grew past 1.2x its size is reset after a good commit.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cache_that_grew_too_big_is_reset_after_the_commit() {
+        let (app, d) = cache_app("grew");
+        let (pending, backing) = (pending_file(&app.data, "acme/demo"), cache_file(&app.data, "acme/demo"));
+        std::fs::write(&pending, "overlay").unwrap();
+        let f = std::fs::File::create(&backing).unwrap();
+        let len = (1.3 * (1u64 << 30) as f64) as i64;
+        assert_eq!(unsafe { libc::posix_fallocate(std::os::unix::io::AsRawFd::as_raw_fd(&f), 0, len) }, 0);
+        let (c, n) = commit_pending(&app, "acme/demo", "").await.unwrap();
+        assert_eq!(c, CacheUse::Committed);
+        assert!(n.unwrap().contains("grew past"));
+        assert!(!backing.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A trusted job ends `Committed` through the real header check; the same job under a cold verdict leaves no file.
+    #[tokio::test]
+    async fn finish_cache_commits_through_the_header_check_on_a_gated_forge() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let (gh, gl) = (Mock::github().await, Mock::start().await);
+        let (mut app, d) = cache_app("gated-commit");
+        let _ = &gh;
+        let a = Arc::get_mut(&mut app).unwrap();
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        let g = crate::forge::gitlab::GitLab::for_mock(&cfg, &a.data, &gl.base, "tok");
+        a.forges.insert(cfg, Forge::GitLab(Box::new(g)));
+        gl.route("GET", "/api/v4/projects/acme%2Fdemo", 200, crate::forge_test_mock::fixture_in("gitlab", "project.json"));
+        gl.route("GET", "/api/v4/projects/1/repository/branches/ci", 200, crate::forge_test_mock::fixture_in("gitlab", "branch_ci.json"));
+        let mut job = (1..=4)
+            .flat_map(|n| {
+                serde_json::from_str::<Vec<serde_json::Value>>(&crate::forge_test_mock::fixture_in("gitlab", &format!("jobs_p{n}.json")))
+                    .unwrap()
+            })
+            .find(|j| j["id"] == 215)
+            .unwrap();
+        job["id"] = 42.into();
+        job["status"] = "success".into();
+        job["ref"] = "main".into();
+        job["tag"] = false.into();
+        job["pipeline"]["source"] = "push".into();
+        gl.route("GET", "/api/v4/projects/1/repository/branches/main", 200, crate::forge_test_mock::fixture_in("gitlab", "branch_ci.json"));
+        gl.route("GET", "/api/v4/projects/1/jobs/42", 200, job.to_string());
+        let backing = cache_file(&app.data, "gl:acme/demo");
+        std::fs::create_dir_all(backing.parent().unwrap()).unwrap();
+        std::fs::write(
+            d.join("info.json"),
+            serde_json::json!({"format": "qcow2", "format-specific": {"type": "qcow2", "data": {"corrupt": false}},
+            "backing-filename": backing.to_str(), "backing-filename-format": "qcow2"})
+            .to_string(),
+        )
+        .unwrap();
+        let ran = |id: &str, verdict: &str, jid: &str| {
+            let dir = app.data.join("vms").join(id);
+            std::fs::create_dir_all(qemu_dir(&dir)).unwrap();
+            std::fs::write(qemu_dir(&dir).join("cache.qcow2"), "overlay").unwrap();
+            app.vms.lock().unwrap().push(Vm {
+                repo: "gl:acme/demo".into(),
+                job: Some("build".into()),
+                result: Some("Succeeded".into()),
+                job_id: Some("42".into()),
+                verdict: Some((verdict.into(), jid.into())),
+                starts: 1,
+                cache: CacheUse::Read,
+                ..vm(id, State::Done, None)
+            });
+            dir
+        };
+        for (id, verdict, jid, want) in [
+            ("ok", "ok", "42", CacheUse::Committed),
+            ("cold", "cold", "42", CacheUse::Discarded),
+            ("other", "ok", "41", CacheUse::Discarded),
+        ] {
+            let dir = ran(id, verdict, jid);
+            finish_cache(&app, id, "gl:acme/demo", &dir, true).await;
+            let v = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap();
+            assert_eq!(v.cache, want, "{id}: {:?}", v.cache_note);
+            assert!(!qemu_dir(&dir).join("cache.qcow2").exists(), "{id}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_token_scrub_discards_the_overlay_on_the_host() {
+        let mut v = Vm { cache: CacheUse::Read, ..vm("kiln-5-0", State::Busy, None) };
+        scrub_failed(&mut v);
+        assert_eq!(v.cache, CacheUse::Discarded);
+        assert!(v.cache_note.as_deref().unwrap().contains("scrub"));
+        // No proof of a scrub after a job: discarded; a VM that never ran a job is left alone.
+        let mut v = Vm { cache: CacheUse::Read, job: Some("t".into()), ..vm("kiln-5-2", State::Done, None) };
+        unscrubbed(&mut v);
+        assert_eq!(v.cache, CacheUse::Discarded);
+        let mut v = Vm { cache: CacheUse::Read, job: None, ..vm("kiln-5-3", State::Done, None) };
+        unscrubbed(&mut v);
+        assert_eq!(v.cache, CacheUse::Read);
+        // Nothing to discard without an overlay: the record stays as it was.
+        let mut v = Vm { cache: CacheUse::None, ..vm("kiln-5-1", State::Busy, None) };
+        scrub_failed(&mut v);
+        assert_eq!((v.cache, v.cache_note), (CacheUse::None, None));
     }
 
     #[test]
@@ -3129,6 +3498,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn a_gitlab_only_ledger_is_seeded_once() {
+        let d = std::env::temp_dir().join(format!("kiln-test-gl_only_ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let day = 20_000 * 86400;
+        std::fs::create_dir_all(d.join("vms/kiln-1-0")).unwrap();
+        let v = Vm {
+            id: "kiln-1-0".into(),
+            repo: "gl:g/p".into(),
+            busy_since: Some(day),
+            done_at: Some(day + 90),
+            ended: Some(day + 95),
+            ..vm("x", State::Done, None)
+        };
+        write_meta(&d, &v);
+        for _ in 0..3 {
+            load_history(&d);
+        }
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "gl".to_string(), 1, 2)]);
+        assert!(!d.join("usage.json").exists(), "a GitLab-only kiln writes no GitHub ledger");
+        // A job lost in a crash is counted once, and a mixed dir keeps both ledgers right.
+        std::fs::create_dir_all(d.join("vms/kiln-2-0")).unwrap();
+        write_meta(&d, &Vm { id: "kiln-2-0".into(), repo: "gl:g/p".into(), busy_since: Some(day), ..vm("x", State::Busy, None) });
+        load_history(&d);
+        load_history(&d);
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "gl".to_string(), 2, 3)]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[tokio::test]
     async fn sockets_in_q_are_never_followed() {
         let d = std::env::temp_dir().join(format!("kiln-test-sockets_in_q_are_never_followed-{}", std::process::id()));
@@ -3142,7 +3540,10 @@ mod tests {
         assert!(connect_own(&d.join("file")).await.is_err());
         // A planted overlay symlink is refused before qemu-img ever reads it.
         std::os::unix::fs::symlink(d.join("file"), d.join("cache.qcow2")).unwrap();
-        assert_eq!(overlay_header(&d.join("cache.qcow2"), &d.join("file")).await, Err("overlay is not a regular file".into()));
+        assert_eq!(
+            overlay_header(&crate::App::for_tests(), &d.join("cache.qcow2"), &d.join("file")).await,
+            Err("overlay is not a regular file".into())
+        );
         // QEMU's whole environment is the allow list: run `env` through the same scrubbing.
         let os = |s: &str| std::ffi::OsString::from(s);
         let mut c = Command::new("env");
@@ -3490,13 +3891,33 @@ mod tests {
 
     #[test]
     fn a_starting_box_does_not_fail_the_doctor() {
-        let mk = || vec![check("a", true, "fine"), check("b", false, "dns error: no")];
+        let mk = || vec![check("a", true, "fine"), soft_check("b", false, "dns error: no")];
         let mut c = mk();
         soften(&mut c, false, "the network");
         assert!(!c[1].ok && c[1].detail == "dns error: no", "after the grace period the failure shows");
         soften(&mut c, true, "the network");
         assert!(c[1].ok && c[1].detail == "starting: waiting for the network (dns error: no)");
         assert!(c[0].ok && c[0].detail == "fine", "passing checks are left alone");
+    }
+
+    /// Credentials, scopes, hash mismatches and an unsafe `tailscale serve` are never "starting".
+    #[test]
+    fn soften_never_hides_a_credential_or_an_unsafe_serve() {
+        let mut c = vec![
+            check("gitlab token", false, "Forge answered 401: token revoked"),
+            check("gitlab scopes", false, "token lacks api"),
+            check("docker mirror", false, "registry.tgz sha256 mismatch"),
+            check("tailscale serve", false, "tailscale serve config exposes kiln's socket unsafely: funnel"),
+            soft_check("tailscale up", false, "BackendState Starting"),
+        ];
+        soften(&mut c, true, "tailscaled");
+        assert_eq!(c.iter().map(|c| c.ok).collect::<Vec<_>>(), [false, false, false, false, true]);
+        // What reads as a network failure is soft; an answer from the server is not.
+        assert!(net_down("error sending request for url (https://x): dns error: failed to lookup address"));
+        assert!(net_down("waiting for the network: x does not resolve yet") && net_down("operation timed out"));
+        assert!(
+            !net_down("Forge answered 401: bad credentials") && !net_down("no token for GitLab forge gl: put one in /d/forges/gl.token")
+        );
     }
 
     #[test]
@@ -3545,11 +3966,14 @@ mod tests {
     /// against event payloads. Skipped where bash or jq is missing.
     #[test]
     fn prejob_hook_refuses_forks() {
-        let have = |b: &str| std::process::Command::new(b).arg("--version").output().is_ok_and(|o| o.status.success());
         // The guest's bash is 5.x; macOS ships 3.2, which lacks ${x,,}.
         let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
-        if !have("bash") || !have("jq") || !bash4() {
-            eprintln!("skipping: bash 4+ and jq needed");
+        if !need(&["bash", "jq"]) {
+            return;
+        }
+        if !bash4() {
+            assert!(std::env::var_os("KILN_REQUIRE_GUEST_TESTS").is_none(), "KILN_REQUIRE_GUEST_TESTS is set but bash is older than 4");
+            eprintln!("skipping: bash 4+ needed");
             return;
         }
         let yaml = include_str!("../guest/user-data.yaml");
@@ -3593,6 +4017,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The cold-detach half of kiln-prejob.sh, with a fake `sudo` that logs its argv and fails on request.
+    #[test]
+    fn prejob_hook_detaches_the_cache_for_tags_and_releases() {
+        let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
+        if !need(&["bash", "jq"]) || !bash4() {
+            return;
+        }
+        let dir = crate::forge_test_mock::scratch("prejob-detach");
+        let script = guest_script("/usr/local/sbin/kiln-prejob.sh", &dir);
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(&sudo, format!("#!/bin/bash\necho \"$@\" >> {0}/sudo.log\n[ -e {0}/fail-sudo ] && exit 1\nexit 0\n", dir.display()))
+            .unwrap();
+        std::fs::set_permissions(&sudo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let run = |env: &[(&str, &str)], event: serde_json::Value, fail: bool| {
+            let _ = std::fs::remove_file(dir.join("sudo.log"));
+            let _ = std::fs::remove_file(dir.join("fail-sudo"));
+            if fail {
+                std::fs::write(dir.join("fail-sudo"), "").unwrap();
+            }
+            std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+            let mut c = std::process::Command::new("bash");
+            c.args(["-c", &script]).env("GITHUB_EVENT_PATH", dir.join("event.json")).env("GITHUB_REPOSITORY", "Acme/kiln");
+            c.env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+            for (k, v) in env {
+                c.env(k, v);
+            }
+            let o = c.output().unwrap();
+            let log = std::fs::read_to_string(dir.join("sudo.log")).unwrap_or_default();
+            (o.status.code(), String::from_utf8_lossy(&o.stdout).to_string(), log)
+        };
+        let push = serde_json::json!({ "ref": "refs/heads/main", "head_commit": {} });
+        let detach = "/usr/local/sbin/kiln-cache detach\n";
+        assert_eq!(
+            run(&[("GITHUB_REF_TYPE", "branch")], push.clone(), false),
+            (Some(0), String::new(), String::new()),
+            "a branch push keeps the cache"
+        );
+        assert_eq!(run(&[("GITHUB_REF_TYPE", "tag")], push.clone(), false), (Some(0), String::new(), detach.into()));
+        assert_eq!(run(&[("GITHUB_EVENT_NAME", "release")], push.clone(), false), (Some(0), String::new(), detach.into()));
+        let (rc, out, log) = run(&[("GITHUB_REF_TYPE", "tag")], push.clone(), true);
+        assert_eq!((rc, log.as_str()), (Some(1), detach));
+        assert!(out.contains("::error::kiln could not detach"), "{out}");
+        // The fork check stays first: a fork PR on a tag ref is refused without calling sudo.
+        let fork = serde_json::json!({ "pull_request": { "head": { "repo": { "full_name": "evil/kiln" } } } });
+        let (rc, out, log) = run(&[("GITHUB_REF_TYPE", "tag")], fork, false);
+        assert_eq!((rc, log.as_str()), (Some(1), ""));
+        assert!(out.contains("refuses code from forks"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A guest script cut out of the recipe, with its fixed paths pointed into `dir`.
     fn guest_script(path: &str, dir: &std::path::Path) -> String {
         let yaml = include_str!("../guest/user-data.yaml");
@@ -3610,13 +4086,26 @@ mod tests {
 
     /// Writes a guest script to a file the test sources (kiln-job only defines functions then).
     fn source_line(script: &str, name: &str) -> String {
-        let f = std::env::temp_dir().join(format!("{name}-{}.sh", std::process::id()));
+        let f = crate::forge_test_mock::scratch(name).join("src.sh");
         std::fs::write(&f, script).unwrap();
         format!("source {}", f.display())
     }
 
+    /// Whether the tools a guest test drives are installed. A missing one skips the test with a message, unless
+    /// `KILN_REQUIRE_GUEST_TESTS` is set (CI): then it fails, so a stripped image cannot silently drop the coverage.
+    fn need(tools: &[&str]) -> bool {
+        let missing: Vec<_> =
+            tools.iter().filter(|t| !std::process::Command::new(t).arg("--version").output().is_ok_and(|o| o.status.success())).collect();
+        if missing.is_empty() {
+            return true;
+        }
+        assert!(std::env::var_os("KILN_REQUIRE_GUEST_TESTS").is_none(), "KILN_REQUIRE_GUEST_TESTS is set but {missing:?} is not installed");
+        eprintln!("skipping: {missing:?} not installed");
+        false
+    }
+
     fn have_bash() -> bool {
-        std::process::Command::new("bash").arg("--version").output().is_ok_and(|o| o.status.success())
+        need(&["bash"])
     }
 
     /// kiln-job's reader turns the host's `kiln.verdict=` line into the verdict file:
@@ -3704,9 +4193,11 @@ mod tests {
                     v = verdict.split(' ').next().unwrap()
                 ),
             );
-            sh("kiln-cache", &format!("echo \"kiln-cache $*\" >> {}", log.display()));
+            // A step fails when its switch file exists in `dir` (not the process env, which tests share).
+            let d = dir.display();
+            sh("kiln-cache", &format!("echo \"kiln-cache $*\" >> {}; [ -e {d}/fail-detach ] && exit 1; exit 0", log.display()));
             sh("sudo", "exec \"$@\"");
-            sh("systemctl", &format!("echo \"systemctl $*\" >> {}", log.display()));
+            sh("systemctl", &format!("echo \"systemctl $*\" >> {}; [ -e {d}/fail-$1 ] && exit 1; exit 0", log.display()));
             sh("docker", &format!("echo \"docker $*\" >> {}; [ \"$1\" = ps ] && [ -n \"$FAKE_UP\" ] && echo abc; exit 0", log.display()));
             std::fs::write(dir.join("verdict"), format!("{verdict}\n")).unwrap();
             let mut c = std::process::Command::new("bash");
@@ -3731,7 +4222,7 @@ mod tests {
         // ok, no image: no docker, runs directly, a failing script is exit 1.
         fresh();
         let (rc, _, calls) = stage("ok 42", &[], &["prepare"]);
-        // dockerd is not up at boot (R3 M-2c): an ok verdict starts it, once the gate has passed; no container is created for a plain job.
+        // dockerd is not up at boot: an ok verdict starts it, once the gate has passed; no container is created for a plain job.
         assert_eq!((rc, calls.as_str()), (Some(0), "kiln-verdict-wait\nsystemctl start docker.service\n"), "{calls}");
         std::fs::write(dir.join("s.sh"), format!("echo ran > {}/ran\n", dir.display())).unwrap();
         let ran = dir.join("ran");
@@ -3762,7 +4253,22 @@ mod tests {
             assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{v}");
         }
 
-        // One-shot (R2 M-3): a second prepare in the same VM is refused, even with an ok verdict.
+        // G4: a failing detach, restart or start refuses: exit 1 (never 2), the step is named, no docker call, and no gate-ok,
+        // so the next stage refuses too.
+        for (v, switch, step) in [("cold 42", "detach", "detach"), ("cold 42", "restart", "restart"), ("ok 42", "start", "start")] {
+            fresh();
+            std::fs::write(dir.join(format!("fail-{}", if switch == "detach" { "detach" } else { switch })), "").unwrap();
+            let (rc, err, calls) = stage(v, &[("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3")], &["prepare"]);
+            assert_eq!(rc, Some(1), "{switch}: never exit 2: {err}");
+            assert!(err.contains(step), "{switch}: {err}");
+            assert!(!calls.contains("docker "), "{switch}: {calls}");
+            assert!(!dir.join("state/gate-ok").exists(), "{switch}: gate-ok must not exist");
+            std::fs::write(dir.join("s.sh"), format!("touch {}/gated\n", dir.display())).unwrap();
+            let (rc, _, _) = stage(v, &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]);
+            assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{switch}: the next stage refuses");
+        }
+
+        // One-shot: a second prepare in the same VM is refused, even with an ok verdict.
         fresh();
         assert_eq!(stage("ok 42", &[], &["prepare"]).0, Some(0));
         let (rc, err, _) = stage("ok 42", &[], &["prepare"]);
@@ -3962,7 +4468,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-rge-{}", std::process::id()));
+        let dir = crate::forge_test_mock::scratch("rge");
         let src = guest_script("/usr/local/sbin/kiln-job", &dir)
             .replace("/usr/local/sbin/kiln-gate", &dir.join("gate").to_string_lossy())
             .replace("/home/runner", &dir.join("home").to_string_lossy());
@@ -3972,17 +4478,20 @@ mod tests {
 echo "gate $*" >> "$REC"
 twin=$([ $# -eq 1 ] && echo 1)
 [ -n "$twin" ] && [ "$STUB" != noarm ] && touch "$KILN_ARMED"
+# The primary marks that it is done; the twin waits for that mark (bounded), so the order never depends on timing.
+[ -z "$twin" ] && trap 'touch "$DONE"' EXIT
+primary_done() { for _ in $(seq 200); do [ -e "$DONE" ] && return; sleep 0.05; done; }
 case "$STUB:${twin:-p}" in
   noarm:1) exit 1 ;;
-  twindead:1) sleep 0.1; exit 1 ;;
-  race:1) sleep 1; echo "twin finished" >> "$REC"; exit 77 ;;
-  *:1) sleep 0.8; exit 0 ;;
-  ok:p) sleep 0.3; echo "ok 5" > "$V"; exit 3 ;;
-  cold:p) sleep 0.3; echo "cold 5" > "$V"; exit 0 ;;
+  twindead:1) exit 1 ;;
+  race:1) primary_done; echo "twin finished" >> "$REC"; exit 77 ;;
+  *:1) primary_done; exit 0 ;;
+  ok:p) echo "ok 5" > "$V"; exit 3 ;;
+  cold:p) echo "cold 5" > "$V"; exit 0 ;;
   refuse:p) exit 77 ;;
   gone:p) exit 75 ;;
   dead:p) exit 137 ;;
-  race:p) sleep 0.3; echo "refuse 5" > "$V"; exit 137 ;;
+  race:p) echo "refuse 5" > "$V"; exit 137 ;;
   twindead:p) sleep 3 ;;
 esac
 "#;
@@ -4005,6 +4514,7 @@ esac
                 .env("STUB", stub)
                 .env("REC", dir.join("rec"))
                 .env("V", dir.join("verdict"))
+                .env("DONE", dir.join("primary-done"))
                 .output()
                 .unwrap();
             (String::from_utf8_lossy(&o.stdout).replace('\n', " "), std::fs::read_to_string(dir.join("rec")).unwrap_or_default())
@@ -4052,7 +4562,7 @@ esac
             assert_eq!(std::fs::read_to_string(dir.join("console")).unwrap(), "kiln.gate=dead\n", "{stub}");
             assert!(rec.contains("kill_uid 4000000000"), "{stub}: {rec}");
         }
-        // R3 M-3: the primary dies just as a refuse verdict lands. The twin, still holding, is waited for (never killed: that
+        // The primary dies just as a refuse verdict lands. The twin, still holding, is waited for (never killed: that
         // would free its group and release every held exec), and the job's uid is killed before the VM is failed.
         let (out, rec) = run("race", dot, "7");
         let lines: Vec<&str> = rec.lines().collect();
@@ -4079,7 +4589,7 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GitHub's path (R4 M-1): run_github starts the runner and never dockerd (docker.socket does, on first use, after
+    /// GitHub's path: run_github starts the runner and never dockerd (docker.socket does, on first use, after
     /// the prejob hook's cold decision), and never without a JIT config.
     #[test]
     fn guest_run_github_leaves_dockerd_to_the_socket() {
@@ -4136,7 +4646,7 @@ esac
     }
 
     /// kiln-docker-gate (docker.service's ExecStartPre): pass outside Gitea VMs and on ok; refuse fails; cold waits for the
-    /// cache disk to be unmounted (R3 M-2a).
+    /// cache disk to be unmounted.
     #[test]
     fn guest_docker_gate_waits_for_the_detach() {
         if !have_bash() {
@@ -4147,7 +4657,10 @@ esac
         let gate =
             guest_script("/usr/local/sbin/kiln-docker-gate", &dir).replace("/usr/local/sbin/kiln-verdict-wait", &wait.to_string_lossy());
         // `mounted` stands for /mnt/cache being a mount point.
-        let run = |marker: bool, verdict: &str, mounted: bool, unmount_after: bool| {
+        // The gate runs as a child. `observe`: how long a gate that is still waiting is watched before it is killed
+        // (None = the gate must exit by itself). `unmount`: the test unmounts /mnt/cache itself, once the gate had its
+        // chance to exit: no timer decides the order. Returns the exit code, or None for a gate killed while waiting.
+        let run = |marker: bool, verdict: &str, mounted: bool, observe: Option<u64>, unmount: bool| {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(&wait, "#!/bin/bash\necho \"$VW\"\n[ \"$VW\" = ok ] || [ \"$VW\" = cold ]\n").unwrap();
@@ -4159,27 +4672,48 @@ esac
                 std::fs::write(dir.join("mounted"), "").unwrap();
             }
             std::fs::write(dir.join("gate.sh"), format!("findmnt(){{ [ -e {}/mounted ]; }}\n{gate}", dir.display())).unwrap();
-            let bg = if unmount_after { format!("(sleep 0.7; rm -f {}/mounted) & ", dir.display()) } else { String::new() };
-            let o = std::process::Command::new("bash")
-                .args(["-c", &format!("{bg}timeout 3 bash {}/gate.sh", dir.display())])
+            let mut child = std::process::Command::new("bash")
+                .arg(dir.join("gate.sh"))
                 .env("VW", verdict)
-                .output()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
                 .unwrap();
-            o.status.code()
+            let mut wait_for = |ms: u64| {
+                for _ in 0..ms / 20 {
+                    if let Some(st) = child.try_wait().unwrap() {
+                        return Some(st.code());
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                None
+            };
+            if let Some(ms) = observe {
+                if let Some(code) = wait_for(ms) {
+                    return code;
+                }
+                if !unmount {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::fs::remove_file(dir.join("mounted")).unwrap();
+            }
+            wait_for(20_000).expect("the gate did not exit")
         };
-        assert_eq!(run(false, "refuse", true, false), Some(0), "not a Gitea VM: no gating at all");
-        assert_eq!(run(true, "ok", true, false), Some(0), "ok does not wait for the unmount (there is none)");
-        assert_eq!(run(true, "refuse", false, false), Some(1));
-        assert_eq!(run(true, "cold", false, false), Some(0), "cold, already detached");
-        assert_eq!(run(true, "cold", true, false), Some(124), "cold with the cache still mounted keeps waiting");
-        assert_eq!(run(true, "cold", true, true), Some(0), "and goes on the moment it is unmounted");
+        assert_eq!(run(false, "refuse", true, None, false), Some(0), "not a Gitea VM: no gating at all");
+        assert_eq!(run(true, "ok", true, None, false), Some(0), "ok does not wait for the unmount (there is none)");
+        assert_eq!(run(true, "refuse", false, None, false), Some(1));
+        assert_eq!(run(true, "cold", false, None, false), Some(0), "cold, already detached");
+        assert_eq!(run(true, "cold", true, Some(1000), false), None, "cold with the cache still mounted keeps waiting");
+        assert_eq!(run(true, "cold", true, Some(500), true), Some(0), "and goes on the moment it is unmounted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow (R3 L-1).
+    /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow.
     #[test]
     fn guest_gate_events_and_crash_handler() {
-        if !std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if !need(&["python3"]) {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kiln-test-guest_gate_events-{}", std::process::id()));
@@ -4206,6 +4740,41 @@ assert bad(rec(24, perm, 5, 1) + rec(24, 0x4000, -1, 0)), "overflow after a good
 assert bad(b"\0" * 10), "short"
 assert bad(rec(0, perm, 5, 1)), "zero length would loop"
 assert bad(rec(48, perm, 5, 1)), "length past the buffer"
+# The policy: what an exec event gets, and when and how the verdict is read.
+boom = lambda: 1 / 0
+assert m.event_response(None, True, boom) == 1, "the primary's own exec, whatever the mode"
+assert m.event_response("ok", False, boom) == 1, "after ok nothing asks who the process is"
+assert m.event_response(None, False, lambda: False) == 1, "not the job's: infrastructure"
+assert m.event_response("refuse", False, lambda: False) == 1
+assert m.event_response(None, False, lambda: True) == 0, "the job's exec is held"
+assert m.event_response("cold", False, lambda: True) == 0
+assert m.event_response("refuse", False, lambda: True) == 2
+assert m.verdict_mode("ok 5\n") == "ok" and m.verdict_mode("cold 5") == "cold" and m.verdict_mode("refuse 5") == "refuse"
+assert m.verdict_mode("") == "refuse" and m.verdict_mode("   \n") == "refuse" and m.verdict_mode("OK 5") == "refuse" and m.verdict_mode("\x00junk") == "refuse"
+assert not m.verdict_due(False, None, 100.0), "nothing held, no verdict: keep waiting"
+assert m.verdict_due(True, None, 100.0), "a verdict file"
+assert not m.verdict_due(False, 100.0, 100.0 + m.TIMEOUT), "exactly TIMEOUT is not yet over"
+assert m.verdict_due(False, 100.0, 100.0 + m.TIMEOUT + 0.1), "timeout from the first held exec: the mode then falls to refuse"
+# A job()-style check against a fake /proc: ancestry, uid, and an unreadable status holds.
+import os, tempfile
+root = tempfile.mkdtemp()
+real_read = m.read
+def fake_read(path):
+    if path.startswith("/proc/"):
+        try: return open(root + path).read()
+        except OSError: return ""
+    return real_read(path)
+m.read = fake_read
+def proc(pid, ppid=None, uid=None):
+    os.makedirs(f"{root}/proc/{pid}", exist_ok=True)
+    if ppid is not None: open(f"{root}/proc/{pid}/stat", "w").write(f"{pid} (x) S {ppid} 0")
+    if uid is not None: open(f"{root}/proc/{pid}/status", "w").write(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+proc(10, 1, 0); proc(20, 10, 1000); proc(30, 1, 1000); proc(40, 1, 0); proc(50, 1)
+assert m.job(20, 10, 1000), "a descendant of the runner"
+assert m.job(30, 999, 1000), "a reparented orphan keeps the uid"
+assert not m.job(40, 999, 1000), "another user's process"
+assert m.job(50, 999, 1000), "an unreadable status cannot be told apart: hold"
+assert m.job(-1, 0, 1000), "another pid namespace: hold"
 m.crash()
 assert open(sys.argv[2]).read() == "b"
 print("ok")
@@ -4229,7 +4798,7 @@ print("ok")
         assert!(check_secret_lines(&n(MAX_SECRET_LINES + 1)).unwrap_err().to_string().contains("9 guest secret lines"));
     }
 
-    /// R3 L-2: a gated VM with a bound job and no recorded verdict is a gate death when it ends.
+    /// A gated VM with a bound job and no recorded verdict is a gate death when it ends.
     #[test]
     fn a_job_without_a_verdict_is_a_gate_death() {
         let mut v = Vm { cache: CacheUse::Read, ..vm("a", State::Busy, None) };
@@ -4240,7 +4809,7 @@ print("ok")
         assert!(!verdictless(&v), "judged");
     }
 
-    /// R3 L-4: a read cancelled mid-line (another `select!` branch won) keeps the partial line in the buffer, and the
+    /// A read cancelled mid-line (another `select!` branch won) keeps the partial line in the buffer, and the
     /// next read completes it, so its tail is never seen as a line of its own.
     #[tokio::test]
     async fn a_cancelled_read_keeps_the_partial_line() {
@@ -4283,15 +4852,15 @@ print("ok")
             !gate.contains("subprocess") && !gate.contains("os.system"),
             "a waited-for spawn would deadlock on the gate's own exec event"
         );
-        if std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            let f = std::env::temp_dir().join(format!("kiln-gate-{}.py", std::process::id()));
+        if need(&["python3"]) {
+            let f = crate::forge_test_mock::scratch("gate-compile").join("kiln-gate.py");
             std::fs::write(&f, &gate).unwrap();
             let o = std::process::Command::new("python3")
                 .args(["-I", "-c", "import sys; compile(open(sys.argv[1]).read(), 'kiln-gate', 'exec')"])
                 .arg(&f)
                 .output()
                 .unwrap();
-            let _ = std::fs::remove_file(&f);
+            let _ = std::fs::remove_dir_all(f.parent().unwrap());
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         }
         // dockerd: socket-activated, and docker.service waits for the verdict in Gitea VMs only.
@@ -4299,16 +4868,16 @@ print("ok")
         assert!(d.contains("ExecStartPre=/usr/local/sbin/kiln-docker-gate\n"));
         let g = yaml.split("path: /usr/local/sbin/kiln-docker-gate\n").nth(1).unwrap();
         assert!(g.contains("kiln-verdict-wait") && g.contains("findmnt /mnt/cache"), "cold waits for the cache disk to be detached");
-        // R3 M-2c: dockerd is not pulled in at boot (neither by kiln-job nor as an enabled unit): each forge's path starts it.
+        // Dockerd is not pulled in at boot (neither by kiln-job nor as an enabled unit): each forge's path starts it.
         let unit = yaml.split("path: /etc/systemd/system/kiln-job.service\n").nth(1).unwrap();
         assert!(unit.contains("Wants=network-online.target\n") && !unit.contains("Wants=network-online.target docker"), "{unit}");
         assert!(yaml.contains("systemctl disable docker.service") && yaml.contains("check \"docker.service not enabled at boot\""));
-        // R3 M-2b, R4 M-1: all but image data is gone from the cache's Docker state before the bind mounts.
+        // All but image data is gone from the cache's Docker state before the bind mounts.
         let cache = yaml.split("path: /usr/local/sbin/kiln-cache\n").nth(1).unwrap();
         let (rm, bind) =
             (cache.find("find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1").unwrap(), cache.find("mount --bind").unwrap());
         assert!(rm < bind);
-        // R3 L-1: the gate's hardening.
+        // The gate's hardening.
         for f in ["4 | 1 | 0x10", "RLIMIT_NOFILE", "def crash", "sysrq", "mask & 0x4000", "crash()\n"] {
             assert!(gate.contains(f), "{f} missing from kiln-gate");
         }
@@ -4791,8 +5360,7 @@ print("ok")
     /// Several secret lines (Gitea, GitLab) are one SMBIOS OEM string each, in order; QEMU would make a file one string.
     #[test]
     fn secret_lines_are_separate_oem_strings() {
-        let d = std::env::temp_dir().join(format!("kiln-secrets-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::forge_test_mock::scratch("secrets");
         for f in ["jit", "jit.1", "jit.2"] {
             std::fs::write(d.join(f), "kiln.x=1").unwrap();
         }
@@ -4858,7 +5426,7 @@ print("ok")
         assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
     }
 
-    /// R4 M-1: GitHub's dockerd starts on first use (after the prejob hook's cold decision), and the cache's Docker state
+    /// GitHub's dockerd starts on first use (after the prejob hook's cold decision), and the cache's Docker state
     /// is an allow-list. The `find` line is run on a seeded tree.
     #[test]
     fn github_dockerd_waits_for_the_prejob_hook_and_cached_docker_state_is_allow_listed() {
@@ -4872,7 +5440,7 @@ print("ok")
         let cache = guest_script("/usr/local/sbin/kiln-cache", &std::env::temp_dir());
         assert!(cache.contains("mount -t ext4 -o noatime,nosuid,nodev /dev/vdb"), "typed, nosuid,nodev cache mount");
         assert!(yaml.contains("check \"docker.socket enabled\""));
-        if !have_bash() || !std::process::Command::new("find").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if !need(&["bash", "find"]) {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kiln-test-docker-allowlist-{}", std::process::id()));
@@ -4901,7 +5469,7 @@ print("ok")
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 13);
+        assert_eq!(RECIPE, 14);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
@@ -5197,7 +5765,7 @@ print("ok")
         });
     }
 
-    /// A gated forge's cache commit needs the host's own ok for exactly the bound job (R2b section 4).
+    /// A gated forge's cache commit needs the host's own ok for exactly the bound job.
     #[tokio::test]
     async fn a_gated_forge_commits_only_after_an_ok_verdict_for_the_bound_job() {
         use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
@@ -5235,6 +5803,56 @@ print("ok")
         assert_eq!(why("g2", Some(("cold", "42"))).await, none, "cold never commits");
         assert_eq!(why("g3", Some(("ok", "41"))).await, none, "an ok for another job");
         assert_eq!(why("g4", Some(("refuse", "42"))).await, none);
+    }
+
+    /// GitLab prints no result, so the debug hold asks the job API before `decide` (and fails closed).
+    #[tokio::test]
+    async fn the_debug_hold_gets_a_gated_forges_result_from_the_api() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let (gh, gl) = (Mock::github().await, Mock::start().await);
+        let app = mock::app("api-result", &gh, crate::Config::default());
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        let g = crate::forge::gitlab::GitLab::for_mock(&cfg, &app.data, &gl.base, "tok");
+        let forge = Forge::GitLab(Box::new(g));
+        let rr = RepoRef::parse("gl:acme/demo").unwrap();
+        gl.route("GET", "/api/v4/projects/acme%2Fdemo", 200, crate::forge_test_mock::fixture_in("gitlab", "project.json"));
+        let job = |n: u64, status: &str, runner: u64| {
+            serde_json::json!({"id": n, "status": status, "runner": {"id": runner}, "ref": "main", "tag": false,
+                "pipeline": {"project_id": 1, "source": "push"}})
+            .to_string()
+        };
+        let bound = |id: &str, n: u64, verdict: &str| {
+            app.vms.lock().unwrap().push(Vm {
+                repo: "gl:acme/demo".into(),
+                job: Some("build".into()),
+                job_id: Some(n.to_string()),
+                verdict: Some((verdict.into(), n.to_string())),
+                starts: 1,
+                runner_id: Some(79),
+                ..vm(id, State::Busy, None)
+            });
+            app.vms.lock().unwrap().last().cloned().unwrap()
+        };
+        let hold = |v: &Vm| decide(30, true, v.job.is_some(), v.result.as_deref());
+        gl.route("GET", "/api/v4/projects/1/jobs/1001", 200, job(1001, "failed", 79));
+        let v = bound("a1", 1001, "ok");
+        let r = api_result(&app, "a1", &forge, &rr, &v, Duration::from_secs(5)).await.expect("a result");
+        assert_eq!((r.result.as_deref(), hold(&r)), (Some("Failed"), Some(1800)));
+        // Not the VM's runner, an API error, no ok verdict: no result, so the guest is released.
+        gl.route("GET", "/api/v4/projects/1/jobs/1002", 200, job(1002, "failed", 80));
+        assert!(api_result(&app, "a2", &forge, &rr, &bound("a2", 1002, "ok"), Duration::from_secs(5)).await.is_none());
+        gl.route("GET", "/api/v4/projects/1/jobs/1003", 500, "{}");
+        assert!(api_result(&app, "a3", &forge, &rr, &bound("a3", 1003, "ok"), Duration::from_secs(5)).await.is_none());
+        gl.route("GET", "/api/v4/projects/1/jobs/1004", 200, job(1004, "failed", 79));
+        assert!(api_result(&app, "a4", &forge, &rr, &bound("a4", 1004, "refuse"), Duration::from_secs(5)).await.is_none());
     }
 
     #[tokio::test]

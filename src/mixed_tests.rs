@@ -1,11 +1,10 @@
-//! X-3: one kiln serving a GitHub, a GitLab and a Gitea repo at once, ticked against three mock forges.
+//! One kiln serving a GitHub, a GitLab and a Gitea repo at once, ticked against three mock forges.
 //!
 //! Deterministic by construction: every test has its own data dir, `vm_cpus` is 1 and memory 64 MB
 //! (so budgets fit a 3-thread host), no GitHub registration succeeds (no VM reaches QEMU), and
 //! anything that depends on how many VMs are alive mid-tick is either seeded (`seed-*` Busy VMs,
 //! which never exit) or counted from records that outlive their task. Tests wait on `app.kills`,
-//! never on a sleep. GitLab and Gitea launches are still off in some builds (`LAUNCH_READY`): their
-//! expectations follow the constant, so the file stays green when it flips.
+//! never on a sleep.
 
 use super::*;
 use crate::forge_test_mock::{Mock, fixture, fixture_in};
@@ -18,14 +17,6 @@ const GH_REPO: &str = "acme/demo";
 const GT_REPO: &str = "gitea:acme/demo";
 const GL_REPO: &str = "gl:acme/demo";
 const GL_JOBS: &str = "/api/v4/projects/1/jobs?scope%5B%5D=pending&scope%5B%5D=running&per_page=100&pagination=keyset";
-
-fn ready(k: forge::Kind) -> usize {
-    usize::from(match k {
-        forge::Kind::GitLab => forge::gitlab::LAUNCH_READY,
-        forge::Kind::Gitea => forge::gitea::LAUNCH_READY,
-        forge::Kind::GitHub => true,
-    })
-}
 
 struct Trio {
     app: Arc<App>,
@@ -219,8 +210,8 @@ async fn demand_is_counted_per_forge() {
     let q = t.tick().await.unwrap();
     let n = |repo: &str| q[repo].get(&1).copied().unwrap_or(0);
     assert_eq!(n(GH_REPO), 2);
-    assert_eq!(n(GT_REPO), 3 * ready(forge::Kind::Gitea));
-    assert_eq!(n(GL_REPO), ready(forge::Kind::GitLab));
+    assert_eq!(n(GT_REPO), 3);
+    assert_eq!(n(GL_REPO), 1);
     assert_eq!(q.len(), 3, "{q:?}");
     // Each forge was read through its own API only, and only read.
     assert!(calls(&t.gh).iter().all(|r| r.starts_with("GET /repos/")), "{:?}", calls(&t.gh));
@@ -255,7 +246,7 @@ async fn a_queued_fork_job_blocks_no_repo() {
         let p = t.app.poll.lock().unwrap();
         assert!(p.repo_errors.is_empty(), "{:?}", p.repo_errors);
         assert_eq!((p.refused_forks.len(), p.refused_forks[GT_REPO], p.refused_forks[GL_REPO]), (2, 1, 1), "{:?}", p.refused_forks);
-        // Gitea reports its queued fork (a banner only); GitLab refuses the MR job. Neither holds anything (R4 M-3).
+        // Gitea reports its queued fork (a banner only); GitLab refuses the MR job. Neither holds anything.
         assert_eq!(p.fork_queued, [GT_REPO]);
     }
     assert!(!killed(&gt_kill).await, "the idle Gitea VM is kept: the exec gate refuses a fork job on any VM");
@@ -397,7 +388,7 @@ async fn two_of_three(name: &str, seed_cpus: u32, seed_mem: u32) -> Trio {
 #[tokio::test]
 async fn the_cpu_budget_is_shared_across_forges() {
     // The host budget is 1.5 vCPUs per thread; leave exactly two vCPUs.
-    let max = host_threads() * 3 / 2;
+    let max = HostReadings::TEST.threads * 3 / 2;
     let t = two_of_three("mixed-cpu", max - 2, 0).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("cpu budget"), "{why}");
@@ -406,8 +397,7 @@ async fn the_cpu_budget_is_shared_across_forges() {
 #[tokio::test]
 async fn the_memory_budget_is_shared_across_forges() {
     // 2 GB stay reserved for the host; leave exactly two 64 MB VMs.
-    let total = platform::mem_total_mb();
-    assert!(total > 2048 + 128, "this host has too little memory ({total} MB) for the budget test");
+    let total = HostReadings::TEST.mem_total_mb;
     let t = two_of_three("mixed-mem", 0, (total - 2048 - 128) as u32).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("memory budget"), "{why}");
@@ -469,6 +459,37 @@ async fn retire_reaches_the_right_forge_with_the_right_reason() {
     assert!(t.gh.requests().is_empty(), "GitHub is not gated: {:?}", t.gh.requests());
 }
 
+/// A security recycle must not be undone by a forge that cannot delete the runner: the idle VM dies anyway,
+/// and `retire` still reports the failure so the delete is tried again.
+#[tokio::test]
+async fn a_stale_policy_vm_dies_even_when_its_runner_cannot_be_deleted() {
+    let t = Trio::new("mixed-retire-err", 99, |_| {}).await;
+    t.gh.fail("DELETE", "/repos/acme/demo/actions/runners/11", 500, "boom");
+    t.gl.route("PUT", &format!("{GL}/runners/79"), 500, "{}");
+    let vms = [("seed-gh", GH_REPO, 11), ("seed-gl", GL_REPO, 79), ("seed-none", "gl2:acme/demo", 5)];
+    let kills: Vec<_> = vms
+        .iter()
+        .map(|&(id, repo, rid)| {
+            seed(&t.app, id, repo, "idle", rid, 1, 64);
+            watch(&t.app, id)
+        })
+        .collect();
+    // A VM that already has a job is not a candidate.
+    seed(&t.app, "seed-job", GH_REPO, "idle", 12, 1, 64);
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-job").unwrap().job_url = Some("https://x/1".into());
+    let busy = watch(&t.app, "seed-job");
+    for (_, repo, _) in vms {
+        vm::recycle_stale_policy(&t.app, repo, "new").await;
+    }
+    for k in &kills {
+        assert!(killed(k).await);
+    }
+    assert!(!killed(&busy).await);
+    let note = |id: &str| t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().note.clone().unwrap();
+    assert!(note("seed-gh").contains("runner delete failed"), "{}", note("seed-gh"));
+    // The forge recovers: the next recycle finds nothing left to do, and a retry of the delete is the sweep's.
+}
+
 /// A reboot loses the VMs and the network is not up when kiln starts: the lost VMs' runners are deleted
 /// on every forge, and the sweep of GitHub's repo that failed is retried, not skipped for good.
 #[tokio::test]
@@ -520,7 +541,7 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     gt_runner(&t.gt, false);
     t.gt.route("GET", &list, 500, "{}");
 
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gl.requests().iter().any(|r| r == &format!("DELETE {GL}/runners/301")), "{:?}", t.gl.requests());
     assert!(!t.gt.requests().iter().any(|r| r.starts_with("DELETE")));
     assert!(t.gh.requests().is_empty(), "GitHub's runners go by the startup sweep alone: {:?}", t.gh.requests());
@@ -528,12 +549,12 @@ async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other()
     t.gl.clear_log();
     t.gt.route("GET", &list, 200, fixture_in("gitea", "runners_one.json"));
     t.gl.route("GET", &format!("{GL}/projects/1/runners?type=project_type&per_page=100&page=1"), 200, "[]");
-    sweep_runners(&t.app, true).await;
+    sweep_runners(&t.app, true, 0).await;
     assert!(t.gt.requests().iter().any(|r| r == &format!("DELETE {GT}/runners/52")), "{:?}", t.gt.requests());
     assert!(t.gl.requests().iter().all(|r| r.starts_with("GET ")), "nothing left to delete: {:?}", t.gl.requests());
 
     // The startup sweep covers GitHub too.
-    sweep_runners(&t.app, false).await;
+    sweep_runners(&t.app, false, 0).await;
     assert!(t.gh.requests().iter().any(|r| r.starts_with("GET /repos/acme/demo/actions/runners")), "{:?}", t.gh.requests());
 }
 
@@ -600,19 +621,10 @@ async fn the_vms_forge_picks_the_guest_secret() {
     assert!(gh.starts_with("kiln.jit=") && !gh.contains('\n'), "{gh}");
     let gt = mint(GT_REPO).await.unwrap().guest_secret;
     assert!(gt.starts_with("kiln.forge=gitea\nkiln.cred="), "{gt}");
-    match mint(GL_REPO).await {
-        Ok(r) => {
-            assert_eq!(ready(forge::Kind::GitLab), 1);
-            assert!(
-                r.guest_secret.starts_with("kiln.forge=gitlab\nkiln.url=") && r.guest_secret.contains("\nkiln.cred="),
-                "{}",
-                r.guest_secret
-            );
-            // The GitLab guest gets the runner's own token, never kiln's personal access token.
-            assert!(!r.guest_secret.contains("gl-tok"));
-        }
-        Err(e) => assert_eq!((ready(forge::Kind::GitLab), e.to_string().as_str()), (0, forge::gitlab::LATER)),
-    }
+    let r = mint(GL_REPO).await.unwrap();
+    assert!(r.guest_secret.starts_with("kiln.forge=gitlab\nkiln.url=") && r.guest_secret.contains("\nkiln.cred="), "{}", r.guest_secret);
+    // The GitLab guest gets the runner's own token, never kiln's personal access token.
+    assert!(!r.guest_secret.contains("gl-tok"));
     assert!(!gt.contains("gt-tok"), "kiln's Gitea token never reaches the guest");
     // Each registration went to its own forge.
     assert!(t.gh.requests().iter().all(|r| r.contains("generate-jitconfig") || r.starts_with("GET ")), "{:?}", t.gh.requests());

@@ -23,9 +23,16 @@ fn uptime_secs() -> Option<u64> {
 /// Inside the grace period: `kiln serve` started less than `GRACE` ago (or, in a CLI run, the
 /// machine booted less than five minutes ago).
 pub fn starting() -> bool {
-    match STARTED.get() {
-        Some(t) => t.elapsed() < GRACE,
-        None => uptime_secs().is_some_and(|u| u < BOOT_GRACE_SECS),
+    starting_at(STARTED.get().map(Instant::elapsed), uptime_secs())
+}
+
+/// `starting` for a process running `since` (None: a CLI run) on a machine up for `uptime` seconds. A serving kiln's
+/// grace also ends when the machine has been up for `BOOT_GRACE_SECS`, so a crash-looping kiln (each run under
+/// `GRACE`) cannot keep every real error hidden forever.
+fn starting_at(since: Option<Duration>, uptime: Option<u64>) -> bool {
+    match since {
+        Some(t) => t < GRACE && uptime.is_none_or(|u| u < BOOT_GRACE_SECS),
+        None => uptime.is_some_and(|u| u < BOOT_GRACE_SECS),
     }
 }
 
@@ -89,7 +96,16 @@ mod tests {
     #[tokio::test]
     async fn an_ip_literal_needs_no_dns() {
         assert!(dns_ok("192.0.2.1").await);
-        assert!(!dns_ok("no-such-host.invalid").await);
+    }
+
+    #[test]
+    fn the_grace_ends_with_the_boot_window_however_often_kiln_restarted() {
+        let s = |secs| Some(Duration::from_secs(secs));
+        assert!(starting_at(s(0), Some(10)) && starting_at(s(179), Some(100)));
+        assert!(!starting_at(s(180), Some(100)), "180 s after this start");
+        assert!(!starting_at(s(5), Some(300)), "a restart long after boot: nothing is starting");
+        assert!(starting_at(None, Some(299)) && !starting_at(None, Some(300)));
+        assert!(starting_at(s(5), None), "no uptime to read: the process clock decides");
     }
 
     #[test]

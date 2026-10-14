@@ -42,6 +42,7 @@
  /* surfaces, low to high: page, card, raised (buttons, menus), overlay; sunk = wells (code, logs) */
  --bg:#0A0A0A;--s1:#171717;--s2:#202020;--s3:#242424;--sunk:#000;
  /* per-VM series, fixed order (validated for CVD on #171717): identity only, never state */
+ --g1:#4da3e0;--g2:#f08a3c;--g3:#2fc49a;--g4:#e8c23a;--g5:#a98be0;--g6:#e57db0;
  --v1:#3987e5;--v2:#d95926;--v3:#199e70;--v4:#c98500;--v5:#d55181;--v6:#008300;--v7:#9085e9;--v8:#e66767;
  --surface:var(--s1);--raised:var(--s2);--muted:#262626;--field:rgb(255 255 255/.035);--seg-on:#0A0A0A;
  --line:rgb(255 255 255/.18);--line-strong:rgb(255 255 255/.36);
@@ -69,6 +70,7 @@
 }
 :root[data-scheme=light]{color-scheme:light;
  --bg:#F5F5F5;--s1:#FFF;--s2:#FFF;--s3:#FAFAFA;--sunk:#EBEBEB;--muted:#EBEBEB;--field:#FFF;--seg-on:#FFF;
+ --g1:#0072b2;--g2:#d55e00;--g3:#00805f;--g4:#9c7a00;--g5:#7f4fb5;--g6:#b83b80;
  --v1:#2a78d6;--v2:#eb6834;--v3:#1baf7a;--v4:#eda100;--v5:#e87ba4;--v6:#008300;--v7:#4a3aa7;--v8:#e34948;
  --line:rgb(0 0 0/.21);--line-strong:rgb(0 0 0/.45);
  --hover:rgb(0 0 0/.04);--active:rgb(0 0 0/.07);
@@ -180,8 +182,23 @@ main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity va
 a.ch{background:var(--s1);color:var(--fg);box-shadow:var(--e1),inset 0 2px var(--queued);transition:box-shadow var(--ease),background var(--ease)}
 a.ch:hover{box-shadow:var(--e2),inset 0 2px var(--queued);background:var(--s2)}
 /* a running slot: the one ember moment, as a status colour */
-a.ch.run{background:color-mix(in srgb,var(--ember) 9%,var(--s1));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ember) 40%,transparent),inset 0 2px var(--ember)}
-a.ch.run:hover{background:color-mix(in srgb,var(--ember) 13%,var(--s1))}
+/* A running card burns at its edges like paper. The effect is pre-recorded (scripts/burn/record.py renders the live
+   SVG-noise version offline): two sprite sheets per scheme and variant, frames stacked in a column, played back by
+   stepping border-image-slice. .burn is the sharp edge (char, ember rim, hot spots, at 2x), ::before the soft scorch
+   under it (1x). Each sheet is a 3-slice: 36px caps, the middle stretches to the card's width, so any width works.
+   --d desyncs cards (a negative delay; a re-render re-pins it to page time), --fx/--fy mirror them, .b0/.b1 pick the
+   sheet. Reduced motion shows frame 8, still. 40 frames per 13/3 s loop. */
+a.ch.run{position:relative;isolation:isolate;overflow:hidden;background:color-mix(in srgb,var(--ember) 7%,var(--s1));box-shadow:none;
+ --e:url(/burn/dark-0.webp?v={{KILN_VERSION}});--s:url(/burn/dark-0s.webp?v={{KILN_VERSION}})}
+a.ch.run.b1{--e:url(/burn/dark-1.webp?v={{KILN_VERSION}});--s:url(/burn/dark-1s.webp?v={{KILN_VERSION}})}
+:root[data-scheme=light] a.ch.run{--e:url(/burn/light-0.webp?v={{KILN_VERSION}});--s:url(/burn/light-0s.webp?v={{KILN_VERSION}})}
+:root[data-scheme=light] a.ch.run.b1{--e:url(/burn/light-1.webp?v={{KILN_VERSION}});--s:url(/burn/light-1s.webp?v={{KILN_VERSION}})}
+a.ch.run:hover{background:color-mix(in srgb,var(--ember) 12%,var(--s1));box-shadow:none}
+a.ch.run::before,.burn{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;border:solid transparent;border-width:0 36px;border-image-width:0 36px;
+ transform:scale(var(--fx,1),var(--fy,1));animation:bfe 4.3333s steps(40) var(--d,0s) infinite;border-image-source:var(--e);border-image-slice:1024 72 4096 72 fill}
+a.ch.run::before{z-index:-2;border-image-source:var(--s);border-image-slice:512 36 2048 36 fill;animation-name:bfs}
+@keyframes bfe{from{border-image-slice:0 72 5120 72 fill}to{border-image-slice:5120 72 0 72 fill}}
+@keyframes bfs{from{border-image-slice:0 36 2560 36 fill}to{border-image-slice:2560 36 0 36 fill}}
 .ch .tx{flex:1;min-width:0}.ch .tx>*{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ch .tm{font-size:17px;font-weight:600;letter-spacing:-.01em}
 /* stats */
@@ -747,7 +764,7 @@ function forgeBanners(F, p, vms, t) {
   }
   return out;
 }
-// A refused job has its own status (`refused`), so it is never a failure here: no red count, no title flip, no alert.
+// A refused job has its own status (`refused`), so it is never a failure here: no red count, no title flip, no browser notification.
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -787,7 +804,7 @@ const HELP = {
   autoupdate: ["Updates", "kiln downloads a newer release, checks its signature, waits for running jobs, restarts, and goes back to the old version if the new one fails to start twice. Auto update does this by itself when no job is running.", "updates"],
   restart: ["Restart", "Restart when idle drains first: no new VMs start, running jobs finish, then kiln restarts. Restart now kills running jobs, and they fail on their forge.", "updates"],
   rules: ["Workflow rules", "Send the result of chosen workflows to chosen destinations. A GitLab repo has no workflow files, so its rules use the name `pipeline`.", "notify-rules"],
-  events: ["Alert types", "Jobs: a job failed, timed out, was killed or lost. Health: something stops launches. Security: a setting or a token changed. Refused jobs send nothing.", "alerts"],
+  events: ["Alert types", "Jobs: a job failed, timed out, was killed or lost. Health: something stops launches. Security: a setting, a token or a forge's project list changed. A job refused by policy sends nothing; one kiln refused because it could not decide (it failed closed) sends a job refused alert.", "alerts"],
   warmbudget: ["Warm VM budget", "Warm VMs count against Max VMs: a slot held by a warm VM can't run another job.", "warm"],
   timeouts: ["Timeouts", "Job timeout: longest a job may run. Idle timeout: a VM that gets no job is killed after this. Poll interval: how often kiln asks each forge for queued jobs. Stop grace: how long running jobs get to finish on `systemctl stop`.", "stuck"],
   cachebranches: ["Cache branches", "Besides the default branch, successful pushes to these branches may also save the repo's cache. Pull requests and tags never do.", "cache-trust"],
@@ -1266,7 +1283,9 @@ function meter(l, val, max, txt, t) {
 // the chart interpolates, never guesses, and scrolls every frame instead of jumping per sample.
 const LAG = 4500, HV = { open: lsGet('kiln-hostx') === '1', win: +lsGet('kiln-hostwin') || 300, buf: [], base: -Infinity, shown: null, raf: 0, hover: null, tipKey: '' };
 const still = () => { const m = document.documentElement.dataset.motion; return m === 'reduce' || (m !== 'full' && matchMedia('(prefers-reduced-motion: reduce)').matches); };
-const vcol = k => `var(--v${k + 1})`;
+// Six colours rotate over the per-VM sequence number the sampler gives each new VM.
+const gcol = k => `var(--g${k % 6 + 1})`;
+const vcol = gcol;
 const vmName = id => { const v = S.vms.find(x => x.id === id); return v ? `${v.repo.split('/').pop()} / ${jt(v)}` : id; };
 const fmtC = c => c.toFixed(1) + ' cores', fmtM = mb => (mb / 1024).toFixed(1) + ' GB';
 const winTxt = w => w < 3600 ? w / 60 + 'm' : '1h';
@@ -1288,10 +1307,29 @@ async function hvLoad() {
   hvKick();
 }
 function hvKick() { if (HV.open && !HV.raf) HV.raf = requestAnimationFrame(hvDraw); }
-// Stack layers of one sample, bottom to top: VMs by colour slot, then the rest of the host.
+// Stack layers of one sample, bottom to top: VMs by sequence number, then the rest of the host.
 function layers(s, key) {
   const i = key === 'cpu' ? 2 : 3, out = s.vms.map(v => ({ k: v[0], id: v[1], v: v[i] }));
   out.push({ k: 'h', id: 'h', v: Math.max(0, s[key] - out.reduce((a, l) => a + l.v, 0)) });
+  return out;
+}
+// Stacked columns {t, L: [{id, k, lo, hi}]} for samples `vis`. A VM exists only in the columns
+// of samples that list it: where the set of VMs changes, an extra column steps the other
+// layers at the VM's last (or first) sample, so its band ends (or starts) with a vertical edge
+// and is never carried to the next sample.
+function hvCols(vis, key) {
+  const col = (s, t, only) => { let acc = 0; return { t, L: layers(s, key).filter(l => l.k === 'h' || !only || only.has(l.id)).map(l => ({ id: l.id, k: l.k, lo: acc, hi: acc += l.v })) }; };
+  const out = [];
+  vis.forEach((s, i) => {
+    const p = vis[i - 1];
+    if (p) {
+      const a = new Set(p.vms.map(v => v[1])), b = new Set(s.vms.map(v => v[1])), com = new Set([...a].filter(x => b.has(x)));
+      const ended = a.size > com.size, started = b.size > com.size;
+      if (ended && !started) out.push(col(s, p.t, com));
+      else if (started && !ended) out.push(col(p, s.t, com));
+    }
+    out.push(col(s, s.t));
+  });
   return out;
 }
 function chart(id, key, max, tR, cs) {
@@ -1308,23 +1346,31 @@ function chart(id, key, max, tR, cs) {
   let a = HV.buf.findIndex(s => s.t >= t0); if (a < 0) return; a = Math.max(0, a - 1);
   let b = HV.buf.findIndex(s => s.t > tR); b = b < 0 ? HV.buf.length : b + 1;
   const vis = HV.buf.slice(a, b); if (vis.length < 2) return;
-  const keys = [...new Set(vis.flatMap(s => s.vms.map(v => v[0])))].sort((x, y) => x - y).concat('h');
-  const stacks = vis.map(s => { const m = new Map(layers(s, key).map(l => [l.k, l.v])); let acc = 0; return keys.map(k => [acc, acc += m.get(k) || 0]); });
-  const xs = vis.map(s => X(s.t));
-  keys.forEach((k, j) => {
-    const c = k === 'h' ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--v${k + 1}`);
-    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
-    for (let i = xs.length - 1; i >= 0; i--) g.lineTo(xs[i], Y(stacks[i][j][0]));
-    g.closePath(); g.fillStyle = c; g.globalAlpha = k === 'h' ? .18 : .32; g.fill();
-    g.beginPath(); xs.forEach((x, i) => g.lineTo(x, Y(stacks[i][j][1])));
-    g.strokeStyle = c; g.globalAlpha = k === 'h' ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
-  });
+  const cols = hvCols(vis, key), xs = cols.map(c => X(c.t));
+  const ids = [...new Set(cols.flatMap(c => c.L.map(l => l.id)))];
+  for (const vid of ids) {
+    // A band is one run of consecutive columns that list this VM.
+    let run = [];
+    const flush = () => {
+      if (run.length) {
+        const k = run[0][1].k, host = k === 'h', c = host ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--g${k % 6 + 1}`);
+        g.beginPath(); run.forEach(([x, l]) => g.lineTo(x, Y(l.hi)));
+        for (let i = run.length - 1; i >= 0; i--) g.lineTo(run[i][0], Y(run[i][1].lo));
+        g.closePath(); g.fillStyle = c; g.globalAlpha = host ? .18 : .32; g.fill();
+        g.beginPath(); run.forEach(([x, l]) => g.lineTo(x, Y(l.hi)));
+        g.strokeStyle = c; g.globalAlpha = host ? .55 : 1; g.lineWidth = 1.5 * dpr; g.lineJoin = g.lineCap = 'round'; g.stroke(); g.globalAlpha = 1;
+      }
+      run = [];
+    };
+    cols.forEach((c, i) => { const l = c.L.find(l => l.id === vid); if (l) run.push([xs[i], l]); else flush(); });
+    flush();
+  }
   const h = HV.hover; if (!h || h.id !== id) return;
   // Only samples on screen: vis also holds one past each edge, for the interpolation.
   const t = t0 + h.x / r.width * win; let n = -1;
   vis.forEach((s, i) => { if (s.t >= t0 && s.t <= tR && (n < 0 || Math.abs(s.t - t) < Math.abs(vis[n].t - t))) n = i; });
   if (n < 0) return hvTip(null);
-  const x = Math.round(xs[n]) + .5;
+  const x = Math.round(X(vis[n].t)) + .5;
   g.strokeStyle = cs.getPropertyValue('--fg-2'); g.lineWidth = dpr; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
   hvTip(vis[n], key, r.left + x / dpr, r.top);
 }
@@ -1369,6 +1415,14 @@ function stackBar(el, parts) {
   }
   parts.forEach((p, i) => { el.children[i].style.width = Math.min(100, p.w).toFixed(2) + '%'; });
 }
+// Legend rows: every VM seen in the window (newest first) with its values now, if still running, then the host.
+function hvLegend(last) {
+  const t0 = last.t - HV.win * 1000, seen = new Map();
+  for (const s of HV.buf) if (s.t >= t0) for (const v of s.vms) seen.set(v[1], v[0]);
+  const now = Object.fromEntries(layers(last, 'cpu').map((l, i) => [l.id, [l.v, layers(last, 'mem')[i].v]]));
+  const rows = [...seen].reverse().map(([id, k]) => ({ k, id, cpu: now[id]?.[0], mem: now[id]?.[1] }));
+  return [...rows, { k: 'h', id: 'h', cpu: now.h[0], mem: now.h[1] }];
+}
 function hostCard() {
   const h = S.host, s = h.samples?.at(-1), used = h.mem_total_mb - h.mem_avail_mb, l = h.load.map(Number);
   if (hvMerge(h.samples) && HV.open) hvLoad();
@@ -1383,7 +1437,7 @@ function hostCard() {
   m('hm-mem', mem, h.mem_total_mb, `${fmtM(mem)} / ${fmtM(h.mem_total_mb)}`, s ? layers(s, 'mem').map(x => ({ k: x.k, w: x.v / h.mem_total_mb * 100 })) : [{ k: 'h', w: used / h.mem_total_mb * 100 }],
     "Host memory in use, coloured by job VM (its QEMU's resident memory); grey is the rest. kiln holds back launches when there isn't enough left for another VM.");
   $('#hm-disk [data-v]').textContent = h.disk_free_gb + ' GB';
-  setHTML($('#hlg'), s ? layers(s, 'cpu').map((x, i) => `<li><span class="k" style="--c:${x.k === 'h' ? 'var(--fg-3)' : vcol(x.k)}"></span><span class="n">${esc(x.k === 'h' ? 'Host, not VMs' : vmName(x.id))}</span><b>${x.v.toFixed(1)}</b><span class="fg2">· ${fmtM(layers(s, 'mem')[i].v)}</span></li>`).reverse().join('') : '<li class="fg2">Collecting samples…</li>');
+  setHTML($('#hlg'), s ? hvLegend(s).map(x => `<li><span class="k" style="--c:${x.k === 'h' ? 'var(--fg-3)' : vcol(x.k)}"></span><span class="n">${esc(x.k === 'h' ? 'Host, not VMs' : vmName(x.id))}</span>${x.cpu == null ? '<span class="fg2">ended</span>' : `<b>${x.cpu.toFixed(1)}</b><span class="fg2">· ${fmtM(x.mem)}</span>`}</li>`).join('') : '<li class="fg2">Collecting samples…</li>');
   if (still()) hvKick();
 }
 const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="${HV.open}" aria-controls="hx">Host${ic('next')}</button></h2>
@@ -1422,12 +1476,15 @@ pages.overview = {
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(stTip(status(v), v))}>${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${repoLabel(F, v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
+      const h = [...v?.id || ''].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+      tiles.push(v ? `<a class="ch${v.state === 'busy' ? ` run b${h % 2}` : ''}"${v.state === 'busy' ? ` style="--d:-${h % 433 / 100}s;--fx:${h & 2 ? -1 : 1};--fy:${h & 4 ? -1 : 1}"` : ''} href="#/jobs/${encodeURIComponent(v.id)}"${tip(stTip(status(v), v))}>${v.state === 'busy' ? '<span class="burn" aria-hidden="true"></span>' : ''}${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${repoLabel(F, v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
         : `<div class="ch"${(i === act.length ? kt : tip)('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
     setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    // Pin the burn loops to page time so a re-render continues them instead of restarting.
+    for (const a of $('#ov-now').getAnimations({ subtree: true })) if (a.animationName) a.startTime = 0;
     setHTML($('#ov-stats'), stats());
     const rec = S.vms.slice(0, 8), f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 15 * 60).slice(0, 3).filter(v => !rec.includes(v)); // the ones Recent jobs shows already are not listed twice
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures${hq('failures')}</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
@@ -1521,7 +1578,7 @@ const jl = new Map();
 // A refused job's note: neutral, not red, with what to do. `?` appears once HELP.refused exists.
 function refusedBox(v, fg) {
   const why = refusedWhy(v), n = fname(fg);
-  return `<div class="cal neu"><b>Refused by kiln:</b> ${esc(why)}${hqIf('refused')}<p class="sm" style="margin-top:4px">No job code ran, and kiln counts this as neither a failure nor an alert. ${/fork/i.test(why) ? `Fork pull requests are never run on this box. Cancel it on ${esc(n)}, or run forks on ${esc(n)}'s own runners.` : 'If you did not expect it, check Settings › Diagnostics.'}</p></div>`;
+  return `<div class="cal neu"><b>Refused by kiln:</b> ${esc(why)}${hqIf('refused')}<p class="sm" style="margin-top:4px">No job code ran, and this is not a failure. A policy refusal sends no alert; if kiln failed closed (it could not decide) you get a job refused alert. ${/fork/i.test(why) ? `Fork pull requests are never run on this box. Cancel it on ${esc(n)}, or run forks on ${esc(n)}'s own runners.` : 'If you did not expect it, check Settings › Diagnostics.'}</p></div>`;
 }
 async function loadLinks(v) {
   jl.set(v.id, null);
@@ -1836,7 +1893,6 @@ const FX = {
   gitlab: { name: 'GitLab', unit: 'project', url: 'https://gitlab.example.com', tok: 'glpat-…', path: 'group/project' },
   gitea: { name: 'Gitea', unit: 'repo', url: 'https://gitea.example.com', tok: 'access token', path: 'owner/repo' },
 };
-const fgPreview = f => f.launches !== false ? '' : `<div class="cal w" style="margin:0 0 16px"><b>${fname(f)} support is in preview:</b> jobs will not run until enabled. kiln reads this ${FX[f.kind].unit}'s queue and ${f.kind === 'gitea' ? 'runs' : 'pipelines'}, but starts no VMs for ${fname(f)} yet.</div>`;
 const fgTokenHelp = f => f.kind === 'gitea'
   ? `Scopes: <code>write:repository</code> and <code>read:user</code>. <a href="${forgeUrl(f, f.url + '/user/settings/applications')}" target="_blank" rel="noopener">Create it ↗</a> opens Gitea's applications page: sign in as the service account first, name the token and tick those two. The account must be the repo's <b>Owner</b> (see below).`
   : `Scopes: <code>create_runner</code>, <code>manage_runner</code>, <code>read_api</code>. <a href="${glTokenUrl(f)}" target="_blank" rel="noopener">Create it ↗</a> opens GitLab with those filled in; sign in as the bot user first.`;
@@ -1899,7 +1955,7 @@ const forgeCard = () => ({
     const id = esc(f.id), gt = f.kind === 'gitea', x = FX[f.kind], ci = gt ? '.gitea/workflows/ci.yml' : '.gitlab-ci.yml', set = f.auth?.source && f.auth.source !== 'none';
     return `<div class="card" id="fc-${id}"><h2>${x.name} <span class="fg2 sm" style="font-weight:400">${id}</span>${hq(f.kind)}<span class="sv">Each button saves at once</span></h2>
         <details class="fcb" data-id="${id}"${FOPEN[f.id] ?? !fgOk(f) ? ' open' : ''}><summary id="fc-${id}-sum"></summary>
-        <div id="fc-${id}-pv"></div><div id="fc-${id}-st"></div>
+        <div id="fc-${id}-st"></div>
         <h3 style="font-size:15px;margin:24px 0 8px">${gt ? 'Repos' : 'Projects'}</h3>
         <div id="fc-${id}-rp"></div>${fgRepoForm(f)}
         <div class="bar" style="margin:20px 0 0"><button class="btn" data-act="forgetest" data-id="${id}"${tip(`Ask ${x.name} who the token is${gt ? ', its version' : ', what it can do'}, and ${gt ? 'whether the account can register runners' : 'its role'} on each ${x.unit}. Creates nothing.`)}>${ic('pulse')}Test</button></div>
@@ -1913,7 +1969,6 @@ const forgeCard = () => ({
     const id = f.id, at = f.auth || {}, gt = f.kind === 'gitea', sc = gt ? null : glScopes(at), set = at.source && at.source !== 'none', dl = at.expires ? daysLeft(at.expires, now()) : null;
     const q = k => $(`#fc-${id}-${k}`), cp = f.caps || {};
     setHTML(q('sum'), `<span>${set ? 'Token set' : '<span class="fail">No token</span>'} · ${f.repos.length} ${FX[f.kind].unit}${f.repos.length === 1 ? '' : 's'} · ${fgOk(f) ? '<span class="ok">healthy</span>' : '<span class="warn">needs attention</span>'}</span>`);
-    setHTML(q('pv'), fgPreview(f));
     const note = [];
     if (!set) note.push('<div class="cal w">No token yet, so kiln cannot see this forge\'s queue. Paste one below.</div>');
     else if (f.health) note.push(`<div class="cal w">${esc(f.health)}</div>`);
@@ -2223,7 +2278,7 @@ function bars(cols, ser, fmt, label, k) {
 }
 // One colour per VM size on every chart: by its place among all sizes kiln has seen.
 const allSizes = () => [...new Set([...S.vms.map(v => v.cpus), ...(S.usage || []).map(u => u[1])])].sort((a, b) => a - b);
-const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', vcol(all.indexOf(c) % 8)]); };
+const sizeSer = cs => { const all = allSizes(); return cs.sort((a, b) => a - b).map(c => [c, c ? c + ' cpu' : 'Unknown size', `var(--v${all.indexOf(c) % 8 + 1})`]); };
 function anHTML() {
   const B = anBuckets(AN.r), t0 = B[0][0], st = (l, v, t, x = '') => `<div class="stat"${kt(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
   const jobs = S.vms.filter(v => v.busy_since >= t0 && !ACTIVE(v) && jobEnd(v) && (!AN.repo || v.repo === AN.repo) && (!AN.cpus || v.cpus === AN.cpus));
@@ -2403,7 +2458,6 @@ pages.setup = {
     const pick = `<div class="seg" role="radiogroup" aria-label="Forge">${[['github', 'GitHub'], ['gitlab', 'GitLab'], ['gitea', 'Gitea']].map(([k, l]) => `<button role="radio" aria-checked="${xk === k}" data-act="sufg" data-id="${k}">${l}</button>`).join('')}</div>`;
     const sum = useGl ? [`${xn} <b>${esc(gl?.id)}</b>${gl?.auth?.login ? ` as <b>${esc(gl.auth.login)}</b>` : ''}`, (gl?.repos || []).map(k => esc(repoPath(gl.id, k))).join(', '), ''] : [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
       S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
-    const prev = `<div class="cal w" style="margin:0">${xn} support is in preview on this kiln: jobs will not run until it is enabled. You can set everything up now.</div>`;
     $('#su-lead').textContent = useGl ? `Three steps, about 5 minutes once your ${xn} server is added in the first one. Progress is detected automatically, so you can leave and come back.` : 'Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.';
     const bot = gt
       ? `<p class="fg2">Use a separate Gitea user for kiln, a <b>service account</b> such as <code>kiln-bot</code>, not yours. Gitea only gives the runner registration token to a repo's <b>Owner</b>, so the account must either <b>own the repo</b> (put the repo under it) or be a member of the <b>Owners</b> team of an organisation that holds only the repos kiln serves. An Owner can push, change settings and delete the repo, so keep this account to those repos.</p>`
@@ -2419,13 +2473,13 @@ pages.setup = {
       return `<ul class="ck">${rows.map(([on, t]) => `<li><span class="${on ? 'ok' : 'fg3'}">${ic(on ? 'check' : 'dot')}</span><span class="${on ? '' : 'fg3'}">${t}</span></li>`).join('')}</ul>`;
     };
     const glB = !useGl ? null : [
-      `${pick}${gl?.launches === false ? prev : ''}${bot}`
+      `${pick}${bot}`
         + (gl ? `${tokP}${fgTokenForm(gl)}${fgCheckHTML(gl)}${gt ? gtPower() : ''}`
           : `<p class="fg2">Then tell kiln where your ${xn} is (${gt ? 'Gitea 1.25' : 'GitLab 16.0'} or newer). The next thing you do is paste the token.</p>${addForgeForm([], xk)}`),
       gl ? `<p class="fg2">Which ${FX[xk].unit} should kiln take jobs from? Paste its URL or <code>${FX[xk].path}</code>. ${gt ? 'The account must own it or be in its organisation\'s Owners team.' : 'The bot must be Maintainer on it.'}</p>${gl.repos.length ? `<ul class="list" style="width:100%">${gl.repos.map(k => fgRepoRow(gl, k)).join('')}</ul>` : ''}${fgRepoForm(gl)}
         <button class="btn" data-act="forgetest" data-id="${esc(gl.id)}"${tip(`Check the ${gt ? 'account' : 'bot'}'s role on each ${FX[xk].unit}`)}>${ic('pulse')}Test</button>${fgCheckHTML(gl)}${fgWhy403(gl)}` : `<p class="fg2">Connect ${xn || 'a forge'} first.</p>`,
       gl ? `<p class="fg2">Add this as <code>${ciName}</code> in the ${FX[xk].unit} and push. A job ${gt ? `with <code>runs-on: [${esc(JL())}]</code>` : `tagged <code>${esc(JL())}</code>`}, or a size such as <code>${esc(JL())}-4cpu</code>, is for kiln.</p>${cb(ciSnippet(xk, JL()))}
-        ${gl.launches === false ? `<div class="cal w" style="margin:0">${xn} support is in preview on this kiln: jobs will not run until it is enabled. kiln will see the job waiting, but starts no VM for it yet, so it stays ${gt ? 'queued' : 'pending'} in ${xn}.</div>` : jobProgress(gl, xn)}` : '',
+        ${jobProgress(gl, xn)}` : '',
     ];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
@@ -2588,7 +2642,7 @@ const GUIDES = [
   ['gate', 'Fork pull requests and refused jobs', () => `<h2>Fork pull requests and refused jobs</h2>
     <p>kiln never runs code from a fork on your box. A pull request from a fork can contain anything, and a kiln VM can reach your cache and, on an open network, your LAN. So kiln looks at every job before any of its code runs. We call that check the <b>verdict gate</b>.</p>
     <p><b>How the check works.</b> On GitHub, kiln does not count queued fork runs, and a hook in the VM fails a fork job before its first step. On GitLab and Gitea, the host decides: it asks the forge's own API where the job came from, never the job's own variables or claims, and tells the VM <i>run</i>, <i>run clean</i> or <i>refuse</i>. If anything is unclear, kiln refuses.</p>
-    <p><b>What you see.</b> The job gets a <i>refused</i> badge and a neutral note with the reason. No job code ran. A refusal is not a failure: it is not counted in Failed, flips no tab title and sends no alert. The forge usually shows the job as failed or cancelled. Overview may show <i>N jobs from fork pull requests refused</i>, or <i>a pull request from a fork is waiting</i> (on Gitea each such job can still cost a VM, which is refused and killed).</p>
+    <p><b>What you see.</b> The job gets a <i>refused</i> badge and a neutral note with the reason. No job code ran. A refusal is not a failure: it is not counted in Failed and flips no tab title. A policy refusal sends no alert; a refusal because kiln failed closed sends a <i>job refused</i> alert (see below). The forge usually shows the job as failed or cancelled. Overview may show <i>N jobs from fork pull requests refused</i>, or <i>a pull request from a fork is waiting</i> (on Gitea each such job can still cost a VM, which is refused and killed).</p>
     <p><b>Refusals on purpose (policy):</b></p>
     ${table(['Reason', 'What it means', 'What to do'],
       ['pull request from a fork', 'The job came from another repo\'s pull or merge request.', 'Close or cancel it on the forge, or run fork code on the forge\'s own runners. Turn on "approve before run" for forks on the forge.'],
@@ -2629,7 +2683,7 @@ const GUIDES = [
     <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
     <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Start with a Slack or ntfy URL, then click <b>Send test</b>.</p>
     <p>Each destination picks what it gets:</p>
-    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted. A job kiln refused on purpose is not a failure and sends nothing.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears. A check that is only waiting for the network after a restart raises nothing.</li><li><b>Security:</b> settings saved (only the names of what changed), a forge token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted. A job kiln refused on purpose (policy) is not a failure and sends nothing; one kiln failed closed on sends a <i>job refused</i> alert, under Jobs.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears. A check that is only waiting for the network after a restart raises nothing.</li><li><b>Security:</b> settings saved (only the names of what changed), a forge token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
     <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. See <a href="#/guides/notify-rules">Notification rules per forge</a>.</p>
     <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
     <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
@@ -2643,7 +2697,7 @@ const GUIDES = [
     <li><b>outcome</b>: <code>success</code>, <code>failure</code> or <code>any</code>.</li>
     <li><b>to</b>: one to twenty destination ids. The dashboard fills these in.</li></ul>
     <p>A failed job that matches a rule is sent once, to the rules' destinations and to every destination that has Jobs alerts on. A job whose workflow file is unknown matches only <code>*</code>.</p>
-    <p><b>Which events alert.</b> Jobs, Health and Security switches on each destination decide the rest: see <a href="#/guides/alerts">Alerts &amp; webhooks</a>. Refused jobs send no Jobs alert on any forge.</p>
+    <p><b>Which events alert.</b> Jobs, Health and Security switches on each destination decide the rest: see <a href="#/guides/alerts">Alerts &amp; webhooks</a>. Policy refusals send no alert on any forge; fail-closed refusals send a job refused alert under Jobs.</p>
     <p><b>What the message says.</b> For a GitLab or Gitea repo the chat message adds the forge name after the repo, for example <code>gitlab:platform/backend (GitLab)</code>. A link is sent only if it points at that job's own forge. Generic destinations get <code>job.forge</code> (the forge id) and <code>job.forge_kind</code> (<code>github</code>, <code>gitlab</code> or <code>gitea</code>) in the signed JSON.</p>`, 'Alerts and usage', ['alerts', 'forges']],
 
   ['analytics', 'Analytics', () => `<h2>Analytics</h2>
@@ -2746,7 +2800,7 @@ const ACT = {
   },
   hostx(b) { HV.open = !HV.open; lsSet('kiln-hostx', HV.open ? '1' : null); b.setAttribute('aria-expanded', HV.open); $('#hx').hidden = !HV.open; if (HV.open) hvLoad(); else { HV.hover = null; hvTip(null); } },
   hostwin(b) { HV.win = +b.dataset.w; lsSet('kiln-hostwin', HV.win); $$('#hx [data-act=hostwin]').forEach(x => x.setAttribute('aria-checked', x === b)); $$('#hx [data-wl]').forEach(x => { x.textContent = '−' + winTxt(HV.win); });
-    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hvKick(); },
+    $$('#hx canvas').forEach(c => c.setAttribute('aria-label', `${c.dataset.title} use by job VM over the last ${winTxt(HV.win)}; values are listed below`)); rove($('#hx')); hostCard(); hvKick(); },
   async mkapp() {
     const m = await post('/api/app/manifest', { org: ($('#app-org')?.value || '').trim(), https: location.protocol === 'https:' });
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;

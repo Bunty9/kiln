@@ -2,8 +2,6 @@
 //! A repo is `(forge id, path)`. The key is bare `owner/name` on GitHub (every existing key,
 //! `Vm.repo` value and cache file stays valid), else `forge-id:path`.
 
-#![allow(dead_code)] // the call sites arrive with the later forge tasks
-
 pub mod console;
 pub mod gitea;
 pub mod github;
@@ -15,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -283,7 +281,7 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
                 Some(u) => {
                     net::check_forge_url(u, f.network.unwrap_or(Network::Public))
                         .map_err(|e| anyhow::anyhow!("forge {:?}: {e:#}", f.id.as_str()))?;
-                    // Two entries for one server share the install's runner prefix and sweep each other's runners (R4 L-12).
+                    // Two entries for one server share the install's runner prefix and sweep each other's runners.
                     let canon = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
                     if let Some(p) = list[..i].iter().find(|p| p.kind == f.kind && p.url.as_deref().is_some_and(|pu| canon(pu) == canon(u)))
                     {
@@ -380,8 +378,10 @@ pub struct Demand {
     /// Queued fork jobs kiln refuses (never counted in `by_size`).
     pub refused_forks: usize,
     /// Gitea: a queued (not `waiting`) fork job with our labels exists. A fork job runs on any
-    /// matching runner, warm ones included, so kiln launches nothing for the repo meanwhile.
+    /// matching runner, warm ones included. Informational: it shows a banner and blocks no launches.
     pub fork_queued: bool,
+    /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
+    pub lookup_error: Option<String>,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.
@@ -620,14 +620,6 @@ impl Forge {
             Self::Gitea(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
         }
     }
-    /// Whether kiln starts VMs for this forge yet (GitLab and Gitea are in preview until it does).
-    pub fn launches(&self) -> bool {
-        match self {
-            Self::GitHub(_) => true,
-            Self::GitLab(_) => gitlab::LAUNCH_READY,
-            Self::Gitea(_) => gitea::LAUNCH_READY,
-        }
-    }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
@@ -740,7 +732,7 @@ impl Forge {
             Self::Gitea(g) => g.sweep(repo, keep).await,
         }
     }
-    /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
+    /// Whether jobs wait for a host verdict. GitHub's path has no
     /// gate: `kiln-prejob.sh` and the JIT config bind it.
     pub fn gated(&self) -> bool {
         match self {
@@ -771,7 +763,7 @@ impl Forge {
     }
 }
 
-/// The host's call on a gated job (4 of the forge design).
+/// The host's call on a gated job.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Call {
     Ok,
@@ -828,7 +820,7 @@ pub struct VerdictFacts {
     pub unknown_source: bool,
     /// Tag or release.
     pub tag: bool,
-    /// GitLab merge-train ref: target plus every MR ahead of this one, which may include fork MRs (R2b B-L1).
+    /// GitLab merge-train ref: target plus every MR ahead of this one, which may include fork MRs.
     pub train: bool,
 }
 
@@ -873,7 +865,7 @@ pub async fn gate(
         match pause.await {
             Err(e) => return Verdict::refuse(format!("pause failed: {e:#}")),
             Ok(Some(held)) if held.len() != 1 || held[0] != job_id => {
-                // A second job slipped past the pause (R2 L-4): worth a look, as the settle time is one lab measurement.
+                // A second job slipped past the pause: worth a look, as the settle time is one lab measurement.
                 tracing::warn!("verdict gate for job {job_id}: the paused runner holds {} job(s), refusing", held.len());
                 return Verdict::refuse(format!("runner holds {} job(s), not only the one it started", held.len()));
             }
@@ -890,7 +882,7 @@ pub async fn gate(
 /// The live forges. A settings save keeps the same `Arc<Forge>` for every forge whose config did
 /// not change, so client state (ETags, rate limits, App tokens) survives.
 #[derive(Default)]
-pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>);
+pub struct Forges(RwLock<HashMap<ForgeId, (ForgeCfg, Arc<Forge>)>>, Mutex<HashMap<ForgeId, Option<std::time::SystemTime>>>);
 
 impl Forges {
     /// Match the registry to `list`. A forge that cannot be built (bad config) is logged and left out.
@@ -923,6 +915,23 @@ impl Forges {
     pub fn load_tokens(&self, data: &std::path::Path) {
         for f in self.all() {
             f.load_token(data);
+        }
+    }
+
+    /// The tick's cheap re-read: a file credential placed by hand after start, or rotated by a secrets manager,
+    /// is picked up when its file's modification time changes (a stat per forge). A missing file seen first is no change.
+    pub fn reload_changed(&self, data: &std::path::Path) {
+        for f in self.all() {
+            let id = f.id();
+            let at = match std::fs::metadata(token_path(data, &id)) {
+                Ok(m) => m.modified().ok(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                // Unreadable: keep the token in use rather than clearing it on a transient error.
+                Err(_) => continue,
+            };
+            if self.1.lock().unwrap().insert(id, at).flatten() != at {
+                f.load_token(data);
+            }
         }
     }
 
@@ -1000,6 +1009,31 @@ mod tests {
         let mut v = VerdictFacts { ours: true, ..Default::default() };
         f(&mut v);
         v
+    }
+
+    /// A token file placed by hand while kiln runs is picked up by the tick; so is a rotated or removed one.
+    #[test]
+    fn a_hand_placed_token_file_is_read_without_a_restart() {
+        let data = std::env::temp_dir().join(format!("kiln-test-reload-tokens-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(data.join("forges")).unwrap();
+        let cfg: ForgeCfg = serde_json::from_value(json!({"id": "gl", "kind": "gitlab", "url": "https://gitlab.example.org"})).unwrap();
+        let forges = Forges::default();
+        let gh = Arc::new(crate::github::Gh::for_mock("http://127.0.0.1:1"));
+        forges.sync(std::slice::from_ref(&cfg), &gh, &data);
+        let f = forges.get(&cfg.id).unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().unwrap().contains("no token"), "{:?}", f.health());
+        let path = token_path(&data, &cfg.id);
+        std::fs::write(&path, "glpat-abc\n").unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().is_none(), "{:?}", f.health());
+        // Unchanged: no re-read. Removed: the credential goes.
+        forges.reload_changed(&data);
+        std::fs::remove_file(&path).unwrap();
+        forges.reload_changed(&data);
+        assert!(f.health().is_some());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -1223,7 +1257,7 @@ mod tests {
             "case-insensitive duplicate"
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
-        // R4 L-12: two entries for one server.
+        // Two entries for one server.
         assert!(!ok(
             r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitlab","url":"https://X.example.org/"}]"#,
             &[]
@@ -1232,7 +1266,7 @@ mod tests {
             r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitea","url":"https://x.example.org"}]"#,
             &[]
         ));
-        // R4 M-2: adds and removes of non-GitHub forges are seen; edits and GitHub's own entry are not.
+        // Adds and removes of non-GitHub forges are seen; edits and GitHub's own entry are not.
         let l = |j: &str| cfg(j).unwrap().unwrap();
         let (gh, a) = (r#"{"id":"github","kind":"github"}"#, r#"{"id":"a","kind":"gitlab","url":"https://x.example.org"}"#);
         assert_eq!(added_or_removed(&l(&format!("[{gh}]")), &l(&format!("[{gh},{a}]"))).as_deref(), Some("a"));
@@ -1251,6 +1285,7 @@ mod tests {
         assert!(cfg(r#"[{"id":"gl","kind":"nope"}]"#).is_err());
     }
 
+    #[test]
     fn label_matching() {
         let size = |v: Value| job_size(&v, "kiln", 4, false);
         assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));

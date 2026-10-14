@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 const EVERY: Duration = Duration::from_secs(2);
 const KEEP: usize = 1800;
-/// Colour slots the dashboard has; a VM beyond them counts as host load.
-const SLOTS: usize = 8;
 
 #[derive(Serialize, Clone)]
 pub struct Sample {
@@ -21,7 +19,7 @@ pub struct Sample {
     cpu: f32,
     /// MB in use, whole host.
     mem: u64,
-    /// (colour slot, VM id, cores busy, resident MB) per running VM.
+    /// (VM sequence number, VM id, cores busy, resident MB) per running VM.
     vms: Vec<(usize, String, f32, u64)>,
 }
 
@@ -139,14 +137,14 @@ impl PsReader {
     }
 }
 
-/// Keep each VM's slot while it lives; a new VM takes the lowest free one.
-fn assign(slots: &mut HashMap<String, usize>, ids: &[&str]) {
-    slots.retain(|id, _| ids.contains(&id.as_str()));
+/// Number each VM once, in order of first sight; the dashboard picks its colour from this, so
+/// consecutive VMs differ even when a box has two slots. Forgets VMs that are gone.
+fn assign(seqs: &mut HashMap<String, usize>, next: &mut usize, ids: &[&str]) {
+    seqs.retain(|id, _| ids.contains(&id.as_str()));
     for id in ids {
-        if !slots.contains_key(*id)
-            && let Some(free) = (0..SLOTS).find(|s| !slots.values().any(|v| v == s))
-        {
-            slots.insert(id.to_string(), free);
+        if !seqs.contains_key(*id) {
+            seqs.insert(id.to_string(), *next);
+            *next += 1;
         }
     }
 }
@@ -155,14 +153,14 @@ pub async fn run(app: Arc<App>) {
     let mut last: Option<(u64, u64, usize)> = None;
     let mut last_vm: HashMap<String, u64> = HashMap::new();
     let mut warned = false;
-    let mut slots = HashMap::<String, usize>::new();
+    let (mut seqs, mut next) = (HashMap::<String, usize>::new(), 0);
     let (mut procfs, mut ps) = (ProcReader::default(), PsReader::default());
     let mut tick = tokio::time::interval(EVERY);
     loop {
         tick.tick().await;
         let ids: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        assign(&mut slots, &ids);
+        assign(&mut seqs, &mut next, &ids);
         let reading = if platform::MACOS { ps.read(&ids) } else { procfs.read(&ids) };
         let Some(Reading { host: now, vms: vm_now }) = reading else {
             if !std::mem::replace(&mut warned, true) {
@@ -180,7 +178,7 @@ pub async fn run(app: Arc<App>) {
                 .iter()
                 .filter_map(|(id, &(t, mb))| {
                     let busy = last_vm.get(id).map_or(0.0, |&p| t.saturating_sub(p) as f32 / per_cpu);
-                    Some((*slots.get(id)?, id.clone(), (busy * 100.0).round() / 100.0, mb))
+                    Some((*seqs.get(id)?, id.clone(), (busy * 100.0).round() / 100.0, mb))
                 })
                 .collect();
             vms.sort_by_key(|v| v.0);
@@ -211,10 +209,28 @@ mod tests {
         assert_eq!(cpu_ticks("cpu  100 0 50 800 50 0 0 0 40 0\ncpu0 1 2\ncpu1 3 4\nintr 5"), Some((150, 1000, 2)));
         assert_eq!(proc_ticks("123 (qemu-system-x86) S 1 2 3 4 5 6 7 8 9 10 700 30 0"), Some(730));
         assert_eq!(proc_ticks("9 (a) b) R 1 2 3 4 5 6 7 8 9 10 5 6"), Some(11), "comm may hold ')'");
-        let mut s = HashMap::new();
-        assign(&mut s, &["a", "b", "c"]);
-        assign(&mut s, &["a", "c", "d"]);
-        assert_eq!((s["a"], s["c"], s["d"]), (0, 2, 1), "survivors keep colour, newcomer takes the freed slot");
+        let (mut s, mut n) = (HashMap::new(), 0);
+        assign(&mut s, &mut n, &["a", "b", "c"]);
+        assign(&mut s, &mut n, &["a", "c", "d"]);
+        assert_eq!((s["a"], s["c"], s["d"]), (0, 2, 3), "survivors keep their number, a newcomer gets a fresh one");
+        assert!(!s.contains_key("b"));
+        assign(&mut s, &mut n, &["d"]);
+        assign(&mut s, &mut n, &["d", "b"]);
+        assert_eq!(s["b"], 4, "a VM seen again later is new, not a recycled number");
+    }
+
+    #[test]
+    fn vm_gone_from_later_samples() {
+        let mut procs = ProcReader::default();
+        // A pid that no longer exists is dropped, so the VM is absent from the reading.
+        procs.pids.insert("vm-1".into(), u32::MAX);
+        let r = procs.read(&["vm-1"]);
+        assert!(r.is_none_or(|r| !r.vms.contains_key("vm-1")));
+        assert!(procs.pids.is_empty());
+        // And a VM no longer wanted is dropped even if its pid lives.
+        procs.pids.insert("vm-2".into(), std::process::id());
+        let r = procs.read(&[]);
+        assert!(r.is_none_or(|r| r.vms.is_empty()));
     }
 
     #[test]

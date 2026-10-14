@@ -133,8 +133,8 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 ## Features
 
 - One VM per job, QEMU/KVM with direct kernel boot, on a qcow2 overlay of a frozen base image. Deleting the overlay erases the job.
-- Rootless: needs only `/dev/kvm` and QEMU. Runs as a systemd user service. Each VM's QEMU runs under seccomp and, where the kernel supports it, Landlock.
-- JIT runners (single-use, auto-deregistering) so no long-lived registration token sits on disk.
+- Rootless: needs only `/dev/kvm` and QEMU. Runs as a systemd user service. On Linux each VM's QEMU runs under seccomp and, where the kernel supports it, Landlock; on macOS it has neither (see [SECURITY.md](SECURITY.md#vmm-confinement)).
+- Single-use runner credentials (a JIT runner on GitHub, a per-job credential on GitLab and Gitea), so no job VM holds a reusable registration token.
 - VM sizes chosen by label: `kiln`, `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu`, `kiln-16cpu`.
 - Demand-based scheduling by queued-job count, with memory, vCPU and disk gates and per-repo failure backoff.
 - Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch (or a configured cache branch such as `dev`) writes it. Tag and release builds run without it.
@@ -145,7 +145,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - GitHub, GitLab and Gitea in one kiln, each with its own token, projects and trust rules.
 - Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
 - Installable as an app (PWA) over Tailscale HTTPS, with its own window, icon and shortcuts. See [Install as an app](docs/configuration.md#install-as-an-app).
-- Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
+- Auto-rebake of the base image when the GitHub runner version or image age goes stale, or the baked Node versions change.
 - Fork pull requests refused by kiln itself, before any of their code runs.
 - Signed self-updates that roll back if the new version fails to start.
 - Baked Node versions of your choice (`bake_node_versions`) for offline `setup-node`.

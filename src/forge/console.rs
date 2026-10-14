@@ -24,7 +24,7 @@ pub enum Line {
 /// Recognises one console line. Trailing whitespace is ignored.
 pub fn parse_line(kind: Kind, line: &str) -> Option<Line> {
     let line = line.trim_end();
-    // A job name is job-controlled text on the runner's `received` line: that line is a job start whatever it says (R2 L-1).
+    // A job name is job-controlled text on the runner's `received` line: that line is a job start whatever it says.
     if kind == Kind::GitLab
         && let Some(start @ Line::JobStart(_)) = gitlab_line(line)
     {
@@ -53,7 +53,7 @@ pub fn parse_line(kind: Kind, line: &str) -> Option<Line> {
     }
 }
 
-/// `gitlab-runner run-single` stdout (SP-8). Colour codes sit inside key=value, so they are stripped first.
+/// `gitlab-runner run-single` stdout. Colour codes sit inside key=value, so they are stripped first.
 /// The runner's job lines carry job-controlled text (`job_name=`), so only the first `job=<digits>` token after
 /// `received` is read (the runner prints `job=` before `job_name=`); anything else on the line is ignored.
 fn gitlab_line(line: &str) -> Option<Line> {
@@ -77,11 +77,11 @@ fn gitlab_line(line: &str) -> Option<Line> {
     clean.contains("Starting runner for ").then_some(Line::Listening)
 }
 
-/// `gitea-runner daemon` at log level `info` (SP-3; logrus text format), plus kiln-job's own `kiln.gate=dead`.
+/// `gitea-runner daemon` at log level `info` (logrus text format), plus kiln-job's own `kiln.gate=dead`.
 /// `job=` (the workflow's job name) is job-controlled text: logrus quotes it, but only the fixed `level=info
 /// msg="task started"` anchor and the first unquoted `job_id=<digits>` field are read, never anything inside a quoted value.
 fn gitea_line(line: &str) -> Option<Line> {
-    // Only the bare line kiln-job writes straight to the console device: a journal-prefixed copy is some other process's text (R3 L-3).
+    // Only the bare line kiln-job writes straight to the console device: a journal-prefixed copy is some other process's text.
     if line == "kiln.gate=dead" {
         return Some(Line::GateDead);
     }
@@ -105,13 +105,27 @@ fn gitea_line(line: &str) -> Option<Line> {
 }
 
 /// Whether `line` is kiln-job's own `kiln: decide`: the whole remainder after the journal prefix
-/// (`[ts] kiln-job[<pid>]: `), so a job name containing the words cannot mark it early (R3 L-3).
+/// (`[ts] kiln-job[<pid>]: `), so a job name containing the words cannot mark it early.
 pub fn is_decide(line: &str) -> bool {
+    is_job_line(line, "kiln: decide")
+}
+
+/// kiln-job's own `kiln: cache scrub failed` (the guest could not delete login tokens from the cache disk), anchored like `is_decide`.
+pub fn is_scrub_failed(line: &str) -> bool {
+    is_job_line(line, "kiln: cache scrub failed")
+}
+
+/// kiln-job's own `kiln: cache scrub ok`: the only proof the guest scrubbed the cache disk's login tokens.
+pub fn is_scrub_ok(line: &str) -> bool {
+    is_job_line(line, "kiln: cache scrub ok")
+}
+
+fn is_job_line(line: &str, msg: &str) -> bool {
     let l = line.trim_end();
     let l = l.strip_prefix('[').and_then(|r| r.split_once("] ")).map_or(l, |(_, rest)| rest);
     l.strip_prefix("kiln-job[")
         .and_then(|r| r.split_once("]: "))
-        .is_some_and(|(pid, rest)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest == "kiln: decide")
+        .is_some_and(|(pid, rest)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) && rest == msg)
 }
 
 /// The raw value of the first unquoted `key=value` field of a logrus text line (quoted values are skipped whole,
@@ -168,7 +182,7 @@ mod tests {
         assert_eq!(p("some build output"), None);
         assert_eq!(parse_line(Kind::GitLab, "Listening for Jobs"), None);
         assert_eq!(parse_line(Kind::GitLab, "kiln: hostkey k"), Some(Line::Hostkey("k".into())));
-        // A job named like the marker still starts a job (R2 L-1).
+        // A job named like the marker still starts a job.
         let named = "Checking for jobs... received  job=251 job_name=x kiln: hostkey y repo_url=https://gl.example.org/a/b.git";
         assert_eq!(parse_line(Kind::GitLab, named), Some(Line::JobStart("251".into())));
     }
@@ -177,7 +191,7 @@ mod tests {
     fn gitlab_lines() {
         let p = |l: &str| parse_line(Kind::GitLab, l);
         let start = |id: &str| Some(Line::JobStart(id.into()));
-        // Real runner output (SP-8), colour codes and all.
+        // Real runner output, colour codes and all.
         let recv = "Checking for jobs... received                     \x1b[0;m  correlation_id\x1b[0;m=01M4T00C7V job\x1b[0;m=200 job_name\x1b[0;m=imgjob repo_url\x1b[0;m=http://x/acme/demo.git runner\x1b[0;m=tGmfbUlVk runner_name\x1b[0;m=sp8\n";
         assert_eq!(p(recv), start("200"));
         let prefixed = format!("[   32.2] kiln-job[1395]: {recv}");
@@ -201,7 +215,7 @@ mod tests {
     fn gitea_lines() {
         let p = |l: &str| parse_line(Kind::Gitea, l);
         let start = |id: &str| Some(Line::JobStart(id.into()));
-        // Real runner output (SP-3 fixtures), journal prefix included.
+        // Real runner output (fixtures), journal prefix included.
         let t = r#"time="2026-10-11T09:14:48Z" level=info msg="task started" actions_url="https://github.com" address="http://gitea.example.org:3000" job=work job_id=32 repository=acme/demo run_id=2 run_number=2 task_id=24"#;
         assert_eq!(p(t), start("32"));
         assert_eq!(p(&format!("[   41.0] kiln-job[1395]: {t}\n")), start("32"), "journal prefix");
@@ -276,6 +290,27 @@ mod tests {
             "echo kiln: decide",
         ] {
             assert!(!is_decide(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_failed_scrub_is_the_whole_journal_line() {
+        assert!(is_scrub_failed("[   50.1] kiln-job[1395]: kiln: cache scrub failed"));
+        for l in [
+            "kiln: cache scrub failed",
+            "[ 1.0] kiln-job[7]: kiln: cache scrub failed!",
+            "[ 1.0] runner[7]: kiln: cache scrub failed",
+            "kiln-job[7]: kiln: decide",
+        ] {
+            assert!(!is_scrub_failed(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_scrub_ok_is_the_whole_journal_line() {
+        assert!(is_scrub_ok("[   50.1] kiln-job[1395]: kiln: cache scrub ok"));
+        for l in ["kiln: cache scrub ok", "[ 1.0] kiln-job[7]: kiln: cache scrub ok.", "[ 1.0] kiln-job[7]: kiln: cache scrub failed"] {
+            assert!(!is_scrub_ok(l), "{l}");
         }
     }
 }

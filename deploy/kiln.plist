@@ -33,10 +33,13 @@
   </dict>
   <key>ThrottleInterval</key>
   <integer>5</integer>
-  <!-- SIGTERM: kiln kills its VMs and deregisters runners that never got a job, then launchd
-       kills what is left of the process group. -->
+  <!-- SIGTERM: kiln stops launching, gives running jobs up to stop_grace_secs (default 25) to
+       finish, then kills its VMs and deregisters runners that never got a job (about 20 s). If
+       the job has not exited after ExitTimeOut seconds, launchd sends SIGKILL, so this matches
+       the systemd unit's TimeoutStopSec=600 (stop_grace_secs goes up to 570). kiln reads the
+       timeout from systemd only, so on macOS keep stop_grace_secs plus ~25 s below this. -->
   <key>ExitTimeOut</key>
-  <integer>30</integer>
+  <integer>600</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>

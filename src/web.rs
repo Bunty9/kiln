@@ -110,14 +110,16 @@ async fn bind_listen(data: &std::path::Path, listen: &str) -> anyhow::Result<(to
     Err(e).with_context(|| format!("bind {listen}"))
 }
 
-pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    load_key(&app.data)?;
-    let router = Router::new()
+/// Every route of the dashboard. The guard layer is added by `serve`, around all of them: a route added here is guarded,
+/// and `no_route_answers_without_the_key` reads this very function's text to test each one.
+fn api_router() -> Router<Arc<App>> {
+    Router::new()
         .route("/", get(|| async { Html(PAGE.as_str()) }))
         .route("/manifest.webmanifest", get(manifest))
         .route("/sw.js", get(sw))
         .route("/icon.svg", get(|| async { icon_file("icon.svg") }))
         .route("/icons/{name}", get(|Path(name): Path<String>| async move { icon_file(&name) }))
+        .route("/burn/{name}", get(|Path(name): Path<String>| async move { burn_file(&name) }))
         .route("/api/state", get(state))
         .route("/api/host", get(|| async { Json(crate::host::recent(usize::MAX)) }))
         .route("/api/config", post(set_config))
@@ -158,8 +160,11 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .route("/api/workflows", get(workflows))
         .route("/api/dispatch", post(dispatch))
         .merge(crate::notify::routes())
-        .layer(middleware::from_fn_with_state(app.clone(), guard))
-        .with_state(app.clone());
+}
+
+pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
+    load_key(&app.data)?;
+    let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
     let configured = app.cfg().listen;
     let (listener, addr) = bind_listen(&app.data, &configured).await?;
     *RUNNING_LISTEN.lock().unwrap() = Some(addr.clone());
@@ -530,6 +535,16 @@ fn icon_file(name: &str) -> Response {
     ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=604800")], body).into_response()
 }
 
+/// The pre-recorded burning-card sprite sheets (scripts/burn/record.py): `<scheme>-<variant>[s].webp`.
+fn burn_file(name: &str) -> Response {
+    macro_rules! sheets {
+        ($($n:literal),*) => { match name { $(concat!($n, ".webp") => include_bytes!(concat!("../assets/burn-", $n, ".webp")).as_slice(),)* _ => return StatusCode::NOT_FOUND.into_response() } };
+    }
+    let body: &'static [u8] = sheets!("dark-0", "dark-0s", "dark-1", "dark-1s", "light-0", "light-0s", "light-1", "light-1s");
+    // The dashboard links them with ?v=<version>, so they can be cached for good.
+    ([(header::CONTENT_TYPE, "image/webp"), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], body).into_response()
+}
+
 /// Tailscale reports tagged nodes as this pseudo-login; it names no person.
 const TAGGED: &str = "tagged-devices";
 
@@ -667,19 +682,23 @@ async fn serve_check(sock: &std::path::Path) -> ServeUse {
     v
 }
 
-/// Doctor's (ok, detail); None when tailscale serve can't be read (the tailscale check covers that).
-pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
-    Some(match serve_status(&data.join("serve.sock")).await.ok()? {
-        ServeUse::Unsafe(why) => {
-            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
+/// Doctor's (ok, detail, soft). `soft` is true only for an unreadable config, which at boot can mean tailscaled is
+/// not up yet; an unsafe one is never soft. Admission fails closed on the same failure.
+pub async fn serve_doctor(data: &std::path::Path) -> (bool, String, bool) {
+    match serve_status(&data.join("serve.sock")).await {
+        Err(why) => (false, format!("could not read the tailscale serve config: {why}"), true),
+        Ok(ServeUse::Unsafe(why)) => {
+            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"), false)
         }
         // Identity headers are trusted only from a root peer (see `Via`).
-        ServeUse::Proxied if !tailscaled_is_root() => {
-            (false, "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into())
-        }
-        ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
-        ServeUse::Unused => (true, "kiln's socket is not served".into()),
-    })
+        Ok(ServeUse::Proxied) if !tailscaled_is_root() => (
+            false,
+            "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into(),
+            false,
+        ),
+        Ok(ServeUse::Proxied) => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into(), false),
+        Ok(ServeUse::Unused) => (true, "kiln's socket is not served".into(), false),
+    }
 }
 
 /// Whether a process named tailscaled runs as root (true when none is found: the tailscale check covers that).
@@ -912,7 +931,7 @@ async fn set_config(State(app): S, Json(c): Json<Config>) -> R<(Extension<crate:
         bail_r(&format!("unknown forge setting(s): {}", bad.join(", ")))?;
     }
     // Adds and removes go through /api/forges (an add forces a file token; a remove checks for running VMs): a re-added id
-    // with a new address would otherwise keep reading its environment-variable token (R4 M-2, L-2).
+    // with a new address would otherwise keep reading its environment-variable token.
     if let Some(id) = crate::forge::added_or_removed(&old_forges, &new_forges) {
         bail_r(&format!("forge {id}: forges are added and removed under Forges, not in a config save"))?;
     }
@@ -1410,7 +1429,7 @@ async fn forges_list(State(app): S) -> R<Json<Value>> {
             let c = cfgs.iter().find(|c| c.id == f.id());
             json!({
                 "id": f.id(), "kind": f.kind(), "url": f.web_url(), "caps": f.caps(), "auth": f.auth(), "repos": repos, "health": f.health(),
-                "launches": f.launches(), "network": c.and_then(|c| c.network), "credential": c.and_then(|c| c.credential),
+                "network": c.and_then(|c| c.network), "credential": c.and_then(|c| c.credential),
             })
         })
         .collect();
@@ -1483,15 +1502,26 @@ async fn run_cancel(State(app): S, Path(id): Path<u64>, Query(q): Query<RepoPara
     // GitLab: the VMs die first, even if the cancel fails (the default token scopes cannot cancel, which is
     // also why this comes before the caps check), because the runner only notices a cancel after about a minute.
     // The job lookup also catches a job that started since the last poll.
+    let (mut killed, mut lookup_failed) = (0, None);
     if f.kind() == crate::forge::Kind::GitLab {
-        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_default();
-        vm::kill_pipeline(&app, &repo.key(), id, &jobs);
+        // A failed lookup still kills the VMs the pipeline link identifies; the failure is reported, not swallowed.
+        let jobs = f.pipeline_job_ids(&repo, id).await.unwrap_or_else(|e| {
+            tracing::warn!("{}: pipeline {id}: job lookup failed: {e:#}", repo.key());
+            lookup_failed = Some(format!("{e:#}"));
+            vec![]
+        });
+        killed = vm::kill_pipeline(&app, &repo.key(), id, &jobs);
     }
+    let suffix = match (&lookup_failed, killed) {
+        (None, 0) => String::new(),
+        (None, n) => format!(" ({n} VM(s) killed)"),
+        (Some(e), n) => format!(" ({n} VM(s) killed; job lookup failed: {e})"),
+    };
     if !f.caps().cancel {
-        bail_r(&cannot(&f, "cancel runs"))?;
+        bail_r(&format!("{}{suffix}", cannot(&f, "cancel runs")))?;
     }
     f.cancel(&repo, id).await?;
-    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}", repo.key()))), StatusCode::NO_CONTENT))
+    Ok((Extension(crate::audit::Note(format!("cancel {} run {id}{suffix}", repo.key()))), StatusCode::NO_CONTENT))
 }
 
 #[derive(Deserialize)]
@@ -1567,7 +1597,7 @@ fn edit_forges(app: &App, edit: impl FnOnce(&mut Vec<crate::forge::ForgeCfg>) ->
 
 /// Deletes the saved token and the cache disks of every forge that is in only one of the lists (removed or new).
 /// Both belong to the forge id, so ones left by a removed forge must never be read by a later forge of that name
-/// at another address (R4 M-5). Before the save, so the new forge never loads them. A failed delete fails the save.
+/// at another address. Before the save, so the new forge never loads them. A failed delete fails the save.
 fn drop_stale_forge_files(data: &std::path::Path, old: &[crate::forge::ForgeCfg], new: &[crate::forge::ForgeCfg]) -> anyhow::Result<()> {
     let only_old = old.iter().filter(|o| !new.iter().any(|n| n.id == o.id));
     let only_new = new.iter().filter(|n| !old.iter().any(|o| o.id == n.id));
@@ -2029,6 +2059,40 @@ mod tests {
         assert!(m.requests().is_empty(), "a refusal must not reach the forge: {:?}", m.requests());
     }
 
+    /// A failed job lookup still kills the VMs the pipeline link names, and the answer says what happened.
+    #[tokio::test]
+    async fn a_gitlab_cancel_reports_the_kills_when_the_job_lookup_fails() {
+        let gh = crate::forge_test_mock::Mock::github().await;
+        let gl = crate::forge_test_mock::Mock::start().await;
+        let forges: Vec<crate::forge::ForgeCfg> = serde_json::from_value(json!([
+            { "id": "github", "kind": "github", "repos": ["acme/demo"] },
+            { "id": "gl", "kind": "gitlab", "url": "https://gitlab.example.org", "repos": ["acme/demo"] },
+        ]))
+        .unwrap();
+        let (mut app, _) = crate::tests::tick_app("web-gl-cancel", &gh, Some(forges.clone()));
+        let g = crate::forge::gitlab::GitLab::for_mock(&forges[1], &app.data, &gl.base, "tok");
+        Arc::get_mut(&mut app).unwrap().forges.insert(forges[1].clone(), crate::forge::Forge::GitLab(Box::new(g)));
+        let mut v: crate::vm::Vm = serde_json::from_value(json!({
+            "id": "kiln-1-0", "repo": "gl:acme/demo", "runner_id": 1, "state": "busy", "job": "t", "result": null,
+            "started": 1, "busy_since": 2, "ended": null, "note": null
+        }))
+        .unwrap();
+        let mut run = crate::vm::Run::default();
+        run.links.run = Some("https://gitlab.example.org/acme/demo/-/pipelines/127".into());
+        v.run = Some(run);
+        app.vms.lock().unwrap().push(v);
+        let kill = Arc::new(tokio::sync::Notify::new());
+        app.kills.lock().unwrap().insert("kiln-1-0".into(), kill.clone());
+        // No route for the pipeline's jobs: the lookup fails.
+        let r = run_cancel(State(app.clone()), Path(127), repo("gl:acme/demo")).await;
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok(), "the linked VM is killed");
+        let said = match r {
+            Ok(a) => a.0.0.0,
+            Err(e) => format!("{:#}", e.0),
+        };
+        assert!(said.contains("1 VM(s) killed; job lookup failed"), "{said}");
+    }
+
     #[tokio::test]
     async fn typed_writes_are_only_rerun_cancel_dispatch() {
         let (m, app) = typed("typed-writes").await;
@@ -2061,6 +2125,49 @@ mod tests {
             assert!(audited(&Method::POST, p, true), "{p}");
         }
         assert!(!audited(&Method::GET, "/api/runs", true));
+    }
+
+    /// A job VM reaches the dashboard port as a loopback peer. With a valid Host and `x-kiln` but no dashboard key, no
+    /// route may answer, whatever the method. The route list is read from the router's own source, so a new route is covered.
+    #[tokio::test]
+    async fn no_route_answers_without_the_key() {
+        let src = [include_str!("web.rs"), include_str!("notify.rs")];
+        let mut paths: Vec<String> = vec![];
+        for s in src {
+            for l in s.lines().filter(|l| l.trim_start().starts_with(".route(\"/api/")) {
+                let p = l.trim_start().trim_start_matches(".route(\"").split('"').next().unwrap();
+                let mut p = p.to_string();
+                while let (Some(a), Some(b)) = (p.find('{'), p.find('}')) {
+                    p.replace_range(a..=b, "1");
+                }
+                paths.push(p);
+            }
+        }
+        assert!(
+            paths.len() >= 40 && paths.contains(&"/api/runs/1/cancel".to_string()) && paths.contains(&"/api/notify/1/test".to_string()),
+            "{paths:?}"
+        );
+        let app = App::for_tests();
+        for p in &paths {
+            for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+                let req = Request::builder().method(m.clone()).uri(p.as_str()).header(header::HOST, "localhost:7878").header("x-kiln", "1");
+                let (r, _) =
+                    admission(&app, Via::Tcp("127.0.0.1:5555".parse().unwrap()), req.body(axum::body::Body::empty()).unwrap()).await;
+                assert_eq!(r.err().map(|r| r.status()), Some(StatusCode::UNAUTHORIZED), "{m} {p}");
+            }
+        }
+        // And through the real layer, on a socket: a merged router is guarded too.
+        let router = api_router().layer(middleware::from_fn_with_state(app.clone(), guard)).with_state(app.clone());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = tokio::spawn(axum::serve(l, router.into_make_service_with_connect_info::<Via>()).into_future());
+        let c = reqwest::Client::new();
+        for (m, p) in [(Method::GET, "/api/jobs/1/log?repo=acme/demo"), (Method::GET, "/api/notify"), (Method::POST, "/api/notify/1/test")]
+        {
+            let r = c.request(m.clone(), format!("http://127.0.0.1:{port}{p}")).header("x-kiln", "1").send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "{m} {p}");
+        }
+        server.abort();
     }
 
     #[tokio::test]
@@ -2261,6 +2368,15 @@ mod tests {
         assert_eq!(ty(&png), "image/png");
         assert!(png.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("max-age"));
         assert_eq!(icon_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
+        // every sheet the page links is served, as a WebP
+        let sheets: Vec<&str> = PAGE.split("url(/burn/").skip(1).map(|s| s.split('?').next().unwrap()).collect();
+        assert_eq!(sheets.len(), 8);
+        for f in sheets {
+            let r = burn_file(f);
+            assert_eq!(r.status(), StatusCode::OK, "{f}");
+            assert_eq!(ty(&r), "image/webp");
+        }
+        assert_eq!(burn_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
         // The embedded PNGs are real PNGs of the advertised size.
         for (bytes, px) in [
             (&include_bytes!("../assets/icon-192.png")[..], 192),
@@ -2541,7 +2657,7 @@ mod tests {
         assert!(forge_remove(State(app.clone()), Path("gl".into())).await.is_err());
         app.vms.lock().unwrap().clear();
         assert!(forge_remove(State(app.clone()), Path("github".into())).await.is_err());
-        // Cache disks belong to the forge id (R4 M-5): Repos › Clear reaches them, and removing the forge deletes them.
+        // Cache disks belong to the forge id: Repos › Clear reaches them, and removing the forge deletes them.
         let cdir = app.data.join("cache");
         std::fs::create_dir_all(&cdir).unwrap();
         for f in ["gl~g%2Ftwo.qcow2", "gl~g%2Ftwo+pending.qcow2", "gitea~g%2Ftwo.qcow2", "acme__demo.qcow2"] {
@@ -2627,7 +2743,7 @@ mod tests {
             f["caps"],
             json!({ "rerun": false, "rerun_failed": false, "cancel": false, "dispatch": false, "workflows": false, "live_steps": false })
         );
-        assert_eq!((f["launches"].clone(), f["network"].clone()), (json!(true), json!("public")));
+        assert_eq!(f["network"], json!("public"));
         assert!(!f.to_string().contains("glpat") && !r.to_string().contains("glpat"));
         // The rerun route says why it is refused.
         let e =
@@ -2688,7 +2804,7 @@ mod tests {
             store_token(&app, &id, &f_old, || g_old.adopt(&cand), "tok-b").is_err() && !tok.exists(),
             "the old forge's token must not bind to the new address"
         );
-        // The settings save can neither remove a forge nor add one (R4 M-2, L-2): an environment-token forge removed and
+        // The settings save can neither remove a forge nor add one: an environment-token forge removed and
         // added back at another address would read its token again.
         put("tok-c");
         let mut c = app.cfg();
@@ -2754,14 +2870,14 @@ mod tests {
         let Json(f) = forges_list(State(app.clone())).await.unwrap_or_else(|_| panic!("forges"));
         let f = f.as_array().unwrap().iter().find(|x| x["id"] == "gitea").unwrap().clone();
         assert_eq!((f["auth"]["login"].clone(), f["auth"]["source"].clone()), (json!("kiln-bot"), json!("file")));
-        assert_eq!((f["caps"]["cancel"].clone(), f["launches"].clone()), (json!(true), json!(true)));
+        assert_eq!(f["caps"]["cancel"], json!(true));
         assert!(!f.to_string().contains("tok-secret") && !r.to_string().contains("REG"));
         // The token only ever went to the mock, in the header of Gitea calls.
         assert!(m.log().iter().all(|q| {
             q.auth.as_deref().is_none_or(|a| a == "token tok-secret-1" || a == "token tok-secret-2" || a == "token tok-secret-3")
         }));
     }
-    /// X-3: one kiln, three forges. A save keeps every untouched client; a forge can only change by
+    /// One kiln, three forges. A save keeps every untouched client; a forge can only change by
     /// being removed and added again, which drops its token, so the new client needs one.
     #[tokio::test]
     async fn a_settings_save_keeps_unchanged_forges_and_refuses_moving_adding_or_removing_one() {
@@ -2808,7 +2924,7 @@ mod tests {
         assert!(e.contains("remove the forge and add it again"), "{e}");
         assert!(Arc::ptr_eq(&a_gl, &live("gl")) && token_path(&app.data, &id("gl")).exists());
 
-        // A save neither removes a forge nor adds one (R4 M-2): both go through /api/forges.
+        // A save neither removes a forge nor adds one: both go through /api/forges.
         let e = save(vec![gh.clone(), more(&gt)]).await.unwrap_err();
         assert!(e.contains("not in a config save"), "{e}");
         let e = save(vec![gh.clone(), more(&gt), more(&gl), f("other", "gitea", "https://other.example.org")]).await.unwrap_err();

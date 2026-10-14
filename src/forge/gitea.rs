@@ -1,4 +1,4 @@
-//! The Gitea forge (5.3 of the forge design): demand from the queued-jobs listing with labels
+//! The Gitea forge: demand from the queued-jobs listing with labels
 //! matched client-side, each job joined to its run for event, path and fork status, and the
 //! server version that gates what Gitea can do, runner registration over the connect-RPC JSON
 //! `Register` call, retire and sweep. All HTTP goes through `net` with the forge's network mode.
@@ -38,9 +38,6 @@ const KNOWN_EVENTS: [&str; 7] = ["push", "pull_request", "pull_request_target", 
 const RUNNER_VERSION: &str = "v5.0.0";
 const NOT_OWNER: &str =
     "Gitea refused the runner registration token: the service account must be the repo owner or a member of the organisation's Owners team";
-
-/// Kill switch: when false, demand reports the queue, fork jobs and claims, but no launchable jobs.
-pub const LAUNCH_READY: bool = true;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -101,7 +98,7 @@ pub struct Gitea {
     login: Mutex<Option<String>>,
     version: Mutex<Option<(Ver, Instant)>>,
     runs: Mutex<HashMap<(String, u64), Arc<RunRec>>>,
-    /// Runner id -> VM id, filled when GT-2 registers a runner; claims are looked up by it.
+    /// Runner id -> VM id, filled when a runner is registered; claims are looked up by it.
     tracked: Mutex<HashMap<u64, String>>,
     /// How long `cache_trust` waits between looks for a job that has not completed yet.
     poll: Duration,
@@ -136,7 +133,7 @@ impl Gitea {
     #[cfg(test)]
     pub fn for_mock(web: &str, mock: &str, token: &str) -> Self {
         let cfg: ForgeCfg = serde_json::from_value(json!({ "id": "gitea", "kind": "gitea", "url": web })).unwrap();
-        let mut g = Self::new(&cfg, &std::env::temp_dir()).unwrap();
+        let mut g = Self::new(&cfg, &crate::forge_test_mock::scratch("gitea")).unwrap();
         g.install = "a1b2c3".into();
         g.api = format!("{mock}/api/v1");
         g.client = net::base().build().unwrap();
@@ -482,7 +479,7 @@ impl Gitea {
                 return Ok(out);
             }
         }
-        // Only the queue may be read in part (R4 L-6): a queued fork job holds nothing back any more, so a missed count is
+        // Only the queue may be read in part: a queued fork job holds nothing back any more, so a missed count is
         // harmless, while failing would let anyone who queues that many jobs stop the repo. Running jobs decide whether a
         // runner may be deleted and which VM holds a fork job: a partial view of those fails closed.
         if status != "queued" {
@@ -578,7 +575,7 @@ impl Gitea {
         Ok(RunnerReg { runner_id: id, guest_secret: format!("kiln.forge=gitea\nkiln.cred={cred}") })
     }
 
-    /// Drops a runner kiln registered (retire, 3.3 of the forge design). The `busy` field is never
+    /// Drops a runner kiln registered (retire). The `busy` field is never
     /// consulted: it stays false while a task is assigned.
     /// - 1.26+: disable (no new task), see whether a job is in progress on it, delete only if not.
     ///   A job in progress: leave it, the entry deletes itself when the job ends (`Busy`).
@@ -653,39 +650,49 @@ impl Gitea {
         // Listed in full before anything is deleted, so a delete cannot shift the pages.
         let mut stale = vec![];
         let mut seen = HashSet::new();
+        let tracked: HashSet<u64> = self.tracked.lock().unwrap().keys().copied().collect();
         'pages: {
             for page in 1..=MAX_PAGES {
                 let v = self.get(&format!("repos/{}/actions/runners?limit={PAGE}&page={page}", repo.path)).await?;
                 let runners = v["runners"].as_array().context("runner listing has no runners")?;
                 for r in runners {
                     let Some(id) = r["id"].as_u64().filter(|&id| seen.insert(id)) else { continue };
-                    if r["name"].as_str().is_some_and(|n| n.starts_with(&prefix) && !keep.contains(n)) && r["status"] == "offline" {
+                    // Runners are named `<install>-<vm id>`: `keep` holds the VM ids (a booting VM's runner is offline).
+                    let ours = r["name"].as_str().and_then(|n| n.strip_prefix(&prefix)).is_some_and(|vm| !keep.contains(vm));
+                    if ours && r["status"] == "offline" && !tracked.contains(&id) {
                         stale.push(id);
                     }
                 }
-                if runners.is_empty() || seen.len() >= v["total_count"].as_u64().unwrap_or(0) as usize {
+                // A listing without a count could end after one page with runners unread: fail instead of sweeping in part.
+                if runners.is_empty() {
+                    break 'pages;
+                }
+                if seen.len() >= v["total_count"].as_u64().context("runner listing has no total_count")? as usize {
                     break 'pages;
                 }
             }
             bail!("more than {} runners: not reading further", MAX_PAGES * PAGE)
         }
-        let mut n = 0;
+        let (mut n, mut failed) = (0, vec![]);
         for id in stale {
             match self.retire(repo, id, disable, false).await {
                 Ok(Dereg::Gone) => n += 1,
                 Ok(_) => {}
-                Err(e) => tracing::warn!("{}: stale runner {id}: {e:#}", repo.path),
+                Err(e) => {
+                    tracing::warn!("{}: stale runner {id}: {e:#}", repo.path);
+                    failed.push(format!("{id}: {e:#}"));
+                }
             }
+        }
+        // Reported, so the startup cleanup tries this repo again and a failing sweep is visible.
+        if !failed.is_empty() {
+            bail!("{} of {} stale runner(s) not deleted ({n} were): {}", failed.len(), failed.len() + n, failed.join("; "));
         }
         Ok(n)
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        let mut d = self.demand_with(repo, label, default_cpus, crate::host_threads()).await?;
-        if !LAUNCH_READY {
-            d.by_size.clear();
-        }
-        Ok(d)
+        self.demand_with(repo, label, default_cpus, crate::host_threads()).await
     }
 
     async fn demand_with(&self, repo: &RepoRef, label: &str, default_cpus: u32, host: u32) -> Result<Demand> {
@@ -731,7 +738,7 @@ impl Gitea {
     }
 }
 
-/// The dashboard and the host verdict (GT-3). Every call is for a repo kiln serves; ids that go
+/// The dashboard and the host verdict. Every call is for a repo kiln serves; ids that go
 /// into a path are numbers, and the workflow is a plain file name.
 impl Gitea {
     async fn post(&self, path: &str, body: Option<&Value>) -> Result<()> {
@@ -868,7 +875,7 @@ impl Gitea {
     /// caller's refusal.
     /// The job must also be this VM's: its `runner_id` is `runner_id` and it is `in_progress` (the server
     /// sets both at FetchTask, before the runner logs `task started`), so a console line naming another
-    /// runner's job (a parser differential, a log-format change) is refused instead of judged (R3 M-1).
+    /// runner's job (a parser differential, a log-format change) is refused instead of judged.
     pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<VerdictFacts> {
         let job = self.job(repo, job_id).await?;
         if job["runner_id"].as_u64() != Some(runner_id) {
@@ -1361,7 +1368,7 @@ mod tests {
         let d = g.demand_with(&repo(), "kiln", 2, 16).await.unwrap();
         assert!(d.by_size.is_empty());
         assert_eq!(m.requests().iter().filter(|r| r.contains("/jobs?")).count(), 2);
-        // 10 full pages and still more: the part read counts (R4 L-6), and the listing does not fail.
+        // 10 full pages and still more: the part read counts, and the listing does not fail.
         for p in 1..=10 {
             m.route(
                 "GET",
@@ -1586,12 +1593,43 @@ mod tests {
         assert!(g.sweep(&repo(), &HashSet::new()).await.is_err());
     }
 
+    #[tokio::test]
+    async fn sweep_spares_booting_and_tracked_runners_and_reports_failures() {
+        let (m, g) = retire_mock("28.1.0").await;
+        let r = |id: u64, name: &str| json!({"id": id, "name": name, "status": "offline"});
+        let page = format!("{RUNNERS}?limit=50&page=1");
+        m.route(
+            "GET",
+            &page,
+            200,
+            json!({"runners": [r(52, "a1b2c3-vm-1"), r(63, "a1b2c3-vm-5"), r(64, "a1b2c3-vm-6")], "total_count": 3}).to_string(),
+        );
+        m.route("PATCH", &format!("{RUNNERS}/63"), 200, fx("runner_disabled.json"));
+        m.route("DELETE", &format!("{RUNNERS}/63"), 204, "");
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
+        // vm-1 is booting (its VM is active): the runner name carries the install prefix, the VM id does not.
+        // vm-6's runner is one this process registered.
+        g.tracked.lock().unwrap().insert(64, "vm-6".into());
+        let keep: HashSet<String> = ["vm-1".to_string()].into();
+        assert_eq!(g.sweep(&repo(), &keep).await.unwrap(), 1);
+        let reqs = m.requests();
+        assert!(!reqs.iter().any(|q| q.contains("/52") || q.contains("/64")), "{reqs:?}");
+        assert!(reqs.contains(&format!("DELETE {RUNNERS}/63")), "{reqs:?}");
+        // A delete that fails makes the sweep fail, so the caller tries again.
+        m.route("DELETE", &format!("{RUNNERS}/63"), 500, "{}");
+        let e = g.sweep(&repo(), &keep).await.unwrap_err();
+        assert!(format!("{e:#}").contains("not deleted"), "{e:#}");
+        // A listing without a total could stop reading early: an error, not a partial sweep.
+        m.route("GET", &page, 200, json!({"runners": [r(63, "a1b2c3-vm-5")]}).to_string());
+        assert!(g.sweep(&repo(), &keep).await.is_err());
+    }
+
     #[test]
     fn credentials_and_construction() {
         let cfg = |j: Value| serde_json::from_value::<ForgeCfg>(j).unwrap();
         let ok = Gitea::new(
             &cfg(json!({"id": "home-lab", "kind": "gitea", "url": "https://gitea.example.org/", "repos": ["acme/demo", "bad", "a/b/c"]})),
-            &std::env::temp_dir(),
+            &crate::forge_test_mock::scratch("gitea-new"),
         )
         .unwrap();
         assert_eq!(ok.web_url(), WEB);
@@ -1622,7 +1660,7 @@ mod tests {
             json!({"id": "g", "kind": "gitea", "url": "http://gitea.example.org"}),
             json!({"id": "g", "kind": "gitea", "url": "http://127.0.0.1:3000", "network": "internal"}),
         ] {
-            assert!(Gitea::new(&cfg(j.clone()), &std::env::temp_dir()).is_err(), "{j}");
+            assert!(Gitea::new(&cfg(j.clone()), &crate::forge_test_mock::scratch("gitea-bad")).is_err(), "{j}");
         }
     }
 
@@ -1631,7 +1669,7 @@ mod tests {
         // `Gitea::new` always builds the guarded client: even an `internal` forge never dials loopback.
         let cfg: ForgeCfg =
             serde_json::from_value(json!({"id": "g", "kind": "gitea", "url": "http://10.1.2.3:3000", "network": "internal"})).unwrap();
-        let mut g = Gitea::new(&cfg, &std::env::temp_dir()).unwrap();
+        let mut g = Gitea::new(&cfg, &crate::forge_test_mock::scratch("gitea-guard")).unwrap();
         g.api = "http://127.0.0.1:9/api/v1".into();
         *g.token.write().unwrap() = Some("tok".into());
         let e = g.get("version").await.unwrap_err();
@@ -1749,7 +1787,7 @@ mod tests {
         r.as_object_mut().unwrap().remove("repository");
         m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
         assert_eq!(verdict(&g, "102").await.v, Refuse);
-        // R3 M-1: a job of another runner, a job that is not running, and one with no runner are refused
+        // A job of another runner, a job that is not running, and one with no runner are refused
         // even when the run is fine (a console line naming a trusted job on another runner).
         for (rid, st, why) in [
             (json!(53), "in_progress", "not this VM's runner"),
