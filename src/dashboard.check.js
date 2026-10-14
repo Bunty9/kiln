@@ -274,3 +274,12 @@ console.log('dashboard analytics ok');
   assert.equal(reloadForBuild(null, 'b', null), false, 'a page without a build id never reloads');
   assert.equal(reloadForBuild('a', undefined, null), false);
 }
+
+// setHTML: a poll that renders after navigating away finds no element; that is a no-op, not a throw.
+{
+  const el = { _h: null, contains: () => false, innerHTML: '', querySelector: () => null };
+  const setHTML = new Function('$$', 'document', 'fillTimes', 'popEl', 'popAnchor', 'tipFor', grab('setHTML') + '\nreturn setHTML;')(() => [], { activeElement: null }, () => {}, null, null, null);
+  setHTML(null, 'x'); setHTML(undefined, 'x');
+  setHTML(el, 'a'); assert.equal(el.innerHTML, 'a');
+  el.innerHTML = 'b'; setHTML(el, 'a'); assert.equal(el.innerHTML, 'b', 'unchanged html is skipped');
+}
