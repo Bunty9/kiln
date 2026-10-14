@@ -515,7 +515,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .ft>input:nth-of-type(1):checked~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):checked~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):checked~.ftl label:nth-of-type(3){color:var(--fg);background:var(--active);box-shadow:inset 0 0 0 1px var(--accent)}
 .ft>input:nth-of-type(1):checked~.fp:nth-of-type(1),.ft>input:nth-of-type(2):checked~.fp:nth-of-type(2),.ft>input:nth-of-type(3):checked~.fp:nth-of-type(3){display:block}
 .ft>input:nth-of-type(1):focus-visible~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):focus-visible~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):focus-visible~.ftl label:nth-of-type(3){outline:2px solid var(--accent);outline-offset:2px}
-@media(max-width:719px){.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
+@media(max-width:719px){.hq{width:24px;height:24px}.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
 /* installed app: content clears the notch, status bar and rounded corners (viewport-fit=cover) */
 .hlp.inst{border:0;background:none;cursor:pointer;font:inherit;font-size:14px;font-weight:500}
 .hlp.inst:hover{background:var(--hover)}
@@ -1045,7 +1045,7 @@ function notifyState() {
 
 /* ---------- doctor + bake log (global) ---------- */
 let doctor = null;
-async function runDoctor() { try { doctor = { ...(await api('/api/doctor')), at: now() }; } catch (e) { doctor = { checks: [], err: e.message, at: now() }; } if (cur?.live) cur.live(); }
+async function runDoctor() { const vk = doctor?.vk; try { doctor = { ...(await api('/api/doctor')), at: now(), vk }; } catch (e) { doctor = { checks: [], err: e.message, at: now(), vk }; } if (cur?.live) cur.live(); }
 const bk = { text: '', next: 0, t0: 0, was: false, busy: false, checked: false };
 async function pollBake() {
   if (bk.busy) return; bk.busy = true;
@@ -1095,7 +1095,7 @@ function route() {
   if (new URLSearchParams(location.search).get('code') && !appConv) return void appCallback();
   cur?.unmount?.(); closePop();
   const sd = swipeDir; swipeDir = 0;
-  const r = parse(), pg = pages[r.page] || pages.overview;
+  const r = parse(), pg = pages[r.page] || pages.notfound;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   cur = pg; scrollTo(0, 0);
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
@@ -1121,7 +1121,10 @@ function onState() {
   if (!S.baking && !bk.was && bk.next === 0 && !bk.checked) pollBake();
   if (S.baking) { if (!bk.was) { bk.t0 = Date.now(); bk.text = ''; bk.next = 0; } pollBake(); } else if (bk.was) pollBake();
   bk.was = S.baking;
-  if (!doctor || now() - doctor.at > 300) { doctor = { checks: [], at: now() }; runDoctor(); }
+  // The doctor's VM checks depend on which VMs are active: re-run when that set changes (at most every 20 s), else every 5 min.
+  const vk = S.vms.filter(v => ['booting', 'idle', 'busy', 'held'].includes(v.state)).map(v => v.id).sort().join();
+  if (!doctor || now() - doctor.at > 300) { doctor = { checks: [], at: now(), vk }; runDoctor(); }
+  else if (doctor.vk !== vk && now() - doctor.at > 20 && !doctor.busy) { doctor.busy = 1; doctor.vk = vk; runDoctor(); }
   if (!mounted) {
     const r = parse();
     if (!onState.auto && r.page === 'overview' && !location.hash.replace('#', '').replace('/', '') && setupNeeded() && !lsGet('kiln-skip-setup')) { onState.auto = 1; location.hash = '#/setup'; return; }
@@ -1467,6 +1470,9 @@ function hostWire() {
   });
 }
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
+pages.notfound = {
+  mount() { $('#app').innerHTML = `<div class="ph"><h1>Page not found</h1></div><div class="empty">${ic('jobs')}<p>There is no page at this address.</p><a class="btn" href="#/">Back to the Overview</a></div>`; },
+};
 pages.overview = {
   mount() {
     $('#app').innerHTML = `<div class="ph"><h1>Overview</h1><div class="stline" id="ov-hl"></div></div><div id="ov-st"></div><div class="ov"><div><div class="sec" id="ov-now"></div><div class="sec" id="ov-stats"></div><div class="sec" id="ov-fail"></div><div class="sec" id="ov-rec"></div></div><aside><div class="card hair" id="ov-host">${hostSkel()}</div></aside></div>`;
@@ -1562,7 +1568,7 @@ pages.job = {
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     const rfd = refusedBy(v), ci = cacheInfo(v);
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), stTip(status(v), v), 1)}<h1>${repoLabel(F, v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on ' + fname(fg) + '.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. ' + fname(fg) + ' marks the job failed after a few minutes.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<p class="sm" style="margin-top:4px">Needs your SSH key (Settings › Debugging) and a tailnet connection. Release now frees the slot.</p><div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
@@ -2813,7 +2819,7 @@ pages.guides = {
     gq = q.trim().toLowerCase();
     const w = gq.split(/\s+/).filter(Boolean), hits = w.length ? GUIDES.filter(g => w.every(x => guideText(g).toLowerCase().includes(x))) : [];
     $('#gres').hidden = !w.length; $('#gbody').hidden = !!w.length;
-        $('#gres').innerHTML = w.length ? (hits.length ? `<ul class="list">${hits.map(g => { const t = guideText(g), k = t.toLowerCase().indexOf(w[0]), s = t.slice(Math.max(0, k - 40), k + 90); return `<li><a class="gr" href="#/guides/${g[0]}" data-act="gclear"><b>${esc(g[1])}</b><span>${k > 0 ? '…' : ''}${esc(s)}…</span></a></li>`; }).join('')}</ul>` : `<div class="empty">${ic('help')}<p>No guide mentions "${esc(gq)}". Try fewer words.</p></div>`) : '';
+        $('#gres').innerHTML = w.length ? (hits.length ? `<ul class="list">${hits.map(g => { const t = guideText(g).slice(g[1].length + 1), k = Math.max(0, t.toLowerCase().indexOf(w[0])), s = t.slice(Math.max(0, k - 40), k + 90); return `<li><a class="gr" href="#/guides/${g[0]}" data-act="gclear"><b>${esc(g[1])}</b><span>${k > 0 ? '…' : ''}${esc(s)}…</span></a></li>`; }).join('')}</ul>` : `<div class="empty">${ic('help')}<p>No guide mentions "${esc(gq)}". Try fewer words.</p></div>`) : '';
   },
 };
 
@@ -2882,7 +2888,7 @@ const ACT = {
   },
   async kill() {
     const v = S.vms.find(x => x.id === pages.job.id);
-    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The job fails on ${fname(forgeOf(F, v.repo))}.`, action: 'Kill VM', danger: 1 })) return;
+    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The VM stops now. ${fname(forgeOf(F, v.repo))} marks the job failed or cancelled once its runner times out, which can take several minutes. A VM killed while booting leaves the job queued, so kiln may start another VM for it.`, action: 'Kill VM', danger: 1 })) return;
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() {
@@ -3155,7 +3161,12 @@ document.addEventListener('submit', async e => {
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
     else if (k === 'addforge') {
       const v = n => $('#af-' + n, f).value.trim(), repo = v('repo'), id = v('id');
-      await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] });
+      try { await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] }); }
+      catch (err) { // say it next to the field as well as in the toast
+        const x = $(/id|name/i.test(err.message) && !/url|address/i.test(err.message) ? '#af-id' : '#af-url', f); let m = f.querySelector('.ferr');
+        if (!m) { m = document.createElement('p'); m.className = 'ferr'; m.id = 'ferr-addforge'; m.setAttribute('role', 'alert'); f.append(m); }
+        m.textContent = err.message; x.setAttribute('aria-invalid', 'true'); x.setAttribute('aria-describedby', m.id); x.focus(); throw err;
+      }
       toast(`${FX[v('kind')]?.name || 'Forge'} added. Now give it a token.`); await poll();
       if (cur === pages.settings) { pages.settings.render(); $(`#fc-${id}`)?.scrollIntoView({ block: 'start' }); } else forgeUI();
     }
