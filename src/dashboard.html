@@ -182,8 +182,22 @@ main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity va
 a.ch{background:var(--s1);color:var(--fg);box-shadow:var(--e1),inset 0 2px var(--queued);transition:box-shadow var(--ease),background var(--ease)}
 a.ch:hover{box-shadow:var(--e2),inset 0 2px var(--queued);background:var(--s2)}
 /* a running slot: the one ember moment, as a status colour */
-a.ch.run{background:color-mix(in srgb,var(--ember) 9%,var(--s1));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ember) 40%,transparent),inset 0 2px var(--ember)}
-a.ch.run:hover{background:color-mix(in srgb,var(--ember) 13%,var(--s1))}
+/* A running card burns at its edges like paper. .burn sits 8px past the card (clipped) and goes through
+   one static SVG noise filter (#kb0..2, top of <body>) that makes the edge ragged: char, a dull ember rim
+   and scorch. Hot spots are two static masked rings on the card's ::before/::after, outside the filter,
+   that only fade in and out (opacity runs on the compositor), so a burning card costs almost no CPU.
+   --d desyncs cards. */
+a.ch.run{--bd:3px;position:relative;isolation:isolate;overflow:hidden;background:color-mix(in srgb,var(--ember) 7%,var(--s1));box-shadow:none;
+ --char:#070302;--rim:#9C330A;--hot:#FF9F3A;--core:#FFE2A0;--scorch:rgb(150 62 12/.45)}
+:root[data-scheme=light] a.ch.run{--char:#1F0E04;--rim:#B4410C;--hot:#FF8A1F;--core:#FFD27A;--scorch:rgb(140 72 20/.34)}
+a.ch.run:hover{background:color-mix(in srgb,var(--ember) 12%,var(--s1));box-shadow:none}
+.burn{position:absolute;inset:-8px;z-index:-1;pointer-events:none;filter:url(#kb0)}
+.burn::before{content:"";position:absolute;inset:0;border-radius:calc(var(--r2) + 8px);box-shadow:inset 0 0 0 calc(8px + var(--bd)) var(--char),inset 0 0 0 calc(9.5px + var(--bd)) var(--rim),inset 0 0 5px calc(9.5px + var(--bd)) color-mix(in srgb,var(--hot) 40%,transparent),inset 0 0 16px calc(9px + var(--bd)) var(--scorch)}
+a.ch.run::before,a.ch.run::after{content:"";position:absolute;z-index:-1;pointer-events:none;inset:calc(var(--bd) - 1px);border:2px solid var(--core);border-radius:calc(var(--r2) + 1px - var(--bd));
+ box-shadow:0 0 3px 1px var(--hot),0 0 12px 2px color-mix(in srgb,var(--hot) 45%,transparent),inset 0 0 6px var(--hot);opacity:.55}
+a.ch.run::before{--m:conic-gradient(from 200deg,#000 0 3%,#0000 8% 45%,#000 50% 54%,#0000 60% 96%,#000);-webkit-mask:var(--m);mask:var(--m);animation:hs 7.1s ease-in-out var(--d,0s) infinite}
+a.ch.run::after{--m:conic-gradient(from 20deg,#000 0 5%,#0000 11% 29%,#000 33% 37%,#0000 43% 63%,#000 68% 74%,#0000 80% 94%,#000);-webkit-mask:var(--m);mask:var(--m);animation:hs 9.7s ease-in-out var(--d,0s) infinite reverse}
+@keyframes hs{0%,100%{opacity:0}18%{opacity:.95}30%{opacity:.6}44%{opacity:1}58%{opacity:.7}72%{opacity:.15}}
 .ch .tx{flex:1;min-width:0}.ch .tx>*{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ch .tm{font-size:17px;font-weight:600;letter-spacing:-.01em}
 /* stats */
@@ -511,6 +525,8 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 </style>
 </head>
 <body>
+<!-- Ragged burnt edge of a running VM card (.burn): static noise displaces the edge. Static on purpose: an animated filter re-runs every frame. -->
+<svg id="kburn" width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="kb0" x="-20%" y="-50%" width="140%" height="200%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".03 .09" numOctaves="4" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="12" xChannelSelector="R" yChannelSelector="G"/></filter><filter id="kb1" x="-20%" y="-50%" width="140%" height="200%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".026 .1" numOctaves="4" seed="23" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="13" xChannelSelector="R" yChannelSelector="G"/></filter><filter id="kb2" x="-20%" y="-50%" width="140%" height="200%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency=".034 .08" numOctaves="4" seed="41" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="11" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <!-- 20px grid, 1.5 stroke, currentColor. Use: <svg class="i"><use href="#i-name"/></svg> -->
 <symbol id="i-overview" viewBox="0 0 20 20"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/></symbol>
@@ -1461,12 +1477,15 @@ pages.overview = {
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(stTip(status(v), v))}>${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${repoLabel(F, v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
+      const h = [...v?.id || ''].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(stTip(status(v), v))}>${v.state === 'busy' ? `<span class="burn" style="--d:-${h % 97 / 10}s;filter:url(#kb${h % 3})" aria-hidden="true"></span>` : ''}${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${repoLabel(F, v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
         : `<div class="ch"${(i === act.length ? kt : tip)('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
     setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    // Pin burn animations to page time so a re-render continues them instead of restarting.
+    for (const a of $('#ov-now').getAnimations({ subtree: true })) if (a.animationName) a.startTime = 0;
     setHTML($('#ov-stats'), stats());
     const rec = S.vms.slice(0, 8), f = S.vms.filter(v => isFail(v) && (v.ended || v.started) > now() - 15 * 60).slice(0, 3).filter(v => !rec.includes(v)); // the ones Recent jobs shows already are not listed twice
     setHTML($('#ov-fail'), f.length ? `<h2>Recent failures${hq('failures')}</h2>${jobList(f)}` : ''); $('#ov-fail').hidden = !f.length;
