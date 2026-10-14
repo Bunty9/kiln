@@ -667,19 +667,23 @@ async fn serve_check(sock: &std::path::Path) -> ServeUse {
     v
 }
 
-/// Doctor's (ok, detail); None when tailscale serve can't be read (the tailscale check covers that).
-pub async fn serve_doctor(data: &std::path::Path) -> Option<(bool, String)> {
-    Some(match serve_status(&data.join("serve.sock")).await.ok()? {
-        ServeUse::Unsafe(why) => {
-            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"))
+/// Doctor's (ok, detail, soft). `soft` is true only for an unreadable config, which at boot can mean tailscaled is
+/// not up yet; an unsafe one is never soft. Admission fails closed on the same failure.
+pub async fn serve_doctor(data: &std::path::Path) -> (bool, String, bool) {
+    match serve_status(&data.join("serve.sock")).await {
+        Err(why) => (false, format!("could not read the tailscale serve config: {why}"), true),
+        Ok(ServeUse::Unsafe(why)) => {
+            (false, format!("tailscale serve config exposes kiln's socket unsafely: {why}; never TCP-forward or funnel serve.sock"), false)
         }
         // Identity headers are trusted only from a root peer (see `Via`).
-        ServeUse::Proxied if !tailscaled_is_root() => {
-            (false, "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into())
-        }
-        ServeUse::Proxied => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into()),
-        ServeUse::Unused => (true, "kiln's socket is not served".into()),
-    })
+        Ok(ServeUse::Proxied) if !tailscaled_is_root() => (
+            false,
+            "tailscaled is not running as root, so kiln ignores its identity headers and HTTPS needs the dashboard key".into(),
+            false,
+        ),
+        Ok(ServeUse::Proxied) => (true, "HTTPS proxies to kiln's socket; tailnet identities trusted".into(), false),
+        Ok(ServeUse::Unused) => (true, "kiln's socket is not served".into(), false),
+    }
 }
 
 /// Whether a process named tailscaled runs as root (true when none is found: the tailscale check covers that).

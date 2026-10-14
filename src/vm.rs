@@ -240,7 +240,8 @@ fn scrub_vm_dir(dir: &Path) {
 }
 
 pub fn load_history(data: &Path) -> Vec<Vm> {
-    let seed = !data.join("usage.json").exists();
+    // GitLab and Gitea jobs never create usage.json: seed only when neither ledger exists.
+    let seed = !data.join("usage.json").exists() && !data.join(USAGE_OTHER).exists();
     let mut vms: Vec<Vm> = std::fs::read_dir(data.join("vms"))
         .into_iter()
         .flatten()
@@ -580,7 +581,12 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
         Ok(f) => f,
         Err(e) => {
             tracing::warn!("{repo}: {e:#}");
-            return true;
+            // The forge cannot be asked, but a stale-policy VM must not take a job under the old settings.
+            for (id, _) in &c {
+                kill_idle(app, id, reason, &format!("{e:#}"));
+            }
+            // Startup cleanup has nothing to retry for a forge that is gone.
+            return reason == Reason::Unused;
         }
     };
     let mut ok = true;
@@ -599,6 +605,9 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
                 } else {
                     tracing::warn!("{id}: {e:#}");
                 }
+                // Fail closed: an idle VM that cannot be deregistered is killed anyway. Its runner is deleted
+                // later by the sweep (GitLab/Gitea) or by the forge (a GitHub JIT runner expires).
+                kill_idle(app, &id, reason, &format!("{e:#}"));
                 continue;
             }
         }
@@ -611,6 +620,20 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
         }
     }
     ok
+}
+
+/// Kills an idle VM with no job whose runner could not be deleted (stale policy or warm recycle only).
+fn kill_idle(app: &App, id: &str, reason: Reason, why: &str) {
+    if !matches!(reason, Reason::StalePolicy | Reason::Warm) {
+        return;
+    }
+    let idle = app.vms.lock().unwrap().iter().any(|v| v.id == id && v.state == State::Idle && v.job_url.is_none());
+    if idle {
+        note(app, id, &format!("{} (runner delete failed: {why})", reason.note()));
+        if let Some(k) = app.kills.lock().unwrap().get(id) {
+            k.notify_one();
+        }
+    }
 }
 
 /// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2),
@@ -950,8 +973,18 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                         }
                     }
                 }
+                // The guest's login-token scrub of the cache disk failed: the overlay must not be committed for later jobs.
+                if crate::forge::console::is_scrub_failed(&text)
+                    && let Some(v) = update(app, id, scrub_failed)
+                {
+                    persist(app, &v);
+                }
                 if crate::forge::console::is_decide(&text) && !std::mem::replace(&mut decided, true) {
-                    let v = update(app, id, |_| {}).context("vm vanished")?;
+                    let mut v = update(app, id, |_| {}).context("vm vanished")?;
+                    // A gated forge prints no result: ask the API once, bounded (the guest waits 20 s). Unknown means release.
+                    if let Some(r) = api_result(app, id, &forge, &rr, &v, Duration::from_secs(10)).await {
+                        v = r;
+                    }
                     let max_vms = app.cfg().max_vms;
                     let held = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Held).count();
                     let mut hold = decide(cfg.debug_hold_mins, ssh_host.is_some(), v.job.is_some(), v.result.as_deref());
@@ -1041,6 +1074,18 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             }
         }
     }
+    // A job that ran but whose guest never reached its cleanup (`kiln: decide` comes after the token scrub) has an
+    // unscrubbed cache disk. (A Gitea runner the server dropped is stopped by the host before any cleanup, as before.)
+    if !decided
+        && !dropped
+        && let Some(v) = update(app, id, |v| {
+            if v.job.is_some() {
+                scrub_failed(v)
+            }
+        })
+    {
+        persist(app, &v);
+    }
     // A gated VM that ends between its job start and its verdict is a gate death, whether or not `kiln.gate=dead` made it
     // to the console (the guest powers off right after printing it); the line is only a hint (R3 L-2).
     let mut lost = false;
@@ -1065,25 +1110,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         bail!("qemu exited with {status}; see console log");
     }
     let mut v = update(app, id, |_| {}).context("vm vanished")?;
-    // GitLab never prints a result the host may believe: ask the job API, and only for the one job the console
-    // bound, on a runner that started exactly one, with a recorded ok or cold verdict for that id (R2b section 4).
-    if v.result.is_none()
-        && forge.gated()
-        && v.starts == 1
-        && let (Some(jid), Some(rid)) = (v.job_id.clone(), v.runner_id)
-        && v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold"))
-    {
-        match forge.job_result(&rr, &jid, rid).await {
-            Ok(Some(r)) => {
-                v = update(app, id, |v| {
-                    v.result = Some(r.into());
-                    v.done_at = Some(now());
-                })
-                .context("vm vanished")?;
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!("{id}: job result: {e:#}"),
-        }
+    // GitLab never prints a result the host may believe: ask the job API (see `api_result`).
+    if let Some(r) = api_result(app, id, &forge, &rr, &v, Duration::from_secs(60)).await {
+        v = r;
     }
     if v.result.is_none() {
         let (state, why) = exit_without_result(v.online_at.is_some(), v.job.is_some());
@@ -1091,6 +1120,35 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         return Ok(state);
     }
     Ok(State::Done)
+}
+
+/// GitLab and Gitea: the result of the one job the console bound, from the job API, on a runner that started
+/// exactly one, with a recorded ok or cold verdict for that id (R2b section 4). Stored on the record and
+/// returned; None when not applicable, unknown, or the API failed or took longer than `limit` (fail closed:
+/// no result means no debug hold).
+async fn api_result(app: &App, id: &str, forge: &crate::forge::Forge, rr: &RepoRef, v: &Vm, limit: Duration) -> Option<Vm> {
+    if v.result.is_some() || !forge.gated() || v.starts != 1 {
+        return None;
+    }
+    let (jid, rid) = (v.job_id.clone()?, v.runner_id?);
+    if !v.verdict.as_ref().is_some_and(|(c, j)| *j == jid && (c == "ok" || c == "cold")) {
+        return None;
+    }
+    match tokio::time::timeout(limit, forge.job_result(rr, &jid, rid)).await {
+        Ok(Ok(Some(r))) => update(app, id, |v| {
+            v.result = Some(r.into());
+            v.done_at = Some(now());
+        }),
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("{id}: job result: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("{id}: job result: no answer in {}s", limit.as_secs());
+            None
+        }
+    }
 }
 
 async fn send(stdin: &mut Option<tokio::process::ChildStdin>, msg: &str) {
@@ -1770,6 +1828,14 @@ fn gate_died(v: &mut Vm) {
     if v.cache == CacheUse::Read {
         v.cache = CacheUse::Discarded;
         v.cache_note = Some("cache not saved: the exec gate died".into());
+    }
+}
+
+/// The guest could not scrub login tokens from the cache disk (`kiln: cache scrub failed`, or it never got that far).
+fn scrub_failed(v: &mut Vm) {
+    if v.cache == CacheUse::Read {
+        v.cache = CacheUse::Discarded;
+        v.cache_note = Some("cache not saved: the guest could not scrub login tokens from it".into());
     }
 }
 
@@ -2744,18 +2810,36 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+    /// The failure only means something is not up yet (set by whoever knows), so `soften` may hide it while starting.
+    /// A credential, a scope, a hash mismatch or an unsafe `tailscale serve` is never soft.
+    #[serde(skip)]
+    soft: bool,
 }
 
 fn check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
-    Check { name: name.into(), ok, detail: detail.into() }
+    Check { name: name.into(), ok, detail: detail.into(), soft: false }
 }
 
-/// While kiln is starting, a failing check that only waits for something (the network, tailscaled)
+/// `check`, whose failure (if any) is soft.
+fn soft_check(name: &str, ok: bool, detail: impl Into<String>) -> Check {
+    Check { soft: true, ..check(name, ok, detail) }
+}
+
+/// Whether a failure text says the network (DNS, a connection, a timeout) is not up, as opposed to a refusal
+/// by a server that answered (a revoked token, a missing scope) or a local fault.
+fn net_down(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    ["dns error", "failed to lookup", "resolve", "error sending request", "connection", "timed out", "timeout", "waiting for the network"]
+        .iter()
+        .any(|k| d.contains(k))
+}
+
+/// While kiln is starting, a failing soft check that only waits for something (the network, tailscaled)
 /// is reported as "starting: waiting for `what`: ..." and passes. After the grace period it fails
-/// with its own text.
+/// with its own text; any other failing check never softens.
 fn soften(checks: &mut [Check], starting: bool, what: &str) {
     if starting {
-        for c in checks.iter_mut().filter(|c| !c.ok) {
+        for c in checks.iter_mut().filter(|c| !c.ok && c.soft) {
             (c.ok, c.detail) = (true, crate::boot::waiting_for(what, &c.detail));
         }
     }
@@ -2922,25 +3006,26 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         }
     }
 
+    // Only a failure that reads as "the network is not up" may soften: a revoked token or a missing scope stays red.
+    out[net_from..].iter_mut().for_each(|c| c.soft = net_down(&c.detail));
+    soften(&mut out[net_from..], waiting_net, "the network");
+
     let (ok, detail) = crate::mirror::check(app).await;
-    out.push(check("docker mirror", ok, detail));
+    // Not started yet, or waiting for DNS, is "starting"; a bad download hash or a busy port is not.
+    let mirror_soft = detail.starts_with("not running") || net_down(&detail);
+    out.push(Check { soft: mirror_soft, ..check("docker mirror", ok, detail) });
     let last = out.len() - 1;
     soften(&mut out[last..], crate::boot::starting(), "the docker mirror");
 
     // Cached unless run from the CLI; a failure only matters when jobs are filtered.
     out.push(match egress_ready(app, cli).await {
         Ok(()) => check("filtered egress", true, "jobs reach the internet and the mirror only"),
-        Err(e) => check(
-            "filtered egress",
-            cfg.egress != "filtered",
-            if cfg.egress == "filtered" { e } else { format!("unavailable (jobs run with open egress): {e}") },
-        ),
+        // Retried by the scheduler: only "waiting for the network" is not a failure while kiln is still starting.
+        Err(e) if cfg.egress == "filtered" => Check { soft: e.starts_with(NET_WAIT), ..check("filtered egress", false, e) },
+        Err(e) => check("filtered egress", true, format!("unavailable (jobs run with open egress): {e}")),
     });
-    // Retried by the scheduler: not a failure while kiln is still starting.
     let last = out.len() - 1;
-    soften(&mut out[last..], cfg.egress == "filtered" && crate::boot::starting(), "filtered egress");
-
-    soften(&mut out[net_from..], waiting_net, "the network");
+    soften(&mut out[last..], crate::boot::starting(), "filtered egress");
 
     let ts_from = out.len();
     let mut no_certs = false;
@@ -2949,18 +3034,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
             let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or_default();
             no_certs = crate::web::no_certs(&v);
             let st = v["BackendState"].as_str().unwrap_or("unknown");
-            check("tailscale up", st == "Running", format!("BackendState {st}"))
+            soft_check("tailscale up", st == "Running", format!("BackendState {st}"))
         }
-        Ok(o) => check("tailscale up", false, format!("tailscale exited with {}", o.status)),
-        Err(e) => check("tailscale up", false, format!("{e:#}")),
+        Ok(o) => soft_check("tailscale up", false, format!("tailscale exited with {}", o.status)),
+        Err(e) => soft_check("tailscale up", false, format!("{e:#}")),
     });
-    // An unsafe serve config always shows; otherwise a tailnet without certs says so, as
-    // "not served" would read as merely not set up.
+    // An unsafe serve config always shows (never soft); an unreadable one is soft only while tailscaled may not be up yet.
+    // Otherwise a tailnet without certs says so, as "not served" would read as merely not set up.
     match crate::web::serve_doctor(&app.data).await {
-        Some((false, detail)) => out.push(check("tailscale serve", false, detail)),
+        (false, detail, soft) => out.push(Check { soft, ..check("tailscale serve", false, detail) }),
         _ if no_certs => out.push(check("tailscale HTTPS", true, "unavailable on this tailnet (DNS › HTTPS Certificates is off)")),
-        Some((ok, detail)) => out.push(check("tailscale serve", ok, detail)),
-        None => {}
+        (ok, detail, _) => out.push(check("tailscale serve", ok, detail)),
     }
     // tailscaled starts in parallel with kiln and needs a moment before it reports Running.
     soften(&mut out[ts_from..], crate::boot::starting(), "tailscaled");
@@ -3027,6 +3111,18 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(50), late.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_ok());
         assert!(tokio::time::timeout(Duration::from_millis(50), other.notified()).await.is_err());
+    }
+
+    #[test]
+    fn a_failed_token_scrub_discards_the_overlay_on_the_host() {
+        let mut v = Vm { cache: CacheUse::Read, ..vm("kiln-5-0", State::Busy, None) };
+        scrub_failed(&mut v);
+        assert_eq!(v.cache, CacheUse::Discarded);
+        assert!(v.cache_note.as_deref().unwrap().contains("scrub"));
+        // Nothing to discard without an overlay: the record stays as it was.
+        let mut v = Vm { cache: CacheUse::None, ..vm("kiln-5-1", State::Busy, None) };
+        scrub_failed(&mut v);
+        assert_eq!((v.cache, v.cache_note), (CacheUse::None, None));
     }
 
     #[test]
@@ -3126,6 +3222,35 @@ mod tests {
         record_usage(&d, &v);
         assert_eq!(std::fs::read_to_string(d.join("usage.json.corrupt")).unwrap(), "{oops");
         assert_eq!(usage_since(&d, 0), vec![[20_000, 4, 1, 2]]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_gitlab_only_ledger_is_seeded_once() {
+        let d = std::env::temp_dir().join(format!("kiln-test-gl_only_ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let day = 20_000 * 86400;
+        std::fs::create_dir_all(d.join("vms/kiln-1-0")).unwrap();
+        let v = Vm {
+            id: "kiln-1-0".into(),
+            repo: "gl:g/p".into(),
+            busy_since: Some(day),
+            done_at: Some(day + 90),
+            ended: Some(day + 95),
+            ..vm("x", State::Done, None)
+        };
+        write_meta(&d, &v);
+        for _ in 0..3 {
+            load_history(&d);
+        }
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "gl".to_string(), 1, 2)]);
+        assert!(!d.join("usage.json").exists(), "a GitLab-only kiln writes no GitHub ledger");
+        // A job lost in a crash is counted once, and a mixed dir keeps both ledgers right.
+        std::fs::create_dir_all(d.join("vms/kiln-2-0")).unwrap();
+        write_meta(&d, &Vm { id: "kiln-2-0".into(), repo: "gl:g/p".into(), busy_since: Some(day), ..vm("x", State::Busy, None) });
+        load_history(&d);
+        load_history(&d);
+        assert_eq!(usage_other_since(&d, 0), vec![(20_000, "gl".to_string(), 2, 3)]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3490,13 +3615,33 @@ mod tests {
 
     #[test]
     fn a_starting_box_does_not_fail_the_doctor() {
-        let mk = || vec![check("a", true, "fine"), check("b", false, "dns error: no")];
+        let mk = || vec![check("a", true, "fine"), soft_check("b", false, "dns error: no")];
         let mut c = mk();
         soften(&mut c, false, "the network");
         assert!(!c[1].ok && c[1].detail == "dns error: no", "after the grace period the failure shows");
         soften(&mut c, true, "the network");
         assert!(c[1].ok && c[1].detail == "starting: waiting for the network (dns error: no)");
         assert!(c[0].ok && c[0].detail == "fine", "passing checks are left alone");
+    }
+
+    /// Credentials, scopes, hash mismatches and an unsafe `tailscale serve` are never "starting".
+    #[test]
+    fn soften_never_hides_a_credential_or_an_unsafe_serve() {
+        let mut c = vec![
+            check("gitlab token", false, "Forge answered 401: token revoked"),
+            check("gitlab scopes", false, "token lacks api"),
+            check("docker mirror", false, "registry.tgz sha256 mismatch"),
+            check("tailscale serve", false, "tailscale serve config exposes kiln's socket unsafely: funnel"),
+            soft_check("tailscale up", false, "BackendState Starting"),
+        ];
+        soften(&mut c, true, "tailscaled");
+        assert_eq!(c.iter().map(|c| c.ok).collect::<Vec<_>>(), [false, false, false, false, true]);
+        // What reads as a network failure is soft; an answer from the server is not.
+        assert!(net_down("error sending request for url (https://x): dns error: failed to lookup address"));
+        assert!(net_down("waiting for the network: x does not resolve yet") && net_down("operation timed out"));
+        assert!(
+            !net_down("Forge answered 401: bad credentials") && !net_down("no token for GitLab forge gl: put one in /d/forges/gl.token")
+        );
     }
 
     #[test]
@@ -5235,6 +5380,56 @@ print("ok")
         assert_eq!(why("g2", Some(("cold", "42"))).await, none, "cold never commits");
         assert_eq!(why("g3", Some(("ok", "41"))).await, none, "an ok for another job");
         assert_eq!(why("g4", Some(("refuse", "42"))).await, none);
+    }
+
+    /// GitLab prints no result, so the debug hold asks the job API before `decide` (and fails closed).
+    #[tokio::test]
+    async fn the_debug_hold_gets_a_gated_forges_result_from_the_api() {
+        use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
+        let (gh, gl) = (Mock::github().await, Mock::start().await);
+        let app = mock::app("api-result", &gh, crate::Config::default());
+        let cfg = ForgeCfg {
+            id: ForgeId::new("gl").unwrap(),
+            kind: Kind::GitLab,
+            url: Some("https://gitlab.example.org".into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        let g = crate::forge::gitlab::GitLab::for_mock(&cfg, &app.data, &gl.base, "tok");
+        let forge = Forge::GitLab(Box::new(g));
+        let rr = RepoRef::parse("gl:acme/demo").unwrap();
+        gl.route("GET", "/api/v4/projects/acme%2Fdemo", 200, crate::forge_test_mock::fixture_in("gitlab", "project.json"));
+        let job = |n: u64, status: &str, runner: u64| {
+            serde_json::json!({"id": n, "status": status, "runner": {"id": runner}, "ref": "main", "tag": false,
+                "pipeline": {"project_id": 1, "source": "push"}})
+            .to_string()
+        };
+        let bound = |id: &str, n: u64, verdict: &str| {
+            app.vms.lock().unwrap().push(Vm {
+                repo: "gl:acme/demo".into(),
+                job: Some("build".into()),
+                job_id: Some(n.to_string()),
+                verdict: Some((verdict.into(), n.to_string())),
+                starts: 1,
+                runner_id: Some(79),
+                ..vm(id, State::Busy, None)
+            });
+            app.vms.lock().unwrap().last().cloned().unwrap()
+        };
+        let hold = |v: &Vm| decide(30, true, v.job.is_some(), v.result.as_deref());
+        gl.route("GET", "/api/v4/projects/1/jobs/1001", 200, job(1001, "failed", 79));
+        let v = bound("a1", 1001, "ok");
+        let r = api_result(&app, "a1", &forge, &rr, &v, Duration::from_secs(5)).await.expect("a result");
+        assert_eq!((r.result.as_deref(), hold(&r)), (Some("Failed"), Some(1800)));
+        // Not the VM's runner, an API error, no ok verdict: no result, so the guest is released.
+        gl.route("GET", "/api/v4/projects/1/jobs/1002", 200, job(1002, "failed", 80));
+        assert!(api_result(&app, "a2", &forge, &rr, &bound("a2", 1002, "ok"), Duration::from_secs(5)).await.is_none());
+        gl.route("GET", "/api/v4/projects/1/jobs/1003", 500, "{}");
+        assert!(api_result(&app, "a3", &forge, &rr, &bound("a3", 1003, "ok"), Duration::from_secs(5)).await.is_none());
+        gl.route("GET", "/api/v4/projects/1/jobs/1004", 200, job(1004, "failed", 79));
+        assert!(api_result(&app, "a4", &forge, &rr, &bound("a4", 1004, "refuse"), Duration::from_secs(5)).await.is_none());
     }
 
     #[tokio::test]

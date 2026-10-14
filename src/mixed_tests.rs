@@ -469,6 +469,37 @@ async fn retire_reaches_the_right_forge_with_the_right_reason() {
     assert!(t.gh.requests().is_empty(), "GitHub is not gated: {:?}", t.gh.requests());
 }
 
+/// A security recycle must not be undone by a forge that cannot delete the runner: the idle VM dies anyway,
+/// and `retire` still reports the failure so the delete is tried again.
+#[tokio::test]
+async fn a_stale_policy_vm_dies_even_when_its_runner_cannot_be_deleted() {
+    let t = Trio::new("mixed-retire-err", 99, |_| {}).await;
+    t.gh.fail("DELETE", "/repos/acme/demo/actions/runners/11", 500, "boom");
+    t.gl.route("PUT", &format!("{GL}/runners/79"), 500, "{}");
+    let vms = [("seed-gh", GH_REPO, 11), ("seed-gl", GL_REPO, 79), ("seed-none", "gl2:acme/demo", 5)];
+    let kills: Vec<_> = vms
+        .iter()
+        .map(|&(id, repo, rid)| {
+            seed(&t.app, id, repo, "idle", rid, 1, 64);
+            watch(&t.app, id)
+        })
+        .collect();
+    // A VM that already has a job is not a candidate.
+    seed(&t.app, "seed-job", GH_REPO, "idle", 12, 1, 64);
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-job").unwrap().job_url = Some("https://x/1".into());
+    let busy = watch(&t.app, "seed-job");
+    for (_, repo, _) in vms {
+        vm::recycle_stale_policy(&t.app, repo, "new").await;
+    }
+    for k in &kills {
+        assert!(killed(k).await);
+    }
+    assert!(!killed(&busy).await);
+    let note = |id: &str| t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().note.clone().unwrap();
+    assert!(note("seed-gh").contains("runner delete failed"), "{}", note("seed-gh"));
+    // The forge recovers: the next recycle finds nothing left to do, and a retry of the delete is the sweep's.
+}
+
 /// A reboot loses the VMs and the network is not up when kiln starts: the lost VMs' runners are deleted
 /// on every forge, and the sweep of GitHub's repo that failed is retried, not skipped for good.
 #[tokio::test]

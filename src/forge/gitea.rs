@@ -653,29 +653,43 @@ impl Gitea {
         // Listed in full before anything is deleted, so a delete cannot shift the pages.
         let mut stale = vec![];
         let mut seen = HashSet::new();
+        let tracked: HashSet<u64> = self.tracked.lock().unwrap().keys().copied().collect();
         'pages: {
             for page in 1..=MAX_PAGES {
                 let v = self.get(&format!("repos/{}/actions/runners?limit={PAGE}&page={page}", repo.path)).await?;
                 let runners = v["runners"].as_array().context("runner listing has no runners")?;
                 for r in runners {
                     let Some(id) = r["id"].as_u64().filter(|&id| seen.insert(id)) else { continue };
-                    if r["name"].as_str().is_some_and(|n| n.starts_with(&prefix) && !keep.contains(n)) && r["status"] == "offline" {
+                    // Runners are named `<install>-<vm id>`: `keep` holds the VM ids (a booting VM's runner is offline).
+                    let ours = r["name"].as_str().and_then(|n| n.strip_prefix(&prefix)).is_some_and(|vm| !keep.contains(vm));
+                    if ours && r["status"] == "offline" && !tracked.contains(&id) {
                         stale.push(id);
                     }
                 }
-                if runners.is_empty() || seen.len() >= v["total_count"].as_u64().unwrap_or(0) as usize {
+                // A listing without a count could end after one page with runners unread: fail instead of sweeping in part.
+                if runners.is_empty() {
+                    break 'pages;
+                }
+                if seen.len() >= v["total_count"].as_u64().context("runner listing has no total_count")? as usize {
                     break 'pages;
                 }
             }
             bail!("more than {} runners: not reading further", MAX_PAGES * PAGE)
         }
-        let mut n = 0;
+        let (mut n, mut failed) = (0, vec![]);
         for id in stale {
             match self.retire(repo, id, disable, false).await {
                 Ok(Dereg::Gone) => n += 1,
                 Ok(_) => {}
-                Err(e) => tracing::warn!("{}: stale runner {id}: {e:#}", repo.path),
+                Err(e) => {
+                    tracing::warn!("{}: stale runner {id}: {e:#}", repo.path);
+                    failed.push(format!("{id}: {e:#}"));
+                }
             }
+        }
+        // Reported, so the startup cleanup tries this repo again and a failing sweep is visible.
+        if !failed.is_empty() {
+            bail!("{} of {} stale runner(s) not deleted ({n} were): {}", failed.len(), failed.len() + n, failed.join("; "));
         }
         Ok(n)
     }
@@ -1584,6 +1598,37 @@ mod tests {
         assert_eq!(g.sweep(&repo(), &HashSet::new()).await.unwrap(), 0);
         m.route("GET", &page, 500, "{}");
         assert!(g.sweep(&repo(), &HashSet::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn sweep_spares_booting_and_tracked_runners_and_reports_failures() {
+        let (m, g) = retire_mock("28.1.0").await;
+        let r = |id: u64, name: &str| json!({"id": id, "name": name, "status": "offline"});
+        let page = format!("{RUNNERS}?limit=50&page=1");
+        m.route(
+            "GET",
+            &page,
+            200,
+            json!({"runners": [r(52, "a1b2c3-vm-1"), r(63, "a1b2c3-vm-5"), r(64, "a1b2c3-vm-6")], "total_count": 3}).to_string(),
+        );
+        m.route("PATCH", &format!("{RUNNERS}/63"), 200, fx("runner_disabled.json"));
+        m.route("DELETE", &format!("{RUNNERS}/63"), 204, "");
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, r#"{"jobs":[],"total_count":0}"#);
+        // vm-1 is booting (its VM is active): the runner name carries the install prefix, the VM id does not.
+        // vm-6's runner is one this process registered.
+        g.tracked.lock().unwrap().insert(64, "vm-6".into());
+        let keep: HashSet<String> = ["vm-1".to_string()].into();
+        assert_eq!(g.sweep(&repo(), &keep).await.unwrap(), 1);
+        let reqs = m.requests();
+        assert!(!reqs.iter().any(|q| q.contains("/52") || q.contains("/64")), "{reqs:?}");
+        assert!(reqs.contains(&format!("DELETE {RUNNERS}/63")), "{reqs:?}");
+        // A delete that fails makes the sweep fail, so the caller tries again.
+        m.route("DELETE", &format!("{RUNNERS}/63"), 500, "{}");
+        let e = g.sweep(&repo(), &keep).await.unwrap_err();
+        assert!(format!("{e:#}").contains("not deleted"), "{e:#}");
+        // A listing without a total could stop reading early: an error, not a partial sweep.
+        m.route("GET", &page, 200, json!({"runners": [r(63, "a1b2c3-vm-5")]}).to_string());
+        assert!(g.sweep(&repo(), &keep).await.is_err());
     }
 
     #[test]

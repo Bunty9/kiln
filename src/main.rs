@@ -1166,6 +1166,7 @@ fn auto_rebake(app: &Arc<App>, cfg: &Config) {
 async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u32, usize>>> {
     static TICK: AtomicUsize = AtomicUsize::new(0);
     reload_token(app).await;
+    app.forges.reload_changed(&app.data);
     refresh_app(app).await;
     // A forge with no credential or rate-limited skips its repos; when none can poll the tick fails.
     let (live, down): (Vec<_>, Vec<_>) = app.forges.all().into_iter().partition(|f| f.health().is_none());
