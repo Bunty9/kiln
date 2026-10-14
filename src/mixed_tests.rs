@@ -397,7 +397,7 @@ async fn two_of_three(name: &str, seed_cpus: u32, seed_mem: u32) -> Trio {
 #[tokio::test]
 async fn the_cpu_budget_is_shared_across_forges() {
     // The host budget is 1.5 vCPUs per thread; leave exactly two vCPUs.
-    let max = host_threads() * 3 / 2;
+    let max = HostReadings::TEST.threads * 3 / 2;
     let t = two_of_three("mixed-cpu", max - 2, 0).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("cpu budget"), "{why}");
@@ -406,8 +406,7 @@ async fn the_cpu_budget_is_shared_across_forges() {
 #[tokio::test]
 async fn the_memory_budget_is_shared_across_forges() {
     // 2 GB stay reserved for the host; leave exactly two 64 MB VMs.
-    let total = platform::mem_total_mb();
-    assert!(total > 2048 + 128, "this host has too little memory ({total} MB) for the budget test");
+    let total = HostReadings::TEST.mem_total_mb;
     let t = two_of_three("mixed-mem", 0, (total - 2048 - 128) as u32).await;
     let why = t.app.poll.lock().unwrap().blocked.clone().unwrap();
     assert!(why.starts_with("memory budget"), "{why}");

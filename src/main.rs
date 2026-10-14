@@ -465,6 +465,28 @@ pub struct App {
     pub update: Mutex<update::Status>,
     /// Outbound webhook notifications (destinations, queues, delivery status).
     pub notify: notify::Hub,
+    /// Background problems nobody is waiting on (a cache that will not save, a cleanup that keeps failing), by what
+    /// raised them: the tick adds them to the health list. Cleared by whoever raised them when it works again.
+    pub notices: Mutex<std::collections::BTreeMap<String, (&'static str, String)>>,
+    /// The `qemu-img` binary; tests point it at a script or at nothing.
+    pub qemu_img: PathBuf,
+    /// Fixed machine readings for tests: a tick gates launches on them, and a loaded or small box must not change a result.
+    pub host_fixed: Option<HostReadings>,
+}
+
+/// What a tick reads from the machine.
+#[derive(Clone, Copy)]
+pub struct HostReadings {
+    pub mem_total_mb: u64,
+    pub mem_avail_mb: u64,
+    pub disk_free_gb: Option<u64>,
+    pub threads: u32,
+}
+
+impl HostReadings {
+    /// A roomy, fixed host for tests: 8 threads, 64 GB of memory, 500 GB of disk.
+    #[cfg(test)]
+    pub const TEST: HostReadings = HostReadings { mem_total_mb: 65536, mem_avail_mb: 65536, disk_free_gb: Some(500), threads: 8 };
 }
 
 impl App {
@@ -478,7 +500,9 @@ impl App {
         std::fs::create_dir_all(&d).unwrap();
         // A default config must validate on a small host (a 3-core CI Mac) too.
         let cfg = Config { vm_cpus: host_threads().min(4), ..Config::default() };
-        Arc::new(App::new(d, cfg, github::Gh::new(String::new(), "none")))
+        let mut app = App::new(d, cfg, github::Gh::new(String::new(), "none"));
+        (app.qemu_img, app.host_fixed) = ("/nonexistent/qemu-img".into(), Some(HostReadings::TEST));
+        Arc::new(app)
     }
 
     fn new(data: PathBuf, cfg: Config, gh: github::Gh) -> Self {
@@ -504,7 +528,31 @@ impl App {
             draining: Default::default(),
             update: Mutex::new(update::Status::load(&data)),
             notify: Default::default(),
+            notices: Mutex::default(),
+            qemu_img: "qemu-img".into(),
+            host_fixed: None,
             data,
+        }
+    }
+
+    pub fn notice(&self, key: &str, kind: &'static str, msg: impl Into<String>) {
+        self.notices.lock().unwrap().insert(key.into(), (kind, msg.into()));
+    }
+
+    pub fn clear_notice(&self, key: &str) {
+        self.notices.lock().unwrap().remove(key);
+    }
+
+    /// The machine's memory, disk and thread count now (or the fixed readings of a test).
+    async fn host_readings(&self) -> HostReadings {
+        match self.host_fixed {
+            Some(h) => h,
+            None => HostReadings {
+                mem_total_mb: platform::mem_total_mb(),
+                mem_avail_mb: platform::mem_avail_mb(),
+                disk_free_gb: vm::disk_free_gb(&self.data).await,
+                threads: host_threads(),
+            },
         }
     }
 
@@ -1047,6 +1095,18 @@ async fn scheduler(app: Arc<App>) {
     }
 }
 
+/// The notices grouped by kind, their messages joined (the health tracker holds one message per kind).
+fn notice_kinds(n: &std::collections::BTreeMap<String, (&'static str, String)>) -> Vec<(&'static str, String)> {
+    let mut by: Vec<(&'static str, Vec<&str>)> = vec![];
+    for (kind, msg) in n.values() {
+        match by.iter_mut().find(|(k, _)| k == kind) {
+            Some((_, v)) => v.push(msg),
+            None => by.push((kind, vec![msg])),
+        }
+    }
+    by.into_iter().map(|(k, v)| (k, v.join("; "))).collect()
+}
+
 /// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
 /// instead of replacing them. "draining" is left out: health state is in memory, so a restart
 /// would orphan its raise with no clear. What only says "starting: ..." (the network is not up yet,
@@ -1181,7 +1241,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     }
     // Launching during a bake is fine: new VMs use the old base until the atomic swap.
     auto_rebake(app, cfg);
-    let (mem_avail, disk) = (platform::mem_avail_mb(), vm::disk_free_gb(&app.data).await);
+    let host = app.host_readings().await;
+    let (mem_avail, disk) = (host.mem_avail_mb, host.disk_free_gb);
     // Shown on the dashboard; each size is gated on its own memory below.
     let mirror_mb = cfg.docker_mirror.then(|| mirror::cache_mb(app)).flatten();
     let cache_mb = Some(vm::cache_dir_mb(&app.data)).filter(|&m| m > 0);
@@ -1234,11 +1295,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         problems.push(g);
     }
     let mut blocked = problems.first().cloned();
+    // Background failures (cache saves, the startup cleanup), one health item per kind.
+    for (kind, msgs) in notice_kinds(&app.notices.lock().unwrap()) {
+        problems.push((kind, msgs));
+    }
     let mut budget = {
         let vms = app.vms.lock().unwrap();
         let act = vms.iter().filter(|v| v.state.is_active());
         let (mb, cpus) = act.fold((0, 0), |(m, c), v| (m + v.mem_mb as u64, c + v.cpus as u64));
-        vm::Budget::new(platform::mem_total_mb(), mb, cpus, host_threads())
+        vm::Budget::new(host.mem_total_mb, mb, cpus, host.threads)
     };
 
     let mut queued_by_repo = HashMap::new();

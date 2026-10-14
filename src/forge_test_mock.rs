@@ -139,7 +139,9 @@ pub fn app(name: &str, mock: &Mock, cfg: crate::Config) -> Arc<crate::App> {
     let data = std::env::temp_dir().join(format!("kiln-test-mock-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(data.join("update")).unwrap();
-    Arc::new(crate::App::new(data, cfg, crate::github::Gh::for_mock(&mock.base)))
+    let mut app = crate::App::new(data, cfg, crate::github::Gh::for_mock(&mock.base));
+    (app.qemu_img, app.host_fixed) = ("/nonexistent/qemu-img".into(), Some(crate::HostReadings::TEST));
+    Arc::new(app)
 }
 
 /// Byte-exact comparison with `testdata/forge/golden/<name>`. `KILN_BLESS=1` rewrites the file instead.

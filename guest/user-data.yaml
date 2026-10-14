@@ -309,7 +309,8 @@ write_files:
 
       # After the runner exits: the same for every forge.
       finish() {
-        /usr/local/sbin/kiln-cache scrub || echo "kiln: cache scrub failed"
+        # The host commits the cache only after the positive line: a failure, or no line at all, discards it.
+        if /usr/local/sbin/kiln-cache scrub; then echo "kiln: cache scrub ok"; else echo "kiln: cache scrub failed"; fi
         sleep 1 # let kiln-steps flush the last page
         if [ -n "${reader-}" ]; then kill "$reader" 2>/dev/null; else open_tty; fi
         echo "kiln: decide"

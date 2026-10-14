@@ -115,6 +115,11 @@ pub fn is_scrub_failed(line: &str) -> bool {
     is_job_line(line, "kiln: cache scrub failed")
 }
 
+/// kiln-job's own `kiln: cache scrub ok`: the only proof the guest scrubbed the cache disk's login tokens.
+pub fn is_scrub_ok(line: &str) -> bool {
+    is_job_line(line, "kiln: cache scrub ok")
+}
+
 fn is_job_line(line: &str, msg: &str) -> bool {
     let l = line.trim_end();
     let l = l.strip_prefix('[').and_then(|r| r.split_once("] ")).map_or(l, |(_, rest)| rest);
@@ -298,6 +303,14 @@ mod tests {
             "kiln-job[7]: kiln: decide",
         ] {
             assert!(!is_scrub_failed(l), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_scrub_ok_is_the_whole_journal_line() {
+        assert!(is_scrub_ok("[   50.1] kiln-job[1395]: kiln: cache scrub ok"));
+        for l in ["kiln: cache scrub ok", "[ 1.0] kiln-job[7]: kiln: cache scrub ok.", "[ 1.0] kiln-job[7]: kiln: cache scrub failed"] {
+            assert!(!is_scrub_ok(l), "{l}");
         }
     }
 }

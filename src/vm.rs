@@ -770,7 +770,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
 
     let base = images(&app.data).join("base.qcow2");
     let disk = q.join("disk.qcow2");
-    let out = Command::new("qemu-img")
+    let out = Command::new(&app.qemu_img)
         .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
         .arg(&base)
         .arg(&disk)
@@ -889,6 +889,8 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let mut lines = BufReader::new(child.stdout.take().unwrap());
     let mut buf = Vec::new();
     let (mut first, mut logged, mut decided, mut cont) = (true, 0, false, false);
+    // Only the guest's positive `kiln: cache scrub ok` lets a cache overlay be committed.
+    let mut scrub_ok = false;
     // Gitea: the runner is unregistered and never exits by itself; the console said so.
     let mut dropped = false;
     // A job is root in its VM and can write anything to the console, so console lines
@@ -974,6 +976,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     }
                 }
                 // The guest's login-token scrub of the cache disk failed: the overlay must not be committed for later jobs.
+                scrub_ok |= crate::forge::console::is_scrub_ok(&text);
                 if crate::forge::console::is_scrub_failed(&text)
                     && let Some(v) = update(app, id, scrub_failed)
                 {
@@ -1074,16 +1077,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
             }
         }
     }
-    // A job that ran but whose guest never reached its cleanup (`kiln: decide` comes after the token scrub) has an
-    // unscrubbed cache disk. (A Gitea runner the server dropped is stopped by the host before any cleanup, as before.)
-    if !decided
-        && !dropped
-        && let Some(v) = update(app, id, |v| {
-            if v.job.is_some() {
-                scrub_failed(v)
-            }
-        })
-    {
+    // A job that ran but whose guest never proved the token scrub (a failure, a lost line, a guest that died first)
+    // leaves an overlay that must not be committed.
+    if !scrub_ok && let Some(v) = update(app, id, unscrubbed) {
         persist(app, &v);
     }
     // A gated VM that ends between its job start and its verdict is a gate death, whether or not `kiln.gate=dead` made it
@@ -1482,8 +1478,8 @@ fn pending_file(data: &Path, repo: &str) -> PathBuf {
     c.with_file_name(format!("{}+pending.qcow2", c.file_stem().unwrap_or_default().to_string_lossy()))
 }
 
-async fn qemu_img(args: &[&str]) -> Result<()> {
-    let out = Command::new("qemu-img").args(args).output().await.context("qemu-img")?;
+async fn qemu_img(app: &App, args: &[&str]) -> Result<()> {
+    let out = Command::new(&app.qemu_img).args(args).output().await.context("qemu-img")?;
     if !out.status.success() {
         bail!("qemu-img {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -1511,9 +1507,10 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
         if !backing.exists() {
             tokio::fs::create_dir_all(backing.parent().unwrap()).await?;
             // Unformatted: the guest runs mkfs on first use.
-            qemu_img(&["create", "-q", "-f", "qcow2", &backing.display().to_string(), &format!("{gb}G")]).await?;
+            qemu_img(app, &["create", "-q", "-f", "qcow2", &backing.display().to_string(), &format!("{gb}G")]).await?;
         }
-        qemu_img(&["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing.display().to_string(), &ov.display().to_string()]).await
+        qemu_img(app, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing.display().to_string(), &ov.display().to_string()])
+            .await
     }
     .await;
     match made {
@@ -1588,7 +1585,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     // The overlay file was QEMU's to write: its header (backing file, external data file) is
     // the job's if QEMU was ever compromised, and `qemu-img commit` writes wherever it points.
     let verdict = match verdict {
-        Ok(()) => overlay_header(&ov, &cache_file(&app.data, repo)).await,
+        Ok(()) => overlay_header(app, &ov, &cache_file(&app.data, repo)).await,
         e => e,
     };
     let (state, note) = match verdict {
@@ -1600,10 +1597,18 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
             // Every overlay alive right now shares the same backing state (commits only happen
             // with no readers), so a newer trusted overlay simply supersedes a parked one.
             let pending = pending_file(&app.data, repo);
-            let _ = tokio::fs::rename(&ov, &pending).await;
-            match commit_pending(app, repo, id).await {
-                Some(r) => r,
-                None => (CacheUse::Committed, Some("cache queued: saved when this repo's other jobs finish".into())),
+            match tokio::fs::rename(&ov, &pending).await {
+                Ok(()) => match commit_pending(app, repo, id).await {
+                    Some(r) => r,
+                    None => (CacheUse::Committed, Some("cache queued: saved when this repo's other jobs finish".into())),
+                },
+                // Nothing was queued: say so, rather than promise a save that will never happen.
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&ov).await;
+                    tracing::warn!("{repo}: cache overlay not queued: {e}");
+                    app.notice(&format!("cache:{}", repo.to_ascii_lowercase()), "cache", format!("cache not saved for {repo}: {e}"));
+                    (CacheUse::Discarded, Some(format!("cache not saved: could not queue the overlay: {e}")))
+                }
             }
         }
     };
@@ -1632,7 +1637,7 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
     }
     let cfg = app.cfg();
     let backing = cache_file(&app.data, repo);
-    let r = qemu_img(&["commit", "-q", &pending.display().to_string()]).await;
+    let r = qemu_img(app, &["commit", "-q", &pending.display().to_string()]).await;
     // qemu-img takes the write lock before touching anything: a refusal means some QEMU
     // still has the cache open and nothing was written. Keep it parked; the tick retries.
     if let Err(e) = &r
@@ -1641,32 +1646,85 @@ pub async fn commit_pending(app: &App, repo: &str, except: &str) -> Option<(Cach
         app.committing.lock().unwrap().remove(&key);
         return Some((CacheUse::Committed, Some("cache queued: still in use, saving shortly".into())));
     }
-    let _ = tokio::fs::remove_file(&pending).await;
+    if let Err(e) = tokio::fs::remove_file(&pending).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("{repo}: parked cache overlay not removed: {e}");
+    }
     let big = disk_bytes(&backing);
+    let notice = format!("cache:{key}");
     let out = match r {
         Err(e) => {
             // A failed commit may leave the backing half-written: start over.
-            let _ = tokio::fs::remove_file(&backing).await;
-            (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}")))
+            let reset = reset_cache(app, repo, &backing).await;
+            tracing::warn!("{repo}: cache commit failed, cache reset: {e:#}");
+            // Surfaced until the next commit works.
+            app.notice(&notice, "cache", format!("cache commit failed for {repo}: {e:#}{reset}"));
+            (CacheUse::Discarded, Some(format!("cache commit failed, cache reset: {e:#}{reset}")))
         }
         Ok(()) if cache_too_big(big, cfg.cache_gb_for(repo)) => {
             let gb = cfg.cache_gb_for(repo);
-            let _ = tokio::fs::remove_file(&backing).await;
+            let reset = reset_cache(app, repo, &backing).await;
             tracing::info!("cache for {repo} grew to {} MB, over {gb} GB x 1.2: reset", big >> 20);
-            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB", gb as f64 * 1.2)))
+            (CacheUse::Committed, Some(format!("cache saved, then reset: it grew past {} GB{reset}", gb as f64 * 1.2)))
         }
-        Ok(()) => (CacheUse::Committed, None),
+        Ok(()) => {
+            app.clear_notice(&notice);
+            (CacheUse::Committed, None)
+        }
     };
     app.committing.lock().unwrap().remove(&key);
     Some(out)
 }
 
+/// Deletes a cache disk that must start over. A disk that stays (it may be half-written, and the next job would mount it)
+/// is a health item for the repo and says so in the VM's note.
+async fn reset_cache(app: &App, repo: &str, backing: &Path) -> String {
+    match tokio::fs::remove_file(backing).await {
+        Ok(()) => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!("{repo}: cache disk not removed: {e}");
+            app.notice(
+                &format!("cache:{}", repo.to_ascii_lowercase()),
+                "cache",
+                format!("cache disk of {repo} could not be reset: {e}; clear it in the dashboard"),
+            );
+            format!(" (the cache disk could not be removed: {e})")
+        }
+    }
+}
+
+/// A parked cache commit nothing reads the cache for, waiting longer than this, is a health item: something else holds the
+/// cache's lock (a stray QEMU) or every commit fails, and the repo's warm VMs wait for it.
+const PARKED_ALERT_SECS: u64 = 15 * 60;
+
+/// Raises or clears the health item for a repo's parked cache commit; called by the tick after it retries the commit.
+pub fn check_parked(app: &App, repo: &str) {
+    let key = format!("cache-parked:{}", repo.to_ascii_lowercase());
+    let age = std::fs::metadata(pending_file(&app.data, repo))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or(0, |d| d.as_secs());
+    let readers = cache_readers(&app.vms.lock().unwrap(), repo, "");
+    if age > PARKED_ALERT_SECS && readers == 0 {
+        app.notice(
+            &key,
+            "cache",
+            format!("cache save for {repo} has waited {} min: its lock is held by another process, or the commit keeps failing (warm VMs of the repo wait for it)", age / 60),
+        );
+    } else {
+        app.clear_notice(&key);
+    }
+}
+
 /// Is `ov` a plain qcow2 overlay of exactly `backing`? Err says why it may not be committed.
-async fn overlay_header(ov: &Path, backing: &Path) -> Result<(), String> {
+async fn overlay_header(app: &App, ov: &Path, backing: &Path) -> Result<(), String> {
     if !tokio::fs::symlink_metadata(ov).await.is_ok_and(|m| m.is_file()) {
         return Err("overlay is not a regular file".into());
     }
-    let o = Command::new("qemu-img")
+    let o = Command::new(&app.qemu_img)
         .args(["info", "--output=json", "-f", "qcow2"])
         .arg(ov)
         .output()
@@ -1836,6 +1894,13 @@ fn scrub_failed(v: &mut Vm) {
     if v.cache == CacheUse::Read {
         v.cache = CacheUse::Discarded;
         v.cache_note = Some("cache not saved: the guest could not scrub login tokens from it".into());
+    }
+}
+
+/// A VM that ran a job without proof of the scrub: its overlay is discarded.
+fn unscrubbed(v: &mut Vm) {
+    if v.job.is_some() {
+        scrub_failed(v);
     }
 }
 
@@ -2579,7 +2644,7 @@ fn runner_version(tag: &str) -> Result<String> {
 /// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
 /// 13: R4 fixes: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
 /// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
-const RECIPE: u64 = 13;
+const RECIPE: u64 = 14;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -3119,6 +3184,13 @@ mod tests {
         scrub_failed(&mut v);
         assert_eq!(v.cache, CacheUse::Discarded);
         assert!(v.cache_note.as_deref().unwrap().contains("scrub"));
+        // No proof of a scrub after a job: discarded; a VM that never ran a job is left alone.
+        let mut v = Vm { cache: CacheUse::Read, job: Some("t".into()), ..vm("kiln-5-2", State::Done, None) };
+        unscrubbed(&mut v);
+        assert_eq!(v.cache, CacheUse::Discarded);
+        let mut v = Vm { cache: CacheUse::Read, job: None, ..vm("kiln-5-3", State::Done, None) };
+        unscrubbed(&mut v);
+        assert_eq!(v.cache, CacheUse::Read);
         // Nothing to discard without an overlay: the record stays as it was.
         let mut v = Vm { cache: CacheUse::None, ..vm("kiln-5-1", State::Busy, None) };
         scrub_failed(&mut v);
@@ -3267,7 +3339,10 @@ mod tests {
         assert!(connect_own(&d.join("file")).await.is_err());
         // A planted overlay symlink is refused before qemu-img ever reads it.
         std::os::unix::fs::symlink(d.join("file"), d.join("cache.qcow2")).unwrap();
-        assert_eq!(overlay_header(&d.join("cache.qcow2"), &d.join("file")).await, Err("overlay is not a regular file".into()));
+        assert_eq!(
+            overlay_header(&crate::App::for_tests(), &d.join("cache.qcow2"), &d.join("file")).await,
+            Err("overlay is not a regular file".into())
+        );
         // QEMU's whole environment is the allow list: run `env` through the same scrubbing.
         let os = |s: &str| std::ffi::OsString::from(s);
         let mut c = Command::new("env");
@@ -5046,7 +5121,7 @@ print("ok")
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 13);
+        assert_eq!(RECIPE, 14);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
