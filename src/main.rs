@@ -1525,6 +1525,15 @@ mod tests {
         let m = forge_test_mock::Mock::github().await;
         // A launch that mints nothing: the GitHub VM below dies at registration, long before QEMU.
         m.route("POST", "/repos/acme/demo/actions/runners/generate-jitconfig", 404, "{}");
+        // GitHub's queue is empty, so its demand never competes with the Gitea pool for the cpu budget (the repo order rotates).
+        for st in ["queued", "in_progress"] {
+            m.route(
+                "GET",
+                &format!("/repos/acme/demo/actions/runs?status={st}&per_page=30"),
+                200,
+                r#"{"workflow_runs":[],"total_count":0}"#,
+            );
+        }
         let forges: Vec<forge::ForgeCfg> = serde_json::from_str(
             r#"[{"id":"github","kind":"github","repos":["acme/demo"]},{"id":"gitea","kind":"gitea","url":"https://gitea.example.org","repos":["acme/demo"]}]"#,
         )
