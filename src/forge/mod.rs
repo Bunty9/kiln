@@ -2,8 +2,6 @@
 //! A repo is `(forge id, path)`. The key is bare `owner/name` on GitHub (every existing key,
 //! `Vm.repo` value and cache file stays valid), else `forge-id:path`.
 
-#![allow(dead_code)] // the call sites arrive with the later forge tasks
-
 pub mod console;
 pub mod gitea;
 pub mod github;
@@ -283,7 +281,7 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
                 Some(u) => {
                     net::check_forge_url(u, f.network.unwrap_or(Network::Public))
                         .map_err(|e| anyhow::anyhow!("forge {:?}: {e:#}", f.id.as_str()))?;
-                    // Two entries for one server share the install's runner prefix and sweep each other's runners (R4 L-12).
+                    // Two entries for one server share the install's runner prefix and sweep each other's runners.
                     let canon = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
                     if let Some(p) = list[..i].iter().find(|p| p.kind == f.kind && p.url.as_deref().is_some_and(|pu| canon(pu) == canon(u)))
                     {
@@ -380,7 +378,7 @@ pub struct Demand {
     /// Queued fork jobs kiln refuses (never counted in `by_size`).
     pub refused_forks: usize,
     /// Gitea: a queued (not `waiting`) fork job with our labels exists. A fork job runs on any
-    /// matching runner, warm ones included, so kiln launches nothing for the repo meanwhile.
+    /// matching runner, warm ones included. Informational: it shows a banner and blocks no launches.
     pub fork_queued: bool,
     /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
     pub lookup_error: Option<String>,
@@ -622,14 +620,6 @@ impl Forge {
             Self::Gitea(g) => g.dispatch(repo, workflow, git_ref, inputs).await,
         }
     }
-    /// Whether kiln starts VMs for this forge yet (GitLab and Gitea are in preview until it does).
-    pub fn launches(&self) -> bool {
-        match self {
-            Self::GitHub(_) => true,
-            Self::GitLab(_) => gitlab::LAUNCH_READY,
-            Self::Gitea(_) => gitea::LAUNCH_READY,
-        }
-    }
     pub fn id(&self) -> ForgeId {
         match self {
             Self::GitHub(_) => ForgeId::github(),
@@ -742,7 +732,7 @@ impl Forge {
             Self::Gitea(g) => g.sweep(repo, keep).await,
         }
     }
-    /// Whether jobs wait for a host verdict (section 4 of the forge design). GitHub's path has no
+    /// Whether jobs wait for a host verdict. GitHub's path has no
     /// gate: `kiln-prejob.sh` and the JIT config bind it.
     pub fn gated(&self) -> bool {
         match self {
@@ -773,7 +763,7 @@ impl Forge {
     }
 }
 
-/// The host's call on a gated job (4 of the forge design).
+/// The host's call on a gated job.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Call {
     Ok,
@@ -830,7 +820,7 @@ pub struct VerdictFacts {
     pub unknown_source: bool,
     /// Tag or release.
     pub tag: bool,
-    /// GitLab merge-train ref: target plus every MR ahead of this one, which may include fork MRs (R2b B-L1).
+    /// GitLab merge-train ref: target plus every MR ahead of this one, which may include fork MRs.
     pub train: bool,
 }
 
@@ -875,7 +865,7 @@ pub async fn gate(
         match pause.await {
             Err(e) => return Verdict::refuse(format!("pause failed: {e:#}")),
             Ok(Some(held)) if held.len() != 1 || held[0] != job_id => {
-                // A second job slipped past the pause (R2 L-4): worth a look, as the settle time is one lab measurement.
+                // A second job slipped past the pause: worth a look, as the settle time is one lab measurement.
                 tracing::warn!("verdict gate for job {job_id}: the paused runner holds {} job(s), refusing", held.len());
                 return Verdict::refuse(format!("runner holds {} job(s), not only the one it started", held.len()));
             }
@@ -1267,7 +1257,7 @@ mod tests {
             "case-insensitive duplicate"
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
-        // R4 L-12: two entries for one server.
+        // Two entries for one server.
         assert!(!ok(
             r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitlab","url":"https://X.example.org/"}]"#,
             &[]
@@ -1276,7 +1266,7 @@ mod tests {
             r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitea","url":"https://x.example.org"}]"#,
             &[]
         ));
-        // R4 M-2: adds and removes of non-GitHub forges are seen; edits and GitHub's own entry are not.
+        // Adds and removes of non-GitHub forges are seen; edits and GitHub's own entry are not.
         let l = |j: &str| cfg(j).unwrap().unwrap();
         let (gh, a) = (r#"{"id":"github","kind":"github"}"#, r#"{"id":"a","kind":"gitlab","url":"https://x.example.org"}"#);
         assert_eq!(added_or_removed(&l(&format!("[{gh}]")), &l(&format!("[{gh},{a}]"))).as_deref(), Some("a"));
@@ -1295,6 +1285,7 @@ mod tests {
         assert!(cfg(r#"[{"id":"gl","kind":"nope"}]"#).is_err());
     }
 
+    #[test]
     fn label_matching() {
         let size = |v: Value| job_size(&v, "kiln", 4, false);
         assert_eq!(size(json!(["self-hosted", "kiln"])), Some(4));

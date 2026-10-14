@@ -427,6 +427,7 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
   app.json, app.pem              GitHub App id and private key (mode 0600), when an App is configured
   dashboard.key                  secret for requests from the box itself, mode 0600, generated on first start
   listen.last                    the listen address that last bound, for the fallback when the configured one is taken
+  install_id                     6-hex prefix for the runner names kiln registers on GitLab and Gitea, so it can tell its own runners from another install's; created at first use
   serve.sock                     unix socket `tailscale serve` proxies to, mode 0600, recreated by `serve` at start
   onboard.json                   hello PRs opened from the dashboard
   usage.json                     GitHub job minutes per UTC day and VM size, for "Saved this month" (the last 400 days that had jobs)

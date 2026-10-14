@@ -258,7 +258,7 @@ pub fn load(data: &std::path::Path) -> Option<Result<AppAuth>> {
 pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp = std::path::PathBuf::from(format!("{}.tmp", path.display()));
-    // A leftover temp file (crash between write and rename) is replaced, never reused (R4 L-3).
+    // A leftover temp file (crash between write and rename) is replaced, never reused.
     let _ = std::fs::remove_file(&tmp);
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
     f.set_permissions(std::fs::Permissions::from_mode(0o600))?;

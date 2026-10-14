@@ -1137,7 +1137,7 @@ mod tests {
 }
 
 /// Characterization of today's GitHub behaviour against the mock forge (forge_test_mock.rs):
-/// the forge refactor (P0-4..P0-11) must keep every assertion here unchanged.
+/// the forge refactor had to keep every assertion here unchanged.
 #[cfg(test)]
 mod characterization {
     use super::*;

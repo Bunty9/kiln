@@ -72,7 +72,7 @@ assert.equal(repoPath('gl', 'gl2:g/p'), 'gl2:g/p', 'only this forge prefix');
 // A GitLab forge whose token has no `api` scope shows no Rerun, Cancel or Run pipeline (the server's caps say so).
 const glNoApi = { id: 'gl', url: 'https://gitlab.example', repos: ['gl:g/p'], caps: { rerun: false, rerun_failed: false, cancel: false, dispatch: false, workflows: false } };
 assert.deepEqual(runActs(true, glNoApi), []); assert.deepEqual(runActs(false, glNoApi), []); assert(!can(glNoApi, 'dispatch'));
-// Forge-aware Repos page, banners and job text (X-5).
+// Forge-aware Repos page, banners and job text.
 const X = new Function('esc', ['tip', 'FN', 'fname', 'forgeOf', 'GL_SCOPES', 'glScopes', 'daysLeft', 'repoPath', 'jobEnd', 'jobMins', 'fl', 'kindOf', 'mixed', 'fbadge', 'forgeByKey', 'keyPath', 'repoText', 'repoLabel', 'labelHint', 'credsOk', 'ghErr', 'ciSnippet', 'sizeNote', 'otherMins', 'repoErr', 'forgeBanners'].map(grab).join('\n') +
   '\nreturn { fl, kindOf, mixed, fbadge, forgeByKey, keyPath, repoText, repoLabel, labelHint, credsOk, ghErr, ciSnippet, sizeNote, otherMins, repoErr, forgeBanners };')(esc);
 const gl1 = { id: 'gitlab', kind: 'gitlab', url: 'https://gitlab.example', repos: ['gitlab:g/s/p'], health: null, auth: { source: 'file', scopes: ['create_runner', 'manage_runner', 'read_api'] } };
@@ -180,7 +180,7 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     { id: 'kiln-3', repo: 'gitea:o/r', state: 'held', job: 'build', started: t0 - 300, busy_since: t0 - 290, hold_until: t0 + 600, ssh: 'ssh -p 2201 runner@100.64.0.7', cpus: 4 }];
   const mkS = (o = {}) => ({ config: cfg, job_label: 'kiln', platform: { os: 'linux', arch: 'x86_64' }, token_set: false, app: null, poll: { queued: {}, repo_errors: {}, refused_forks: {}, fork_queued: [] }, vms: [], notify: { dests: [] }, usage: [], usage_other: [],
     image: null, image_ready: false, baking: false, host: { load: [0, 0, 0], cpus: 8, mem_total_mb: 32768, mem_avail_mb: 20000, disk_free_gb: 100, samples: [] }, version: '0.0.0', mirror: null, caches: {}, update: {}, restart: {}, ...o });
-  const fg = (kind, id, x = {}) => ({ id, kind, url: `https://${id}.example`, repos: [], health: null, caps: {}, auth: { source: 'none' }, launches: true, network: 'public', ...x });
+  const fg = (kind, id, x = {}) => ({ id, kind, url: `https://${id}.example`, repos: [], health: null, caps: {}, auth: { source: 'none' }, network: 'public', ...x });
   const boxes = {
     'fresh GitHub': [mkS(), [fg('github', 'github', { repos: ['acme/api'] })]],
     'fresh, forges not loaded yet': [mkS(), null],

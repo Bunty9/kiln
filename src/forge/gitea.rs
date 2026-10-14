@@ -1,4 +1,4 @@
-//! The Gitea forge (5.3 of the forge design): demand from the queued-jobs listing with labels
+//! The Gitea forge: demand from the queued-jobs listing with labels
 //! matched client-side, each job joined to its run for event, path and fork status, and the
 //! server version that gates what Gitea can do, runner registration over the connect-RPC JSON
 //! `Register` call, retire and sweep. All HTTP goes through `net` with the forge's network mode.
@@ -38,9 +38,6 @@ const KNOWN_EVENTS: [&str; 7] = ["push", "pull_request", "pull_request_target", 
 const RUNNER_VERSION: &str = "v5.0.0";
 const NOT_OWNER: &str =
     "Gitea refused the runner registration token: the service account must be the repo owner or a member of the organisation's Owners team";
-
-/// Kill switch: when false, demand reports the queue, fork jobs and claims, but no launchable jobs.
-pub const LAUNCH_READY: bool = true;
 
 /// A Gitea server version, compared numerically. The 28.x line is newer than 1.x, so never test `major == 1`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -101,7 +98,7 @@ pub struct Gitea {
     login: Mutex<Option<String>>,
     version: Mutex<Option<(Ver, Instant)>>,
     runs: Mutex<HashMap<(String, u64), Arc<RunRec>>>,
-    /// Runner id -> VM id, filled when GT-2 registers a runner; claims are looked up by it.
+    /// Runner id -> VM id, filled when a runner is registered; claims are looked up by it.
     tracked: Mutex<HashMap<u64, String>>,
     /// How long `cache_trust` waits between looks for a job that has not completed yet.
     poll: Duration,
@@ -482,7 +479,7 @@ impl Gitea {
                 return Ok(out);
             }
         }
-        // Only the queue may be read in part (R4 L-6): a queued fork job holds nothing back any more, so a missed count is
+        // Only the queue may be read in part: a queued fork job holds nothing back any more, so a missed count is
         // harmless, while failing would let anyone who queues that many jobs stop the repo. Running jobs decide whether a
         // runner may be deleted and which VM holds a fork job: a partial view of those fails closed.
         if status != "queued" {
@@ -578,7 +575,7 @@ impl Gitea {
         Ok(RunnerReg { runner_id: id, guest_secret: format!("kiln.forge=gitea\nkiln.cred={cred}") })
     }
 
-    /// Drops a runner kiln registered (retire, 3.3 of the forge design). The `busy` field is never
+    /// Drops a runner kiln registered (retire). The `busy` field is never
     /// consulted: it stays false while a task is assigned.
     /// - 1.26+: disable (no new task), see whether a job is in progress on it, delete only if not.
     ///   A job in progress: leave it, the entry deletes itself when the job ends (`Busy`).
@@ -695,11 +692,7 @@ impl Gitea {
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        let mut d = self.demand_with(repo, label, default_cpus, crate::host_threads()).await?;
-        if !LAUNCH_READY {
-            d.by_size.clear();
-        }
-        Ok(d)
+        self.demand_with(repo, label, default_cpus, crate::host_threads()).await
     }
 
     async fn demand_with(&self, repo: &RepoRef, label: &str, default_cpus: u32, host: u32) -> Result<Demand> {
@@ -745,7 +738,7 @@ impl Gitea {
     }
 }
 
-/// The dashboard and the host verdict (GT-3). Every call is for a repo kiln serves; ids that go
+/// The dashboard and the host verdict. Every call is for a repo kiln serves; ids that go
 /// into a path are numbers, and the workflow is a plain file name.
 impl Gitea {
     async fn post(&self, path: &str, body: Option<&Value>) -> Result<()> {
@@ -882,7 +875,7 @@ impl Gitea {
     /// caller's refusal.
     /// The job must also be this VM's: its `runner_id` is `runner_id` and it is `in_progress` (the server
     /// sets both at FetchTask, before the runner logs `task started`), so a console line naming another
-    /// runner's job (a parser differential, a log-format change) is refused instead of judged (R3 M-1).
+    /// runner's job (a parser differential, a log-format change) is refused instead of judged.
     pub async fn verdict_facts(&self, repo: &RepoRef, job_id: &str, runner_id: u64) -> Result<VerdictFacts> {
         let job = self.job(repo, job_id).await?;
         if job["runner_id"].as_u64() != Some(runner_id) {
@@ -1375,7 +1368,7 @@ mod tests {
         let d = g.demand_with(&repo(), "kiln", 2, 16).await.unwrap();
         assert!(d.by_size.is_empty());
         assert_eq!(m.requests().iter().filter(|r| r.contains("/jobs?")).count(), 2);
-        // 10 full pages and still more: the part read counts (R4 L-6), and the listing does not fail.
+        // 10 full pages and still more: the part read counts, and the listing does not fail.
         for p in 1..=10 {
             m.route(
                 "GET",
@@ -1794,7 +1787,7 @@ mod tests {
         r.as_object_mut().unwrap().remove("repository");
         m.route("GET", &format!("{API}/runs/70"), 200, r.to_string());
         assert_eq!(verdict(&g, "102").await.v, Refuse);
-        // R3 M-1: a job of another runner, a job that is not running, and one with no runner are refused
+        // A job of another runner, a job that is not running, and one with no runner are refused
         // even when the run is fine (a console line naming a trusted job on another runner).
         for (rid, st, why) in [
             (json!(53), "in_progress", "not this VM's runner"),

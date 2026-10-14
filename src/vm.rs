@@ -106,7 +106,7 @@ fn is_default<T: Default + PartialEq>(v: &T) -> bool {
 }
 
 impl Vm {
-    /// The verdict gate refused this VM's job on purpose (a fork pull request, a `workflow_run`, ...): kiln working as designed, not a failure.
+    /// The verdict gate refused this VM's job (a policy refusal such as a fork pull request or a `workflow_run`, or a fail-closed one): kiln working as designed, not a failure.
     pub fn refused(&self) -> bool {
         self.verdict.as_ref().is_some_and(|(c, _)| c == "refuse") || self.note.as_deref().is_some_and(|n| n.starts_with("refused:"))
     }
@@ -126,7 +126,7 @@ pub struct Vm {
     pub result: Option<String>,
     #[serde(default)]
     pub job_url: Option<String>,
-    /// The forge's id of the job this VM ran: set once (4.3 of the forge design); a second id kills the VM.
+    /// The forge's id of the job this VM ran: set once; a second id kills the VM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// "Running job" lines this VM's own console showed, counted even when `apply_line` ignores
@@ -135,7 +135,7 @@ pub struct Vm {
     #[serde(default, skip_serializing_if = "is_default")]
     pub starts: u32,
     /// The host's own call on the bound job, (call, job id): `ok`, `cold` or `refuse`. A gated forge's
-    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits (R2b).
+    /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<(String, String)>,
     /// The refusal came from kiln or the forge failing, not from policy (`Verdict::failure`); old records read false.
@@ -511,7 +511,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 persist(&app, &v);
             }
             // A JIT runner that never ran a job stays registered (offline) on GitHub. A gated forge's
-            // runner never removes itself, so it goes whatever the VM did (R2 H-1); the VM is over.
+            // runner never removes itself, so it goes whatever the VM did; the VM is over.
             if let Some(rid) = v.runner_id
                 && (v.job.is_none() || forge_for(&app, &v.repo).is_ok_and(|(f, _)| f.gated()))
             {
@@ -545,7 +545,7 @@ pub async fn reap(app: &App, repo: &str, cpus: u32, n: usize) {
     retire(app, repo, c, Reason::Surplus).await;
 }
 
-/// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id` (R2 L-6): the runner only
+/// Kills the active VMs of `repo` whose job belongs to GitLab pipeline `id`: the runner only
 /// notices a cancel after about a minute, so a maintainer stopping a suspicious job must stop the VM.
 /// Matched by the pipeline link, or by a console-bound job id in `jobs` (the API's list for the pipeline).
 pub fn kill_pipeline(app: &App, repo: &str, id: u64, jobs: &[String]) -> usize {
@@ -644,7 +644,7 @@ fn kill_idle(app: &App, id: &str, reason: Reason, why: &str) {
     }
 }
 
-/// Startup: deletes the forge runners of saved records that have ended, for every gated forge (R2b B-L2),
+/// Startup: deletes the forge runners of saved records that have ended, for every gated forge,
 /// and of VMs the last run lost (a crash or reboot) on any forge: their runners are known by id, so no
 /// sweep by name has to guess. A failed delete at the VM's end is not retried, and a record lost in a
 /// crash never ran its delete. Only the last day is tried: older runners fall to the orphan sweep, and a
@@ -832,7 +832,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd.arg("-drive").arg(format!("file={},if=virtio,format=qcow2,cache=unsafe,discard=unmap", ov.display()));
     }
     // Direct kernel boot without initrd: virtio + ext4 are built into the
-    // Ubuntu kernel, which brings boot-to-runner down to ~4s.
+    // Ubuntu kernel, which brings boot-to-runner down to about 10 s.
     cmd.arg("-kernel").arg(images(&app.data).join("base.vmlinuz"));
     cmd.args(job_args(&GUEST, &q, ssh_host.is_some(), now_us()));
     if ssh_host.is_some() && publish == Publish::Monitor {
@@ -920,7 +920,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         .min(v.started + hard_cap);
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         // `buf` is not cleared here: a line another branch cut off (cancelled mid-line) keeps its bytes in it, and the
-        // next read appends the rest, so its tail is never parsed as a whole line (R3 L-4).
+        // next read appends the rest, so its tail is never parsed as a whole line.
         tokio::select! {
             r = read_capped(&mut lines, &mut buf) => {
                 if r? == 0 {
@@ -1047,7 +1047,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                 }
                 if refuse {
                     // The guest fails the job cleanly (kiln-exec exits 1) so the forge shows why; no job
-                    // code can run before an `ok`, so waiting is safe. Bounded, then killed (R2 M-2).
+                    // code can run before an `ok`, so waiting is safe. Bounded, then killed.
                     let _ = tokio::time::timeout(REFUSE_GRACE, child.wait()).await;
                     child.kill().await.ok();
                     return Ok(State::Killed);
@@ -1091,7 +1091,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         persist(app, &v);
     }
     // A gated VM that ends between its job start and its verdict is a gate death, whether or not `kiln.gate=dead` made it
-    // to the console (the guest powers off right after printing it); the line is only a hint (R3 L-2).
+    // to the console (the guest powers off right after printing it); the line is only a hint.
     let mut lost = false;
     if forge.gated()
         && let Some(v) = update(app, id, |v| {
@@ -1127,7 +1127,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
 }
 
 /// GitLab and Gitea: the result of the one job the console bound, from the job API, on a runner that started
-/// exactly one, with a recorded ok or cold verdict for that id (R2b section 4). Stored on the record and
+/// exactly one, with a recorded ok or cold verdict for that id. Stored on the record and
 /// returned; None when not applicable, unknown, or the API failed or took longer than `limit` (fail closed:
 /// no result means no debug hold).
 async fn api_result(app: &App, id: &str, forge: &crate::forge::Forge, rr: &RepoRef, v: &Vm, limit: Duration) -> Option<Vm> {
@@ -1412,7 +1412,7 @@ pub fn cache_file(data: &Path, repo: &str) -> PathBuf {
     data.join("cache").join(format!("{stem}.qcow2"))
 }
 
-/// Deletes every cache disk and parked overlay of a forge (`{id}~*`), for a removed or re-added id (R4 M-5).
+/// Deletes every cache disk and parked overlay of a forge (`{id}~*`), for a removed or re-added id.
 pub fn drop_forge_caches(data: &Path, id: &crate::forge::ForgeId) -> Result<()> {
     let prefix = format!("{}~", id.as_str());
     for e in std::fs::read_dir(data.join("cache")).into_iter().flatten().flatten() {
@@ -1481,7 +1481,7 @@ fn cache_verdict(cache_on: bool, succeeded: bool, writers: &[String], trust: Res
 
 /// A trusted overlay parked until the repo's other jobs stop reading the cache.
 fn pending_file(data: &Path, repo: &str) -> PathBuf {
-    // "+" cannot be in a repo name, so repo `x` never parks onto the cache file of a repo `x.pending` (R3 L-5).
+    // "+" cannot be in a repo name, so repo `x` never parks onto the cache file of a repo `x.pending`.
     let c = cache_file(data, repo);
     c.with_file_name(format!("{}+pending.qcow2", c.file_stem().unwrap_or_default().to_string_lossy()))
 }
@@ -1560,7 +1560,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     };
     let trust = if succeeded && cfg.cache && console.is_ok() {
         // Records from before `job_id` carry only the job page.
-        // A gated forge's id is the console's alone: the API-sourced job page never stands in for it (R2 L-5).
+        // A gated forge's id is the console's alone: the API-sourced job page never stands in for it.
         match v.job_id.clone().or_else(|| v.job_url.as_deref().filter(|_| !gated).and_then(job_id).map(|j| j.to_string())) {
             Some(id) => match forge_for(app, repo) {
                 Ok((f, repo)) => f.cache_trust(&JobRef { repo, id }, &writers).await.map_err(|e| format!("{e:#}")),
@@ -1869,7 +1869,7 @@ pub(crate) fn apply_line(kind: crate::forge::Kind, v: &mut Vm, line: &str, t: u6
 }
 
 /// The host's own record of a verdict. A refused or cold job never commits the cache, whatever the
-/// guest does (R2 L-2): a tag or release job may keep a mounted overlay.
+/// guest does: a tag or release job may keep a mounted overlay.
 fn apply_verdict(v: &mut Vm, jid: &str, vd: &crate::forge::Verdict) {
     use crate::forge::Call;
     if v.job_id.as_deref() == Some(jid) {
@@ -1927,7 +1927,7 @@ enum Bound {
     Second,
 }
 
-/// Binds the console's job id once, forward only (4.3 of the forge design).
+/// Binds the console's job id once, forward only.
 fn bind_job_id(v: &mut Vm, id: &str) -> Bound {
     match v.job_id.as_deref() {
         None => {
@@ -2016,7 +2016,7 @@ fn now_us() -> u128 {
 /// Secret lines a job VM can be given (`kiln.forge`, `kiln.url`, `kiln.cred`, `kiln.timeout`, ...).
 const MAX_SECRET_LINES: usize = 8;
 
-/// More lines than `MAX_SECRET_LINES` would leave `jit.N` files that are neither passed to QEMU nor deleted (R3 L-6).
+/// More lines than `MAX_SECRET_LINES` would leave `jit.N` files that are neither passed to QEMU nor deleted.
 fn check_secret_lines(secret: &str) -> Result<()> {
     let n = secret.lines().count();
     if n > MAX_SECRET_LINES {
@@ -2662,9 +2662,9 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 9: kiln-job runs GitLab jobs (`run_gitlab`).
 /// 10: kiln-exec binds the verdict to the server job id and is one-shot.
 /// 11: kiln-job runs Gitea jobs under the exec gate (`run_gitea`, `kiln-gate`); dockerd waits for the verdict there.
-/// 12: R3 fixes: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
+/// 12: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
 /// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
-/// 13: R4 fixes: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
+/// 13: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
 /// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
 const RECIPE: u64 = 14;
 
@@ -4220,7 +4220,7 @@ mod tests {
         // ok, no image: no docker, runs directly, a failing script is exit 1.
         fresh();
         let (rc, _, calls) = stage("ok 42", &[], &["prepare"]);
-        // dockerd is not up at boot (R3 M-2c): an ok verdict starts it, once the gate has passed; no container is created for a plain job.
+        // dockerd is not up at boot: an ok verdict starts it, once the gate has passed; no container is created for a plain job.
         assert_eq!((rc, calls.as_str()), (Some(0), "kiln-verdict-wait\nsystemctl start docker.service\n"), "{calls}");
         std::fs::write(dir.join("s.sh"), format!("echo ran > {}/ran\n", dir.display())).unwrap();
         let ran = dir.join("ran");
@@ -4266,7 +4266,7 @@ mod tests {
             assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{switch}: the next stage refuses");
         }
 
-        // One-shot (R2 M-3): a second prepare in the same VM is refused, even with an ok verdict.
+        // One-shot: a second prepare in the same VM is refused, even with an ok verdict.
         fresh();
         assert_eq!(stage("ok 42", &[], &["prepare"]).0, Some(0));
         let (rc, err, _) = stage("ok 42", &[], &["prepare"]);
@@ -4560,7 +4560,7 @@ esac
             assert_eq!(std::fs::read_to_string(dir.join("console")).unwrap(), "kiln.gate=dead\n", "{stub}");
             assert!(rec.contains("kill_uid 4000000000"), "{stub}: {rec}");
         }
-        // R3 M-3: the primary dies just as a refuse verdict lands. The twin, still holding, is waited for (never killed: that
+        // The primary dies just as a refuse verdict lands. The twin, still holding, is waited for (never killed: that
         // would free its group and release every held exec), and the job's uid is killed before the VM is failed.
         let (out, rec) = run("race", dot, "7");
         let lines: Vec<&str> = rec.lines().collect();
@@ -4587,7 +4587,7 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GitHub's path (R4 M-1): run_github starts the runner and never dockerd (docker.socket does, on first use, after
+    /// GitHub's path: run_github starts the runner and never dockerd (docker.socket does, on first use, after
     /// the prejob hook's cold decision), and never without a JIT config.
     #[test]
     fn guest_run_github_leaves_dockerd_to_the_socket() {
@@ -4644,7 +4644,7 @@ esac
     }
 
     /// kiln-docker-gate (docker.service's ExecStartPre): pass outside Gitea VMs and on ok; refuse fails; cold waits for the
-    /// cache disk to be unmounted (R3 M-2a).
+    /// cache disk to be unmounted.
     #[test]
     fn guest_docker_gate_waits_for_the_detach() {
         if !have_bash() {
@@ -4708,7 +4708,7 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow (R3 L-1).
+    /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow.
     #[test]
     fn guest_gate_events_and_crash_handler() {
         if !need(&["python3"]) {
@@ -4796,7 +4796,7 @@ print("ok")
         assert!(check_secret_lines(&n(MAX_SECRET_LINES + 1)).unwrap_err().to_string().contains("9 guest secret lines"));
     }
 
-    /// R3 L-2: a gated VM with a bound job and no recorded verdict is a gate death when it ends.
+    /// A gated VM with a bound job and no recorded verdict is a gate death when it ends.
     #[test]
     fn a_job_without_a_verdict_is_a_gate_death() {
         let mut v = Vm { cache: CacheUse::Read, ..vm("a", State::Busy, None) };
@@ -4807,7 +4807,7 @@ print("ok")
         assert!(!verdictless(&v), "judged");
     }
 
-    /// R3 L-4: a read cancelled mid-line (another `select!` branch won) keeps the partial line in the buffer, and the
+    /// A read cancelled mid-line (another `select!` branch won) keeps the partial line in the buffer, and the
     /// next read completes it, so its tail is never seen as a line of its own.
     #[tokio::test]
     async fn a_cancelled_read_keeps_the_partial_line() {
@@ -4866,16 +4866,16 @@ print("ok")
         assert!(d.contains("ExecStartPre=/usr/local/sbin/kiln-docker-gate\n"));
         let g = yaml.split("path: /usr/local/sbin/kiln-docker-gate\n").nth(1).unwrap();
         assert!(g.contains("kiln-verdict-wait") && g.contains("findmnt /mnt/cache"), "cold waits for the cache disk to be detached");
-        // R3 M-2c: dockerd is not pulled in at boot (neither by kiln-job nor as an enabled unit): each forge's path starts it.
+        // Dockerd is not pulled in at boot (neither by kiln-job nor as an enabled unit): each forge's path starts it.
         let unit = yaml.split("path: /etc/systemd/system/kiln-job.service\n").nth(1).unwrap();
         assert!(unit.contains("Wants=network-online.target\n") && !unit.contains("Wants=network-online.target docker"), "{unit}");
         assert!(yaml.contains("systemctl disable docker.service") && yaml.contains("check \"docker.service not enabled at boot\""));
-        // R3 M-2b, R4 M-1: all but image data is gone from the cache's Docker state before the bind mounts.
+        // All but image data is gone from the cache's Docker state before the bind mounts.
         let cache = yaml.split("path: /usr/local/sbin/kiln-cache\n").nth(1).unwrap();
         let (rm, bind) =
             (cache.find("find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1").unwrap(), cache.find("mount --bind").unwrap());
         assert!(rm < bind);
-        // R3 L-1: the gate's hardening.
+        // The gate's hardening.
         for f in ["4 | 1 | 0x10", "RLIMIT_NOFILE", "def crash", "sysrq", "mask & 0x4000", "crash()\n"] {
             assert!(gate.contains(f), "{f} missing from kiln-gate");
         }
@@ -5424,7 +5424,7 @@ print("ok")
         assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
     }
 
-    /// R4 M-1: GitHub's dockerd starts on first use (after the prejob hook's cold decision), and the cache's Docker state
+    /// GitHub's dockerd starts on first use (after the prejob hook's cold decision), and the cache's Docker state
     /// is an allow-list. The `find` line is run on a seeded tree.
     #[test]
     fn github_dockerd_waits_for_the_prejob_hook_and_cached_docker_state_is_allow_listed() {
@@ -5763,7 +5763,7 @@ print("ok")
         });
     }
 
-    /// A gated forge's cache commit needs the host's own ok for exactly the bound job (R2b section 4).
+    /// A gated forge's cache commit needs the host's own ok for exactly the bound job.
     #[tokio::test]
     async fn a_gated_forge_commits_only_after_an_ok_verdict_for_the_bound_job() {
         use crate::forge::{Forge, ForgeCfg, ForgeId, Kind};
