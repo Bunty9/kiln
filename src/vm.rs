@@ -1311,6 +1311,17 @@ pub fn cache_file(data: &Path, repo: &str) -> PathBuf {
     data.join("cache").join(format!("{stem}.qcow2"))
 }
 
+/// Deletes every cache disk and parked overlay of a forge (`{id}~*`), for a removed or re-added id (R4 M-5).
+pub fn drop_forge_caches(data: &Path, id: &crate::forge::ForgeId) -> Result<()> {
+    let prefix = format!("{}~", id.as_str());
+    for e in std::fs::read_dir(data.join("cache")).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_file(e.path()).with_context(|| format!("deleting {}", e.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Bytes actually allocated (like `du`), not the virtual size.
 fn disk_bytes(p: &Path) -> u64 {
     std::fs::metadata(p).map_or(0, |m| m.blocks() * 512)
@@ -1369,7 +1380,9 @@ fn cache_verdict(cache_on: bool, succeeded: bool, writers: &[String], trust: Res
 
 /// A trusted overlay parked until the repo's other jobs stop reading the cache.
 fn pending_file(data: &Path, repo: &str) -> PathBuf {
-    cache_file(data, repo).with_extension("pending.qcow2")
+    // "+" cannot be in a repo name, so repo `x` never parks onto the cache file of a repo `x.pending` (R3 L-5).
+    let c = cache_file(data, repo);
+    c.with_file_name(format!("{}+pending.qcow2", c.file_stem().unwrap_or_default().to_string_lossy()))
 }
 
 async fn qemu_img(args: &[&str]) -> Result<()> {
@@ -1593,7 +1606,7 @@ fn cache_readers(vms: &[Vm], repo: &str, except: &str) -> usize {
 
 /// Dashboard "Clear": delete a repo's cache (recreated empty by the next job).
 pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
-    if !app.repos().iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+    if !app.all_repos().iter().any(|r| r.eq_ignore_ascii_case(repo)) {
         bail!("not a configured repo");
     }
     let vms = app.vms.lock().unwrap();
@@ -2431,7 +2444,9 @@ fn runner_version(tag: &str) -> Result<String> {
 /// 11: kiln-job runs Gitea jobs under the exec gate (`run_gitea`, `kiln-gate`); dockerd waits for the verdict there.
 /// 12: R3 fixes: dockerd is not started at boot (each forge's path starts it after its trust step), the cache's container
 /// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
-const RECIPE: u64 = 12;
+/// 13: R4 fixes: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
+/// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
+const RECIPE: u64 = 13;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -3914,10 +3929,10 @@ esac
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GitHub's path (R3 M-2c): dockerd is not up at boot, so run_github starts it, before the runner and never without a
-    /// JIT config.
+    /// GitHub's path (R4 M-1): run_github starts the runner and never dockerd (docker.socket does, on first use, after
+    /// the prejob hook's cold decision), and never without a JIT config.
     #[test]
-    fn guest_run_github_starts_docker_before_the_runner() {
+    fn guest_run_github_leaves_dockerd_to_the_socket() {
         if !have_bash() {
             return;
         }
@@ -3925,26 +3940,22 @@ esac
         let job = guest_script("/usr/local/sbin/kiln-job", &dir)
             .replace("/usr/local/sbin/kiln-steps", &dir.join("steps").to_string_lossy())
             .replace("/home/runner/actions-runner", &dir.to_string_lossy());
-        let run = |jit: &str, docker_ok: bool| {
+        let run = |jit: &str| {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let script = format!(
-                "{}\nsecret(){{ printf '%s' \"$JIT\"; }}\nsystemctl(){{ echo \"systemctl $*\" >> \"$REC\"; {}; }}\n\
+                "{}\nsecret(){{ printf '%s' \"$JIT\"; }}\nsystemctl(){{ echo \"systemctl $*\" >> \"$REC\"; }}\n\
                  sudo(){{ echo \"sudo $*\" >> \"$REC\"; }}\nrun_github; echo \"rc=$?\"",
                 source_line(&job, "rgh"),
-                if docker_ok { "true" } else { "false" }
             );
             let o = std::process::Command::new("bash").args(["-c", &script]).env("JIT", jit).env("REC", dir.join("rec")).output().unwrap();
             (String::from_utf8_lossy(&o.stdout).replace('\n', " "), std::fs::read_to_string(dir.join("rec")).unwrap_or_default())
         };
-        let (out, rec) = run("abc", true);
+        let (out, rec) = run("abc");
         assert!(out.contains("rc=0"), "{out}");
-        assert_eq!(rec, "systemctl start docker.service\nsudo -u runner ./run.sh --jitconfig abc\n", "docker first, then the runner");
-        // A docker that fails to start does not stop a job that never needs it.
-        let (out, rec) = run("abc", false);
-        assert!(out.contains("docker did not start") && rec.contains("run.sh --jitconfig abc"), "{out} {rec}");
-        // No JIT config: nothing starts, dockerd included.
-        let (out, rec) = run("", true);
+        assert_eq!(rec, "sudo -u runner ./run.sh --jitconfig abc\n", "the runner only: no systemctl, so no dockerd before the hook");
+        // No JIT config: nothing starts.
+        let (out, rec) = run("");
         assert!(out.contains("rc=1") && rec.is_empty(), "{out} {rec}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4142,12 +4153,10 @@ print("ok")
         let unit = yaml.split("path: /etc/systemd/system/kiln-job.service\n").nth(1).unwrap();
         assert!(unit.contains("Wants=network-online.target\n") && !unit.contains("Wants=network-online.target docker"), "{unit}");
         assert!(yaml.contains("systemctl disable docker.service") && yaml.contains("check \"docker.service not enabled at boot\""));
-        // R3 M-2b: container records and plugins are gone from the cache before the bind mounts.
+        // R3 M-2b, R4 M-1: all but image data is gone from the cache's Docker state before the bind mounts.
         let cache = yaml.split("path: /usr/local/sbin/kiln-cache\n").nth(1).unwrap();
-        let (rm, bind) = (
-            cache.find("rm -rf /mnt/cache/var_lib_docker/containers /mnt/cache/var_lib_docker/plugins").unwrap(),
-            cache.find("mount --bind").unwrap(),
-        );
+        let (rm, bind) =
+            (cache.find("find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1").unwrap(), cache.find("mount --bind").unwrap());
         assert!(rm < bind);
         // R3 L-1: the gate's hardening.
         for f in ["4 | 1 | 0x10", "RLIMIT_NOFILE", "def crash", "sysrq", "mask & 0x4000", "crash()\n"] {
@@ -4699,9 +4708,50 @@ print("ok")
         assert!(a.contains("= arm64 ]; then\n") && a.contains("\"linux-modules-extra-$(uname -r)\""));
     }
 
+    /// R4 M-1: GitHub's dockerd starts on first use (after the prejob hook's cold decision), and the cache's Docker state
+    /// is an allow-list. The `find` line is run on a seeded tree.
+    #[test]
+    fn github_dockerd_waits_for_the_prejob_hook_and_cached_docker_state_is_allow_listed() {
+        let yaml = include_str!("../guest/user-data.yaml");
+        let job = guest_script("/usr/local/sbin/kiln-job", &std::env::temp_dir());
+        let gh = job.split("run_github() {").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(!gh.contains("systemctl start docker") && !gh.contains("docker.service"), "run_github must leave dockerd to docker.socket");
+        // The release path detaches, then starts dockerd on the clean disk; the socket stays enabled for first use.
+        let pre = guest_script("/usr/local/sbin/kiln-prejob.sh", &std::env::temp_dir());
+        assert!(pre.contains("kiln-cache detach"));
+        let cache = guest_script("/usr/local/sbin/kiln-cache", &std::env::temp_dir());
+        assert!(cache.contains("mount -t ext4 -o noatime,nosuid,nodev /dev/vdb"), "typed, nosuid,nodev cache mount");
+        assert!(yaml.contains("check \"docker.socket enabled\""));
+        if !have_bash() || !std::process::Command::new("find").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kiln-test-docker-allowlist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = dir.join("var_lib_docker");
+        for n in ["image", "overlay2", "volumes", "buildkit", "swarm", "containers", "plugins", "network", "runtimes", "tmp", "trust"] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+            std::fs::write(d.join(n).join("f"), "x").unwrap();
+        }
+        std::fs::write(d.join("stray"), "x").unwrap();
+        std::os::unix::fs::symlink("/", d.join("buildkit2")).unwrap();
+        std::fs::remove_dir_all(d.join("buildkit")).unwrap();
+        std::os::unix::fs::symlink("/", d.join("buildkit")).unwrap(); // an allowed name that is a symlink goes too
+        let line = cache.lines().find(|l| l.contains("-name image")).unwrap().replace("/mnt/cache", &dir.to_string_lossy());
+        let o = std::process::Command::new("bash").args(["-c", &format!("set -eu\n{line}")]).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let mut left: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["image", "overlay2", "volumes"]);
+        // First use of a repo: no var_lib_docker yet, and the line must not fail under `set -e`.
+        std::fs::remove_dir_all(&d).unwrap();
+        let o = std::process::Command::new("bash").args(["-c", &format!("set -eu\n{line}\ntrue")]).output().unwrap();
+        assert!(o.status.success());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 12);
+        assert_eq!(RECIPE, 13);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));

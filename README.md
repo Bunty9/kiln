@@ -4,11 +4,11 @@
 
 ![kiln dashboard: a GitHub Actions job is queued, a VM boots in its slot, live step logs stream, and the VM is deleted when the job finishes](docs/media/demo.gif)
 
-Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions or GitLab CI job.
+Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions, GitLab CI or Gitea Actions job.
 
-kiln is a single Rust binary with an embedded dashboard. It polls GitHub (or GitLab) for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
+kiln is a single Rust binary with an embedded dashboard. It polls GitHub, GitLab or Gitea for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
 
-**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub or GitLab. It runs on one host with no failover; while the box is down, jobs wait in the forge's queue.
+**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub, GitLab or Gitea. It runs on one host with no failover; while the box is down, jobs wait in the forge's queue.
 
 **What you need:**
 
@@ -233,9 +233,9 @@ The tab title and favicon show running jobs and unseen failures. Opt-in browser 
 A job is root inside its own VM, and the dashboard holds a GitHub token, so kiln is built around two boundaries.
 
 - **The dashboard** answers only tailnet peers whose Tailscale identity is the owner of the box (or is listed in `allowed_users`), and the box itself with a secret dashboard key. It checks the `Host` header and requires a custom `x-kiln` header on writes. Job VMs reach the host through QEMU's NAT and look like local traffic, which is why local access needs the key.
-- **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror. **Switch to filtered before running untrusted pull requests, such as ones from forks.**
+- **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror (plus the one `ip:port` of a private GitLab or Gitea server, when you set its `network` to `internal`). **Switch to filtered before running untrusted pull requests, such as ones from forks.**
 
-The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook (on GitLab, by the host's verdict gate), before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
+The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused before any of their code runs: by the runner's job-started hook on GitHub, and by the host's verdict gate on GitLab and Gitea. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent).
 
 ## Configuration
 

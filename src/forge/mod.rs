@@ -131,6 +131,13 @@ pub fn moved(old: &[ForgeCfg], new: &[ForgeCfg]) -> Vec<String> {
     new.iter().filter(|f| old.iter().any(|o| o.id == f.id && key(o) != key(f))).map(|f| f.id.as_str().to_string()).collect()
 }
 
+/// The first non-GitHub forge id that is in only one of the lists.
+pub fn added_or_removed(old: &[ForgeCfg], new: &[ForgeCfg]) -> Option<String> {
+    let ids = |l: &[ForgeCfg]| l.iter().filter(|f| f.kind != Kind::GitHub).map(|f| f.id.as_str().to_string()).collect::<Vec<_>>();
+    let (o, n) = (ids(old), ids(new));
+    o.iter().filter(|i| !n.contains(i)).chain(n.iter().filter(|i| !o.contains(i))).next().cloned()
+}
+
 /// `[a-z][a-z0-9-]{0,23}`; part of cache filenames, so effectively immutable.
 #[derive(Serialize, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ForgeId(String);
@@ -276,6 +283,12 @@ pub fn validate(forges: &Option<Vec<ForgeCfg>>, repos: &[String]) -> Result<()> 
                 Some(u) => {
                     net::check_forge_url(u, f.network.unwrap_or(Network::Public))
                         .map_err(|e| anyhow::anyhow!("forge {:?}: {e:#}", f.id.as_str()))?;
+                    // Two entries for one server share the install's runner prefix and sweep each other's runners (R4 L-12).
+                    let canon = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
+                    if let Some(p) = list[..i].iter().find(|p| p.kind == f.kind && p.url.as_deref().is_some_and(|pu| canon(pu) == canon(u)))
+                    {
+                        bail!("forge {:?} and {:?} are the same server", p.id.as_str(), f.id.as_str());
+                    }
                 }
                 None => bail!("forge {:?} needs an http(s) url", f.id.as_str()),
             }
@@ -1170,6 +1183,21 @@ mod tests {
             "case-insensitive duplicate"
         );
         assert!(cfg(r#"[{"id":"GL","kind":"gitlab"}]"#).is_err());
+        // R4 L-12: two entries for one server.
+        assert!(!ok(
+            r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitlab","url":"https://X.example.org/"}]"#,
+            &[]
+        ));
+        assert!(ok(
+            r#"[{"id":"a","kind":"gitlab","url":"https://x.example.org"},{"id":"b","kind":"gitea","url":"https://x.example.org"}]"#,
+            &[]
+        ));
+        // R4 M-2: adds and removes of non-GitHub forges are seen; edits and GitHub's own entry are not.
+        let l = |j: &str| cfg(j).unwrap().unwrap();
+        let (gh, a) = (r#"{"id":"github","kind":"github"}"#, r#"{"id":"a","kind":"gitlab","url":"https://x.example.org"}"#);
+        assert_eq!(added_or_removed(&l(&format!("[{gh}]")), &l(&format!("[{gh},{a}]"))).as_deref(), Some("a"));
+        assert_eq!(added_or_removed(&l(&format!("[{gh},{a}]")), &l(&format!("[{gh}]"))).as_deref(), Some("a"));
+        assert_eq!(added_or_removed(&l(&format!("[{a}]")), &l(&format!("[{gh},{a}]"))), None);
         // M5: a newer kiln's extra field must not stop an older one from starting (rollback), and
         // survives a save; but a dashboard write may not introduce one (typo protection).
         let newer = cfg(r#"[{"id":"gl","kind":"gitlab","url":"https://x.example.org","tls_ca":"/x"}]"#).unwrap();

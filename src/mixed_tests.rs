@@ -234,7 +234,7 @@ async fn demand_is_counted_per_forge() {
 }
 
 #[tokio::test]
-async fn a_fork_job_blocks_only_its_own_repo() {
+async fn a_queued_fork_job_blocks_no_repo() {
     let t = Trio::new("mixed-forks", 99, |c| {
         c.warm.insert(GT_REPO.into(), 1);
         c.warm.insert(GL_REPO.into(), 1);
@@ -246,6 +246,8 @@ async fn a_fork_job_blocks_only_its_own_repo() {
     gl_queue(&t.gl, vec![gl_job(1, false), gl_job(2, true)]);
     gt_runner(&t.gt, false);
     seed(&t.app, "seed-gt", GT_REPO, "idle", 52, 1, 64);
+    let policy = vm::policy_id(&t.cfg);
+    t.app.vms.lock().unwrap().iter_mut().for_each(|v| (v.policy, v.started, v.online_at) = (policy.clone(), now(), Some(now())));
     let gt_kill = watch(&t.app, "seed-gt");
 
     t.tick().await.unwrap();
@@ -253,12 +255,11 @@ async fn a_fork_job_blocks_only_its_own_repo() {
         let p = t.app.poll.lock().unwrap();
         assert!(p.repo_errors.is_empty(), "{:?}", p.repo_errors);
         assert_eq!((p.refused_forks.len(), p.refused_forks[GT_REPO], p.refused_forks[GL_REPO]), (2, 1, 1), "{:?}", p.refused_forks);
-        // Only Gitea's queued fork stops launches; GitLab refuses the MR job but its repo goes on.
+        // Gitea reports its queued fork (a banner only); GitLab refuses the MR job. Neither holds anything (R4 M-3).
         assert_eq!(p.fork_queued, [GT_REPO]);
     }
-    assert!(killed(&gt_kill).await, "the idle Gitea VM could be handed the fork job");
-    assert!(t.gt.requests().iter().any(|r| r == &format!("DELETE {GT}/runners/52")), "{:?}", t.gt.requests());
-    assert_eq!(t.launched(GT_REPO), 0, "no warm or demand VM for the fork repo");
+    assert!(!killed(&gt_kill).await, "the idle Gitea VM is kept: the exec gate refuses a fork job on any VM");
+    assert!(!t.gt.requests().iter().any(|r| r == &format!("DELETE {GT}/runners/52")), "{:?}", t.gt.requests());
     assert_eq!(t.launched(GH_REPO), 1, "GitHub launches for its own queue");
     assert!(t.launched(GL_REPO) >= 1, "GitLab keeps its warm pool");
     let writes =

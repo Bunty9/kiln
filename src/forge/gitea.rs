@@ -467,22 +467,29 @@ impl Gitea {
         }
     }
 
-    /// Every job of `repo` in `status`, all pages (more than `MAX_PAGES` is an error: a partial
-    /// view could hide a fork job).
+    /// Every job of `repo` in `status`, all pages (up to `MAX_PAGES`; beyond that the queue is read in part with a warning, any other status is an error).
     async fn jobs(&self, repo: &RepoRef, status: &str) -> Result<Vec<Value>> {
         let mut out: Vec<Value> = vec![];
         let mut seen = HashSet::new();
         for page in 1..=MAX_PAGES {
             let v = self.get(&format!("repos/{}/actions/jobs?status={status}&limit={PAGE}&page={page}", repo.path)).await?;
             let jobs = v["jobs"].as_array().context("jobs listing has no jobs")?;
-            let total = v["total_count"].as_u64().unwrap_or(0) as usize;
+            // A listing without a count could end after one page with jobs unread: an in_progress one hidden from a retire.
+            let total = v["total_count"].as_u64().context("jobs listing has no total_count")? as usize;
             // A job can move between pages while we read: count each id once.
             out.extend(jobs.iter().filter(|j| seen.insert(j["id"].as_u64())).cloned());
             if jobs.is_empty() || seen.len() >= total {
                 return Ok(out);
             }
         }
-        bail!("more than {} {status} jobs: not reading further", MAX_PAGES * PAGE)
+        // Only the queue may be read in part (R4 L-6): a queued fork job holds nothing back any more, so a missed count is
+        // harmless, while failing would let anyone who queues that many jobs stop the repo. Running jobs decide whether a
+        // runner may be deleted and which VM holds a fork job: a partial view of those fails closed.
+        if status != "queued" {
+            bail!("more than {} {status} jobs: not reading further", MAX_PAGES * PAGE);
+        }
+        tracing::warn!("{}: more than {} {status} jobs: not reading further", repo.path, MAX_PAGES * PAGE);
+        Ok(out)
     }
 
     /// The run behind a job (event, path, pull request), fetched once per id.
@@ -1338,7 +1345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pages_are_read_to_the_end_and_a_flood_fails_closed() {
+    async fn pages_are_read_to_the_end_and_a_flood_is_read_to_the_cap() {
         let (m, g) = mock().await;
         let job = |id: u64| json!({"id": id, "run_id": 70, "status": "queued", "labels": ["ubuntu-latest"]});
         let page = |p: u32, ids: std::ops::Range<u64>| {
@@ -1354,7 +1361,7 @@ mod tests {
         let d = g.demand_with(&repo(), "kiln", 2, 16).await.unwrap();
         assert!(d.by_size.is_empty());
         assert_eq!(m.requests().iter().filter(|r| r.contains("/jobs?")).count(), 2);
-        // 10 full pages and still more: no partial view.
+        // 10 full pages and still more: the part read counts (R4 L-6), and the listing does not fail.
         for p in 1..=10 {
             m.route(
                 "GET",
@@ -1363,8 +1370,21 @@ mod tests {
                 json!({"jobs": (p as u64 * 100..p as u64 * 100 + 50).map(job).collect::<Vec<_>>(), "total_count": 9999}).to_string(),
             );
         }
-        let e = g.demand_with(&repo(), "kiln", 2, 16).await.unwrap_err();
-        assert!(e.to_string().contains("not reading further"), "{e:#}");
+        g.demand_with(&repo(), "kiln", 2, 16).await.unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(m.requests().iter().filter(|r| r.contains("/jobs?status=queued")).count(), 12, "10 more pages were read");
+        // Running jobs decide a runner's deletion and which VM holds a fork job: a partial view, or a listing without
+        // a count (which would end after one page), fails closed.
+        for p in 1..=10 {
+            m.route(
+                "GET",
+                &format!("{API}/jobs?status=in_progress&limit=50&page={p}"),
+                200,
+                json!({"jobs": (p as u64 * 100..p as u64 * 100 + 50).map(job).collect::<Vec<_>>(), "total_count": 9999}).to_string(),
+            );
+        }
+        assert!(g.jobs(&repo(), "in_progress").await.unwrap_err().to_string().contains("not reading further"));
+        m.route("GET", &format!("{API}/jobs?status=in_progress&limit=50&page=1"), 200, json!({"jobs": [job(1)]}).to_string());
+        assert!(g.jobs(&repo(), "in_progress").await.is_err(), "no total_count");
     }
 
     #[tokio::test]
