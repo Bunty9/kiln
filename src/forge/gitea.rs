@@ -136,7 +136,7 @@ impl Gitea {
     #[cfg(test)]
     pub fn for_mock(web: &str, mock: &str, token: &str) -> Self {
         let cfg: ForgeCfg = serde_json::from_value(json!({ "id": "gitea", "kind": "gitea", "url": web })).unwrap();
-        let mut g = Self::new(&cfg, &std::env::temp_dir()).unwrap();
+        let mut g = Self::new(&cfg, &crate::forge_test_mock::scratch("gitea")).unwrap();
         g.install = "a1b2c3".into();
         g.api = format!("{mock}/api/v1");
         g.client = net::base().build().unwrap();
@@ -1636,7 +1636,7 @@ mod tests {
         let cfg = |j: Value| serde_json::from_value::<ForgeCfg>(j).unwrap();
         let ok = Gitea::new(
             &cfg(json!({"id": "home-lab", "kind": "gitea", "url": "https://gitea.example.org/", "repos": ["acme/demo", "bad", "a/b/c"]})),
-            &std::env::temp_dir(),
+            &crate::forge_test_mock::scratch("gitea-new"),
         )
         .unwrap();
         assert_eq!(ok.web_url(), WEB);
@@ -1667,7 +1667,7 @@ mod tests {
             json!({"id": "g", "kind": "gitea", "url": "http://gitea.example.org"}),
             json!({"id": "g", "kind": "gitea", "url": "http://127.0.0.1:3000", "network": "internal"}),
         ] {
-            assert!(Gitea::new(&cfg(j.clone()), &std::env::temp_dir()).is_err(), "{j}");
+            assert!(Gitea::new(&cfg(j.clone()), &crate::forge_test_mock::scratch("gitea-bad")).is_err(), "{j}");
         }
     }
 
@@ -1676,7 +1676,7 @@ mod tests {
         // `Gitea::new` always builds the guarded client: even an `internal` forge never dials loopback.
         let cfg: ForgeCfg =
             serde_json::from_value(json!({"id": "g", "kind": "gitea", "url": "http://10.1.2.3:3000", "network": "internal"})).unwrap();
-        let mut g = Gitea::new(&cfg, &std::env::temp_dir()).unwrap();
+        let mut g = Gitea::new(&cfg, &crate::forge_test_mock::scratch("gitea-guard")).unwrap();
         g.api = "http://127.0.0.1:9/api/v1".into();
         *g.token.write().unwrap() = Some("tok".into());
         let e = g.get("version").await.unwrap_err();

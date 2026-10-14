@@ -3964,11 +3964,14 @@ mod tests {
     /// against event payloads. Skipped where bash or jq is missing.
     #[test]
     fn prejob_hook_refuses_forks() {
-        let have = |b: &str| std::process::Command::new(b).arg("--version").output().is_ok_and(|o| o.status.success());
         // The guest's bash is 5.x; macOS ships 3.2, which lacks ${x,,}.
         let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
-        if !have("bash") || !have("jq") || !bash4() {
-            eprintln!("skipping: bash 4+ and jq needed");
+        if !need(&["bash", "jq"]) {
+            return;
+        }
+        if !bash4() {
+            assert!(std::env::var_os("KILN_REQUIRE_GUEST_TESTS").is_none(), "KILN_REQUIRE_GUEST_TESTS is set but bash is older than 4");
+            eprintln!("skipping: bash 4+ needed");
             return;
         }
         let yaml = include_str!("../guest/user-data.yaml");
@@ -4029,13 +4032,26 @@ mod tests {
 
     /// Writes a guest script to a file the test sources (kiln-job only defines functions then).
     fn source_line(script: &str, name: &str) -> String {
-        let f = std::env::temp_dir().join(format!("{name}-{}.sh", std::process::id()));
+        let f = crate::forge_test_mock::scratch(name).join("src.sh");
         std::fs::write(&f, script).unwrap();
         format!("source {}", f.display())
     }
 
+    /// Whether the tools a guest test drives are installed. A missing one skips the test with a message, unless
+    /// `KILN_REQUIRE_GUEST_TESTS` is set (CI): then it fails, so a stripped image cannot silently drop the coverage.
+    fn need(tools: &[&str]) -> bool {
+        let missing: Vec<_> =
+            tools.iter().filter(|t| !std::process::Command::new(t).arg("--version").output().is_ok_and(|o| o.status.success())).collect();
+        if missing.is_empty() {
+            return true;
+        }
+        assert!(std::env::var_os("KILN_REQUIRE_GUEST_TESTS").is_none(), "KILN_REQUIRE_GUEST_TESTS is set but {missing:?} is not installed");
+        eprintln!("skipping: {missing:?} not installed");
+        false
+    }
+
     fn have_bash() -> bool {
-        std::process::Command::new("bash").arg("--version").output().is_ok_and(|o| o.status.success())
+        need(&["bash"])
     }
 
     /// kiln-job's reader turns the host's `kiln.verdict=` line into the verdict file:
@@ -4123,9 +4139,11 @@ mod tests {
                     v = verdict.split(' ').next().unwrap()
                 ),
             );
-            sh("kiln-cache", &format!("echo \"kiln-cache $*\" >> {}", log.display()));
+            // A step fails when its switch file exists in `dir` (not the process env, which tests share).
+            let d = dir.display();
+            sh("kiln-cache", &format!("echo \"kiln-cache $*\" >> {}; [ -e {d}/fail-detach ] && exit 1; exit 0", log.display()));
             sh("sudo", "exec \"$@\"");
-            sh("systemctl", &format!("echo \"systemctl $*\" >> {}", log.display()));
+            sh("systemctl", &format!("echo \"systemctl $*\" >> {}; [ -e {d}/fail-$1 ] && exit 1; exit 0", log.display()));
             sh("docker", &format!("echo \"docker $*\" >> {}; [ \"$1\" = ps ] && [ -n \"$FAKE_UP\" ] && echo abc; exit 0", log.display()));
             std::fs::write(dir.join("verdict"), format!("{verdict}\n")).unwrap();
             let mut c = std::process::Command::new("bash");
@@ -4179,6 +4197,21 @@ mod tests {
             std::fs::write(dir.join("s.sh"), format!("touch {}/gated\n", dir.display())).unwrap();
             let (rc, _, _) = stage(v, &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]);
             assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{v}");
+        }
+
+        // G4: a failing detach, restart or start refuses: exit 1 (never 2), the step is named, no docker call, and no gate-ok,
+        // so the next stage refuses too.
+        for (v, switch, step) in [("cold 42", "detach", "detach"), ("cold 42", "restart", "restart"), ("ok 42", "start", "start")] {
+            fresh();
+            std::fs::write(dir.join(format!("fail-{}", if switch == "detach" { "detach" } else { switch })), "").unwrap();
+            let (rc, err, calls) = stage(v, &[("CUSTOM_ENV_CI_JOB_IMAGE", "alpine:3")], &["prepare"]);
+            assert_eq!(rc, Some(1), "{switch}: never exit 2: {err}");
+            assert!(err.contains(step), "{switch}: {err}");
+            assert!(!calls.contains("docker "), "{switch}: {calls}");
+            assert!(!dir.join("state/gate-ok").exists(), "{switch}: gate-ok must not exist");
+            std::fs::write(dir.join("s.sh"), format!("touch {}/gated\n", dir.display())).unwrap();
+            let (rc, _, _) = stage(v, &[], &["run", dir.join("s.sh").to_str().unwrap(), "build_script"]);
+            assert_eq!((rc, dir.join("gated").exists()), (Some(1), false), "{switch}: the next stage refuses");
         }
 
         // One-shot (R2 M-3): a second prepare in the same VM is refused, even with an ok verdict.
@@ -4381,7 +4414,7 @@ mod tests {
         if !have_bash() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("kiln-rge-{}", std::process::id()));
+        let dir = crate::forge_test_mock::scratch("rge");
         let src = guest_script("/usr/local/sbin/kiln-job", &dir)
             .replace("/usr/local/sbin/kiln-gate", &dir.join("gate").to_string_lossy())
             .replace("/home/runner", &dir.join("home").to_string_lossy());
@@ -4391,17 +4424,20 @@ mod tests {
 echo "gate $*" >> "$REC"
 twin=$([ $# -eq 1 ] && echo 1)
 [ -n "$twin" ] && [ "$STUB" != noarm ] && touch "$KILN_ARMED"
+# The primary marks that it is done; the twin waits for that mark (bounded), so the order never depends on timing.
+[ -z "$twin" ] && trap 'touch "$DONE"' EXIT
+primary_done() { for _ in $(seq 200); do [ -e "$DONE" ] && return; sleep 0.05; done; }
 case "$STUB:${twin:-p}" in
   noarm:1) exit 1 ;;
-  twindead:1) sleep 0.1; exit 1 ;;
-  race:1) sleep 1; echo "twin finished" >> "$REC"; exit 77 ;;
-  *:1) sleep 0.8; exit 0 ;;
-  ok:p) sleep 0.3; echo "ok 5" > "$V"; exit 3 ;;
-  cold:p) sleep 0.3; echo "cold 5" > "$V"; exit 0 ;;
+  twindead:1) exit 1 ;;
+  race:1) primary_done; echo "twin finished" >> "$REC"; exit 77 ;;
+  *:1) primary_done; exit 0 ;;
+  ok:p) echo "ok 5" > "$V"; exit 3 ;;
+  cold:p) echo "cold 5" > "$V"; exit 0 ;;
   refuse:p) exit 77 ;;
   gone:p) exit 75 ;;
   dead:p) exit 137 ;;
-  race:p) sleep 0.3; echo "refuse 5" > "$V"; exit 137 ;;
+  race:p) echo "refuse 5" > "$V"; exit 137 ;;
   twindead:p) sleep 3 ;;
 esac
 "#;
@@ -4424,6 +4460,7 @@ esac
                 .env("STUB", stub)
                 .env("REC", dir.join("rec"))
                 .env("V", dir.join("verdict"))
+                .env("DONE", dir.join("primary-done"))
                 .output()
                 .unwrap();
             (String::from_utf8_lossy(&o.stdout).replace('\n', " "), std::fs::read_to_string(dir.join("rec")).unwrap_or_default())
@@ -4566,7 +4603,10 @@ esac
         let gate =
             guest_script("/usr/local/sbin/kiln-docker-gate", &dir).replace("/usr/local/sbin/kiln-verdict-wait", &wait.to_string_lossy());
         // `mounted` stands for /mnt/cache being a mount point.
-        let run = |marker: bool, verdict: &str, mounted: bool, unmount_after: bool| {
+        // The gate runs as a child. `observe`: how long a gate that is still waiting is watched before it is killed
+        // (None = the gate must exit by itself). `unmount`: the test unmounts /mnt/cache itself, once the gate had its
+        // chance to exit: no timer decides the order. Returns the exit code, or None for a gate killed while waiting.
+        let run = |marker: bool, verdict: &str, mounted: bool, observe: Option<u64>, unmount: bool| {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(&wait, "#!/bin/bash\necho \"$VW\"\n[ \"$VW\" = ok ] || [ \"$VW\" = cold ]\n").unwrap();
@@ -4578,27 +4618,48 @@ esac
                 std::fs::write(dir.join("mounted"), "").unwrap();
             }
             std::fs::write(dir.join("gate.sh"), format!("findmnt(){{ [ -e {}/mounted ]; }}\n{gate}", dir.display())).unwrap();
-            let bg = if unmount_after { format!("(sleep 0.7; rm -f {}/mounted) & ", dir.display()) } else { String::new() };
-            let o = std::process::Command::new("bash")
-                .args(["-c", &format!("{bg}timeout 3 bash {}/gate.sh", dir.display())])
+            let mut child = std::process::Command::new("bash")
+                .arg(dir.join("gate.sh"))
                 .env("VW", verdict)
-                .output()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
                 .unwrap();
-            o.status.code()
+            let mut wait_for = |ms: u64| {
+                for _ in 0..ms / 20 {
+                    if let Some(st) = child.try_wait().unwrap() {
+                        return Some(st.code());
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                None
+            };
+            if let Some(ms) = observe {
+                if let Some(code) = wait_for(ms) {
+                    return code;
+                }
+                if !unmount {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::fs::remove_file(dir.join("mounted")).unwrap();
+            }
+            wait_for(20_000).expect("the gate did not exit")
         };
-        assert_eq!(run(false, "refuse", true, false), Some(0), "not a Gitea VM: no gating at all");
-        assert_eq!(run(true, "ok", true, false), Some(0), "ok does not wait for the unmount (there is none)");
-        assert_eq!(run(true, "refuse", false, false), Some(1));
-        assert_eq!(run(true, "cold", false, false), Some(0), "cold, already detached");
-        assert_eq!(run(true, "cold", true, false), Some(124), "cold with the cache still mounted keeps waiting");
-        assert_eq!(run(true, "cold", true, true), Some(0), "and goes on the moment it is unmounted");
+        assert_eq!(run(false, "refuse", true, None, false), Some(0), "not a Gitea VM: no gating at all");
+        assert_eq!(run(true, "ok", true, None, false), Some(0), "ok does not wait for the unmount (there is none)");
+        assert_eq!(run(true, "refuse", false, None, false), Some(1));
+        assert_eq!(run(true, "cold", false, None, false), Some(0), "cold, already detached");
+        assert_eq!(run(true, "cold", true, Some(1000), false), None, "cold with the cache still mounted keeps waiting");
+        assert_eq!(run(true, "cold", true, Some(500), true), Some(0), "and goes on the moment it is unmounted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// kiln-gate's pure parts, loaded as a module (its fanotify code never runs): event stepping and overflow (R3 L-1).
     #[test]
     fn guest_gate_events_and_crash_handler() {
-        if !std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if !need(&["python3"]) {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kiln-test-guest_gate_events-{}", std::process::id()));
@@ -4702,15 +4763,15 @@ print("ok")
             !gate.contains("subprocess") && !gate.contains("os.system"),
             "a waited-for spawn would deadlock on the gate's own exec event"
         );
-        if std::process::Command::new("python3").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            let f = std::env::temp_dir().join(format!("kiln-gate-{}.py", std::process::id()));
+        if need(&["python3"]) {
+            let f = crate::forge_test_mock::scratch("gate-compile").join("kiln-gate.py");
             std::fs::write(&f, &gate).unwrap();
             let o = std::process::Command::new("python3")
                 .args(["-I", "-c", "import sys; compile(open(sys.argv[1]).read(), 'kiln-gate', 'exec')"])
                 .arg(&f)
                 .output()
                 .unwrap();
-            let _ = std::fs::remove_file(&f);
+            let _ = std::fs::remove_dir_all(f.parent().unwrap());
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         }
         // dockerd: socket-activated, and docker.service waits for the verdict in Gitea VMs only.
@@ -5210,8 +5271,7 @@ print("ok")
     /// Several secret lines (Gitea, GitLab) are one SMBIOS OEM string each, in order; QEMU would make a file one string.
     #[test]
     fn secret_lines_are_separate_oem_strings() {
-        let d = std::env::temp_dir().join(format!("kiln-secrets-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::forge_test_mock::scratch("secrets");
         for f in ["jit", "jit.1", "jit.2"] {
             std::fs::write(d.join(f), "kiln.x=1").unwrap();
         }
@@ -5291,7 +5351,7 @@ print("ok")
         let cache = guest_script("/usr/local/sbin/kiln-cache", &std::env::temp_dir());
         assert!(cache.contains("mount -t ext4 -o noatime,nosuid,nodev /dev/vdb"), "typed, nosuid,nodev cache mount");
         assert!(yaml.contains("check \"docker.socket enabled\""));
-        if !have_bash() || !std::process::Command::new("find").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        if !need(&["bash", "find"]) {
             return;
         }
         let dir = std::env::temp_dir().join(format!("kiln-test-docker-allowlist-{}", std::process::id()));
