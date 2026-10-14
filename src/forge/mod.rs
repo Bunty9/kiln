@@ -794,11 +794,18 @@ impl Call {
 pub struct Verdict {
     pub v: Call,
     pub why: String,
+    /// A refusal because kiln or the forge failed (timeout, API or pause error, a held-job mismatch), not because of policy. The owner is alerted.
+    pub failure: bool,
 }
 
 impl Verdict {
+    /// A refusal because kiln failed closed: the default, so a new refuse path alerts until it is called policy.
     fn refuse(why: impl Into<String>) -> Self {
-        Self { v: Call::Refuse, why: why.into() }
+        Self { v: Call::Refuse, why: why.into(), failure: true }
+    }
+    /// A refusal that is the gate working as designed (a fork, a `workflow_run`, another project's job): silent.
+    fn policy(why: impl Into<String>) -> Self {
+        Self { v: Call::Refuse, why: why.into(), failure: false }
     }
     /// The serial line the guest's `verdict_reader` accepts.
     pub fn line(&self, job_id: &str) -> String {
@@ -828,21 +835,21 @@ pub struct VerdictFacts {
 /// Pure: facts to verdict. Anything but a plain, known, same-repo, non-fork job refuses or goes cold.
 pub fn decide(f: &VerdictFacts) -> Verdict {
     if !f.ours {
-        Verdict::refuse("job is not for this repo")
+        Verdict::policy("job is not for this repo")
     } else if f.workflow_run {
-        Verdict::refuse("workflow_run is never run")
+        Verdict::policy("workflow_run is never run")
     } else if f.downstream {
-        Verdict::refuse("multi-project downstream pipelines are not run")
+        Verdict::policy("multi-project downstream pipelines are not run")
     } else if f.unknown_source {
-        Verdict::refuse("unknown job source")
+        Verdict::policy("unknown job source")
     } else if f.fork {
-        Verdict::refuse("pull request from a fork")
+        Verdict::policy("pull request from a fork")
     } else if f.tag {
-        Verdict { v: Call::Cold, why: "tag or release".into() }
+        Verdict { v: Call::Cold, why: "tag or release".into(), failure: false }
     } else if f.train {
-        Verdict { v: Call::Cold, why: "merge train".into() }
+        Verdict { v: Call::Cold, why: "merge train".into(), failure: false }
     } else {
-        Verdict { v: Call::Ok, why: String::new() }
+        Verdict { v: Call::Ok, why: String::new(), failure: false }
     }
 }
 
@@ -1048,6 +1055,38 @@ mod tests {
         f.delay = Duration::from_secs(5);
         let v = f.gate("7", Duration::from_millis(30)).await;
         assert_eq!((v.v, v.why.as_str()), (Call::Refuse, "verdict timed out"));
+    }
+
+    /// Policy refusals are silent, failures alert: classified where the refusal is made.
+    #[tokio::test]
+    async fn refusals_are_classed_policy_or_failure() {
+        for i in 0..4 {
+            let v = decide(&facts(|f| [&mut f.fork, &mut f.workflow_run, &mut f.downstream, &mut f.unknown_source][i].clone_from(&true)));
+            assert!(v.v == Call::Refuse && !v.failure, "{}", v.why);
+        }
+        let v = decide(&VerdictFacts::default());
+        assert!(v.v == Call::Refuse && !v.failure, "another project's job is policy");
+        assert!(!decide(&facts(|f| f.tag = true)).failure);
+        let mut failures = vec![];
+        let mut f = FakeForge::ok("7");
+        f.facts = Err("500".into());
+        failures.push(f.gate("7", LIMIT).await);
+        let mut f = FakeForge::ok("7");
+        f.held = Err("pause 500".into());
+        failures.push(f.gate("7", LIMIT).await);
+        for held in [vec!["7".into(), "8".into()], vec!["8".into()], vec![]] {
+            let mut f = FakeForge::ok("7");
+            f.held = Ok(Some(held));
+            failures.push(f.gate("7", LIMIT).await);
+        }
+        let mut f = FakeForge::ok("7");
+        f.delay = Duration::from_secs(5);
+        failures.push(f.gate("7", Duration::from_millis(30)).await);
+        failures.push(FakeForge::ok("7").gate("not-a-number", LIMIT).await);
+        assert_eq!(failures.len(), 7);
+        for v in failures {
+            assert!(v.v == Call::Refuse && v.failure, "{}", v.why);
+        }
     }
 
     /// The console id is attacker-reachable text: it never reaches the serial line or the API
