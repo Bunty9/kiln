@@ -451,7 +451,21 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The dashboard, stamped with the version that serves it: a page the service worker kept
 /// from an older kiln sees the server's version differ and reloads (see doPoll).
-static PAGE: LazyLock<String> = LazyLock::new(|| include_str!("dashboard.html").replace("{{KILN_VERSION}}", VERSION));
+static PAGE: LazyLock<String> =
+    LazyLock::new(|| include_str!("dashboard.html").replace("{{KILN_VERSION}}", VERSION).replace("{{KILN_BUILD}}", &BUILD));
+
+/// Identifies this exact build: the version plus a hash of the embedded dashboard and worker.
+/// A same-version rebuild with a changed page gets a new id, so open tabs reload (see doPoll).
+static BUILD: LazyLock<String> = LazyLock::new(|| build_id(include_str!("dashboard.html"), include_str!("../assets/sw.js")));
+
+fn build_id(page: &str, sw: &str) -> String {
+    let mut c = ring::digest::Context::new(&ring::digest::SHA256);
+    for part in [VERSION, page, sw] {
+        c.update(part.as_bytes());
+        c.update(&[0]);
+    }
+    c.finish().as_ref()[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Content-Security-Policy for every response. Scripts run only if they are the page's own
 /// inline blocks (by hash, computed from the embedded page), so an injected `<script>` or
@@ -519,7 +533,7 @@ async fn sw() -> impl IntoResponse {
         (header::CACHE_CONTROL, "no-cache"),
         (header::HeaderName::from_static("service-worker-allowed"), "/"),
     ];
-    (h, sw_source(VERSION))
+    (h, sw_source(&format!("{VERSION}-{}", *BUILD)))
 }
 
 fn icon_file(name: &str) -> Response {
@@ -887,6 +901,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "baking": app.baking.load(std::sync::atomic::Ordering::Relaxed),
         "host": host_stats(&app).await,
         "version": env!("CARGO_PKG_VERSION"),
+        "build": *BUILD,
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.all_repos()),
         "update": update::compact(&app),
@@ -1841,6 +1856,7 @@ mod tests {
             [
                 "app",
                 "baking",
+                "build",
                 "caches",
                 "config",
                 "host",
@@ -2345,6 +2361,17 @@ mod tests {
         assert!(js.contains("skipWaiting") && js.contains("clients.claim"));
         // Only navigations get the cached shell: a fetch('/') probe (the offline page) reaches kiln.
         assert!(js.contains("u.pathname !== '/' && SHELL.includes(u.pathname)"));
+    }
+
+    #[test]
+    fn build_id_follows_the_embedded_bytes() {
+        let a = build_id("page", "sw");
+        assert_eq!(a, build_id("page", "sw"));
+        assert_ne!(a, build_id("page2", "sw"));
+        assert_ne!(a, build_id("page", "sw2"));
+        assert_ne!(build_id("ab", "c"), build_id("a", "bc"), "parts are delimited");
+        assert!(PAGE.contains(&format!(r#"<meta name="kiln-build" content="{}">"#, *BUILD)));
+        assert!(!PAGE.contains("{{KILN_BUILD}}"));
     }
 
     #[test]

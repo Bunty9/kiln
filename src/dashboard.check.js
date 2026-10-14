@@ -263,3 +263,14 @@ console.log('dashboard analytics ok');
   assert.equal(new Set(cs.slice(0, 6)).size, 6, 'six distinct colours'); assert.equal(cs[6], cs[0]);
   assert.notEqual(gcol(0), gcol(1), 'consecutive VMs differ even on a 2-slot box');
 }
+
+// Build reload: differing builds reload once per build; the guard stops a loop; no build id means no decision.
+{
+  const { reloadForBuild } = new Function(grab('reloadForBuild') + '\nreturn { reloadForBuild };')();
+  assert.equal(reloadForBuild('a', 'b', null), true);
+  assert.equal(reloadForBuild('a', 'b', 'b'), false, 'already reloaded for this build');
+  assert.equal(reloadForBuild('a', 'b', 'x'), true, 'a guard for an older build does not block');
+  assert.equal(reloadForBuild('a', 'a', null), false);
+  assert.equal(reloadForBuild(null, 'b', null), false, 'a page without a build id never reloads');
+  assert.equal(reloadForBuild('a', undefined, null), false);
+}
