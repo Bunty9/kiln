@@ -3567,7 +3567,7 @@ mod tests {
 
     #[tokio::test]
     async fn sockets_in_q_are_never_followed() {
-        let d = std::env::temp_dir().join(format!("kiln-test-sockets_in_q_are_never_followed-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-sq-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let _l = std::os::unix::net::UnixListener::bind(d.join("mon.sock")).unwrap();
@@ -4222,8 +4222,18 @@ mod tests {
         false
     }
 
+    /// The guest scripts are Linux's and use bash 5.1 features (`mapfile`, `wait -n -p`): macOS's /bin/bash is 3.2,
+    /// so there they run only with a newer bash first on PATH (`brew install bash`).
     fn have_bash() -> bool {
-        need(&["bash"])
+        let ok = std::process::Command::new("bash")
+            .args(["-c", "(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501 ))"])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            assert!(std::env::var_os("KILN_REQUIRE_GUEST_TESTS").is_none(), "KILN_REQUIRE_GUEST_TESTS is set but bash is older than 5.1");
+            eprintln!("skipping: bash >= 5.1 not found on PATH");
+        }
+        ok
     }
 
     /// kiln-job's reader turns the host's `kiln.verdict=` line into the verdict file:
@@ -4524,7 +4534,6 @@ mod tests {
         let b64 = |t: &str| {
             String::from_utf8(
                 std::process::Command::new("base64")
-                    .args(["-w0"])
                     .stdin({
                         let f = dir.join("t");
                         std::fs::create_dir_all(&dir).unwrap();
@@ -4536,6 +4545,7 @@ mod tests {
                     .stdout,
             )
             .unwrap()
+            .replace('\n', "") // BSD base64 has no -w0; GNU wraps at 76
         };
         let sec =
             |url: &str, t: &str| format!("  String 1: kiln.forge=gitlab\n  String 2: kiln.url={url}\n  String 3: kiln.cred={}", b64(t));
@@ -4621,7 +4631,7 @@ esac
             std::fs::write(dir.join("gate"), gate).unwrap();
             std::process::Command::new("chmod").args(["755"]).arg(dir.join("gate")).status().unwrap();
             let script = format!(
-                "{}\nsecret(){{ case $1 in cred) printf '%s' \"$JSON\" | base64 -w0;; timeout) printf '%s' \"$MINS\";; esac; }}\n\
+                "{}\nsecret(){{ case $1 in cred) printf '%s' \"$JSON\" | base64 | tr -d '\\n';; timeout) printf '%s' \"$MINS\";; esac; }}\n\
                  start_verdict_reader(){{ echo reader >> \"$REC\"; }}; harden_gitea(){{ echo harden >> \"$REC\"; }}\n\
                  systemctl(){{ echo \"systemctl $*\" >> \"$REC\"; }}; chown(){{ :; }}; id(){{ echo 4000000000; }}\n\
                  kill_uid(){{ echo \"kill_uid $1\" >> \"$REC\"; }}\n\
