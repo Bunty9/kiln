@@ -2676,6 +2676,8 @@ fn runner_version(tag: &str) -> Result<String> {
 /// records are deleted at mount, cold Gitea waits for the detach, gate hardening, arm64 reads every fw_cfg secret file.
 /// 13: the cache's Docker state is an allow-list (image, overlay2, volumes, buildkit), GitHub no longer starts
 /// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
+/// 14: the guest prints `kiln: cache scrub ok` after scrubbing login tokens off the cache disk; the host
+///     commits the cache only after that line.
 const RECIPE: u64 = 14;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each

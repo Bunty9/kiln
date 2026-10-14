@@ -4,7 +4,9 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 hosts, and ships arm64 releases. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).
+## [0.2.6] - 2026-10-14
+
+Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 Linux hosts, and ships signed releases for Linux x86_64 and arm64 and for macOS arm64. Hosts self-heal at boot after a restart, and the dashboard has a refresh with full help for every feature. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).
 
 ### Added
 
@@ -261,7 +263,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/Bunty9/kiln/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Bunty9/kiln/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Bunty9/kiln/compare/v0.2.2...v0.2.3
