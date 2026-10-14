@@ -119,6 +119,7 @@ fn api_router() -> Router<Arc<App>> {
         .route("/sw.js", get(sw))
         .route("/icon.svg", get(|| async { icon_file("icon.svg") }))
         .route("/icons/{name}", get(|Path(name): Path<String>| async move { icon_file(&name) }))
+        .route("/burn/{name}", get(|Path(name): Path<String>| async move { burn_file(&name) }))
         .route("/api/state", get(state))
         .route("/api/host", get(|| async { Json(crate::host::recent(usize::MAX)) }))
         .route("/api/config", post(set_config))
@@ -532,6 +533,16 @@ fn icon_file(name: &str) -> Response {
     };
     // The manifest links them with ?v=<version>; a week is plenty for the unversioned favicon links.
     ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=604800")], body).into_response()
+}
+
+/// The pre-recorded burning-card sprite sheets (scripts/burn/record.py): `<scheme>-<variant>[s].webp`.
+fn burn_file(name: &str) -> Response {
+    macro_rules! sheets {
+        ($($n:literal),*) => { match name { $(concat!($n, ".webp") => include_bytes!(concat!("../assets/burn-", $n, ".webp")).as_slice(),)* _ => return StatusCode::NOT_FOUND.into_response() } };
+    }
+    let body: &'static [u8] = sheets!("dark-0", "dark-0s", "dark-1", "dark-1s", "light-0", "light-0s", "light-1", "light-1s");
+    // The dashboard links them with ?v=<version>, so they can be cached for good.
+    ([(header::CONTENT_TYPE, "image/webp"), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], body).into_response()
 }
 
 /// Tailscale reports tagged nodes as this pseudo-login; it names no person.
@@ -2357,6 +2368,15 @@ mod tests {
         assert_eq!(ty(&png), "image/png");
         assert!(png.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("max-age"));
         assert_eq!(icon_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
+        // every sheet the page links is served, as a WebP
+        let sheets: Vec<&str> = PAGE.split("url(/burn/").skip(1).map(|s| s.split('?').next().unwrap()).collect();
+        assert_eq!(sheets.len(), 8);
+        for f in sheets {
+            let r = burn_file(f);
+            assert_eq!(r.status(), StatusCode::OK, "{f}");
+            assert_eq!(ty(&r), "image/webp");
+        }
+        assert_eq!(burn_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
         // The embedded PNGs are real PNGs of the advertised size.
         for (bytes, px) in [
             (&include_bytes!("../assets/icon-192.png")[..], 192),
