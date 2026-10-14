@@ -90,6 +90,11 @@ pub struct JobInfo {
     pub outcome: String,
     pub duration_s: Option<u64>,
     pub url: Option<String>,
+    /// `job.refused` only: why kiln failed closed, and `"failure"` (policy refusals send nothing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<&'static str>,
     #[serde(skip)]
     pub vm_id: String,
 }
@@ -131,7 +136,7 @@ pub enum Class {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
-    /// "job.failed", "job.finished", "health.raised", "health.cleared", "security.changed",
+    /// "job.failed", "job.refused", "job.finished", "health.raised", "health.cleared", "security.changed",
     /// "test" or "more".
     pub ty: &'static str,
     pub class: Class,
@@ -199,6 +204,9 @@ fn summary(e: &Event, esc: &dyn Fn(&str) -> String) -> String {
             if let Some(d) = j.duration_s {
                 s += &format!(" after {}", dur(d));
             }
+            if let Some(r) = &j.reason {
+                s += &format!(" ({})", esc(r));
+            }
             s
         }
         Detail::Health(h) if h.state == "cleared" => format!("✅ resolved: {}", esc(&h.message)),
@@ -240,6 +248,7 @@ fn discord_esc(s: &str) -> String {
 fn title(ty: &str) -> &'static str {
     match ty {
         "job.failed" => "kiln: job failed",
+        "job.refused" => "kiln: job refused",
         "job.finished" => "kiln: workflow finished",
         "health.raised" => "kiln: needs attention",
         "health.cleared" => "kiln: resolved",
@@ -319,7 +328,7 @@ pub fn render(
             }
             let mut headers = vec![("Content-Type", "text/plain; charset=utf-8".to_string()), ("Title", title(e.ty).to_string())];
             let (prio, tag) = match e.ty {
-                "job.failed" | "health.raised" | "security.changed" => ("high", "warning"),
+                "job.failed" | "job.refused" | "health.raised" | "security.changed" => ("high", "warning"),
                 _ => ("default", "white_check_mark"),
             };
             headers.push(("Priority", prio.into()));
@@ -963,10 +972,12 @@ pub fn outcome(v: &crate::vm::Vm) -> Option<&'static str> {
 pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     // A job the verdict gate refused (a fork pull request, a workflow_run, ...) is policy, not a failure: no alert.
     // The Overview banner and the job page carry the reason.
-    if v.fork || v.refused() {
+    // One that kiln failed closed on (a timeout, a forge API error, a held-job mismatch) means kiln or the forge is unhealthy: `job.refused`.
+    if v.fork || (v.refused() && !v.refused_by_failure()) {
         return;
     }
-    let Some(oc) = outcome(v) else { return };
+    let refusal = v.refused_by_failure();
+    let Some(oc) = (if refusal { Some("refused") } else { outcome(v) }) else { return };
     let ok = oc == "succeeded";
     let cfg = app.cfg();
     let forge_id = crate::forge::RepoRef::parse(&v.repo).map_or_else(|_| crate::forge::ForgeId::github(), |r| r.forge);
@@ -1016,9 +1027,15 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
         url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
+        reason: refusal.then(|| clean(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
+        class: refusal.then_some("failure"),
         vm_id: v.id.clone(),
     };
-    let (ty, class) = if ok { ("job.finished", Class::Direct) } else { ("job.failed", Class::Job) };
+    let (ty, class) = match (ok, refusal) {
+        (_, true) => ("job.refused", Class::Job),
+        (true, _) => ("job.finished", Class::Direct),
+        _ => ("job.failed", Class::Job),
+    };
     to.sort();
     to.dedup();
     emit(app, Event { ty, class, detail: Detail::Job(info), to });
@@ -1699,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_fork_jobs_never_alert() {
+    fn policy_refusals_stay_silent_and_failures_alert() {
         let (app, q) = job_app();
         let fork = Vm { fork: true, ..vm_end(crate::vm::State::Killed, None) };
         job_ended(&app, &fork);
@@ -1711,9 +1728,50 @@ mod tests {
         let other =
             Vm { id: "kiln-9-6".into(), note: Some("refused: unknown job source".into()), ..vm_end(crate::vm::State::Killed, None) };
         job_ended(&app, &other);
-        assert!(q.q.lock().unwrap().is_empty(), "kiln refused these jobs itself");
+        assert!(q.q.lock().unwrap().is_empty(), "policy refusals are informational");
         job_ended(&app, &Vm { id: "kiln-9-4".into(), ..vm_end(crate::vm::State::Killed, None) });
         assert_eq!(q.q.lock().unwrap().len(), 1, "a plain kill still alerts");
+        // Every reason kiln fails closed on alerts once, as job.refused with the reason.
+        let reasons = [
+            "verdict timed out",
+            "API error: 500",
+            "pause failed: 500",
+            "runner holds 2 job(s), not only the one it started",
+            "console job id is not numeric",
+        ];
+        for (i, why) in reasons.iter().enumerate() {
+            let v = Vm {
+                id: format!("kiln-8-{i}"),
+                note: Some(format!("refused: {why}")),
+                verdict: Some(("refuse".into(), "7".into())),
+                refuse_failure: true,
+                ..vm_end(crate::vm::State::Killed, None)
+            };
+            job_ended(&app, &v);
+        }
+        let got: Vec<_> = q.q.lock().unwrap().iter().skip(1).cloned().collect();
+        assert_eq!(got.len(), reasons.len());
+        for (e, why) in got.iter().zip(reasons) {
+            assert_eq!(e.ty, "job.refused");
+            assert!(matches!(e.class, Class::Job));
+            let Detail::Job(j) = &e.detail else { panic!() };
+            assert_eq!((j.outcome.as_str(), j.class, j.reason.as_deref()), ("refused", Some("failure"), Some(clean(why).as_str())));
+        }
+        let j = serde_json::to_value(match &got[0].detail {
+            Detail::Job(j) => j,
+            _ => unreachable!(),
+        })
+        .unwrap();
+        assert_eq!((j["class"].as_str(), j["reason"].as_str()), (Some("failure"), Some("verdict timed out")));
+        assert!(
+            serde_json::to_value(match &job("a/b", "j", "main").detail {
+                Detail::Job(j) => j.clone(),
+                _ => unreachable!(),
+            })
+            .unwrap()
+            .get("reason")
+            .is_none()
+        );
     }
 
     #[test]
@@ -1866,6 +1924,8 @@ mod tests {
                 outcome: "failed".into(),
                 duration_s: Some(312),
                 url: Some("https://github.com/acme/kiln/actions/runs/1/job/2".into()),
+                reason: None,
+                class: None,
                 vm_id: "kiln-1-0".into(),
             }),
         }

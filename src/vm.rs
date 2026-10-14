@@ -110,6 +110,10 @@ impl Vm {
     pub fn refused(&self) -> bool {
         self.verdict.as_ref().is_some_and(|(c, _)| c == "refuse") || self.note.as_deref().is_some_and(|n| n.starts_with("refused:"))
     }
+    /// A refusal kiln made because it or the forge failed closed: the owner must be told.
+    pub fn refused_by_failure(&self) -> bool {
+        self.refused() && self.refuse_failure
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -134,6 +138,9 @@ pub struct Vm {
     /// cache commit needs an `ok` for exactly `job_id`; a record with none never commits (R2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<(String, String)>,
+    /// The refusal came from kiln or the forge failing, not from policy (`Verdict::failure`); old records read false.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub refuse_failure: bool,
     /// When GitHub queued the job this VM's runner picked up.
     #[serde(default)]
     pub queued_at: Option<u64>,
@@ -407,6 +414,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         job_url: None,
         job_id: None,
         verdict: None,
+        refuse_failure: false,
         starts: 0,
         queued_at: None,
         started: now(),
@@ -1745,6 +1753,7 @@ fn apply_verdict(v: &mut Vm, jid: &str, vd: &crate::forge::Verdict) {
     }
     if vd.v == Call::Refuse {
         v.note = Some(format!("refused: {}", vd.why));
+        v.refuse_failure = vd.failure;
     }
     if vd.v != Call::Ok && v.cache == CacheUse::Read {
         v.cache = CacheUse::Discarded;
@@ -3030,7 +3039,7 @@ mod tests {
             }))
             .unwrap()
         };
-        let say = |v, why: &str| Verdict { v, why: why.into() };
+        let say = |v, why: &str| Verdict { v, why: why.into(), failure: false };
         let mut ok = vm();
         ok.job_id = Some("7".into());
         apply_verdict(&mut ok, "7", &say(Call::Ok, ""));
@@ -3047,6 +3056,11 @@ mod tests {
         let mut no = vm();
         apply_verdict(&mut no, "7", &say(Call::Refuse, "unknown job source"));
         assert_eq!((no.cache, no.note.as_deref()), (CacheUse::Discarded, Some("refused: unknown job source")));
+        assert!(no.refused() && !no.refused_by_failure(), "a policy refusal stays silent");
+        let mut bad = vm();
+        bad.job_id = Some("7".into());
+        apply_verdict(&mut bad, "7", &Verdict { failure: true, ..say(Call::Refuse, "verdict timed out") });
+        assert!(bad.refused_by_failure(), "a timeout is kiln failing closed");
     }
 
     #[test]
@@ -3315,6 +3329,7 @@ mod tests {
             job_url: None,
             job_id: None,
             verdict: None,
+            refuse_failure: false,
             starts: 0,
             queued_at: None,
             started: 0,
@@ -4994,6 +5009,7 @@ print("ok")
             job_url: Some("https://github.com/acme/demo/actions/runs/1004/job/5201".into()),
             job_id: None,
             verdict: None,
+            refuse_failure: false,
             starts: 0,
             queued_at: Some(1_790_000_000),
             started: 1_790_000_010,
