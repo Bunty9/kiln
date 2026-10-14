@@ -470,6 +470,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .ck{list-style:none;padding:0;margin:0;display:grid;gap:6px}.ck li{display:flex;align-items:center;gap:8px}
 .wm{display:inline-flex;align-items:center;gap:3px;height:20px;padding:0 7px 0 5px;margin-left:6px;border-radius:999px;background:color-mix(in srgb,var(--ember) 12%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--ember) 30%,transparent);font:500 12px/1 var(--sans);color:var(--ember);vertical-align:middle}
 .wm .i{width:12px;height:12px}
+.fb{display:inline-block;height:18px;padding:0 7px;margin-right:8px;border-radius:999px;font:500 11px/18px var(--sans);color:var(--fg-2);box-shadow:inset 0 0 0 1px var(--line);vertical-align:1px;white-space:nowrap}
 .hlp{margin-left:auto;padding:0 10px;gap:6px}
 .hlp+.cdot{margin-left:0}
 .gd{max-width:68ch;line-height:1.65}.gd h2{font-size:20px;font-weight:600;letter-spacing:-.015em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
@@ -545,7 +546,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 <symbol id="i-update" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.25"/><path d="M10 13.75v-7.5M6.75 9.5 10 6.25l3.25 3.25"/></symbol>
 </defs></svg>
 <header class="top"><div>
-  <a class="logo" href="#/" data-tip="kiln: one fresh VM per GitHub Actions job, on this box"><svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
+  <a class="logo" href="#/" data-tip="kiln: one fresh VM per CI job, on this box"><svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="var(--ember)"/></svg>kiln</a>
   <nav class="nav" id="nav" aria-label="Sections"></nav>
   <button class="hlp inst" id="inst" data-act="install" hidden aria-label="Install app" data-tip="Install kiln as an app: its own window, a dock or home-screen icon, and shortcuts to Jobs, Repos and Settings."><svg class="i l" aria-hidden="true"><use href="#i-dl"/></svg><span>Install app</span></button>
   <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides" data-tip="Guides and troubleshooting (g h). Press ? for keyboard shortcuts."><svg class="i l" aria-hidden="true"><use href="#i-help"/></svg><span>Help</span></a>
@@ -591,7 +592,7 @@ const ic = (n, s = 16) => `<svg class="i${s > 16 ? ' l' : ''}" aria-hidden="true
 // One badge component: colour class, icon and word. The tip says what a state means.
 const STATE = {
   booting: ['boot', 'The VM is starting. Its runner usually comes online in about 4 s.'],
-  waiting: ['wait', 'The runner is online and waiting for GitHub to hand it a job.'],
+  waiting: ['wait', 'The runner is online and waiting for {F} to hand it a job.'],
   running: ['flame', 'The job is running in this VM.'],
   held: ['held', 'The job failed and its VM is kept running so you can SSH in. It holds its memory and VM slot until you release it, the hold ends, or a queued job needs the slot.'],
   passed: ['check', 'The job succeeded. Its VM is already deleted.'],
@@ -600,13 +601,15 @@ const STATE = {
   lost: ['lost', 'This VM was running when kiln stopped, and it stopped with kiln.'],
   'not needed': ['skip', 'No job reached this VM: the queued job went to another runner or was cancelled. Nothing went wrong.'],
   ended: ['skip', 'Ended in a state this kiln version does not know (recorded by a newer kiln, read after a rollback).'],
-  cancelled: ['cancel', 'Cancelled on GitHub.'],
-  queued: ['clock', 'GitHub is waiting for a runner.'],
-  skipped: ['skip', 'GitHub skipped this job.'],
+  cancelled: ['cancel', 'Cancelled on {F}.'],
+  queued: ['clock', 'Waiting for a runner on {F}.'],
+  skipped: ['skip', 'Skipped by {F}.'],
   warn: ['alert'],
 };
+// {F} in a state tip is the forge: GitHub, or "the forge" once the box serves more than one.
+const stTip = s => STATE[s]?.[1]?.replace('{F}', mixed(F) ? 'the forge' : 'GitHub');
 const badge = (s, c = s, tip, f) => {
-  const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? STATE[s]?.[1];
+  const k = STATE[s] || STATE[c] || ['dot'], t = tip ?? stTip(s);
   return `<span class="bdg s-${c.replace(/ /g, '-')}"${t ? `${f ? ' tabindex="0"' : ''} data-tip="${esc(t)}"` : ''}>${ic(k[0])}${esc(s)}</span>`;
 };
 const ACTIVE = v => ['booting', 'idle', 'busy', 'held'].includes(v.state);
@@ -628,8 +631,83 @@ function status(v) {
     default: return 'lost';
   }
 }
-const ghStatus = (s, c) => s !== 'completed' ? (s === 'in_progress' ? 'running' : 'queued')
-  : c === 'success' ? 'passed' : c === 'cancelled' ? 'cancelled' : c === 'skipped' || c === 'neutral' ? 'skipped' : 'failed';
+// A run or job from the forge API (kiln's status and outcome) as a badge state.
+const runStatus = x => x.status !== 'completed' ? x.status : { Succeeded: 'passed', SucceededWithIssues: 'passed', Canceled: 'cancelled', Abandoned: 'cancelled', Skipped: 'skipped' }[x.outcome] || 'failed';
+// Forges (GET /api/forges) and what each allows: controls the forge can't do stay hidden.
+const forgeOf = (fs, repo) => (fs || []).find(f => f.repos.some(r => r.toLowerCase() === String(repo).toLowerCase()));
+const can = (f, cap) => !!f?.caps?.[cap];
+const runActs = (done, f) => (done ? [can(f, 'rerun') && 'rerun'] : [can(f, 'cancel') && 'cancel']).filter(Boolean);
+const FN = { github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea' };
+const fname = f => FN[f?.kind] || 'the forge';
+// Links only to the forge's own web UI (its url from /api/forges); anything else becomes inert.
+const forgeUrl = (f, u) => f && String(u ?? '').startsWith(f.url + '/') ? esc(u) : '#';
+let F = null;
+const loadForges = async () => { try { F = await api('/api/forges'); } catch { /* keep the last list (null before the first load); the next state poll retries */ } return F; };
+// A forge in a banner or tip: "GitLab", or "GitLab (id)" when its id isn't just its kind.
+const fl = f => FN[f?.kind] ? (f.id === f.kind ? FN[f.kind] : `${FN[f.kind]} (${f.id})`) : 'the forge';
+// Which forge kind a repo key belongs to; GitHub until the forge list has loaded.
+const kindOf = (F, r) => forgeOf(F, r)?.kind || 'github';
+// Badges only help once the box serves more than GitHub.
+const mixed = F => (F || []).some(f => f.kind !== 'github');
+const fbadge = f => FN[f?.kind] ? `<span class="fb">${esc(fl(f))}</span>` : '';
+// A credential exists somewhere: the GitHub token, or any other forge's.
+const credsOk = (F, tokenSet) => !!tokenSet || (F || []).some(f => f.kind !== 'github' && f.auth?.source && f.auth.source !== 'none');
+// The poll error as the GitHub banners should read it: other forges' repo errors are theirs.
+function ghErr(p, F) {
+  const e = String(p.error || '');
+  if (!mixed(F)) return e;
+  return Object.entries(p.repo_errors || {}).filter(([r]) => kindOf(F, r) === 'github').map(([r, m]) => `${r}: ${m}`).join('; ');
+}
+// What the CI file for a forge looks like, and its size labels.
+function ciSnippet(kind, L) {
+  if (kind === 'gitlab') return `build:\n  tags: [${L}]\n  script:\n    - echo hello from kiln\n`;
+  if (kind === 'gitea') return `name: CI\non: [push]\njobs:\n  test:\n    runs-on: [${L}]\n    steps:\n      - run: echo hello from kiln\n`;
+  return `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${L}]\n    steps:\n      - uses: actions/checkout@v7\n`;
+}
+const sizeNote = (kind, L, cpus) => `Sizes: ${kind === 'gitlab' ? `tags: [${L}-2cpu]` : kind === 'gitea' ? `runs-on: [${L}-2cpu]` : `runs-on: [self-hosted, ${L}-2cpu]`} (also 4cpu, 8cpu, 16cpu). Default is ${cpus} vCPUs.`;
+// Minutes of finished non-GitHub jobs from the usage ledger (rows [utc day, forge id, jobs, minutes]) from UTC day `d0` on,
+// by forge name: shown unpriced, because only GitHub bills them.
+function otherMins(rows, F, d0) {
+  const m = {};
+  for (const [d, id, , n] of rows || []) {
+    const k = (F || []).find(f => f.id === id)?.kind || id, nm = FN[k] || k;
+    if (d >= d0) m[nm] = (m[nm] || 0) + n;
+  }
+  return m;
+}
+// The repo-page error for a failed forge call, in that forge's words.
+function repoErr(e, f, app) {
+  const n = fl(f), m = String(e.message);
+  if (/\b404\b/.test(m)) return f && f.kind !== 'github' ? `Project not found, or the ${n} token lacks access.` : app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.';
+  if (/\b401\b/.test(m)) return f && f.kind !== 'github' ? `${n} rejected the token. Replace it in Settings › Forges.` : app ? "GitHub rejected the App's credentials. Check Settings › Forges." : 'GitHub rejected the token. Replace it in Settings › Forges.';
+  return m;
+}
+// Problems of the forges other than GitHub (GitHub keeps its own banners), as [colour, text]. Every text names the forge.
+function forgeBanners(F, p, vms, t) {
+  const out = [], add = (c, m) => out.push([c, m]);
+  for (const f of (F || []).filter(x => x.kind !== 'github')) {
+    const n = fl(f), at = f.auth || {}, errs = Object.entries(p.repo_errors || {}).filter(([r]) => forgeOf([f], r));
+    if (!at.source || at.source === 'none') add('fail', `${n}: no token. kiln can't see its queued jobs.`);
+    else if (f.health) add('warn', `${n}: ${esc(f.health)}`);
+    if (errs.some(([, m]) => /\b401\b/.test(m))) add('fail', `${n} rejected the token. Replace it in Settings › Forges.`);
+    for (const [r, m] of errs) if (!/\b401\b/.test(m)) add('warn', `${n}: ${esc(repoPath(f.id, r))}: ${esc(m)}`);
+    const sc = f.kind === 'gitlab' ? glScopes(at) : null;
+    if (sc?.missing.length) add('fail', `${n}: the token lacks ${sc.missing.map(esc).join(', ')}.`);
+    const dl = at.expires ? daysLeft(at.expires, t) : null;
+    if (dl !== null && dl <= 14) add(dl <= 7 ? 'fail' : 'warn', `${n} token ${dl < 0 ? 'has expired' : dl === 0 ? 'expires today' : `expires in ${dl} day${dl > 1 ? 's' : ''}`}. Rotate it before then.`);
+    const seen = new Set();
+    for (const v of vms) {
+      if (!forgeOf([f], v.repo) || seen.has(v.repo)) continue;
+      seen.add(v.repo);
+      if (!v.mint_failed || t - (v.ended || v.started) > 3600) continue;
+      const path = esc(repoPath(f.id, v.repo)), note = String(v.note || '');
+      if (f.kind === 'gitlab' && /Maintainer/.test(note)) add('warn', `${n}: kiln cannot create a runner in ${path}. The token's user must be Maintainer or above there, and runner registration must be on for the project. Press Test on its card.`);
+      if (f.kind === 'gitea' && /Owners team|HTTP 403/.test(note)) add('warn', `${n}: kiln cannot register a runner for ${path}. The service account must own the repo, or be in its organisation's Owners team.`);
+    }
+    for (const r of p.fork_queued || []) if (forgeOf([f], r)) add('warn', `${esc(r)}: a pull request from a fork is waiting. kiln refuses it, and a VM that is handed it is killed; close or cancel it on ${n} to stop that.`);
+  }
+  return out;
+}
 const isFail = v => { if (v.mint_failed) return false; const s = status(v); return s === 'failed' || s === 'lost' || (s === 'killed' && !!v.busy_since); };
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
@@ -644,19 +722,21 @@ const HELP = {
   key: ["Dashboard key", "Tailnet devices are recognised by their Tailscale login. A browser on the CI box itself can't be, because job VMs look like local traffic too. So it has to show this key once.", "network"],
   serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it. The tailnet must have HTTPS certificates on (Tailscale admin console › DNS › HTTPS Certificates).", "network"],
   doctor: ["Diagnostics", "Runs `kiln doctor`: KVM, tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
-  queued: ["Queued", "Jobs GitHub is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
+  queued: ["Queued", "Jobs your forge is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
   stale: ["Stale image", "The image needs a rebake: its runner is older than GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
-  timeline: ["Timeline", "Queue: GitHub waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until GitHub hands it the job. Job: your steps.", "stuck"],
+  timeline: ["Timeline", "Queue: the forge waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until the forge hands it the job. Job: your steps.", "stuck"],
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only. Use filtered for pull requests you don't trust.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
-  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min.", "analytics"],
+  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min. Only GitHub jobs are priced; GitLab and Gitea minutes are shown as minutes.", "analytics"],
   privacy: ["Privacy", "Usage statistics and crash reports stay off unless you turn them on. This box sends them, never your browser, and they never include repo, account or host names, IPs, file paths, tokens or logs. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever is set here.", "privacy"],
-  runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when GitHub hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
+  runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when the forge hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
   failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes. The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
   webhooks: ["Webhooks", "This box sends alerts to Slack, Discord, ntfy or any https URL, with no dashboard open. Each destination picks job, health and security alerts, and workflow rules add the successes you choose. A URL is a secret: it is never shown again after saving.", "alerts"],
+  gitlab: ["GitLab", "kiln serves a GitLab project with a bot account's access token (`create_runner`, `manage_runner`, `read_api`). For each job it makes a one-job runner in the project, boots a VM for it and deletes both afterwards.", "gitlab"],
+  gitea: ["Gitea", "kiln serves a Gitea repo with a dedicated service account's access token (`write:repository`, `read:user`). The account must own the repo or be in its organisation's Owners team, because only an Owner gets the runner registration token. For each job kiln makes a one-job runner in the repo, boots a VM for it and deletes both afterwards.", "gitea"],
   warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
 };
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -670,13 +750,15 @@ const WFSCOPE = "This token can't create workflow files. Add the `workflow` scop
 const TIPS = {
   overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
   jobs: "Every row is one throwaway VM that ran one job, with the branch, PR and commit it ran for. Open a row for its timeline and logs.",
-  job: "Console is boot and runner output, Steps is your steps live, and the GitHub log appears when the job ends.",
+  job: "Console is boot and runner output, Steps is your steps live, and the forge's own log (named for it) appears when the job ends.",
   repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
   settings: "Changes apply within seconds, with no restart. The listen address is the only exception: Overview then offers Restart when idle.",
 };
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
-const snippet = () => `name: CI\non: [push, pull_request]\njobs:\n  test:\n    runs-on: [self-hosted, ${S?.config.label || 'kiln'}]\n    steps:\n      - uses: actions/checkout@v7\n`;
+// The runs-on label of the default size: the configured label, plus -arm64 on an arm64 host.
+const JL = () => S?.job_label || S?.config.label || 'kiln';
+const snippet = (kind = 'github') => ciSnippet(kind, JL());
 
 /* ---------- api, dialogs, toasts ---------- */
 let keyWait = null;
@@ -697,7 +779,7 @@ async function api(path, o = {}) {
   }
   const r = await fetch(path, init);
   const text = await r.text();
-  // Only kiln's own 401 asks for the dashboard key; a 401 that GitHub sent through the proxy is GitHub's.
+  // Only kiln's own 401 asks for the dashboard key.
   if (r.status === 401 && /dashboard key/i.test(text)) { await askKey(); return api(path, o); }
   if (!r.ok) {
     let m = text; try { m = JSON.parse(text).message || text; } catch { /* plain text */ }
@@ -712,13 +794,14 @@ function ghMsg(m) {
   if (i < 0) return m;
   try { const j = JSON.parse(m.slice(i)); return m.slice(0, i).replace(/^(GET|POST|PUT|DELETE|PATCH) \S+: /, '').trim() + (j.message ? ': ' + j.message : ''); } catch { return m; }
 }
-// A repo from a hash route must not walk the API path elsewhere (`..` segments, `?`).
-const okRepo = r => { const p = String(r).split('/'); return p.length === 2 && p.every(x => /^[\w.-]+$/.test(x) && x !== '.' && x !== '..'); };
-const gh = (repo, rest) => { if (!okRepo(repo)) throw new Error('not a repo name: ' + repo); return `/api/gh/repos/${repo}/actions/${rest}`; };
+// The forge API takes the repo as a query value; kiln checks it against the repos it serves.
+const fq = (path, repo, extra = '') => `/api/${path}?repo=${encodeURIComponent(repo)}${extra}`;
 // Links to GitHub only: a URL from the API that is anything else becomes inert.
 const ghUrl = u => /^https:\/\/github\.com\//.test(String(u ?? '')) ? esc(u) : '#';
 // Served repos: the GitHub App's installations in App mode, else the configured list.
-const REPOS = () => S.app ? S.app.repos : S.config.repos;
+const GHREPOS = () => S.app ? S.app.repos : S.config.repos;
+// Every repo kiln serves, from every forge (GitHub's alone until the forge list loads).
+const REPOS = () => F ? F.flatMap(f => f.repos) : GHREPOS();
 // Per-repo maps (warm, cache_branches, repo_cache_gb) are keyed by owner/name; GitHub names are
 // case-insensitive, so read and replace entries ignoring case.
 const ciGet = (m, r) => Object.entries(m || {}).find(([k]) => k.toLowerCase() === r.toLowerCase())?.[1];
@@ -728,7 +811,7 @@ const appRefresh = () => S.app ? `<button class="btn" data-act="apprefresh"${tip
 const appAccounts = a => [...new Set([a.owner, ...(a.accounts || S.config.app_accounts || [])].filter(Boolean))];
 // A failed /api/app/convert keeps ?code&state in the URL so Retry (or a reload) can finish it.
 let appConv = null;
-const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › GitHub.')}>Dismiss</button></div>`;
+const appConvHTML = () => !appConv?.err ? '' : `<div class="bn" style="--c:var(--fail)">${ic('alert')}<span><b>The GitHub App was not saved.</b> ${esc(appConv.err)}</span><button class="btn pri" data-act="appretry">${ic('refresh')}Retry</button><button class="btn" data-act="appdismiss"${tip('Forget this attempt. You can create the App again from Settings › Forges.')}>Dismiss</button></div>`;
 const appInstall = (pri) => S.app ? `<a class="btn${pri ? ' pri' : ''}" href="${ghUrl(S.app.html_url)}/installations/new" target="_blank" rel="noopener" data-tip="Opens GitHub to choose which repos the App, and so kiln, serves">${pri ? 'Install the App on your repos' : 'Install on repos'}${ic('ext')}</a>` : '';
 function toast(msg, bad) {
   const t = document.createElement('div'), s = document.createElement('span'); t.className = 'toast' + (bad ? ' bad' : '');
@@ -801,6 +884,7 @@ async function doPoll() {
       if (lsGet('kiln-updated') !== S.version) { lsSet('kiln-updated', S.version); return location.reload(); }
     } else if (S.version && lsGet('kiln-updated') === S.version) { lsSet('kiln-updated', null); toast(`kiln updated to ${S.version}`); }
     if (down) okUntil = now() + 2;
+    await loadForges(); // repos, auth and health change with the state: refresh with every poll
     fails = 0; down = false; renderConn(); onState();
   } catch (e) {
     if (e.status === 403) return full('Not allowed', e.message, 'Ask the owner to add your login under Access.');
@@ -881,7 +965,7 @@ const plain = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 const pages = {};
 let cur = null, mounted = false, swipeDir = 0;
 const NAV = [['overview', '#/', 'Overview', 'VM slots, health and recent jobs (g o)'], ['jobs', '#/jobs', 'Jobs', 'Every VM kiln ran, newest first (g j)'],
-  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, GitHub, image, cache, network and more (g s)']];
+  ['repos', '#/repos', 'Repos', 'The repositories kiln serves (g r)'], ['settings', '#/settings/capacity', 'Settings', 'Capacity, forges, image, cache, network and more (g s)']];
 $('#nav').innerHTML = NAV.map(([k, h, l, t]) => `<a href="${h}" data-p="${k}"${tip(t)}>${ic(k)}${l}</a>`).join('');
 $('#tabs').innerHTML = NAV.map(([k, h, l]) => `<a href="${h}" data-p="${k}">${ic(k, 20)}<span>${l}</span>${k === 'jobs' ? '<span class="n" hidden></span>' : ''}</a>`).join('');
 function parse() {
@@ -891,17 +975,17 @@ function parse() {
 }
 // GitHub's manifest flow sends the browser back to /?code=…&state=….
 // The URL keeps code and state until the conversion succeeds, so a failure can be retried.
-// No window.open here: after an await it is popup-blocked. Settings › GitHub shows the install button instead.
+// No window.open here: after an await it is popup-blocked. Settings › Forges shows the install button instead.
 async function appCallback() {
   const q = new URLSearchParams(location.search);
   appConv = { busy: true };
   try {
     const r = await post('/api/app/convert', { code: q.get('code'), state: q.get('state') || '' });
-    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/github');
+    appConv = null; history.replaceState(null, '', location.pathname + '#/settings/forges');
     toast(`GitHub App ${r.slug || ''} created. Install it on your repos next.`); await poll();
   } catch (e) {
     appConv = { err: String(e.message || e) };
-    history.replaceState(null, '', location.pathname + location.search + '#/settings/github');
+    history.replaceState(null, '', location.pathname + location.search + '#/settings/forges');
   }
   route();
 }
@@ -955,26 +1039,28 @@ addEventListener('hashchange', async () => {
   }
   lastHash = to; route();
 });
-const setupNeeded = () => !S.token_set || !S.image_ready || !REPOS().length || !S.vms.length;
+const setupNeeded = () => !credsOk(F, S.token_set) || !S.image_ready || !REPOS().length || !S.vms.length;
 
 /* ---------- overview ---------- */
 // Job page: the same, linked to GitHub.
-function runMeta(v) {
+function runMeta(v, f, L) {
   const r = v.run; if (!r) return '';
-  const gh = `https://github.com/${v.repo}`;
-  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? `<a href="${ghUrl(`${gh}/pull/${+r.pr}`)}" target="_blank" rel="noopener"${kt('Pull request')}>PR #${+r.pr}</a>` : ''}${r.sha ? `<a class="mono" href="${ghUrl(`${gh}/commit/${encodeURIComponent(r.sha)}`)}" target="_blank" rel="noopener"${kt('Commit')}>${esc(r.sha.slice(0, 7))}</a>` : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
+  L = { ...r.links, ...L };
+  const a = (u, cls, t, body) => u && forgeUrl(f, u) !== '#' ? `<a${cls} href="${forgeUrl(f, u)}" target="_blank" rel="noopener"${kt(t)}>${body}</a>` : `<span${cls}${kt(t)}>${body}</span>`;
+  return `<span${kt('Branch the run is for')}>${ic('branch')}${esc(r.branch)}</span>${r.pr ? a(L.pr, '', 'Pull request', `PR #${+r.pr}`) : ''}${r.sha ? a(L.commit, ' class="mono"', 'Commit', esc(r.sha.slice(0, 7))) : ''}${r.workflow ? `<span${kt('Workflow and run number')}>${esc(r.workflow)}${r.number ? ' #' + +r.number : ''}</span>` : ''}<span${kt('Event that triggered the run')}>${esc(r.event)}</span>${r.title ? `<span${kt('Run title: commit message or PR title')}>${esc(r.title)}</span>` : ''}`;
 }
 // Where the job's code came from: branch, PR, commit, and the run's title.
 const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', schedule: 'scheduled' };
+const EVK = { push: '', pull_request: '', manual: 'manual', schedule: 'scheduled' };
 function gitLine(v) {
   const r = v.run; if (!r) return '';
-  const ev = r.event in EV ? EV[r.event] : r.event;
+  const ev = r.kind && r.kind !== 'other' ? (EVK[r.kind] ?? r.kind) : r.event in EV ? EV[r.event] : r.event;
   return `<span class="g">${ic('branch')}<span>${esc(r.branch)}</span>${r.pr ? `<span>#${+r.pr}</span>` : ''}${r.sha ? `<span class="mono">${esc(r.sha.slice(0, 7))}</span>` : ''}${ev ? `<span>${esc(ev)}</span>` : ''}${r.title ? `<span class="gt">${esc(r.title)}</span>` : ''}</span>`;
 }
 function jobRow(v) {
   const sel = parse().seg[0] === v.id ? ' aria-current="page"' : '';
   const t = `<span class="tt"><span class="r">${esc(v.repo)} /</span> ${esc(jt(v))}</span><span class="id">${esc(v.id)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span>${gitLine(v)}`;
-  return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}${tip([STATE[status(v)]?.[1], 'Started ' + when(v.started)].filter(Boolean).join('\n'))}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
+  return `<li><a class="row" href="#/jobs/${encodeURIComponent(v.id)}"${sel}${tip([stTip(status(v)), 'Started ' + when(v.started)].filter(Boolean).join('\n'))}><span class="bd">${badge(status(v))}</span><span class="t">${t}</span>
     <span class="w"${tip('Started ' + when(v.started))}>${relH(v.started)}</span><span class="d"${tip(ACTIVE(v) ? 'Running for' : 'Job time: from the job starting to the VM ending')}>${timeHTML(v)}</span><span class="m">${relH(v.started)} · ${timeHTML(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></a></li>`;
 }
 const jobList = l => `<ul class="list">${l.map(jobRow).join('')}</ul>`;
@@ -987,12 +1073,12 @@ function newListen() {
 }
 const RESTART_WAITS = v => ACTIVE(v) && v.state !== 'held';
 function banners() {
-  const p = S.poll, c = S.config, b = [], err = String(p.error || '');
+  const p = S.poll, c = S.config, b = [], err = ghErr(p, F), gh = !F || F.some(f => f.kind === 'github');
   const B = (col, msg, act) => b.push(`<div class="bn" style="--c:var(--${col})">${ic(BI[col] || 'info')}<span>${msg}</span>${act || ''}</div>`);
   const A = (t, h) => `<a class="btn" href="${h}">${t}</a>`, X = (t, a, pri) => `<button class="btn${pri ? ' pri' : ''}" data-act="${a}">${t}</button>`;
-  if (!S.token_set) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/github'));
-  else if (/401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/github'))
-    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/github'));
+  if (!S.token_set && gh) B('fail', 'No GitHub token. kiln can\'t see queued jobs.', A('Add token', '#/settings/forges'));
+  else if (gh && /401|Bad credentials/i.test(err)) S.app ? B('fail', "GitHub rejected kiln's GitHub App credentials. The App may have been deleted or its private key revoked.", A('Check the App', '#/settings/forges'))
+    : B('fail', 'GitHub rejected the token.', A('Replace token', '#/settings/forges'));
   if (S.baking) {
     const i = bakeIdx(), last = plain(bk.text.trim().split('\n').pop() || '');
     B('ember', `<b>Baking image</b> · elapsed ${dur((Date.now() - bk.t0) / 1000)}, usually ~4 min
@@ -1014,15 +1100,18 @@ function banners() {
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked_kind === 'github_api') B('fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.');
   else if (p.blocked_kind === 'held') { const h = oldestHeld(); B('warn', esc(p.blocked) + `. kiln is releasing the oldest hold.${hq('held')}`, h ? X('Release oldest', 'relheld') + A('View held job', '#/jobs/' + encodeURIComponent(h.id)) : ''); }
-  else if (p.blocked && !oldImg && up.state !== 'draining' && !rs.state) B('warn', 'Not launching VMs: ' + esc(p.blocked));
+  else if (p.blocked_kind === 'forge_api') B('fail', esc(p.blocked) + '. Queued jobs start once it registers runners again.');
+  // A forge that is down gets its own banner below, which says what to fix.
+  else if (p.blocked && !oldImg && up.state !== 'draining' && !rs.state && !(p.blocked_kind === 'forge' && (F || []).some(f => f.kind !== 'github' && f.health && p.blocked.startsWith(f.id + ': ')))) B('warn', 'Not launching VMs: ' + esc(p.blocked));
   if (p.paused_until && p.paused_until > now()) B('warn', `GitHub rate limit reached. Polling paused until ${hhmm(p.paused_until)}.`);
   for (const [r, v] of Object.entries(p.backoff || {})) B('warn', `${esc(r)}: launches paused after ${+v.fails} failures, retry in ${dur(v.retry_at - now())}${hq('backoff')}`);
-  for (const [r, m] of Object.entries(p.repo_errors || {})) B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
-  for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on GitHub-hosted runners.`);
+  for (const [r, m] of Object.entries(p.repo_errors || {})) if (kindOf(F, r) === 'github') B('warn', `${esc(r)}: ${esc(ghMsg(m))}`);
+  for (const [r, n] of Object.entries(p.refused_forks || {})) B('warn', `${esc(r)}: ${+n} job${n > 1 ? 's' : ''} from fork pull requests refused. kiln never runs fork code on this box; cancel ${n > 1 ? 'them' : 'it'} or run forks on ${kindOf(F, r) === 'github' ? 'GitHub-hosted runners' : fl(forgeOf(F, r)) + "'s own runners"}.`);
+  for (const [c, m] of forgeBanners(F, p, S.vms, now())) B(c, m, A('Forges', '#/settings/forges'));
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now())) B('warn', 'Last poll failed: ' + esc(err));
   if (im?.rebake) B('warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B('warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
-  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/github'));
+  const tx = S.token_expires; if (tx && tx - now() < 14 * 86400) B(tx - now() < 7 * 86400 ? 'fail' : 'warn', `GitHub token expires ${tx > now() ? 'in ' + dur(tx - now()) : 'now'}. Rotate it before then.`, A('Token', '#/settings/forges'));
   if (c.max_vms === 0) B('warn', 'Paused. Max VMs is 0, so no new jobs start.', X('Resume', 'resume'));
   const mi = S.mirror; if (mi?.enabled && !mi.running) B('warn', 'Docker mirror is enabled but not running.' + (mi.error ? ' ' + esc(mi.error) : ''), A('Details', '#/settings/image'));
   const bad = (doctor?.checks || []).filter(x => !x.ok).length;
@@ -1030,10 +1119,10 @@ function banners() {
   const nbad = (S.notify?.dests || []).filter(d => (d.status?.failing_since && d.status.last_error && d.status.last_error[0] - d.status.failing_since >= 3600) || d.status?.permanent_streak >= 3);
   if (nbad.length) B('fail', 'Notifications failing: ' + nbad.map(d => esc(d.name)).join(', '), A('Fix', '#/settings/notifications'));
   if (S.notify?.load_error) B('fail', 'Notification destinations: ' + esc(S.notify.load_error), A('Fix', '#/settings/notifications'));
-  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/github'));
+  if (S.app?.error) B('fail', 'GitHub App: ' + esc(S.app.error), A('Settings', '#/settings/forges'));
   else if (S.app && !S.app.repos.length) b.push(`<div class="bn cta">${ic('github')}<span><b>Install the App on your repos.</b> kiln serves exactly the repos the GitHub App is installed on, and it is on none yet.</span>${appInstall(1)}</div>`);
-  else if (S.token_set && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
-  else if (S.token_set && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
+  else if (credsOk(F, S.token_set) && !REPOS().length) B('queued', 'No repositories added. kiln has nothing to pick up.', A('Add repo', '#/repos'));
+  else if (credsOk(F, S.token_set) && S.image_ready && !S.vms.some(v => v.busy_since)) B('queued', "Setup isn't finished: no job has run on kiln yet.", A('Resume setup', '#/setup'));
   if (appConv?.err) b.unshift(appConvHTML());
   return b;
 }
@@ -1053,11 +1142,13 @@ function stats() {
   // GitHub bills by UTC calendar month; usage rows are [utc day, cpus, jobs, minutes].
   const use = (S.usage || []).filter(u => u[0] >= m0);
   const mins = use.reduce((s, u) => s + u[3], 0), saved = use.reduce((s, u) => s + u[3] * rate(u[1]), 0);
+  // Only GitHub bills minutes: the other forges' are shown as minutes, from their own part of the usage ledger.
+  const om = Object.entries(otherMins(S.usage_other, F, m0)).map(([k, n]) => `${k}: ${n} min, not priced`).join(', ');
   const st = (l, v, t, x = '') => `<div class="stat" tabindex="0"${tip(t)}><div class="l">${l}</div><div class="v ${x}">${v}</div></div>`;
   return `<div class="stats">${st('Jobs today', ran.filter(v => v.started >= day).length, 'Jobs that started running since midnight, your time')}
     <a class="stat" href="#/jobs?f=failed"${tip('Jobs that failed, were lost, or were killed mid-job in the last 24 hours. Click to list them.')}><div class="l">Failed in 24h</div><div class="v ${f24 ? 'fail' : ''}">${f24}</div></a>
     ${st('Median job time', med == null ? '—' : dur(med), 'Median time from a job starting to its VM ending, over the last 100 jobs')}${st('Saved this month', '≈ $' + saved.toFixed(2), `${mins} job minutes since the 1st (UTC, GitHub's billing month), each job rounded up to the minute as GitHub bills it, priced at the hosted runner of the same size`)}</div>
-    <p class="foot">median from last 100 jobs · saved: ${mins} min at <button class="lnk" data-act="rate"${tip('Set one flat $/min for savings; leave empty for GitHub-hosted rates by VM size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042)')}>${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}</button></p>`;
+    <p class="foot">median from last 100 jobs · saved: ${mins} min at <button class="lnk" data-act="rate"${tip('Set one flat $/min for savings; leave empty for GitHub-hosted rates by VM size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042)')}>${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}</button>${om ? ` · ${esc(om)}${hq('analytics')}` : ''}</p>`;
 }
 function meter(l, val, max, txt, t) {
   const p = max > 0 ? Math.min(100, val / max * 100) : 0;
@@ -1224,7 +1315,7 @@ pages.overview = {
     const q = Object.values(S.poll.queued || {}).reduce((a, b) => a + b, 0), tiles = [], total = Math.max(c.max_vms, act.length);
     for (let i = 0; i < Math.min(total, act.length + 4); i++) {
       const v = act[i];
-      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(STATE[status(v)]?.[1])}>${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
+      tiles.push(v ? `<a class="ch ${v.state === 'busy' ? 'run' : ''}" href="#/jobs/${encodeURIComponent(v.id)}"${tip(stTip(status(v)))}>${sl.has(v.id) ? `<span class="vk" style="--c:${vcol(sl.get(v.id))}" aria-hidden="true"></span>` : ''}<span class="tx"><b style="font-weight:500">${esc(v.repo)} / ${esc(jt(v))}</b><span class="sm fg2">${status(v)}${v.cpus ? ' · ' + +v.cpus + ' cpu' : ''}${wm(v)}</span></span><span class="tm" data-t="${v.busy_since || v.started}" data-k="dur"></span></a>`
         : `<div class="ch"${(i === act.length ? kt : tip)('Free VM slot. Max VMs sets how many slots there are.')}>Idle</div>`);
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
@@ -1237,8 +1328,8 @@ pages.overview = {
     hostCard();
   },
 };
-const SIZES = () => `Sizes: runs-on: [self-hosted, ${S.config.label}-2cpu] (also 4cpu, 8cpu, 16cpu). Default is ${S.config.vm_cpus} vCPUs.`;
-const emptyJobs = () => { const r = REPOS()[0]; return `<div class="empty">${ic('jobs')}<p>No jobs yet. kiln boots a VM when GitHub queues a job with <code>runs-on: [self-hosted, ${esc(S.config.label)}]</code> in one of your repos.</p>${cb(snippet())}${r ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES())}</p><a href="#/guides/move">Learn more</a></div>`; };
+const SIZES = (kind = 'github') => sizeNote(kind, JL(), S.config.vm_cpus);
+const emptyJobs = () => { const r = REPOS()[0], f = forgeOf(F, r), k = f?.kind || 'github'; return `<div class="empty">${ic('jobs')}<p>No jobs yet. kiln boots a VM when ${k === 'github' ? 'GitHub' : esc(fl(f))} queues a job with ${k === 'gitlab' ? `<code>tags: [${esc(JL())}]</code>` : `<code>runs-on: ${k === 'gitea' ? esc(JL()) : `[self-hosted, ${esc(JL())}]`}</code>`} in one of your ${k === 'github' ? 'repos' : 'projects'}.</p>${cb(snippet(k))}${r && k === 'github' ? helloBtn(r, false) : ''}<p class="sm">${esc(SIZES(k))}</p><a href="#/guides/move">Learn more</a></div>`; };
 
 /* ---------- jobs ---------- */
 const jf = { f: 'all', repo: '' };
@@ -1283,6 +1374,7 @@ pages.job = {
   mount(r) {
     this.id = r.seg[0]; this.lv = null;
     $('#app').innerHTML = `<div id="jd"></div><div id="jd-log"></div>`;
+    if (!F) loadForges().then(() => cur === this && this.update());
   },
   update() {
     const v = S.vms.find(x => x.id === this.id), box = $('#jd');
@@ -1292,33 +1384,57 @@ pages.job = {
       fb.set(v.id, null);
       api(`/api/log?src=${encodeURIComponent(v.id)}&file=console&from=0`).then(r => { const m = /\[\s*([\d.]+)\]\s.*Listening for Jobs/.exec(r.data || ''); if (m) { fb.set(v.id, v.started + +m[1]); this.update(); } }).catch(() => {});
     }
+    const fg = forgeOf(F, v.repo), L = jl.get(v.id), jobUrl = L?.job || v.run?.links?.job || v.job_url;
+    if (F && v.job_url && !jl.has(v.id)) loadLinks(v);
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), undefined, 1)}<h1>${esc(v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
-      ${v.job_url ? `<a class="btn" href="${ghUrl(v.job_url)}" target="_blank" rel="noopener"${tip("Open this job's run on GitHub")}>View on GitHub${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on GitHub.')}>${ic('kill')}Kill VM</button>` : ''}</div>
-      <div class="jm"><span class="mono"${kt('VM id, also the runner name on GitHub')}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id GitHub gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v)}${v.run ? hq('runinfo') : ''}</div>
+      ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. The job fails on ' + fname(fg) + '.')}>${ic('kill')}Kill VM</button>` : ''}</div>
+      <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span>${sz(v, 1)}${v.cpus ? hq('size') : ''}${wm(v, 1)}<span${kt('Runner id ' + fname(fg) + ' gave this VM')}>runner ${esc(v.runner_id ?? '—')}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       ${cacheLine(v)}${v.egress ? `<p class="fg2 sm" style="margin:8px 0">Network: ${esc(v.egress)}${hq('network')}</p>` : ''}
       ${v.note ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
-    if (!this.lv) {
+    if (!this.lv && F) {
       const id = v.id;
       this.lv = new Log($('#jd-log'), { id, live: () => ACTIVE(S.vms.find(x => x.id === id) || {}), sources: [
-        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, { k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' },
-        { k: 'gh', label: 'GitHub', off: true, tip: "GitHub's final log for this job", gh: () => ghLog(S.vms.find(x => x.id === id)) }] });
+        { k: 'console', label: 'Console', src: id, file: 'console', tip: 'Boot and runner output. Start here if the job never started.' }, ...(can(fg, 'live_steps') ? [{ k: 'steps', label: 'Steps', src: id, file: 'steps', tip: 'Your steps, live' }] : []),
+        { k: 'forge', label: fname(fg), off: true, tip: `${fname(fg)}'s final log for this job`, forge: () => forgeLog(S.vms.find(x => x.id === id)) }] });
     }
-    this.lv.setOff('gh', ACTIVE(v) || !v.ended);
+    this.lv?.setOff('forge', ACTIVE(v) || !v.ended);
   },
   unmount() { this.lv?.destroy(); this.lv = null; },
 };
-async function ghLog(v) {
-  const jm = /\/job\/(\d+)/.exec(v.job_url || '');
-  if (jm) { try { return await api(gh(v.repo, `jobs/${jm[1]}/logs`), { text: true }); } catch (e) { if (e.status === 404) throw e; } }
-  const runs = (await api(gh(v.repo, 'runs?per_page=5'))).workflow_runs || [];
-  for (const run of runs) {
-    const j = ((await api(gh(v.repo, `runs/${run.id}/jobs`))).jobs || []).find(x => x.runner_name === v.id);
-    if (j) return api(gh(v.repo, `jobs/${j.id}/logs`), { text: true });
+// Run links per VM id, from the API (null if the run can't be read).
+const jl = new Map();
+async function loadLinks(v) {
+  jl.set(v.id, null);
+  // Only GitHub's job url carries the id the runs API takes; the others' runs links come with the run record.
+  if (forgeOf(F, v.repo)?.kind !== 'github') return;
+  const m = /\/runs\/(\d+)(?:\/job\/(\d+))?/.exec(v.job_url || ''); if (!m) return;
+  try {
+    const r = await api(fq('runs/' + m[1], v.repo)), j = r.jobs.find(x => String(x.id) === (m[2] || String(v.job_id)));
+    jl.set(v.id, { ...r.links, job: j?.links.job || r.links.run }); if (cur === pages.job) pages.job.update();
+  } catch { /* the page falls back to the stored job link */ }
+}
+// The forge's own log of a job, all pages (kiln caps each page and the download).
+async function forgeLog(v) {
+  let id = /(?:\/-\/jobs|\/job)\/(\d+)/.exec(v.job_url || '')?.[1] || v.job_id; // GitHub /job/N, GitLab /-/jobs/N
+  if (!id) {
+    for (const run of (await api(fq('runs', v.repo))).runs.slice(0, 5)) {
+      const j = (await api(fq('runs/' + run.id, v.repo))).jobs.find(x => x.runner === v.id);
+      if (j) { id = j.id; break; }
+    }
+    if (!id) throw new Error("This job is not among the repo's 5 latest runs on the forge.");
   }
-  throw new Error('This job is not among the repo\'s 5 latest runs on GitHub.');
+  let text = '', from = 0;
+  for (let i = 0; i < 20; i++) {
+    const p = await api(fq(`jobs/${id}/log`, v.repo, '&from=' + from));
+    text += p.text;
+    if (p.truncated) { text += '\n[kiln shows only the first 16 MiB of this log]\n'; break; }
+    if (p.complete || p.next <= from) break;
+    from = p.next;
+  }
+  return text;
 }
 
 /* ---------- log viewer ---------- */
@@ -1331,7 +1447,7 @@ class Log {
     el.className = 'lv'; el.classList.toggle('wrap', this.wrap);
     const T = (a, i, l, p, t) => `<button class="btn" data-lv="${a}" aria-pressed="${p}" aria-label="${l}"${tip(t)}>${ic(i)}<span class="lbl">${l}</span></button>`;
     el.innerHTML = `<div class="lt">${o.sources.length > 1 ? `<div class="seg" role="radiogroup" aria-label="Log source">${o.sources.map(s => `<button role="radio" data-src="${s.k}"${tip(s.tip)}>${s.label}</button>`).join('')}</div>` : `<span class="ttl">${o.sources[0].label}</span>`}<span class="sp"></span>
-      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show GitHub's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
+      ${T('wrap', 'wrap', 'Wrap', this.wrap, 'Wrap long lines (w)')}${T('follow', 'down', 'Follow', true, 'Keep scrolled to the newest output (f)')}<span data-ts hidden>${T('ts', 'clock', 'Timestamps', false, "Show the forge's timestamp on each line")}</span>${T('copy', 'copy', 'Copy', false, 'Copy the log shown here')}${T('dl', 'dl', 'Download', false, 'Download the full log as a text file')}</div>
       <p class="sm fg2" data-note hidden style="margin-bottom:8px"></p><div class="lw"><pre tabindex="0" aria-label="Log output"></pre><button class="chip jump" hidden data-lv="jump">${ic('down')}Jump to latest</button></div>`;
     this.pre = $('pre', el);
     el.addEventListener('click', e => {
@@ -1342,7 +1458,7 @@ class Log {
     LOGS.add(this); curLog = this; this.select(this.k);
   }
   src() { return this.o.sources.find(s => s.k === this.k); }
-  setOff(k, off) { const b = $(`[data-src=${k}]`, this.el); b.disabled = off; b.dataset.tip = off ? "GitHub's log is available when the job finishes" : (this.o.sources.find(s => s.k === k)?.tip || ''); if (off && this.k === k) this.select(this.o.sources[0].k); }
+  setOff(k, off) { const b = $(`[data-src=${k}]`, this.el); b.disabled = off; b.dataset.tip = off ? `${this.o.sources.find(x => x.k === k)?.label || 'The forge'}'s log is available when the job finishes` : (this.o.sources.find(s => s.k === k)?.tip || ''); if (off && this.k === k) this.select(this.o.sources[0].k); }
   setFollow(f) { this.follow = f; $('[data-lv=follow]', this.el).setAttribute('aria-pressed', f); $('.jump', this.el).hidden = f; if (f) this.pre.scrollTop = this.pre.scrollHeight; }
   async toggle(a) {
     if (a === 'follow') return this.setFollow(!this.follow);
@@ -1355,7 +1471,7 @@ class Log {
       if (this.skipped || this.trimmed) {
         text = ''; try { for (let n = 0;;) { const r = await api(`/api/log?src=${encodeURIComponent(s.src)}&file=${s.file}&from=${n}`); if (!r.data) break; text += r.data; n = r.next; } } catch (e) { return fail(e); }
       }
-      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'github'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
+      a2.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a2.download = `${id}-${s.file || 'forge'}.log`; a2.click(); setTimeout(() => URL.revokeObjectURL(a2.href), 1000);
     }
   }
   note(t) { const n = $('[data-note]', this.el); n.textContent = t || ''; n.hidden = !t; }
@@ -1363,14 +1479,14 @@ class Log {
   select(k) {
     this.k = k; this.gen++; clearTimeout(this.timer); this.timer = null; this.next = 0; this.skipped = false; this.clear();
     $$('[data-src]', this.el).forEach(b => b.setAttribute('aria-checked', b.dataset.src === k)); rove(this.el);
-    $('[data-ts]', this.el).hidden = k !== 'gh';
+    $('[data-ts]', this.el).hidden = k !== 'forge';
     const s = this.src(); this.setFollow(true);
-    if (s.gh) this.loadGh(s, this.gen); else this.tick(this.gen);
+    if (s.forge) this.loadForge(s, this.gen); else this.tick(this.gen);
   }
-  async loadGh(s, g) {
-    this.pre.textContent = 'Fetching the log from GitHub…';
-    try { const t = await s.gh(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
-    catch (e) { if (g === this.gen) this.pre.textContent = e.status === 404 ? 'GitHub has no log for this job yet. Logs appear once the job completes.' : e.message; }
+  async loadForge(s, g) {
+    this.pre.textContent = `Fetching the log from ${s.label}…`;
+    try { const t = await s.forge(); if (g !== this.gen) return; this.pre.textContent = ''; this.big(t, g); }
+    catch (e) { if (g === this.gen) this.pre.textContent = /\b404\b/.test(e.message) ? `${s.label} has no log for this job yet. Logs appear once the job completes.` : e.message; }
   }
   async tick(g) {
     this.busy = true; clearTimeout(this.timer); this.timer = null; const s = this.src();
@@ -1387,7 +1503,7 @@ class Log {
     if (!this.pre.isConnected) return this.destroy();
     if (g === this.gen && this.o.live() && !document.hidden) this.timer = setTimeout(() => this.tick(g), 1000);
   }
-  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().gh && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
+  kick() { if (!this.pre.isConnected) return this.destroy(); if (!this.busy && !this.timer && this.src() && !this.src().forge && this.o.live() && !document.hidden && this.pre.isConnected) this.tick(this.gen); }
   big(t, g) { // render big logs in slices so the page stays responsive
     const lines = t.split('\n'); let i = 0;
     const step = () => { if (g !== this.gen) return; this.add(lines.slice(i, i + 2500).join('\n') + '\n', true); i += 2500; if (i < lines.length) setTimeout(step); };
@@ -1432,8 +1548,6 @@ class Log {
 /* ---------- repos ---------- */
 const lastRun = {};
 const routed = r => S.vms.some(v => v.repo === r && v.started > now() - 14 * 86400);
-const repoErr = e => e.status === 404 ? (S.app ? 'Repo not found, or the GitHub App is not installed on it.' : 'Repo not found or token lacks access.')
-  : e.status === 401 ? (S.app ? "GitHub rejected the App's credentials. Check Settings › GitHub." : 'GitHub rejected the token. Replace it in Settings › GitHub.') : e.message;
 function addRepo(raw) {
   const r = String(raw).trim().replace(/^https?:\/\/github\.com\//, '').replace(/(\.git|\/)$/, '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(r)) return toast('Enter the repository as owner/name', true);
@@ -1446,44 +1560,52 @@ async function saveCfg(c) {
   return r;
 }
 const repoForm = `<form class="bar" data-form="addrepo" style="margin:16px 0 0"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false" style="width:260px"><button class="btn pri">Add repo</button></form>`;
+// GitHub repos are added here; a GitLab or Gitea project belongs to its forge's card.
+const repoAdd = () => !F || F.some(f => f.kind === 'github') ? repoForm + `<p class="fg2 sm" style="margin-top:8px">GitLab or Gitea project? Add it on its forge's card in <a href="#/settings/forges">Settings › Forges</a>.</p>`
+  : `<div class="bar" style="margin:16px 0 0"><a class="btn pri" href="#/settings/forges">Add a project in Settings › Forges</a></div>`;
 const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() };
 pages.repos = {
   mount(r) {
-    this.r = r.seg.length >= 2 ? r.seg.slice(0, 2).join('/') : null; this.app = !!S.app;
-    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : repoForm}`; REPOS().forEach(x => loadLast(x)); return; }
+    this.r = r.seg.length >= 2 ? r.seg.join('/') : null; this.app = !!S.app; // a GitLab project may sit in subgroups
+
+    if (!F) loadForges().then(() => cur === this && this.update());
+    if (!this.r) { $('#app').innerHTML = `<div class="ph"><h1>Repos</h1></div><div id="rl"></div>${S.app ? '<div id="rl-app"></div>' : '<div id="rl-add"></div>'}`; REPOS().forEach(x => loadLast(x)); return; }
     Object.assign(rd, { repo: this.r, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() });
-    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1>${esc(this.r)}</h1><span class="sp"></span><a class="btn" href="https://github.com/${esc(this.r)}" target="_blank" rel="noopener"${tip('Open this repo on GitHub')}>GitHub${ic('ext')}</a></div>
+    $('#app').innerHTML = `<div class="ph"><a class="back" href="#/repos" aria-label="Back to repos"${tip('Back to repos')}>${ic('back', 20)}</a><h1 id="rd-h"></h1><span class="sp"></span><span id="rd-ext"></span></div>
       <div id="rd-err"></div><div class="sec" id="rd-warm"></div><div class="sec" id="rd-wf"></div><div class="sec" id="rd-runs"></div>
-      ${S.app ? '' : `<div class="sec"><div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div></div>`}`;
+      <div class="sec" id="rd-dz"></div>`;
     this.load(); this.t = setInterval(() => this.loadRuns(), 10000);
   },
   unmount() { clearInterval(this.t); },
+  kind() { return forgeOf(F, this.r)?.kind; },
   async load() {
     const repo = this.r;
     this.loadRuns();
-    try { const w = await api(gh(repo, 'workflows')); if (repo === rd.repo) { rd.wfs = w.workflows || []; this.update(); } } catch (e) { rd.err = repoErr(e); this.update(); }
+    try { const w = await api(fq('workflows', repo)); if (repo === rd.repo) { rd.wfs = w; this.update(); } } catch (e) { rd.err = repoErr(e, forgeOf(F, repo), S.app); this.update(); }
   },
   async loadRuns() {
     const repo = this.r; if (!repo || document.hidden) return;
     try {
-      const r = (await api(gh(repo, 'runs?per_page=15'))).workflow_runs || [];
+      const r = (await api(fq('runs', repo))).runs.slice(0, 15);
       if (repo !== rd.repo) return; rd.runs = r; rd.err = null;
-      await Promise.all([...rd.open].map(id => api(gh(repo, `runs/${id}/jobs`)).then(j => rd.jobs.set(id, j.jobs || [])).catch(() => {})));
-    } catch (e) { rd.err = repoErr(e); }
+      await Promise.all([...rd.open].map(id => api(fq('runs/' + id, repo)).then(j => rd.jobs.set(id, j.jobs)).catch(() => {})));
+    } catch (e) { rd.err = repoErr(e, forgeOf(F, repo), S.app); }
     if (repo === rd.repo) this.update();
   },
   update() {
     if (cur === this && this.app !== !!S.app) return route(); // App mode flipped: the layout depends on it
     if (!this.r) {
-      const rs = REPOS();
+      const rs = REPOS(), mx = mixed(F);
+      rs.filter(r => !(r in lastRun)).forEach(r => { lastRun[r] = null; loadLast(r); }); // repos of a forge that loaded after mount
       setHTML($('#rl'), rs.length ? `<ul class="list">${rs.map(r => {
-        const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r;
-        return `<li><div class="row rr"><a class="nm" href="#/repos/${esc(r)}">${esc(r)}</a>
+        const ok = routed(r), n = (S.poll.queued || {})[r], lr = lastRun[r], open = pages.repos.sn === r, fg = forgeOf(F, r);
+        return `<li><div class="row rr"><a class="nm" href="#/repos/${esc(r)}">${mx ? fbadge(fg) : ''}${esc(fg && fg.kind !== 'github' ? repoPath(fg.id, r) : r)}</a>
           <span class="rt">${ok ? `<span class="ok sm"${tip('A kiln job ran for this repo in the last 14 days')}>Routing to kiln</span>` : `<button class="lnk warn sm" data-act="route" data-id="${esc(r)}" aria-expanded="${open}"${tip('No kiln job in the last 14 days. Click for how to route one here.')}>No kiln jobs seen</button>`}</span>
-          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from GitHub")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run on GitHub: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
-          ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>${cb(snippet())}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES())}</p></div>` : ''}</li>`;
+          <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from the forge")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
+          ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. ${fg && fg.kind !== 'github' ? `Point a job at kiln${fg.kind === 'gitlab' ? ' with a tag' : ''}:</p>` : `Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>`}${cb(snippet(fg?.kind))}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES(fg?.kind))}</p></div>` : ''}</li>`;
       }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 30 seconds until it serves one.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
-        : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks GitHub every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
+        : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks your forge every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
+      if ($('#rl-add')) setHTML($('#rl-add'), repoAdd());
       if ($('#rl-app')) setHTML($('#rl-app'), rs.length ? `<p class="fg2 sm" style="margin:16px 0 8px">These are the repos the GitHub App is installed on. Install or uninstall it on GitHub to change the list.</p><div class="bar">${appInstall()}${appRefresh()}</div>` : '');
       return;
     }
@@ -1492,24 +1614,37 @@ pages.repos = {
     const cg = ciGet(S.config.repo_cache_gb, this.r);
     setHTML($('#rd-warm'), `<div class="card"><h2>Warm VMs${hq('warm')}</h2><form class="bar" data-form="warm" style="margin:0"><label class="sr" for="warm-in">Warm VMs</label><input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">0 to 4. Counts against Max VMs; only default-size jobs use them.</p></div><div class="card"><h2>Cache branches</h2><form class="bar" data-form="cachebr" style="margin:0"><label class="sr" for="cb-in">Cache branches</label><input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">Successful pushes to these branches also save the repo cache, besides the default branch. Pull requests never do.</p></div><div class="card"><h2>Cache size</h2><form class="bar" data-form="cachegb" style="margin:0"><label class="sr" for="cg-in">Cache size (GB)</label><input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px"><button class="btn">Save</button></form><p class="fg2 sm" style="margin-top:8px">GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.</p></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
-    setHTML($('#rd-wf'), `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.path)}</span></span><button class="btn" data-act="runwf" data-id="${+w.id}"${tip('Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button></div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>'));
-    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(runHTML).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
+    const f = forgeOf(F, this.r), other = f && f.kind !== 'github';
+    setHTML($('#rd-h'), (mixed(F) ? fbadge(f) + ' ' : '') + esc(other ? repoPath(f.id, this.r) : this.r));
+    setHTML($('#rd-dz'), S.app && !other ? '' : other
+      ? `<div class="card"><h2>${esc(fl(f))} project</h2><p class="fg2" style="margin-bottom:12px">To stop serving it, or to check the token and its role on the project, use the ${esc(fl(f))} card.</p><a class="btn" href="#/settings/forges">Open Settings › Forges</a></div>`
+      : `<div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div>`);
+    setHTML($('#rd-ext'), f ? `<a class="btn" href="${esc(f.url)}/${esc(this.r.replace(/^[^:/]+:/, ''))}" target="_blank" rel="noopener"${tip('Open this repo on ' + fname(f))}>${fname(f)}${ic('ext')}</a>` : '');
+    const runBtn = w => can(f, 'dispatch') ? `<button class="btn" data-act="runwf" data-id="${esc(w)}"${tip(f.kind === 'gitlab' ? 'Start a pipeline on a branch.' : 'Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button>` : '';
+    setHTML($('#rd-wf'), can(f, 'workflows') ? `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.file)}</span></span>${runBtn(w.file)}</div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>')
+      : can(f, 'dispatch') ? `<h2>Pipelines</h2><div class="card">${runBtn('')}</div>` : '');
+    setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(x => runHTML(x, f)).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
   },
 };
-function runHTML(run) {
-  const st = ghStatus(run.status, run.conclusion), open = rd.open.has(run.id), done = run.status === 'completed';
+function runHTML(run, f) {
+  const st = runStatus(run), open = rd.open.has(run.id), done = run.status === 'completed', fn = fname(f);
   const jobs = open ? (rd.jobs.get(run.id) || null) : null;
   const jh = !open ? '' : !jobs ? '<div class="sn fg2 sm">Loading jobs…</div>' : `<div class="sn" style="padding-top:0">${jobs.map(j => {
-    const vm = S.vms.find(v => v.id === j.runner_name), t0 = iso(j.started_at), t1 = iso(j.completed_at);
-    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(ghStatus(j.status, j.conclusion))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
-      ${j.runner_name ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner_name)}</span>` : ''}</div>`;
+    const vm = S.vms.find(v => v.id === j.runner), t0 = iso(j.started_at), t1 = iso(j.completed_at);
+    return `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--line)">${badge(runStatus(j))}<span>${esc(j.name)}</span><span class="fg2 sm">${t0 ? dur((t1 || now()) - t0) : ''}</span>
+      ${j.runner ? vm ? `<a class="mono sm" href="#/jobs/${encodeURIComponent(vm.id)}">${esc(vm.id)}</a>` : `<span class="mono sm fg3">${esc(j.runner)}</span>` : ''}</div>`;
   }).join('') || '<span class="fg2 sm">No jobs.</span>'}</div>`;
+  const btn = {
+    rerun: `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip(`Ask ${fn} to run this workflow run again`)}>${ic('rerun')}Rerun</button>`,
+    cancel: `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip(`Ask ${fn} to cancel this run`)}>${ic('cancel')}Cancel</button>`,
+  };
+  const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
-    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.display_title)}</span><span class="id" style="font-family:var(--sans)">#${+run.run_number} · ${esc(run.head_branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn ic" href="${ghUrl(run.html_url)}" target="_blank" rel="noopener" aria-label="Open on GitHub"${tip('Open this run on GitHub')}>${ic('ext')}</a>${done ? `<button class="btn" data-act="rerun" data-id="${+run.id}"${tip('Ask GitHub to run this workflow run again')}>${ic('rerun')}Rerun</button>` : `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip('Ask GitHub to cancel this run')}>${ic('cancel')}Cancel</button>`}</span></div>${jh}</li>`;
+    <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
+    <span style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
-  try { const x = (await api(gh(r, 'runs?per_page=1'))).workflow_runs?.[0]; lastRun[r] = x ? ghStatus(x.status, x.conclusion) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
+  try { const x = (await api(fq('runs', r))).runs[0]; lastRun[r] = x ? runStatus(x) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
   if (cur === pages.repos && !pages.repos.r) pages.repos.update();
 }
 
@@ -1525,16 +1660,145 @@ const consentHTML = () => `<div class="card"><h2>${ic('shield', 20)} Help improv
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"><button class="btn pri" data-act="consent">Save choice</button><a class="btn" href="#/settings/privacy">See what is sent</a></div></div>`;
 
 /* ---------- settings ---------- */
-const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', github: 'GitHub', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', privacy: 'Privacy', appearance: 'Appearance' };
+const GROUPS = { capacity: 'Capacity', timeouts: 'Timeouts', access: 'Access', forges: 'Forges', image: 'Image', cache: 'Cache', debug: 'Debugging', network: 'Network', notifications: 'Notifications', diagnostics: 'Diagnostics', analytics: 'Analytics', updates: 'Updates', privacy: 'Privacy', appearance: 'Appearance' };
 // Accent swatches (Settings › Appearance): kiln glazes, [id, name, dark-theme value, light-theme value]. Keep in sync with the CSS.
 const ACCENTS = [['ember', 'Ember', '#F59E4C', '#A34B07'], ['flame', 'Flame', '#F27B52', '#B0391A'], ['brass', 'Brass', '#E2B657', '#7E5E0A'], ['celadon', 'Celadon', '#74C6B1', '#1B6B5B'], ['cobalt', 'Cobalt', '#8EAAF4', '#3354B5'], ['mono', 'Mono', '#FAFAFA', '#171717']];
-const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', github: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', privacy: 'shield', appearance: 'palette' };
+const GI = { capacity: 'cpu', timeouts: 'timer', access: 'users', forges: 'github', image: 'image', cache: 'cache', debug: 'debug', network: 'network', notifications: 'bell', diagnostics: 'pulse', analytics: 'chart', updates: 'update', privacy: 'shield', appearance: 'palette' };
 let ncHTML = '', tsOpen = false, serveSt = null; // serveSt: { busy, want } while the request runs, { err } after a failure
 let draft = null, cfgJ = '', TS = null, tokRes = null;
 const pings = new Map();
 const isDirty = () => draft && JSON.stringify(draft) !== JSON.stringify(S.config);
 const fld = (id, label, ctl, hint, help, t) => `<div class="fld"><div><label for="${id}"${tip(t)}>${label}</label>${help ? hq(help) : ''}</div><div>${ctl}</div>${hint ? `<div class="h">${hint}</div>` : ''}</div>`;
 const num = (k, v, step = 1) => `<input type="number" id="f-${k}" data-k="${k}" value="${esc(v)}" min="0" step="${step}">`;
+/* ---------- forges: adding one, the GitLab card ---------- */
+const GL_SCOPES = ['create_runner', 'manage_runner', 'read_api'];
+// What a GitLab token's scopes (auth.scopes from /api/forges) mean for kiln; null until they are known.
+function glScopes(auth) {
+  const s = auth?.scopes; if (!Array.isArray(s)) return null;
+  const full = s.includes('api');
+  return { full, missing: full ? [] : GL_SCOPES.filter(x => !s.includes(x)) };
+}
+// Whole days until a token's expiry date (YYYY-MM-DD, valid through that day, UTC); null when it never expires.
+function daysLeft(date, t) {
+  const e = Date.parse(date + 'T23:59:59Z');
+  return isNaN(e) ? null : Math.floor((e - t * 1000) / 86400000);
+}
+// A free id for a new forge: gitlab, gitlab-2, ...
+function nextForgeId(base, used) {
+  let id = base, n = 2;
+  while (used.includes(id)) id = `${base}-${n++}`;
+  return id;
+}
+// A project's path inside forge `id`, from the canonical key kiln lists (`gl:group/proj`).
+const repoPath = (id, key) => String(key).startsWith(id + ':') ? String(key).slice(id.length + 1) : String(key);
+const FC = {}, FB = {}; // forge id -> last setup check; forge id -> { busy } or { err } for the card
+// Redraw whatever shows forges: Settings › Forges, or the setup steps.
+const forgeUI = () => { if (cur === pages.settings && pages.settings.g === 'forges') pages.settings.live(); else if (cur === pages.setup) pages.setup.update(); };
+// Replaces a forge's project list with what `edit` makes of the current one, then reloads state.
+async function forgeRepos(id, edit) {
+  const f = (F || []).find(x => x.id === id); if (!f) return;
+  await post(`/api/forges/${encodeURIComponent(id)}/repos`, { repos: edit(f) }); await poll();
+}
+// Asks GitLab about the saved token and the bot's role on each project.
+async function forgeTest(id) {
+  FB[id] = { busy: 1 }; forgeUI();
+  try { FC[id] = await post(`/api/forges/${encodeURIComponent(id)}/check`); FB[id] = null; } catch (e) { FB[id] = { err: e.message }; }
+  await poll(); forgeUI();
+}
+const glTokenUrl = f => forgeUrl(f, `${f.url}/-/user_settings/personal_access_tokens?name=kiln&scopes=${GL_SCOPES.join(',')}`);
+// What differs between the non-GitHub forges in the shared cards and the setup steps.
+const FX = {
+  gitlab: { name: 'GitLab', unit: 'project', url: 'https://gitlab.example.com', tok: 'glpat-…', path: 'group/project' },
+  gitea: { name: 'Gitea', unit: 'repo', url: 'https://gitea.example.com', tok: 'access token', path: 'owner/repo' },
+};
+const fgPreview = f => f.launches ? '' : `<div class="cal w" style="margin:0 0 16px"><b>${fname(f)} support is in preview:</b> jobs will not run until enabled. kiln reads this ${FX[f.kind].unit}'s queue and ${f.kind === 'gitea' ? 'runs' : 'pipelines'}, but starts no VMs for ${fname(f)} yet.</div>`;
+const fgTokenHelp = f => f.kind === 'gitea'
+  ? `Scopes: <code>write:repository</code> and <code>read:user</code>. <a href="${forgeUrl(f, f.url + '/user/settings/applications')}" target="_blank" rel="noopener">Create it ↗</a> opens Gitea's applications page: sign in as the service account first, name the token and tick those two. The account must be the repo's <b>Owner</b> (see below).`
+  : `Scopes: <code>create_runner</code>, <code>manage_runner</code>, <code>read_api</code>. <a href="${glTokenUrl(f)}" target="_blank" rel="noopener">Create it ↗</a> opens GitLab with those filled in; sign in as the bot user first.`;
+const fgTokenForm = f => `<form data-form="forgetoken" data-id="${esc(f.id)}" class="bar" style="margin:0"><label class="sr" for="ft-${esc(f.id)}">${fname(f)} access token</label><input type="password" id="ft-${esc(f.id)}" placeholder="${FX[f.kind].tok}" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
+  <p class="fg2 sm" style="margin-top:8px">${fgTokenHelp(f)} kiln tries the token before saving it, stores it on this box only and never shows it again.</p>`;
+const fgRepoForm = f => `<form data-form="forgerepo" data-id="${esc(f.id)}" class="bar" style="margin:12px 0 0"><label class="sr" for="fr-${esc(f.id)}">${fname(f)} ${FX[f.kind].unit}</label><input type="text" id="fr-${esc(f.id)}" placeholder="${FX[f.kind].path} or paste its URL" autocomplete="off" spellcheck="false" required style="width:320px"><button class="btn pri">Add ${FX[f.kind].unit}</button></form>`;
+const gtWhy403 = `<details style="margin-top:12px"><summary>Registering a runner fails with 403?</summary><p class="fg2 sm" style="margin-top:8px">Gitea only gives the runner registration token to the repo's <b>Owner</b>: the account that owns the repo, or a member of the <b>Owners</b> team of the organisation that does. A collaborator with Admin permission gets 403. Put the service account in the Owners team (or make it the owner of the repo), then press Test. A token without the right scope gets a different error, which kiln names.</p></details>`;
+const fgWhy403 = f => f.kind === 'gitea' ? gtWhy403 : glWhy403;
+const glWhy403 = `<details style="margin-top:12px"><summary>Creating a runner fails with 403?</summary><p class="fg2 sm" style="margin-top:8px">GitLab gives the same answer for three different causes. Check each: (1) the bot's role on the project is below Maintainer; (2) the instance setting <b>valid_runner_registrars</b> (Admin › Settings › CI/CD › Runner registration) does not include <i>project</i>; (3) runner registration is switched off for the project or its group (Settings › CI/CD › Runners; there is no API for it, so kiln cannot check). A token without the right scope gets a different error, which kiln names.</p></details>`;
+const gtPower = () => `<details style="margin-top:16px"><summary>Token power: what this account can do</summary><div class="fg2 sm" style="margin-top:8px">
+  <p><code>write:repository</code> lets kiln see queued jobs and runs, get the runner registration token and delete the runners it made. <code>read:user</code> only lets it ask who the token is.</p>
+  <p><b>The catch:</b> Gitea hands out the registration token only to the repo's Owner, so this account can <b>register runners and change the repo</b>: push code, edit settings and, in the worst case, delete it. That is broader than a GitHub App. Use a <b>dedicated bot account</b> that owns only the repos kiln serves (a personal namespace, or a small organisation holding just those), never your own account.</p>
+  <p>The registration token is reusable. kiln keeps it in memory and never gives it to a job VM, which only gets a runner credential that works for one job and is deleted when the job ends.</p></div></details>`;
+const glPower = () => `<details style="margin-top:16px"><summary>Token power: what this token can do</summary><div class="fg2 sm" style="margin-top:8px">
+  <p><code>create_runner</code> and <code>manage_runner</code> let kiln make a one-job runner for each VM, pause it and delete it. <code>read_api</code> lets it see queued jobs, pipelines and logs.</p>
+  <p><b>The catch:</b> with <code>read_api</code>, a token whose user is a Maintainer can also read the project's CI/CD variables, values included, even the masked and protected ones. GitHub never allows that. So use a <b>dedicated bot account</b> that belongs to only the projects kiln serves, never your own account, and keep the token out of anything else.</p>
+  <p>Rerun, Cancel and Run pipeline in this dashboard need the wider <code>api</code> scope. kiln recommends against it, and hides those buttons unless the token has it.</p>
+  <p>A job VM never gets this token. It gets a runner credential that works for one project, which kiln deletes when the job ends.</p></div></details>`;
+const fgPower = f => f.kind === 'gitea' ? gtPower() : glPower();
+// One project row: its role on the project (from the last Test), and a way to drop it.
+function fgRepoRow(f, key) {
+  const r = FC[f.id]?.repos?.find(x => x.repo === key), path = repoPath(f.id, key), gt = f.kind === 'gitea', u = FX[f.kind].unit;
+  const st = r ? badge(r.role || 'no access', r.ok ? 'passed' : 'failed', r.ok ? (gt ? 'Owner: kiln can register runners for this repo' : 'Maintainer or above: kiln can create runners in this project') : r.message) : badge('not checked', 'queued', `Press Test to check the ${gt ? 'account' : 'bot'}'s role on this ${u}`);
+  return `<li><div class="row flat bf" style="grid-template-columns:132px minmax(0,1fr) auto"><span>${st}</span><span>${esc(path)}${r && !r.ok ? ` <span class="fail sm">${esc(r.message)}</span>` : ''}</span>
+    <button class="btn" data-act="forgerepormv" data-id="${esc(f.id)}" data-repo="${esc(key)}" aria-label="Remove ${esc(path)}"${tip(`Stop serving this ${u}. Running jobs finish.`)}>${ic('x')}</button></div></li>`;
+}
+// What the last Test or token save found, or why it failed.
+function fgCheckHTML(f) {
+  const c = FC[f.id], b = FB[f.id];
+  if (b?.busy) return `<p class="fg2 sm">Checking with ${fname(f)}…</p>`;
+  if (b?.err) return `<div class="cal" role="alert">${esc(b.err)}</div>`;
+  if (!c) return '';
+  const warn = (c.warnings || []).map(w => `<div class="cal w">${esc(w)}</div>`).join('');
+  return warn + ((c.problems || []).map(p => `<div class="cal">${esc(p)}</div>`).join('') || (c.ok ? `<div class="cal o">Everything kiln needs is in place${c.version ? ` (${fname(f)} ${esc(c.version)})` : ''}.</div>` : ''));
+}
+// The Add forge form, shared by Settings › Forges and the setup wizard (which fixes the kind).
+function addForgeForm(used, kind) {
+  const L = (id, t) => `<label for="af-${id}" style="font-size:14px;font-weight:500">${t}</label>`, col = 'display:grid;gap:4px', k = kind || 'gitlab', x = FX[k], nid = esc(nextForgeId(k, used));
+  return `<form data-form="addforge" style="display:grid;gap:12px;max-width:460px">
+    <div style="${col}">${L('kind', 'Forge')}<select id="af-kind" data-act="afkind">${Object.entries(FX).filter(([y]) => !kind || y === kind).map(([y, v]) => `<option value="${y}"${y === k ? ' selected' : ''}>${v.name}</option>`).join('')}</select></div>
+    <div style="${col}">${L('url', 'Address')}<input type="text" id="af-url" placeholder="${x.url}" autocomplete="off" spellcheck="false" required><span class="fg2 sm">The address of the site, not of a project or repo. https, unless the network is internal.</span></div>
+    <div style="${col}">${L('id', 'Name')}<input type="text" id="af-id" value="${nid}" pattern="[a-z][a-z0-9\\-]{0,23}" autocomplete="off" spellcheck="false" required><span class="fg2 sm">Lowercase letters, digits and dashes. It prefixes this forge's project names (<code id="af-hint">name:${x.path}</code>) and cannot change later.</span></div>
+    <div style="${col}">${L('net', 'Network')}<select id="af-net"><option value="public">Public: https over the internet</option><option value="internal">Internal: LAN or tailnet, http allowed</option></select><span class="fg2 sm">Internal opens job VMs' network to this forge's address and port, and to every site behind a reverse proxy on it. Loopback and this machine's own address are refused.</span></div>
+    <div style="${col}">${L('repo', 'First project or repo (optional)')}<input type="text" id="af-repo" placeholder="${x.path} or paste its URL" autocomplete="off" spellcheck="false"></div>
+    <div><button class="btn pri" id="af-btn">Add ${x.name}</button></div></form>`;
+}
+// The Settings › Forges card of a GitLab or Gitea forge; `f` says which.
+const forgeCard = () => ({
+  html(f) {
+    const id = esc(f.id), gt = f.kind === 'gitea', x = FX[f.kind], ci = gt ? '.gitea/workflows/ci.yml' : '.gitlab-ci.yml';
+    return `<div class="card" id="fc-${id}"><h2>${x.name} <span class="fg2 sm" style="font-weight:400">${id}</span>${hq(f.kind)}</h2>
+        <div id="fc-${id}-pv"></div><div id="fc-${id}-st"></div>
+        ${fgTokenForm(f)}${fgPower(f)}
+        <h3 style="font-size:15px;margin:24px 0 8px">${gt ? 'Repos' : 'Projects'}</h3>
+        <div id="fc-${id}-rp"></div>${fgRepoForm(f)}${fgWhy403(f)}
+        <div class="bar" style="margin:20px 0 0"><button class="btn" data-act="forgetest" data-id="${id}"${tip(`Ask ${x.name} who the token is${gt ? ', its version' : ', what it can do'}, and ${gt ? 'whether the account can register runners' : 'its role'} on each ${x.unit}. Creates nothing.`)}>${ic('pulse')}Test</button>
+          <span class="sp"></span><button class="btn dng" data-act="forgerm" data-id="${id}"${tip('Stop serving this forge and delete its saved token')}>${ic('trash')}Remove forge</button></div>
+        <div id="fc-${id}-ck" style="margin-top:12px"></div>
+        <details style="margin-top:12px"><summary>A ${ci} that uses kiln</summary>${cb(ciSnippet(f.kind, JL()))}<p class="fg2 sm">Use <code>${esc(JL())}-4cpu</code> and the other size labels like the GitHub ones. ${gt ? 'Jobs that do not ask for kiln' : 'Jobs without the tag'} are left to your other runners.</p></details></div>`;
+  },
+  live(f) {
+    const id = f.id, at = f.auth || {}, gt = f.kind === 'gitea', sc = gt ? null : glScopes(at), set = at.source && at.source !== 'none', dl = at.expires ? daysLeft(at.expires, now()) : null;
+    const q = k => $(`#fc-${id}-${k}`), cp = f.caps || {};
+    setHTML(q('pv'), fgPreview(f));
+    const note = [];
+    if (!set) note.push('<div class="cal w">No token yet, so kiln cannot see this forge\'s queue. Paste one below.</div>');
+    else if (f.health) note.push(`<div class="cal w">${esc(f.health)}</div>`);
+    if (gt) {
+      note.push('<div class="cal w">Gitea gives the runner registration token only to a repo\'s <b>Owner</b>, so this account can register runners and change the repo. Use a dedicated bot account limited to the repos kiln serves.</div>');
+      if (set && cp.dispatch && !cp.rerun) note.push('<div class="cal neu">This Gitea is older than 1.26: Rerun and Cancel are hidden, and kiln cannot disable a runner before deleting it.</div>');
+      else if (set && cp.dispatch && !cp.cancel) note.push('<div class="cal neu">This Gitea is older than 28: Cancel is hidden. Rerun works.</div>');
+    }
+    if (sc?.missing.length) note.push(`<div class="cal">The token lacks ${sc.missing.map(x => `<code>${esc(x)}</code>`).join(', ')}. Create it again with <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>.</div>`);
+    else if (sc?.full) note.push('<div class="cal w">This token has the full <code>api</code> scope, which is more than kiln needs: anyone who gets it can change your projects. It is what turns on Rerun, Cancel and Run pipeline here. Prefer the three runner scopes unless you want those buttons.</div>');
+    else if (sc) note.push('<div class="cal neu">Least privilege: the runner scopes only. Rerun, Cancel and Run pipeline are hidden, because they need the <code>api</code> scope.</div>');
+    if (dl !== null && dl <= 14) note.push(`<div class="cal${dl <= 7 ? '' : ' w'}">The token ${dl < 0 ? 'has expired' : dl === 0 ? 'expires today' : `expires in ${dl} day${dl > 1 ? 's' : ''}`}. Create a new one and save it here before then.</div>`);
+    const ver = FC[id]?.version || at.version;
+    setHTML(q('st'), `<dl class="kv" style="margin-bottom:16px"><dt>Address</dt><dd><a href="${forgeUrl(f, f.url + '/')}" target="_blank" rel="noopener">${esc(f.url)}</a></dd>
+      <dt>Network</dt><dd>${f.network === 'internal' ? '<span class="warn">internal</span> <span class="fg2">(job VMs can reach this address and port, and every site served there)</span>' : 'public'}</dd>
+      <dt>Token</dt><dd>${set ? `<span class="ok">Set</span> <span class="fg2">(${at.source === 'env' ? 'environment variable' : 'saved file'})</span>` : '<span class="fail">Not set</span>'}</dd>
+      ${at.login ? `<dt>${gt ? 'Account' : 'Signed in as'}</dt><dd>${esc(at.login)}</dd>` : ''}
+      ${gt ? `<dt>Version</dt><dd>${ver ? esc(ver) : set ? '<span class="fg2">press Test to read it</span>' : '—'}</dd>` : `<dt>Scopes</dt><dd>${sc ? at.scopes.map(x => `<code>${esc(x)}</code>`).join(' ') : set ? '<span class="fg2">not read yet</span>' : '—'}</dd>
+      <dt>Expires</dt><dd>${at.expires ? esc(at.expires) : set && sc ? 'never' : '—'}</dd>`}</dl>${note.join('')}`);
+    setHTML(q('rp'), f.repos.length ? `<ul class="list">${f.repos.map(k => fgRepoRow(f, k)).join('')}</ul>` : `<p class="fg2 sm">No ${FX[f.kind].unit} yet. kiln serves only the ${FX[f.kind].unit}s listed here.</p>`);
+    setHTML(q('ck'), fgCheckHTML(f));
+  },
+});
 const G = {
   capacity: {
     html() {
@@ -1544,7 +1808,7 @@ const G = {
         ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus), '', '', 'Default size: VMs for jobs with the plain label get this many vCPUs')}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5), '', '', 'Memory of a default-size VM. Held for as long as the VM runs.')}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb), '', '', "Size of each VM's throwaway disk, deleted with the VM")}
         ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
-        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(c.label)}]`, 'label')}
+        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, `Jobs opt in with runs-on: [self-hosted, ${esc(JL())}]`, 'label')}
         ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
         <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
     },
@@ -1592,6 +1856,14 @@ const G = {
       ${S.token_source === 'gh' ? '<p class="fg2 sm" style="margin-bottom:16px">Token comes from the gh keyring, which may be locked after a headless reboot. Save it here instead.</p>' : ''}`);
     },
   },
+  gitlab: forgeCard(),
+  gitea: forgeCard(),
+  forges: {
+    // One card per configured forge (GET /api/forges), by kind: G.github, G.gitlab, G.gitea, then the Add forge control.
+    html: () => !F ? '' : (F.map(f => G[f.kind]?.html(f) ?? '').join('') || '<p class="fg2">No forge is configured.</p>')
+      + `<details class="card" id="af-d"><summary><b>Add a forge</b> <span class="fg2 sm">· GitLab or Gitea, on your own server</span></summary><div style="margin-top:16px">${addForgeForm(F.map(f => f.id))}</div></details>`,
+    live() { for (const f of F || []) G[f.kind]?.live?.(f); },
+  },
   image: {
     html: () => `<div class="card"><h2>Image options</h2>
       <div class="fld"><div><span class="lb">Docker mirror</span>${hq('mirror')}</div><label class="sw"><input type="checkbox" role="switch" id="f-docker_mirror" data-k="docker_mirror" aria-label="Docker mirror" ${draft.docker_mirror !== false ? 'checked' : ''}><span class="fg2 sm" id="mir"></span></label></div>
@@ -1630,11 +1902,12 @@ const G = {
     html: () => `<div class="card"><h2>Job network</h2>
       <div class="fld"><span class="lb" id="eg-l">Job network</span><div><div class="seg" role="radiogroup" aria-labelledby="eg-l">${['open', 'filtered'].map(m => `<button role="radio" aria-checked="${(draft.egress || 'open') === m}" data-act="egress" data-id="${m}">${m === 'open' ? 'Open' : 'Filtered'}</button>`).join('')}</div>
       <div class="h">Filtered: jobs reach the internet and kiln's Docker mirror only — not your LAN, tailnet, or other services on this box. Recommended before running untrusted pull requests. Open: jobs route like any process on the host.</div><div id="eg-st" class="sm" style="margin-top:8px"></div></div></div></div>
-      <div id="ts" style="margin-top:16px"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">${ic('pulse')}Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
+      <div id="eg-fg"></div><div id="ts" style="margin-top:16px"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">${ic('pulse')}Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
     open() { loadTs(); if (!doctor?.checks?.length) runDoctor(); },
     live() {
       const c = (doctor?.checks || []).find(x => x.name === 'filtered egress'), el = $('#eg-st');
       if (el) setHTML(el, c ? `<span class="${c.ok ? (/^unavailable/i.test(c.detail) ? 'fg2' : 'ok') : 'fail'}">${c.ok ? (/^unavailable/i.test(c.detail) ? 'Not checked:' : 'Check passed') : 'Check failed'}</span> <span class="fg2">${esc(c.detail)}</span>` : '<span class="fg2">Checking…</span>');
+      setHTML($('#eg-fg'), (F || []).filter(f => f.network === 'internal').map(f => `<div class="cal w" style="margin-top:16px"><b>${esc(fl(f))} is on an internal network.</b> Job VMs can reach ${esc(f.url)} even when the job network is Filtered, and every site served at that address (a reverse proxy there opens all of its hosts).</div>`).join(''));
       if (TS) renderTs();
     },
   },
@@ -1811,15 +2084,16 @@ function anHTML() {
   const oldest = Math.min(...S.vms.map(v => v.started)), cut = S.vms.length >= 100 && oldest > t0;
   const note = cut ? `<div class="cal neu" style="margin-top:0">The dashboard gets the newest 100 VMs, which reach back to ${esc(when(oldest))}. Earlier ${AN.r === 1 ? 'hours' : 'days'} are hatched; the minutes chart at the bottom isn't limited to these VMs.</div>` : '';
   const ld = Math.floor(Date.now() / 86400000), use = (S.usage || []).filter(u => u[0] > ld - 30 && (!AN.cpus || u[1] === AN.cpus)), us = sizeSer([...new Set(use.map(u => u[1]))]);
+  const lom = Object.entries(otherMins((S.usage_other || []).filter(u => u[0] > ld - 30), F, 0)).map(([k, n]) => `${k} ${n} min`).join(', ');
   const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
-    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
+    + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. ${lom ? ` Not priced: ${esc(lom)}.` :''} From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
     : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
   if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}.</p></div>` + ledger;
   const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };
   const x = i => cut && (B[i + 1]?.[0] ?? Infinity) <= oldest;
   const n = [0, 0, 0]; jobs.forEach(v => n[outcome(v)]++);
   const tj = jobs.filter(timed), jd = tj.map(v => jobEnd(v) - v.busy_since), q = jobs.filter(v => v.queued_at), on = jobs.filter(v => v.online_at);
-  const sr = n[0] + n[1] ? n[0] / (n[0] + n[1]) : null, mins = jobs.reduce((a, v) => a + jobMins(v), 0), saved = jobs.reduce((a, v) => a + jobMins(v) * rate(v.cpus), 0), ms = median(q.map(v => v.busy_since - v.queued_at));
+  const sr = n[0] + n[1] ? n[0] / (n[0] + n[1]) : null, mins = jobs.reduce((a, v) => a + jobMins(v), 0), gmins = jobs.filter(v => kindOf(F, v.repo) === 'github').reduce((a, v) => a + jobMins(v), 0), saved = jobs.filter(v => kindOf(F, v.repo) === 'github').reduce((a, v) => a + jobMins(v) * rate(v.cpus), 0), ms = median(q.map(v => v.busy_since - v.queued_at));
   const oc = B.map(([, l], i) => ({ l, x: x(i), v: [0, 0, 0] })); jobs.forEach(v => oc[at(v.busy_since)].v[outcome(v)]++);
   const js = sizeSer([...new Set(jobs.map(v => v.cpus))]), mc = B.map(([, l], i) => ({ l, x: x(i), v: js.map(() => 0) }));
   jobs.forEach(v => mc[at(v.busy_since)].v[js.findIndex(s => s[0] === v.cpus)] += jobMins(v));
@@ -1833,8 +2107,8 @@ function anHTML() {
   return `${note}
     <div class="stats">${st('Jobs', jobs.length, `Finished jobs that started in this range: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`)}${st('Success rate', pc(sr), 'Passed out of passed and failed. Cancelled jobs count as neither.', sr != null && sr < .8 ? 'fail' : '')}
     ${st('Median job time', dd(median(jd)), 'From a job starting to its result' + (lost ? `. Leaves out ${lost} lost job${lost > 1 ? 's' : ''}: kiln stopped while ${lost > 1 ? 'they' : 'it'} ran.` : ''))}${st('p95 job time', dd(pctl(jd, .95)), '95% of jobs took this long or less')}
-    ${st('Median time to start', dd(ms), 'From GitHub queueing the job to it starting in a kiln VM: queue, boot and wait')}${st('Failed', n[1], 'Failed, lost, or killed mid-job', n[1] ? 'fail' : '')}
-    ${st('Job minutes', mins, 'Each job rounded up to the minute, as GitHub bills it')}${st('Saved', '≈ $' + saved.toFixed(2), `${mins} job minutes at ${myRate() ? '$' + myRate() + '/min' : 'the GitHub-hosted rate for each VM size'}`)}</div>
+    ${st('Median time to start', dd(ms), 'From the forge queueing the job to it starting in a kiln VM: queue, boot and wait')}${st('Failed', n[1], 'Failed, lost, or killed mid-job', n[1] ? 'fail' : '')}
+    ${st('Job minutes', mins, 'Each job rounded up to the minute, as GitHub bills it')}${st('Saved', '≈ $' + saved.toFixed(2), `${mixed(F) ? gmins + ' GitHub job minutes' : mins + ' job minutes'} at ${myRate() ? '$' + myRate() + '/min' : 'the GitHub-hosted rate for each VM size'}${mixed(F) ? '. GitLab and Gitea minutes are counted in Job minutes but not priced.' : ''}`)}</div>
     <div class="card"><h2>Jobs per ${unit}</h2>${bars(oc, OUT, String, `Jobs per ${unit}: ${n[0]} passed, ${n[1]} failed, ${n[2]} cancelled or other`, 'jobs')}</div>
     <div class="card"><h2>Job minutes per ${unit}</h2>${bars(mc, js, x => x + ' min', `${mins} job minutes per ${unit} by VM size`, 'mins')}</div>
     <div class="card"><h2>Where the time goes <span class="fg2 sm" style="font-weight:400">median per phase</span>${hq('timeline')}</h2>${timeline(ph)}</div>
@@ -1881,7 +2155,8 @@ function updHTML() {
 const tokHTML = () => !tokRes ? '' : `<div class="cal o"><b>${esc(tokRes.login)}</b> · scopes: ${esc((tokRes.scopes || []).join(', ') || 'none')}</div>` + (Object.keys(tokRes.repos || {}).length ? `<ul class="list">${Object.entries(tokRes.repos).map(([r, m]) => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(m === 'ok' ? 'access' : 'no access', m === 'ok' ? 'passed' : 'failed', m === 'ok' ? 'The token can use this repo' : 'The token cannot use this repo')}</span><span>${esc(r)}${m === 'ok' ? '' : ` <span class="fail sm">${esc(m)}</span>`}</span></div></li>`).join('')}</ul>` : '');
 pages.settings = {
   mount(r) {
-    const g = GROUPS[r.seg[0]] ? r.seg[0] : 'capacity'; this.g = g;
+    const g = GROUPS[r.seg[0]] ? r.seg[0] : r.seg[0] === 'github' ? 'forges' : 'capacity'; this.g = g;
+    if (g === 'forges' && !F) loadForges().then(() => cur === this && this.g === 'forges' && this.render());
     cfgJ = JSON.stringify(S.config); draft = JSON.parse(cfgJ);
     $('#app').innerHTML = `<div class="ph"><h1>Settings</h1></div><div class="set"><nav class="sub" aria-label="Settings groups">${Object.entries(GROUPS).map(([k, l]) => `<a href="#/settings/${k}" ${k === g ? 'aria-current="page"' : ''}>${ic(GI[k])}${l}</a>`).join('')}</nav>
       <div><label class="sr" for="gsel">Settings group</label><select id="gsel" data-act="gsel">${Object.entries(GROUPS).map(([k, l]) => `<option value="${k}" ${k === g ? 'selected' : ''}>${l}</option>`).join('')}</select>
@@ -1925,7 +2200,7 @@ function renderTs() {
 }
 
 /* ---------- test PR + onboarding ---------- */
-let setupOpen = null, setupRepo = null, setupSnip = false, hello = lsJ('kiln-hello', {});
+let setupOpen = null, setupRepo = null, setupSnip = false, setupForge = null, hello = lsJ('kiln-hello', {});
 const helloSt = {}, helloErr = {};
 async function loadHello() {
   try {
@@ -1948,13 +2223,14 @@ const imgStrip = () => S.image_ready ? ['o', `<span class="ok">${ic('check')} VM
   : ['w', 'The VM image isn\'t built yet. <button class="btn" data-act="bake">Bake image</button>'];
 pages.setup = {
   mount() {
-    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › GitHub.')}>Skip for now</button></div>
+    $('#app').innerHTML = `<div class="ph"><h1>Set up kiln</h1><span class="sp"></span><button class="btn" data-act="skip"${tip('Go to Overview. Setup stays available from Settings › Forges.')}>Skip for now</button></div>
       <p class="lead">Three steps, about 5 minutes. Progress is detected automatically, so you can leave and come back.</p><div id="su-consent" style="margin-bottom:16px"></div><div class="card" id="su"></div>`;
     setupOpen = null;
+    if (!F) loadForges().then(() => cur === this && this.update());
   },
   update() {
     const sc = $('#su-consent'); sc.hidden = !consentUnset(); if (sc.hidden) sc.innerHTML = ''; else if (!sc.firstChild) sc.innerHTML = consentHTML();
-    const c = S.config, rs = REPOS(), repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
+    const c = S.config, rs = GHREPOS(), repo = rs.includes(setupRepo) ? setupRepo : rs[0], first = S.vms.find(v => v.busy_since && v.ended);
     if (!S.image_ready && !S.baking && bk.checked && !bakeFailed() && !lsGet('kiln-bake-auto')) { lsSet('kiln-bake-auto', '1'); ACT.bake().catch(fail); }
     const [cls, st] = imgStrip(), strip = `<div class="cal ${cls}" style="margin:0 0 20px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px">${st}</div>`;
     if (first) {
@@ -1965,9 +2241,31 @@ pages.setup = {
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin:16px 0"><a class="btn pri" href="#/jobs/${encodeURIComponent(first.id)}">View the job</a><a class="btn" href="#/" data-act="finish">Go to overview</a></div>
         <p class="fg2">${ok ? 'Next: close or merge the test PR, then <a href="#/guides/move">move a real workflow →</a>' : 'kiln worked; the workflow failed. <a href="#/guides/debug">Debug a failed job →</a>'}</p>`);
     }
-    const done = [S.token_set, rs.length > 0, S.vms.some(v => v.busy_since)], open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
-    const sum = [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
-      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › GitHub.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+    const xk = setupForge ?? (F ? ((F.find(f => f.kind !== 'github' && !S.token_set && !S.app) || {}).kind ?? 'github') : 'github');
+    if (setupForge === null && F) setupForge = xk;
+    const gl = (F || []).find(f => f.kind === xk && xk !== 'github'), useGl = xk !== 'github', xn = FX[xk]?.name, gt = xk === 'gitea', ran = S.vms.some(v => v.busy_since);
+    const done = useGl ? [!!gl && gl.auth?.source !== 'none' && (gt || glScopes(gl.auth)?.missing.length === 0), !!gl?.repos.length, ran] : [S.token_set, rs.length > 0, ran];
+    const open = setupOpen ?? (done.indexOf(false) < 0 ? 2 : done.indexOf(false));
+    const pick = `<div class="seg" role="radiogroup" aria-label="Forge">${[['github', 'GitHub'], ['gitlab', 'GitLab'], ['gitea', 'Gitea']].map(([k, l]) => `<button role="radio" aria-checked="${xk === k}" data-act="sufg" data-id="${k}">${l}</button>`).join('')}</div>`;
+    const sum = useGl ? [`${xn} <b>${esc(gl?.id)}</b>${gl?.auth?.login ? ` as <b>${esc(gl.auth.login)}</b>` : ''}`, (gl?.repos || []).map(k => esc(repoPath(gl.id, k))).join(', '), ''] : [S.app ? `GitHub App <b>${esc(S.app.slug || S.app.id)}</b>` : tokRes?.login ? `Connected as <b>${esc(tokRes.login)}</b>` : 'GitHub connected',
+      S.app ? `${rs.map(esc).join(', ')}. Install on more repos from Settings › Forges.` : `${rs.map(esc).join(', ')}. Add more in <a href="#/repos">Repos</a>.`, ''];
+    const prev = `<div class="cal w" style="margin:0">${xn} support is in preview: jobs will not run until enabled. You can set everything up now.</div>`;
+    const bot = gt
+      ? `<p class="fg2">Use a separate Gitea user for kiln, a <b>service account</b> such as <code>kiln-bot</code>, not yours. Gitea only gives the runner registration token to a repo's <b>Owner</b>, so the account must either <b>own the repo</b> (put the repo under it) or be a member of the <b>Owners</b> team of an organisation that holds only the repos kiln serves. An Owner can push, change settings and delete the repo, so keep this account to those repos.</p>`
+      : `<p class="fg2">Use a separate GitLab user for kiln, a <b>bot account</b> such as <code>kiln-bot</code>, not yours. Add it as <b>Maintainer</b> to only the projects kiln should serve. Maintainer is what creating runners needs, and a Maintainer's token with <code>read_api</code> can read the project's CI/CD variables, so the bot should have nothing else to read.</p>`;
+    const tokP = gt
+      ? `<p class="fg2">Sign in as that account and create its access token with exactly <code>write:repository</code> and <code>read:user</code>. kiln needs Gitea 1.25 or newer (1.26.3+ recommended, 28+ for Cancel).</p>`
+      : `<p class="fg2">Sign in as the bot and create its access token with exactly <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>. Leave <code>api</code> off: it only adds Rerun and Cancel buttons, and lets the token change your projects.</p>`;
+    const ciName = gt ? '.gitea/workflows/ci.yml' : '.gitlab-ci.yml';
+    const glB = [
+      `${pick}${gl?.launches ? '' : prev}${bot}`
+        + (gl ? `${tokP}${fgTokenForm(gl)}${fgCheckHTML(gl)}${gt ? gtPower() : ''}`
+          : `<p class="fg2">Then tell kiln where your ${xn} is. The next thing you do is paste the token.</p>${addForgeForm([], xk)}`),
+      gl ? `<p class="fg2">Which ${FX[xk].unit} should kiln take jobs from? Paste its URL or <code>${FX[xk].path}</code>. ${gt ? 'The account must own it or be in its organisation\'s Owners team.' : 'The bot must be Maintainer on it.'}</p>${gl.repos.length ? `<ul class="list" style="width:100%">${gl.repos.map(k => fgRepoRow(gl, k)).join('')}</ul>` : ''}${fgRepoForm(gl)}
+        <button class="btn" data-act="forgetest" data-id="${esc(gl.id)}"${tip(`Check the ${gt ? 'account' : 'bot'}'s role on each ${FX[xk].unit}`)}>${ic('pulse')}Test</button>${fgCheckHTML(gl)}${fgWhy403(gl)}` : `<p class="fg2">Connect ${xn || 'a forge'} first.</p>`,
+      gl ? `<p class="fg2">Add this as <code>${ciName}</code> in the ${FX[xk].unit} and push. A job ${gt ? `with <code>runs-on: [${esc(JL())}]</code>` : `tagged <code>${esc(JL())}</code>`}, or a size such as <code>${esc(JL())}-4cpu</code>, is for kiln.</p>${cb(ciSnippet(xk, JL()))}
+        ${gl.launches ? '' : `<div class="cal w" style="margin:0">${xn} support is in preview: jobs will not run until enabled. kiln will see the job waiting, but starts no VM for it yet, so it stays ${gt ? 'queued' : 'pending'} in ${xn}.</div>`}` : '',
+    ];
     const test = () => {
       if (!repo) return '<p class="fg2">Add a repo first.</p>';
       const h = hello[repo], alt = `<button class="lnk fg2 sm" data-act="snip" aria-expanded="${setupSnip}">I'd rather edit a workflow myself</button>${setupSnip ? cb(snippet()) + `<p class="fg2 sm">${esc(SIZES())}</p>` : ''}`;
@@ -1982,33 +2280,56 @@ pages.setup = {
         ${!q && now() - h.at > 120 ? '<div class="cal w" style="margin:0">Nothing queued yet. Check the PR\'s Checks tab: Actions may be disabled for this repo, or the run needs approval.</div>' : ''}${alt}`;
     };
     const B = S.app ? [
-      `<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/github">Settings › GitHub</a>.</p>`,
+      `${pick}<p class="fg2">kiln signs in to GitHub as the GitHub App <b>${esc(S.app.slug || S.app.id)}</b>: only the permissions kiln needs, and tokens that expire after an hour. Manage it in <a href="#/settings/forges">Settings › Forges</a>.</p>`,
       `<p class="fg2">kiln serves exactly the repos the App is installed on. Install it on at least one, then come back: kiln checks every 30 seconds, or refresh now.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts" style="display:flex;flex-wrap:wrap;gap:8px">${appInstall(1)}${appRefresh()}</div>`,
       test(),
     ] : [
-      `<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
+      `${pick}<p class="fg2">kiln needs a token to see queued jobs and create a single-use runner for each. <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=kiln" target="_blank" rel="noopener">Create a token ↗</a> opens GitHub with the right scopes; paste it here.</p>
        <form data-form="token"><label class="sr" for="tok-in">GitHub token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required><button class="btn pri">Validate and save</button></form>
        <p class="fg2 sm">Classic token, <code>repo</code> + <code>workflow</code> scopes. Stored on this box only.</p>${tokHTML()}
-       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/github">Create one in Settings › GitHub</a>.</p>`,
+       <p class="fg2 sm">Prefer a GitHub App? It gets only the permissions kiln needs and its tokens expire after an hour. <a href="#/settings/forges">Create one in Settings › Forges</a>.</p>`,
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    setHTML($('#su'), strip + `<ol class="stp">${['Connect GitHub', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'].map((t, i) => {
+    const BB = useGl ? glB : B, titles = ['Connect a forge', useGl ? (gt ? 'Add the repo' : 'Add the project') : S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'];
+    setHTML($('#su'), strip + `<ol class="stp">${titles.map((t, i) => {
       const d = done[i] && i !== open;
-      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${B[i]}</div>` : ''}</li>`;
+      return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${BB[i]}</div>` : ''}</li>`;
     }).join('')}</ol>`);
+    rove($('#su'));
   },
 };
 
 /* ---------- guides ---------- */
 const GUIDES = [
   ['start', 'Getting started', L => `<h2>Getting started</h2>
-    <p>When GitHub queues a job whose <code>runs-on</code> names kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
+    <p>When your forge (GitHub, GitLab or Gitea) queues a job that asks for kiln (<code>runs-on</code>, or <code>tags</code> on GitLab), kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
     <p>You need three things:</p>
-    <ol><li><b>A GitHub token</b> (Settings › GitHub), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
-    <p>Setup walks you through all three and can open a test pull request for you.</p><p><a class="btn" href="#/setup">Open setup</a></p>
+    <ol><li><b>A token for your forge</b> (Settings › Forges), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
+    <p>Setup walks you through all three and can open a test pull request for you. Using GitLab or Gitea? <a href="#/guides/gitlab">Use GitLab</a> and <a href="#/guides/gitea">Use Gitea</a> say what to set up.</p><p><a class="btn" href="#/setup">Open setup</a></p>
     <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
     <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
+  ['gitlab', 'Use GitLab', L => `<h2>Use GitLab</h2>
+    <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need a GitLab 16.0 or newer, on your own server or gitlab.com.</p>
+    <ol><li><b>Make a bot account.</b> A separate GitLab user, such as <code>kiln-bot</code>, added as <b>Maintainer</b> to only the projects kiln serves. Not your own account.</li>
+    <li><b>Create its access token</b> (signed in as the bot: Preferences › Access tokens) with exactly <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>. Give it an expiry; kiln warns two weeks before.</li>
+    <li><b>Add the forge</b> with its address, then paste the token. kiln tries the token before it saves it and says what is wrong, for example <i>the token lacks create_runner</i>, or <i>Developer is below Maintainer</i> for a project.</li>
+    <li><b>Add the project</b> by its <code>group/project</code> path or by pasting its URL. Press <b>Test</b> to see the bot's role on each project.</li>
+    <li><b>Tag the job</b> in <code>.gitlab-ci.yml</code>:${cb(`build:\n  tags: [${L}]\n  script:\n    - make test`)}Use <code>${L}-4cpu</code> and the other size labels like the GitHub ones. Untagged jobs are left to your other runners.</li></ol>
+    <p><b>Token power.</b> With <code>read_api</code>, a Maintainer's token can read the project's CI/CD variables, values included, masked and protected ones too. GitHub never allows that. So the bot should belong only to the projects kiln serves, and the token should be used for nothing else. A job VM never receives it: it gets a runner credential for one project, and kiln deletes that runner when the job ends.</p>
+    <p><b>Rerun, Cancel and Run pipeline</b> need the wider <code>api</code> scope. kiln recommends leaving it off, and hides those buttons unless the token has it. Without them you still rerun and cancel in GitLab itself.</p>
+    <p><b>A 403 when kiln creates a runner</b> has three causes that GitLab does not tell apart: the bot's role is below Maintainer; the instance setting <i>valid_runner_registrars</i> (Admin › Settings › CI/CD › Runner registration) does not include <i>project</i>; or runner registration is turned off for the project or its group. Check each. A missing scope gets a different error, which kiln names.</p>
+    <p><b>Forks.</b> kiln never runs a job from a fork's merge request. GitLab can also run a fork's pipeline <i>in your project</i> when someone with access clicks Run pipeline, and that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave <i>Run pipelines in the parent project for merge requests from forks</i> off, or do not run them.</p>`],
+  ['gitea', 'Use Gitea', L => `<h2>Use Gitea</h2>
+    <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need Gitea 1.25 or newer, on your own server. 1.26.3 or newer is recommended (before it, approving one fork pull request once trusts that user's later ones), and 28 or newer for Cancel.</p>
+    <ol><li><b>Make a service account.</b> A separate Gitea user, such as <code>kiln-bot</code>, not your own. Gitea hands out the runner registration token only to a repo's <b>Owner</b>, so it must <b>own the repo</b> (a personal namespace holding just the repos kiln serves) or be a member of the <b>Owners</b> team of a small organisation that holds only those repos. A collaborator with Admin permission is refused (403).</li>
+    <li><b>Create its access token</b> (signed in as that account: Settings › Applications) with exactly <code>write:repository</code> and <code>read:user</code>.</li>
+    <li><b>Add the forge</b> with its address, then paste the token. kiln tries the token before it saves it and says what is wrong, for example <i>the token lacks write:repository</i>, or that the account must be the repo owner or in the Owners team.</li>
+    <li><b>Add the repo</b> by its <code>owner/repo</code> path or by pasting its URL. Press <b>Test</b> to see the account's role on each repo and the server version.</li>
+    <li><b>Ask for kiln</b> in <code>.gitea/workflows/ci.yml</code>:${cb(`name: CI\non: [push]\njobs:\n  test:\n    runs-on: [${L}]\n    steps:\n      - run: make test`)}Use <code>${L}-4cpu</code> and the other size labels like the GitHub ones. Jobs that do not ask for kiln are left to your other runners.</li></ol>
+    <p><b>Token power.</b> An Owner can push code, change the repo's settings and, in the worst case, delete it, and the registration token it gets is reusable and registers more runners. That is broader than a GitHub App, so use a dedicated account that owns only the repos kiln serves, and use the token for nothing else. A job VM never receives it: it gets a runner credential for one job, which kiln deletes when the job ends.</p>
+    <p><b>Versions.</b> Rerun needs Gitea 1.26, Cancel needs 28. kiln hides a button the server cannot do.</p>
+    <p><b>Forks.</b> kiln never runs a job from a fork's pull request, including <code>pull_request_target</code>, and refuses every <code>workflow_run</code> job. Do not let a workflow check out an untrusted ref after a trusted trigger.</p>`],
   ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
     ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
     <p>For another size, use exactly one size label:</p>
@@ -2017,8 +2338,8 @@ const GUIDES = [
     <ul><li>Never combine labels: <code>[${L}, ${L}-8cpu]</code> is never picked up.</li><li>A size above this box's CPU count waits forever.</li><li>Each job gets a fresh VM. Install steps rerun every time, but downloads come from the repo cache.</li><li>To skip the ~10 s boot, keep <b>warm VMs</b> ready: Repos › your repo › Warm VMs. They hold memory while idle and are recycled so they never go stale.</li></ul>
     <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. macOS, Windows and GPUs are not supported.</p>`],
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
-    <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub:</b> the final log.</li></ul>
-    <p>Under the job's name you see the branch, PR and commit it ran for, linked to GitHub. The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
+    <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub, GitLab or Gitea:</b> the forge's own final log, named for the forge.</li></ul>
+    <p>Under the job's name you see the branch, PR and commit it ran for, linked to the forge. The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
     <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
     <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
     <p>If holds stop working after you update kiln, rebake the image.</p>`],
@@ -2026,7 +2347,7 @@ const GUIDES = [
     <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
     <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Click <b>Send test</b> to check it.</p>
     <p>Each destination picks what it gets:</p>
-    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted.</li><li><b>Health:</b> something stops launches (an old image, a GitHub registration outage, a broken network filter, low memory or disk) or polling fails, and again when it clears.</li><li><b>Security:</b> settings saved (only the names of what changed), the GitHub token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears.</li><li><b>Security:</b> settings saved (only the names of what changed), the GitHub token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
     <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. A failed job matched by a rule is still sent only once.</p>
     <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
     <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
@@ -2048,8 +2369,8 @@ const GUIDES = [
     <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
   ['analytics', 'Analytics & savings', () => `<h2>Analytics &amp; savings</h2>
     <p>Settings › Analytics sums up finished jobs for the last 24 hours, 7 or 30 days, for all repos or one, and all VM sizes or one.</p>
-    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from GitHub queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try warm VMs (Repos › your repo).</li>
-    <li><b>Job minutes and Saved:</b> each job is rounded up to the minute, as GitHub bills it, and priced at the GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute). To use one flat rate instead, click the rate under the Overview stats.</li>
+    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from the forge queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try warm VMs (Repos › your repo).</li>
+    <li><b>Job minutes and Saved:</b> each job is rounded up to the minute, as GitHub bills it, and priced at the GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute). To use one flat rate instead, click the rate under the Overview stats. Only GitHub jobs are priced: GitLab and Gitea jobs have no GitHub-hosted equivalent, so their minutes are shown without dollars.</li>
     <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
     <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
     <p>Each chart's numbers are also a table under <b>Show numbers</b>.</p>`],
@@ -2062,13 +2383,13 @@ const GUIDES = [
     <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
     <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li><li><i>Notifications failing:</i> a webhook destination keeps failing; its row in Settings › Notifications shows the last error.</li></ul></li>
+    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li><li><i>A banner naming GitLab or Gitea:</i> that forge has no token, rejected it, is unreachable, or refuses runner registration (GitLab needs Maintainer, Gitea the repo owner or an Owners-team member). Settings › Forges has the fix.</li><li><i>Notifications failing:</i> a webhook destination keeps failing; its row in Settings › Notifications shows the last error.</li></ul></li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
     <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
 ];
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(S.config.label), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
+    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', gitlab: 'key', gitea: 'key', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
     $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
       <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
       <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
@@ -2091,6 +2412,20 @@ const ACT = {
     const f = document.createElement('form'); f.method = 'post'; f.action = m.url; f.hidden = true;
     const i = document.createElement('input'); i.name = 'manifest'; i.value = JSON.stringify(m.manifest); f.append(i);
     document.body.append(f); f.submit();
+  },
+  forgetest: b => forgeTest(b.dataset.id),
+  async forgerm(b) {
+    const id = b.dataset.id;
+    if (!await ask({ title: `Remove forge ${id}?`, body: 'kiln stops serving its projects and deletes its saved token. Its running jobs must finish first. Its cache disks are deleted.', action: 'Remove', danger: 1 })) return;
+    await api(`/api/forges/${encodeURIComponent(id)}`, { method: 'DELETE' }); delete FC[id]; delete FB[id]; toast(`Forge ${id} removed`); await poll();
+    if (cur === pages.settings) pages.settings.render(); else forgeUI();
+  },
+  forgerepormv: b => forgeRepos(b.dataset.id, f => f.repos.filter(k => k !== b.dataset.repo)).then(() => toast('Project removed')),
+  sufg(b) { setupForge = b.dataset.id; pages.setup.update(); },
+  afkind(sel) { // the Add forge form follows the kind picked
+    const f = sel.form, k = sel.value, x = FX[k], used = (F || []).map(y => y.id), id = $('#af-id', f);
+    $('#af-url', f).placeholder = x.url; $('#af-repo', f).placeholder = x.path + ' or paste its URL'; $('#af-btn', f).textContent = 'Add ' + x.name; $('#af-hint', f).textContent = 'name:' + x.path;
+    if (/^(gitlab|gitea)(-\d+)?$/.test(id.value)) id.value = nextForgeId(k, used);
   },
   async rmapp() {
     if (!await ask({ title: 'Remove the GitHub App?', body: 'kiln goes back to token auth. The App itself stays on GitHub; delete it there if you no longer need it.', action: 'Remove', danger: 1 })) return;
@@ -2120,7 +2455,7 @@ const ACT = {
   },
   async kill() {
     const v = S.vms.find(x => x.id === pages.job.id);
-    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(v.repo)} / ${esc(v.job || 'no job')}</b>? The job fails on GitHub.`, action: 'Kill VM', danger: 1 })) return;
+    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(v.repo)} / ${esc(v.job || 'no job')}</b>? The job fails on ${fname(forgeOf(F, v.repo))}.`, action: 'Kill VM', danger: 1 })) return;
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() { await post(`/api/vms/${encodeURIComponent(pages.job.id)}/release`); toast('Releasing'); await poll(); },
@@ -2147,7 +2482,7 @@ const ACT = {
   },
   snip() { setupSnip = !setupSnip; pages.setup.update(); },
   surepo(s) { setupRepo = s.value; pages.setup.update(); },
-  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/github'; },
+  updtok() { if (cur === pages.setup) { setupOpen = 0; pages.setup.update(); } else location.hash = '#/settings/forges'; },
   resettips() { Object.keys(TIPS).forEach(k => lsSet('kiln-tip-' + k, null)); toast('Tips will show again'); },
   guides() { dlg.close(); location.hash = '#/guides'; },
   gdsel: s => (location.hash = '#/guides/' + s.value),
@@ -2161,14 +2496,14 @@ const ACT = {
     await saveCfg({ ...S.config, repos: S.config.repos.filter(x => x !== r), warm: ciPut(S.config.warm, r), cache_branches: ciPut(S.config.cache_branches, r), repo_cache_gb: ciPut(S.config.repo_cache_gb, r) }); toast(`Removed ${r}`); location.hash = '#/repos';
   },
   rdretry() { rd.err = null; pages.repos.load(); },
-  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${b.dataset.id}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">Run workflow</button></form>`); },
+  runwf(b) { openPop(b, `<form data-form="dispatch" data-id="${esc(b.dataset.id)}"><label for="br-in">Branch</label><input type="text" id="br-in" value="main" spellcheck="false"><button class="btn pri">${pages.repos.kind() === 'gitlab' ? 'Run pipeline' : 'Run workflow'}</button></form>`); },
   async run(b) {
     const id = +b.dataset.id;
-    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(gh(rd.repo, `runs/${id}/jobs`)).then(j => { rd.jobs.set(id, j.jobs || []); pages.repos.update(); }).catch(fail); }
+    if (rd.open.has(id)) rd.open.delete(id); else { rd.open.add(id); api(fq('runs/' + id, rd.repo)).then(j => { rd.jobs.set(id, j.jobs); pages.repos.update(); }).catch(fail); }
     pages.repos.update();
   },
-  async rerun(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/rerun`)); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
-  async cancel(b) { await post(gh(rd.repo, `runs/${b.dataset.id}/cancel`)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async rerun(b) { await post(fq(`runs/${+b.dataset.id}/rerun`, rd.repo, b.dataset.failed ? '&failed=1' : '')); toast('Rerun requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
+  async cancel(b) { await post(fq(`runs/${+b.dataset.id}/cancel`, rd.repo)); toast('Cancel requested'); setTimeout(() => pages.repos.loadRuns(), 2000); },
   gsel: s => (location.hash = '#/settings/' + s.value),
   discard() { draft = JSON.parse(JSON.stringify(S.config)); pages.settings.render(); },
   async save() {
@@ -2206,7 +2541,7 @@ const ACT = {
   },
   async rsnow() {
     const n = S.vms.filter(RESTART_WAITS).length;
-    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: (n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on GitHub with "The runner has received a shutdown signal". Use <b>Restart when idle</b> to let them finish first.` : 'No job is running: kiln restarts in place right away, which takes a few seconds.') + newListen() })) return;
+    if (!await ask({ title: 'Restart kiln now?', action: 'Restart now', body: (n ? `This <b>kills the ${n} running VM${n > 1 ? 's' : ''}</b>: their jobs fail on ${mixed(F) ? 'their forges' : 'GitHub'}${mixed(F) ? '' : ' with "The runner has received a shutdown signal"'}. Use <b>Restart when idle</b> to let them finish first.` : 'No job is running: kiln restarts in place right away, which takes a few seconds.') + newListen() })) return;
     await post('/api/restart?now=true'); toast('Restarting kiln'); await poll();
   },
   async rscancel() { await post('/api/restart/cancel'); toast('Restart cancelled. Launching resumes.'); await poll(); },
@@ -2356,7 +2691,7 @@ document.addEventListener('submit', async e => {
   e.preventDefault(); const inp = $('input', f), btn = k === 'notify' ? $('button.pri', f) : $('button', f); btn.disabled = true;
   try {
     if (k === 'rate') { lsSet('kiln-rate', inp.value); closePop(true); pages.overview.update(); toast(myRate() ? 'Rate saved' : 'Using GitHub-hosted rates'); }
-    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post(gh(rd.repo, `workflows/${f.dataset.id}/dispatches`), { ref }); closePop(true); toast(`Workflow started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
+    else if (k === 'dispatch') { const ref = inp.value.trim() || 'main'; await post('/api/dispatch', { repo: rd.repo, workflow: f.dataset.id || undefined, ref }); closePop(true); toast(`${pages.repos.kind() === 'gitlab' ? 'Pipeline' : 'Workflow'} started on ${ref}`); setTimeout(() => pages.repos.loadRuns(), 2500); }
     else if (k === 'warm') {
       const n = Math.max(0, Math.min(4, Math.round(+inp.value) || 0)), r = pages.repos.r;
       await saveCfg({ ...S.config, warm: ciPut(S.config.warm, r, n || null) }); toast(n ? `${n} warm VM${n > 1 ? 's' : ''} for ${r}` : 'Warm VMs off');
@@ -2376,6 +2711,21 @@ document.addEventListener('submit', async e => {
     }
     else if (k === 'notify') await ACT.nsave();
     else if (k === 'addrepo') { const r = await addRepo(inp.value); if (r) { inp.value = ''; if (cur === pages.repos) pages.repos.update(); } }
+    else if (k === 'addforge') {
+      const v = n => $('#af-' + n, f).value.trim(), repo = v('repo'), id = v('id');
+      await post('/api/forges', { kind: v('kind'), id, url: v('url'), network: v('net'), repos: repo ? [repo] : [] });
+      toast(`${FX[v('kind')]?.name || 'Forge'} added. Now give it a token.`); await poll();
+      if (cur === pages.settings) { pages.settings.render(); $(`#fc-${id}`)?.scrollIntoView({ block: 'start' }); } else forgeUI();
+    }
+    else if (k === 'forgetoken') {
+      const id = f.dataset.id; FB[id] = { busy: 1 }; forgeUI();
+      try { FC[id] = await post(`/api/forges/${encodeURIComponent(id)}/token`, { token: inp.value.trim() }); FB[id] = null; inp.value = ''; toast('Token saved'); } catch (err) { FB[id] = { err: err.message }; }
+      await poll(); forgeUI();
+    }
+    else if (k === 'forgerepo') {
+      const id = f.dataset.id; await forgeRepos(id, x => [...x.repos, inp.value.trim()]); inp.value = ''; toast('Project added');
+      if ((F || []).find(x => x.id === id)?.auth?.source !== 'none') await forgeTest(id); else forgeUI();
+    }
     else if (k === 'token') {
       tokRes = await post('/api/token', { token: inp.value.trim() }); inp.value = ''; toast('Token saved'); if (cur === pages.setup) setupOpen = null; await poll();
       if (cur === pages.settings) $('#tok-res').innerHTML = tokHTML(); else cur.update();

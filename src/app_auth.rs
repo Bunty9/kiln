@@ -258,8 +258,9 @@ pub fn load(data: &std::path::Path) -> Option<Result<AppAuth>> {
 pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp = std::path::PathBuf::from(format!("{}.tmp", path.display()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    // `mode` only applies to a new file: a leftover temp file keeps its own.
+    // A leftover temp file (crash between write and rename) is replaced, never reused (R4 L-3).
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
     f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     std::io::Write::write_all(&mut f, bytes)?;
     f.sync_all()?;
@@ -310,13 +311,13 @@ mod tests {
 
     #[test]
     fn manifest_shape() {
-        let m = manifest("http://ryzen7.tail1234.ts.net:7878", "ryzen7");
+        let m = manifest("http://mybox.tail1234.ts.net:7878", "mybox");
         // GitHub appends ?code&state: a plain path keeps them in location.search
-        assert_eq!(m["redirect_url"], "http://ryzen7.tail1234.ts.net:7878/");
+        assert_eq!(m["redirect_url"], "http://mybox.tail1234.ts.net:7878/");
         // the dashboard behind tailscale serve is https
         assert_eq!(origin("box.ts.net:8443", true), "https://box.ts.net:8443");
         assert_eq!(origin("127.0.0.1:7878", false), "http://127.0.0.1:7878");
-        assert_eq!(m["name"], "kiln-ryzen7");
+        assert_eq!(m["name"], "kiln-mybox");
         assert_eq!(m["public"], false);
         assert_eq!(m["hook_attributes"]["active"], false);
         assert_eq!(

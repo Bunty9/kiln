@@ -1,11 +1,12 @@
 //! Host CPU and memory sampled every 2 s, split by job VM, for the dashboard's Host card.
-//! An hour is kept in memory only: a restart starts the graph empty.
+//! An hour is kept in memory only: a restart starts the graph empty. Linux reads /proc,
+//! macOS (no /proc) one `ps` per sample.
 
-use crate::{App, vm};
+use crate::{App, platform};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const EVERY: Duration = Duration::from_secs(2);
 const KEEP: usize = 1800;
@@ -25,6 +26,11 @@ pub struct Sample {
 }
 
 static HIST: Mutex<VecDeque<Sample>> = Mutex::new(VecDeque::new());
+
+/// Resident MB of kiln's running VMs in the latest sample.
+pub fn vms_mb() -> u64 {
+    HIST.lock().unwrap().back().map_or(0, |s| s.vms.iter().map(|v| v.3).sum())
+}
 
 /// The last `n` samples, oldest first.
 pub fn recent(n: usize) -> Vec<Sample> {
@@ -47,21 +53,90 @@ fn proc_ticks(stat: &str) -> Option<u64> {
     Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
 }
 
-/// The QEMU process of each wanted VM, found by its `vms/<id>/q/` paths on the command line.
+/// `cmd` is the QEMU of VM `id`: kiln puts paths under `vms/<id>/q/` on its command line.
+/// Arguments are NUL-separated in /proc/<pid>/cmdline and space-separated in `ps`.
+fn qemu_of(cmd: &str, id: &str) -> bool {
+    cmd.split(['\0', ' ']).next().is_some_and(|a| a.rsplit('/').next().unwrap_or(a).starts_with("qemu-system"))
+        && cmd.contains(&format!("/vms/{id}/q/"))
+}
+
+/// The QEMU process of each wanted VM, from /proc.
 fn find_qemu(want: &[&str]) -> HashMap<String, u32> {
     let mut out = HashMap::new();
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
         let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else { continue };
         let cmd = String::from_utf8_lossy(&cmd);
-        if !cmd.split('\0').next().is_some_and(|a| a.rsplit('/').next().unwrap_or(a).starts_with("qemu-system")) {
-            continue;
-        }
-        if let Some(id) = want.iter().find(|id| cmd.contains(&format!("/vms/{id}/q/"))) {
+        if let Some(id) = want.iter().find(|id| qemu_of(&cmd, id)) {
             out.insert(id.to_string(), pid);
         }
     }
     out
+}
+
+/// One sample's raw counters: the host's (busy, total, CPUs) ticks, and each found VM's
+/// (busy ticks, resident MB). Only differences between two readings mean anything.
+struct Reading {
+    host: (u64, u64, usize),
+    vms: HashMap<String, (u64, u64)>,
+}
+
+/// Linux: /proc/stat for the host, /proc/<pid>/stat and statm for each VM's QEMU, in jiffies.
+#[derive(Default)]
+struct ProcReader {
+    pids: HashMap<String, u32>,
+}
+
+impl ProcReader {
+    fn read(&mut self, ids: &[&str]) -> Option<Reading> {
+        self.pids.retain(|id, pid| ids.contains(&id.as_str()) && std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let missing: Vec<&str> = ids.iter().copied().filter(|id| !self.pids.contains_key(*id)).collect();
+        if !missing.is_empty() {
+            self.pids.extend(find_qemu(&missing));
+        }
+        let host = cpu_ticks(&std::fs::read_to_string("/proc/stat").unwrap_or_default())?;
+        let vms = self
+            .pids
+            .iter()
+            .filter_map(|(id, pid)| {
+                let t = proc_ticks(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?;
+                let pages: u64 = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?.split_whitespace().nth(1)?.parse().ok()?;
+                Some((id.clone(), (t, pages * 4096 / (1 << 20))))
+            })
+            .collect();
+        Some(Reading { host, vms })
+    }
+}
+
+/// macOS: one `ps` per sample, in centiseconds. HVF runs the vCPUs on QEMU's threads, so a
+/// VM's guest time is in its QEMU's CPU time. macOS has no host-wide tick counter outside
+/// the Mach API, so host busy time adds up every process's increase since the last sample (a
+/// new process counts whole; one that exited in between loses its last slice), and total is
+/// wall time times CPUs.
+#[derive(Default)]
+struct PsReader {
+    prev: HashMap<u32, u64>,
+    busy: u64,
+    since: Option<Instant>,
+}
+
+impl PsReader {
+    fn read(&mut self, ids: &[&str]) -> Option<Reading> {
+        let procs = platform::process_usage();
+        if procs.is_empty() {
+            return None;
+        }
+        let elapsed = self.since.get_or_insert_with(Instant::now).elapsed();
+        Some(self.fold(&procs, ids, elapsed.as_millis() as u64 / 10, crate::host_threads() as usize))
+    }
+
+    /// `elapsed_cs`: centiseconds since the first reading.
+    fn fold(&mut self, procs: &[platform::Usage], ids: &[&str], elapsed_cs: u64, cpus: usize) -> Reading {
+        self.busy += procs.iter().map(|p| p.cs.saturating_sub(self.prev.get(&p.pid).copied().unwrap_or(0))).sum::<u64>();
+        self.prev = procs.iter().map(|p| (p.pid, p.cs)).collect();
+        let vms = ids.iter().filter_map(|id| procs.iter().find(|p| qemu_of(&p.cmd, id)).map(|p| (id.to_string(), (p.cs, p.mb)))).collect();
+        Reading { host: (self.busy, elapsed_cs * cpus as u64, cpus), vms }
+    }
 }
 
 /// Keep each VM's slot while it lives; a new VM takes the lowest free one.
@@ -80,32 +155,24 @@ pub async fn run(app: Arc<App>) {
     let mut last: Option<(u64, u64, usize)> = None;
     let mut last_vm: HashMap<String, u64> = HashMap::new();
     let mut warned = false;
-    let (mut pids, mut slots) = (HashMap::<String, u32>::new(), HashMap::<String, usize>::new());
+    let mut slots = HashMap::<String, usize>::new();
+    let (mut procfs, mut ps) = (ProcReader::default(), PsReader::default());
     let mut tick = tokio::time::interval(EVERY);
     loop {
         tick.tick().await;
         let ids: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        pids.retain(|id, pid| ids.contains(&id.as_str()) && std::path::Path::new(&format!("/proc/{pid}")).exists());
-        let missing: Vec<&str> = ids.iter().copied().filter(|id| !pids.contains_key(*id)).collect();
-        if !missing.is_empty() {
-            pids.extend(find_qemu(&missing));
-        }
         assign(&mut slots, &ids);
-        let Some(now) = cpu_ticks(&std::fs::read_to_string("/proc/stat").unwrap_or_default()) else {
+        let reading = if platform::MACOS { ps.read(&ids) } else { procfs.read(&ids) };
+        let Some(Reading { host: now, vms: vm_now }) = reading else {
             if !std::mem::replace(&mut warned, true) {
-                tracing::warn!("host graphs: /proc/stat unreadable, no samples");
+                tracing::warn!(
+                    "host graphs: no CPU counters ({}), no samples",
+                    if platform::MACOS { "ps" } else { "/proc/stat unreadable" }
+                );
             }
             continue;
         };
-        let vm_now: HashMap<String, (u64, u64)> = pids
-            .iter()
-            .filter_map(|(id, pid)| {
-                let t = proc_ticks(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)?;
-                let pages: u64 = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?.split_whitespace().nth(1)?.parse().ok()?;
-                Some((id.clone(), (t, pages * 4096 / (1 << 20))))
-            })
-            .collect();
         if let Some(prev) = last.filter(|p| now.1 > p.1) {
             // Ticks over all CPUs in this interval, so ticks / per_cpu = cores busy.
             let per_cpu = (now.1 - prev.1) as f32 / now.2 as f32;
@@ -120,7 +187,7 @@ pub async fn run(app: Arc<App>) {
             let s = Sample {
                 t: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
                 cpu: ((now.0.saturating_sub(prev.0)) as f32 / per_cpu * 100.0).round() / 100.0,
-                mem: (vm::meminfo_kb("MemTotal:") / 1024).saturating_sub(vm::mem_avail_mb()),
+                mem: platform::mem_total_mb().saturating_sub(platform::mem_avail_mb()),
                 vms,
             };
             let mut h = HIST.lock().unwrap();
@@ -148,5 +215,21 @@ mod tests {
         assign(&mut s, &["a", "b", "c"]);
         assign(&mut s, &["a", "c", "d"]);
         assert_eq!((s["a"], s["c"], s["d"]), (0, 2, 1), "survivors keep colour, newcomer takes the freed slot");
+    }
+
+    #[test]
+    fn ps_reader_sums_increases() {
+        let p = |pid, cs, mb, cmd: &str| platform::Usage { pid, cs, mb, cmd: cmd.into() };
+        let q = "/opt/homebrew/bin/qemu-system-aarch64 -machine virt -fw_cfg name=opt/kiln/jit,file=/d/vms/vm-1/q/jit";
+        let mut r = PsReader::default();
+        let a = r.fold(&[p(1, 500, 10, "/sbin/launchd"), p(2, 1000, 3000, q), p(3, 40, 1, "sh")], &["vm-1", "vm-2"], 0, 8);
+        assert_eq!(a.vms.len(), 1, "vm-2 has no QEMU");
+        assert_eq!(a.vms["vm-1"], (1000, 3000));
+        // 2 s later: launchd +10, QEMU +300 (1.5 cores), sh gone, a new pid 4 with 20.
+        let b = r.fold(&[p(1, 510, 10, "/sbin/launchd"), p(2, 1300, 3100, q), p(4, 20, 1, "ls")], &["vm-1"], 200, 8);
+        assert_eq!(b.host.0 - a.host.0, 10 + 300 + 20, "increases, new process whole, exited one dropped");
+        assert_eq!((b.host.1 - a.host.1, b.host.2), (1600, 8), "wall centiseconds times CPUs");
+        assert_eq!(b.vms["vm-1"], (1300, 3100));
+        assert!(qemu_of(q, "vm-1") && !qemu_of(q, "vm-") && !qemu_of("sh -c qemu-system /d/vms/vm-1/q/", "vm-1"));
     }
 }

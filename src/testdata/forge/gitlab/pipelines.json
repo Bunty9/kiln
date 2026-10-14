@@ -1,0 +1,63 @@
+[
+ {
+  "id": 127,
+  "iid": 116,
+  "project_id": 1,
+  "status": "running",
+  "source": "push",
+  "ref": "long",
+  "sha": "81649bffaa8957bc0ef1b1e8fce9d74ef1f6490b",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/127",
+  "created_at": "2026-10-13T08:55:56.414Z",
+  "updated_at": "2026-10-13T08:56:01.266Z"
+ },
+ {
+  "id": 122,
+  "iid": 111,
+  "project_id": 1,
+  "status": "success",
+  "source": "merge_request_event",
+  "ref": "refs/merge-requests/2/head",
+  "sha": "5a821dc28a9bfbd1e6ca5b3fcbb3a38fcc85d325",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/122",
+  "created_at": "2026-10-13T08:50:00.000Z",
+  "updated_at": "2026-10-13T08:51:00.000Z"
+ },
+ {
+  "id": 120,
+  "iid": 109,
+  "project_id": 1,
+  "status": "failed",
+  "source": "push",
+  "ref": "main",
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "name": "nightly",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/120",
+  "created_at": "2026-10-13T08:40:00.000Z",
+  "updated_at": "2026-10-13T08:41:00.000Z"
+ },
+ {
+  "id": 119,
+  "iid": 108,
+  "project_id": 1,
+  "status": "pending",
+  "source": "web",
+  "ref": "bad ref/../x",
+  "sha": "not-hex",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/119",
+  "created_at": "2026-10-13T08:30:00.000Z",
+  "updated_at": "2026-10-13T08:30:00.000Z"
+ },
+ {
+  "id": 118,
+  "iid": 107,
+  "project_id": 1,
+  "status": "canceling",
+  "source": "api",
+  "ref": "main",
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "web_url": "https://gitlab.example.org/acme/demo/-/pipelines/118",
+  "created_at": "2026-10-13T08:20:00.000Z",
+  "updated_at": "2026-10-13T08:20:00.000Z"
+ }
+]

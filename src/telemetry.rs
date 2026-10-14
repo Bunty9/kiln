@@ -177,7 +177,7 @@ fn usage(app: &App, id: &str) -> Value {
         "build": BUILD,
         "arch": std::env::consts::ARCH,
         "host_threads": crate::host_threads(),
-        "host_mem_gb": crate::vm::meminfo_kb("MemTotal:") / 1_048_576,
+        "host_mem_gb": crate::platform::mem_total_mb() / 1024,
         "auth": match app.gh.source() { "app" => "app", "none" => "none", _ => "token" },
         "repos": app.repos().len(),
         "max_vms": c.max_vms,
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn crash_files_are_capped() {
-        let dir = std::env::temp_dir().join(format!("kiln-crash-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kiln-test-crash_files_are_capped-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for _ in 0..MAX_PENDING + 5 {
             record(&dir, &json!({})).unwrap();

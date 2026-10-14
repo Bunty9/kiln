@@ -4,17 +4,17 @@
 
 ![kiln dashboard: a GitHub Actions job is queued, a VM boots in its slot, live step logs stream, and the VM is deleted when the job finishes](docs/media/demo.gif)
 
-Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions job.
+Self-hosted CI on hardware you already own: one fresh, rootless QEMU/KVM virtual machine per GitHub Actions, GitLab CI or Gitea Actions job.
 
-kiln is a single Rust binary with an embedded dashboard. It polls GitHub for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
+kiln is a single Rust binary with an embedded dashboard. It polls GitHub, GitLab or Gitea for queued jobs, boots a throwaway Ubuntu 24.04 VM for each one, lets a single-use runner take the job, and deletes the VM afterwards. No root, no Kubernetes, no cloud account, no runner fleet to babysit.
 
-**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub. It runs on one host with no failover; while the box is down, jobs wait in GitHub's queue.
+**Who it's for:** solo developers, small teams and homelabs with an always-on Linux box and repos on GitHub, GitLab or Gitea. It runs on one host with no failover; while the box is down, jobs wait in the forge's queue.
 
 **What you need:**
 
-- **x86_64 Linux with KVM** (`/dev/kvm`, user in the `kvm` group). Jobs run in Ubuntu 24.04 x86_64 guests only: no macOS, Windows or arm64 jobs.
-- **Tailscale.** The dashboard answers only your tailnet (and the box itself, with a key). kiln polls GitHub, so no inbound port or public IP is needed.
-- **GitHub Actions.** kiln serves GitHub repos through a GitHub App or a token. GitLab, Gitea and Forgejo are not supported.
+- **Linux with KVM** (`/dev/kvm`, user in the `kvm` group), x86_64 or arm64 (arm64 and Apple Silicon are experimental). Jobs run in Ubuntu 24.04 guests of the host's architecture: no macOS or Windows jobs.
+- **Tailscale.** The dashboard answers only your tailnet (and the box itself, with a key). kiln polls your forge, so no inbound port or public IP is needed.
+- **GitHub Actions, GitLab CI or Gitea Actions.** kiln serves GitHub repos through a GitHub App or a token, and GitLab projects (gitlab.com or self-managed) through a bot account's token; see [GitLab](#gitlab), and Gitea repos (1.25 or newer) through a service account's token; see [Gitea](#gitea). Forgejo is not supported.
 
 Full list: [Requirements](#requirements).
 
@@ -23,7 +23,7 @@ Full list: [Requirements](#requirements).
 On the CI box, install the latest release:
 
 ```sh
-flavor=x86_64-linux          # or x86_64-linux-musl
+flavor=x86_64-linux          # pick one from the table below
 v=$(curl -s https://api.github.com/repos/Bunty9/kiln/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
 f=kiln-$v-$flavor.tar.gz url=https://github.com/Bunty9/kiln/releases/latest/download
 cd "$(mktemp -d)"
@@ -47,13 +47,21 @@ openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in "$f" -sigf
 
 </details>
 
-`x86_64-linux` needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); `x86_64-linux-musl` is fully static and runs on any x86_64 Linux. You can also install [from crates.io or source](#other-ways-to-install).
+| Platform | `flavor` | Notes |
+|---|---|---|
+| Linux x86_64 | `x86_64-linux` | needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later) |
+| Linux x86_64 | `x86_64-linux-musl` | fully static, runs on any x86_64 Linux |
+| Linux arm64 | `aarch64-linux` | needs glibc 2.39 or newer |
+| Linux arm64 | `aarch64-linux-musl` | fully static, runs on any arm64 Linux |
+| macOS, Apple Silicon | `aarch64-macos` | experimental; follow [docs/apple-silicon.md](docs/apple-silicon.md) (launchd service, `shasum -a 256 -c` instead of `sha256sum -c`) |
+
+Every tarball is signed with the same Ed25519 key. The macOS binary carries the linker's ad-hoc code signature, which Apple Silicon requires, but it is not notarized by Apple; a download through curl is not quarantined, so it runs without a Gatekeeper prompt. Intel Macs have no release build. You can also install [from crates.io or source](#other-ways-to-install).
 
 Then bake the image, start the service and open `http://<box>:7878` from a device on your tailnet. A first-run stepper walks through the token, a repo and a first job.
 
 ```sh
 kiln doctor        # checks KVM, tools, disk, memory, token, mirror, Tailscale
-kiln bake          # one time: Ubuntu 24.04 cloud image + runner, takes about 5 minutes
+kiln bake          # one time: Ubuntu 24.04 cloud image + runner, takes 5 to 10 minutes
 systemctl --user daemon-reload && systemctl --user enable --now kiln
 loginctl enable-linger $USER    # keep running while logged out
 ```
@@ -65,6 +73,28 @@ jobs:
   test:
     runs-on: [self-hosted, kiln]
 ```
+
+On GitLab a job asks for `tags: [kiln]`, on Gitea for `runs-on: [kiln]`; see [GitLab](#gitlab) and [Gitea](#gitea).
+
+## GitLab
+
+kiln serves GitLab projects on gitlab.com and on self-managed GitLab (16.0 or newer is accepted, 17 or newer recommended; the runner in the image is GitLab Runner 19.4.1, pinned, and the whole path was tested end to end against GitLab CE 19.4.1). The job's code runs exactly as on GitHub: one fresh VM per job, deleted afterwards.
+
+- **What works:** plain jobs, `image:`, `services:` (Docker runs inside the VM) and artifacts. A job asks for kiln with `tags: [kiln]` (or `kiln-4cpu` and the other sizes); untagged jobs and other tags are left to your other runners.
+- **Cache:** the repo cache disk (Docker layers, package and toolchain caches) works as on GitHub and follows the same trust rule: only a successful `push` pipeline on the default branch (or a protected branch listed in `cache_branches`) saves it, merge request, tag and child pipelines never do, and tag pipelines run without the cache.
+- **Setup:** a dedicated bot user as Maintainer on only the served projects, with a token that has `create_runner`, `manage_runner` and `read_api`. A Maintainer's `read_api` token can read the project's CI/CD variables, so read the [token power](SECURITY.md#gitlab) note first. Steps and every setting: [docs/configuration.md](docs/configuration.md#gitlab).
+- **Safety:** merge requests from forks, multi-project downstream pipelines and anything kiln cannot classify are refused before any job code runs; see [SECURITY.md](SECURITY.md#gitlab).
+
+Not yet covered: `docker:dind`, gitlab.com's own tier and rate-limit behaviour, and arm64 hosts.
+
+## Gitea
+
+kiln serves Gitea repos on your own server: **1.25 or newer** (1.26.3 or newer recommended; end-to-end tested against Gitea 28.1.0 with `gitea-runner` 5.0.0, pinned in the image). One fresh VM per job, deleted afterwards.
+
+- **What works:** plain jobs, JavaScript actions such as `actions/checkout`, job-level `container:` and `services:` (Docker runs inside the VM), tags (run cold), rerun (1.26+) and cancel (28+) from the dashboard. A job asks for kiln with `runs-on: [kiln]` (or `kiln-4cpu` and the other sizes) in `.gitea/workflows` or `.github/workflows`.
+- **Cache:** the repo cache disk works as on GitHub with the same trust rule. Gitea's `actions/cache` does **not** persist between jobs (the runner's cache server lives on the VM's disk); rely on the cache disk.
+- **Setup:** a dedicated service account that is the repo's **Owner** (Gitea gives the runner registration token only to an Owner), with a token that has `write:repository` and `read:user`. That account can change or delete the repo, so read the [account power](SECURITY.md#gitea) note first. Steps: [docs/configuration.md](docs/configuration.md#gitea).
+- **Safety:** every Gitea job waits behind a root exec gate in the VM until kiln's host verdict; fork pull requests, `pull_request_target` from a fork and every `workflow_run` are refused before any job code runs; see [SECURITY.md](SECURITY.md#fork-pull-requests).
 
 ## Why
 
@@ -112,6 +142,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - Optional filtered egress: job VMs reach the internet and the mirror only, not your LAN or tailnet.
 - Debug hold: a failed job's VM stays up for SSH for a while.
 - Optional warm pool of pre-booted idle VMs per repo.
+- GitHub, GitLab and Gitea in one kiln, each with its own token, projects and trust rules.
 - Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
 - Installable as an app (PWA) over Tailscale HTTPS, with its own window, icon and shortcuts. See [Install as an app](docs/configuration.md#install-as-an-app).
 - Auto-rebake of the base image when the runner version or image age goes stale, or the baked Node versions change.
@@ -122,13 +153,14 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 
 ## Requirements
 
-- Linux x86_64 with read/write access to `/dev/kvm` (the user must be in the `kvm` group).
-- `qemu-system-x86_64`, `qemu-img`, `xorriso`, `curl` and `tailscale` on `PATH` (`kiln doctor` checks them).
+- Linux (x86_64, or arm64 and experimental) with read/write access to `/dev/kvm` (the user must be in the `kvm` group).
+- `qemu-system-x86_64` (`qemu-system-aarch64` on arm64), `qemu-img`, `xorriso`, `curl` and `tailscale` on `PATH` (`kiln doctor` checks them).
 - The box on a Tailscale tailnet. The dashboard answers only tailnet devices of the box's owner (or users in `allowed_users`), and the box itself with a dashboard key.
 - About 15 GB of free disk at a minimum (kiln refuses to launch VMs below that), plus room for the base image, caches and the Docker mirror.
-- A GitHub App (created from the dashboard) or a GitHub token that can manage runners on your repos (see [Setup](#setup)).
-- The `x86_64-linux` release binary needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the `x86_64-linux-musl` build does not. To build from source you need Rust 1.89 or newer.
+- For GitHub, a GitHub App (created from the dashboard) or a token that can manage runners on your repos (see [Setup](#setup)). For GitLab or Gitea, a bot or service account and its token ([GitLab](#gitlab), [Gitea](#gitea)).
+- The glibc release binaries (`x86_64-linux`, `aarch64-linux`) need glibc 2.39 or newer (Ubuntu 24.04, Debian 13 or later); the `-musl` builds do not. To build from source you need Rust 1.89 or newer.
 - For filtered egress only: `sudo apt install rootlesskit slirp4netns nftables uidmap util-linux`.
+- Experimental, not yet tested on a real Mac: an Apple Silicon Mac running arm64 job VMs with Hypervisor.framework. See [docs/apple-silicon.md](docs/apple-silicon.md).
 
 ## Installing and running
 
@@ -164,13 +196,15 @@ Open `http://<box>:7878` from your own devices on the tailnet (or as a user list
 
 ### Setup
 
+This is the GitHub setup; for GitLab and Gitea see [GitLab](#gitlab) and [Gitea](#gitea), or add the forge under Settings › Forges.
+
 1. **GitHub token.** kiln looks for `KILN_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then the token saved from the dashboard, then `gh auth token`. A classic PAT needs the `repo` scope (plus `workflow` for the hello PR). A fine-grained token needs *Administration: write* and *Actions: read/write* on each repo (add *Contents* and *Workflows: write* only if you want kiln to open the hello PR). Saving a token checks that it authenticates and reports each repo's runners-API result. Details in [docs/configuration.md](docs/configuration.md#github-token).
 2. **Repos.** Add them on the Repos tab as `owner/name`.
 3. **Workflows.** Opt a workflow in with `runs-on` (below). The Repos tab can open a PR that adds a small `kiln-hello.yml` workflow for you.
 
 ## Using kiln in workflows
 
-Jobs opt in with `runs-on: [self-hosted, kiln]`. The label picks the VM size. Plain `kiln` gets the default size (`vm_cpus` / `vm_mem_mb`, 4 vCPU and 8 GB unless changed). Add exactly one size label to choose another:
+Jobs opt in with `runs-on: [self-hosted, kiln]` (GitHub; GitLab and Gitea use the same labels as `tags:` and `runs-on:`). The label picks the VM size. Plain `kiln` gets the default size (`vm_cpus` / `vm_mem_mb`, 4 vCPU and 8 GB unless changed). Add exactly one size label to choose another:
 
 | `runs-on` | vCPU | RAM |
 |---|---|---|
@@ -186,27 +220,27 @@ kiln's own CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs this
 
 ## Updates
 
-kiln updates itself from signed GitHub releases: Settings › Updates shows when a new version is out, with its release notes. **Update** downloads the release, checks its Ed25519 signature against the key built into kiln, lets running jobs finish (no new VMs start meanwhile), swaps the binary and restarts in place. If the new version fails to start twice, kiln restores the previous one. Set `auto_update` to install new releases on its own when the box is idle. Each release ships a glibc build and a fully static musl build; kiln updates to the same kind it is. Details: [docs/configuration.md](docs/configuration.md#updates).
+kiln updates itself from signed GitHub releases: Settings › Updates shows when a new version is out, with its release notes. **Update** downloads the release, checks its Ed25519 signature against the key built into kiln, lets running jobs finish (no new VMs start meanwhile), swaps the binary and restarts in place. If the new version fails to start twice, kiln restores the previous one. Set `auto_update` to install new releases on its own when the box is idle. Each release ships a glibc build and a fully static musl build for x86_64 and arm64 Linux, plus an Apple Silicon build; kiln updates to the same kind and CPU it is. Details: [docs/configuration.md](docs/configuration.md#updates).
 
 ## Dashboard tour
 
 A first-run stepper takes over until kiln is set up. After that there are four pages:
 
 - **Overview:** health banners only when something needs you (token, image, backoff, rate limit, memory, mirror), one "chamber" per VM slot with live timers, jobs today, failures, median job time and an estimate of minutes saved against GitHub-hosted prices. The Host card splits CPU and memory by job VM and opens into live charts of the last hour.
-- **Jobs:** every job VM, filterable. The detail page shows a queue, boot, wait and job timeline, the exit reason, and three log sources: live **console**, live **steps** (the runner's `_diag/pages`, mirrored over a second serial port) and the **GitHub** log once the job finishes. ANSI colour, follow, wrap, copy, download, and a Kill button.
-- **Repos:** connected repos, whether jobs actually route to kiln, workflows (with dispatch), recent runs (rerun or cancel), jobs and steps.
-- **Settings:** capacity (and pause), timeouts, access, GitHub token, image (rebake, Docker mirror, auto-rebake), cache, debugging, network (egress mode, Tailscale peers, ping, netcheck, HTTPS serve), notifications, diagnostics (the same checks as `kiln doctor`) and updates.
+- **Jobs:** every job VM, filterable. The detail page shows a queue, boot, wait and job timeline, the exit reason, and three log sources: live **console**, live **steps** (the runner's `_diag/pages`, mirrored over a second serial port) and the forge's own log (GitHub, GitLab or Gitea) once the job finishes. ANSI colour, follow, wrap, copy, download, and a Kill button.
+- **Repos:** connected repos on every forge, whether jobs actually route to kiln, workflows (with dispatch), recent runs (rerun or cancel), jobs and steps.
+- **Settings:** capacity (and pause), timeouts, access, forges (GitHub token or App, GitLab and Gitea tokens and projects), image (rebake, Docker mirror, auto-rebake), cache, debugging, network (egress mode, Tailscale peers, ping, netcheck, HTTPS serve), notifications, diagnostics (the same checks as `kiln doctor`) and updates.
 
 The tab title and favicon show running jobs and unseen failures. Opt-in browser notifications for failed jobs need HTTPS.
 
 ## Security model
 
-A job is root inside its own VM, and the dashboard holds a GitHub token, so kiln is built around two boundaries.
+A job is root inside its own VM, and the dashboard holds your forge tokens, so kiln is built around two boundaries.
 
 - **The dashboard** answers only tailnet peers whose Tailscale identity is the owner of the box (or is listed in `allowed_users`), and the box itself with a secret dashboard key. It checks the `Host` header and requires a custom `x-kiln` header on writes. Job VMs reach the host through QEMU's NAT and look like local traffic, which is why local access needs the key.
-- **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror. **Switch to filtered before running untrusted pull requests, such as ones from forks.**
+- **The VM** is the isolation unit. By default (`egress: "open"`) a job has full outbound network, including your LAN and tailnet, which is fine for your own repos. With `egress: "filtered"` each VM runs in a rootless network namespace with an nftables filter that allows only the public internet, DNS and the Docker mirror (plus the one `ip:port` of a private GitLab or Gitea server, when you set its `network` to `internal`). **Switch to filtered before running untrusted pull requests, such as ones from forks.**
 
-The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused inside the VM by the runner's job-started hook, before any of their code runs. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent). See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem.
+The repo cache is a trusted writer with throwaway readers, so a PR can read the cache but never poison it. Pull requests from forks are refused before any of their code runs: by the runner's job-started hook on GitHub, and by the host's verdict gate on GitLab and Gitea. Releases are signed with an Ed25519 key that never meets the build job, and kiln installs only releases signed with it. See [SECURITY.md](SECURITY.md) for the full threat model, the defenses, the known residual risks and how to report a problem. kiln sends nothing to its maintainers unless you opt in to anonymous usage statistics or crash reports (the dashboard asks once; Settings › Privacy shows exactly what is sent).
 
 ## Configuration
 
@@ -232,8 +266,9 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 
 - **Runner updates.** kiln pins the runner version when it bakes. GitHub stops sending jobs to runners much more than a month out of date, so kiln rebakes by itself (`auto_rebake`) once the image is stale.
 - **Network throughput.** User-mode networking (slirp) tops out well below line rate and is CPU-heavy on large `docker pull`s. A future option is `passt` (still rootless) or a one-time root setup of tap devices.
-- **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo; org-level runner groups are not implemented.
-- **Single host, x86_64, Ubuntu 24.04 guests only.** Scheduling is a per-repo count; there are no priorities or fair-share.
+- **Not yet tested.** GitLab and Gitea jobs ran on x86_64 only (arm64 hosts are untested for both); `docker:dind`, gitlab.com's tier and rate limits, Forgejo and Intel Macs are untested or unsupported.
+- **Runners are per repo.** With a GitHub App, kiln serves every repo the App is installed on, but it registers runners per repo (GitLab: per project); org-level runner groups are not implemented.
+- **Single host, Ubuntu 24.04 guests of the host's architecture** (x86_64; arm64, including Apple Silicon, is experimental). Scheduling is a per-repo count; there are no priorities or fair-share.
 - **Filtered egress is opt-in.** It is implemented but not yet the default; DNS is not filtered.
 
 ## Documentation
@@ -242,6 +277,7 @@ The full reference (every field, range, live-versus-restart behaviour, environme
 |---|---|
 | [docs/stacks.md](docs/stacks.md) | Language and tool compatibility, pricing, migration tips |
 | [docs/architecture.md](docs/architecture.md) | How kiln works: lifecycle, scheduling, cache, egress, API |
+| [docs/apple-silicon.md](docs/apple-silicon.md) | Running kiln on an Apple Silicon Mac (experimental, untested) |
 | [docs/configuration.md](docs/configuration.md) | Every setting, environment variable, file and command |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, tests, deploying |
 | [SECURITY.md](SECURITY.md) | Threat model, residual risks, reporting |

@@ -1,0 +1,4 @@
+{
+  "message": "token is required",
+  "url": "https://gitea.example.org/api/swagger"
+}

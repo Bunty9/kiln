@@ -1,0 +1,29 @@
+{
+    "workflows": [
+        {
+            "id": "fail.yml",
+            "name": "failwf",
+            "path": ".gitea/workflows/fail.yml",
+            "state": "active",
+            "created_at": "2026-10-11T09:24:34Z",
+            "updated_at": "2026-10-11T09:24:34Z",
+            "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/workflows/fail.yml",
+            "html_url": "https://gitea.example.org/acme/demo/src/branch/main/.gitea/workflows/fail.yml",
+            "badge_url": "https://gitea.example.org/acme/demo/actions/workflows/fail.yml/badge.svg?branch=main",
+            "deleted_at": "0001-01-01T00:00:00Z"
+        },
+        {
+            "id": "spike.yml",
+            "name": "spike",
+            "path": ".gitea/workflows/spike.yml",
+            "state": "active",
+            "created_at": "2026-10-11T09:24:34Z",
+            "updated_at": "2026-10-11T09:24:34Z",
+            "url": "https://gitea.example.org/api/v1/repos/acme/demo/actions/workflows/spike.yml",
+            "html_url": "https://gitea.example.org/acme/demo/src/branch/main/.gitea/workflows/spike.yml",
+            "badge_url": "https://gitea.example.org/acme/demo/actions/workflows/spike.yml/badge.svg?branch=main",
+            "deleted_at": "0001-01-01T00:00:00Z"
+        }
+    ],
+    "total_count": 2
+}

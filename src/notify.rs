@@ -3,11 +3,15 @@
 //! text from a repo format, mention or inject into the target. See the Notifications section
 //! of docs/configuration.md and SECURITY.md.
 
+#[cfg(test)]
+use crate::forge::net::allowed;
+use crate::forge::net::{self, Mode, literal_ip};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+#[cfg(test)]
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,86 +25,6 @@ pub enum Kind {
     Slack,
     Discord,
     Ntfy,
-}
-
-/// May an alert connect to `ip`? Public unicast only; with `tailnet`, also the tailnet ranges
-/// (100.64.0.0/10 and fd7a:115c:a1e0::/48). The same private ranges job egress filtering drops,
-/// plus the IPv6 translation prefixes (local-use NAT64, SIIT, Teredo), discard (100::/64),
-/// the deprecated site-local fec0::/10 and the documentation prefixes 2001:db8::/32 and 3fff::/20.
-pub fn allowed(ip: IpAddr, tailnet: bool) -> bool {
-    match ip {
-        IpAddr::V4(v4) => allowed_v4(v4, tailnet),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = embedded_v4(v6) {
-                return allowed_v4(v4, tailnet);
-            }
-            let s = v6.segments();
-            if v6.is_unspecified() || v6.is_loopback() {
-                return false;
-            }
-            // Translation and discard prefixes whose target kiln cannot judge: refused outright.
-            if s[..3] == [0x64, 0xff9b, 1] // 64:ff9b:1::/48, local-use NAT64
-                || s[..6] == [0, 0, 0, 0, 0xffff, 0] // ::ffff:0:0:0/96, SIIT
-                || s[..2] == [0x2001, 0] // 2001::/32, Teredo
-                || s[..4] == [0x100, 0, 0, 0]
-            // 100::/64, discard
-            {
-                return false;
-            }
-            if s[0] & 0xfe00 == 0xfc00 {
-                return tailnet && s[..3] == [0xfd7a, 0x115c, 0xa1e0];
-            }
-            !(s[0] & 0xffc0 == 0xfe80 // link-local
-                || s[0] & 0xffc0 == 0xfec0 // site-local
-                || s[0] & 0xff00 == 0xff00 // multicast
-                || s[..2] == [0x2001, 0x0db8] // documentation
-                || (s[0] == 0x3fff && s[1] & 0xf000 == 0)) // documentation, 3fff::/20
-        }
-    }
-}
-
-/// The IPv4 address an IPv6 one stands for (mapped, compatible, NAT64, 6to4), if any:
-/// such an address reaches that IPv4 host, so it is judged as one.
-fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
-    let s = v6.segments();
-    let v4 = |hi: u16, lo: u16| Some(Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8));
-    if let Some(m) = v6.to_ipv4_mapped() {
-        return Some(m);
-    }
-    if s[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback() {
-        return v4(s[6], s[7]);
-    }
-    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return v4(s[6], s[7]);
-    }
-    if s[0] == 0x2002 {
-        return v4(s[1], s[2]);
-    }
-    None
-}
-
-fn allowed_v4(ip: Ipv4Addr, tailnet: bool) -> bool {
-    let [a, b, c, _] = ip.octets();
-    if a == 100 && b & 0xc0 == 64 {
-        return tailnet;
-    }
-    !(a == 0
-        || a == 10
-        || a == 127
-        || (a == 169 && b == 254)
-        || (a == 172 && b & 0xf0 == 16)
-        || (a == 192 && b == 0 && (c == 0 || c == 2))
-        || (a == 192 && b == 168)
-        || (a == 198 && b & 0xfe == 18)
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 224)
-}
-
-/// The host of `u` when it is an IP literal. Requests to a literal skip DNS, and so the
-/// resolver's check, so callers check it themselves.
-pub fn literal_ip(u: &reqwest::Url) -> Option<IpAddr> {
-    u.host_str()?.trim_start_matches('[').trim_end_matches(']').parse().ok()
 }
 
 /// Validate a destination URL for its kind; Err is a message for the dashboard.
@@ -129,7 +53,7 @@ pub fn check_url(kind: Kind, url: &str, tailnet: bool) -> Result<reqwest::Url, S
         _ => {}
     }
     if let Some(ip) = literal_ip(&u)
-        && !allowed(ip, tailnet)
+        && !Mode::public(tailnet).permits(ip, &net::own_addrs().map_err(|e| format!("cannot list host addresses: {e}"))?)
     {
         return Err(format!("{ip} is an internal address{}", if tailnet { "" } else { " (tick \"on my tailnet\" for a tailnet address)" }));
     }
@@ -154,6 +78,9 @@ fn invisible(c: char) -> bool {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct JobInfo {
     pub repo: String,
+    /// The forge's id and kind (`github`, `gitlab`, `gitea`); added to every payload.
+    pub forge: String,
+    pub forge_kind: String,
     pub workflow: Option<String>,
     pub workflow_name: Option<String>,
     pub job: String,
@@ -183,6 +110,7 @@ pub struct SecurityInfo {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // one JobInfo per event; boxing it only adds churn
 pub enum Detail {
     Job(JobInfo),
     Health(HealthInfo),
@@ -217,9 +145,28 @@ pub struct Rendered {
     pub body: Vec<u8>,
 }
 
-/// `url` if it is a plain https://github.com/ URL with nothing that could break out of a link.
-pub fn github_link(url: &str) -> Option<&str> {
-    (url.starts_with("https://github.com/") && url.len() <= 300 && !url.contains(['|', '>', '<', ' ', '"', '\'', '\n'])).then_some(url)
+/// `url` if it is on one of `origins` (`scheme://host[:port]`, no trailing slash) and has nothing
+/// that could break out of a link.
+pub fn forge_link<'a>(url: &'a str, origins: &[String]) -> Option<&'a str> {
+    let on_origin = origins.iter().any(|o| url.strip_prefix(o.as_str()).is_some_and(|r| r.starts_with('/')));
+    (on_origin && net::link_safe(url)).then_some(url)
+}
+
+/// The origin a forge's links must be on: its own URL (github.com for GitHub).
+fn forge_origin(f: &crate::forge::ForgeCfg) -> Option<String> {
+    match f.url.as_deref() {
+        Some(u) => {
+            net::check_forge_url(u, f.network.unwrap_or(crate::forge::Network::Public)).ok().map(|u| u.origin().ascii_serialization())
+        }
+        None => (f.kind == crate::forge::Kind::GitHub).then(|| "https://github.com".to_string()),
+    }
+}
+
+/// Origins job links may point to: github.com and every configured forge's own URL.
+fn link_origins(cfg: &crate::Config) -> Vec<String> {
+    let mut o = vec!["https://github.com".to_string()];
+    o.extend(crate::forge::effective(&cfg.forges, &cfg.repos).iter().filter_map(forge_origin));
+    o
 }
 
 fn dur(s: u64) -> String {
@@ -237,8 +184,15 @@ fn summary(e: &Event, esc: &dyn Fn(&str) -> String) -> String {
     match &e.detail {
         Detail::Job(j) => {
             let icon = if j.outcome == "succeeded" { "✅" } else { "❌" };
-            let wf = j.workflow.as_deref().unwrap_or("workflow unknown");
-            let mut s = format!("{icon} {} · {} · {} {}", esc(&j.repo), esc(wf), esc(&j.job), j.outcome);
+            // GitLab has no workflow file: its pipeline name is what it has.
+            let wf = if j.forge_kind == "gitlab" { j.workflow_name.as_ref().or(j.workflow.as_ref()) } else { j.workflow.as_ref() };
+            let wf = wf.map_or("workflow unknown", String::as_str);
+            let name = match j.forge_kind.as_str() {
+                "gitlab" => " (GitLab)",
+                "gitea" => " (Gitea)",
+                _ => "",
+            };
+            let mut s = format!("{icon} {}{name} · {} · {} {}", esc(&j.repo), esc(wf), esc(&j.job), j.outcome);
             if let Some(b) = &j.branch {
                 s += &format!(" on {}", esc(b));
             }
@@ -310,6 +264,7 @@ fn generic_body(e: &Event, id: &str, at: u64, link: Option<&str>) -> Value {
 /// The request for one event to one destination. Repo text was `clean`ed when the event was
 /// built; here it is escaped for the target, and kept out of headers entirely.
 /// Errors only for Generic with no valid signing secret: it fails closed rather than send unsigned.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     kind: Kind,
     secret: Option<&str>,
@@ -318,9 +273,16 @@ pub fn render(
     msg_id: &str,
     at: u64,
     link: Option<&str>,
+    origins: &[String],
 ) -> Result<Rendered, String> {
+    // The sink enforces the link origin, whatever built the event (a job URL is data from a forge).
+    let mut checked = e.clone();
+    if let Detail::Job(j) = &mut checked.detail {
+        j.url = j.url.take().filter(|u| forge_link(u, origins).is_some());
+    }
+    let e = &checked;
     let job_url = match &e.detail {
-        Detail::Job(j) => j.url.as_deref().and_then(github_link),
+        Detail::Job(j) => j.url.as_deref(),
         _ => None,
     };
     let json_h = ("Content-Type", "application/json".to_string());
@@ -567,43 +529,32 @@ pub fn health(app: &crate::App, now_list: Vec<(String, String)>, now: u64) {
     }
 }
 
-/// DNS for alert requests: system resolution, then only addresses `allowed` may pass. The
-/// connection uses exactly these, so there is no gap for a rebind between check and connect.
+/// DNS for alert requests: `net::Guard` with this destination's tailnet choice. `net::builder`
+/// installs the real one; this keeps the resolver tests' shape.
+#[cfg(test)]
 struct Guard {
     tailnet: bool,
 }
 
+#[cfg(test)]
 impl reqwest::dns::Resolve for Guard {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let tailnet = self.tailnet;
-        Box::pin(async move {
-            let host = name.as_str().to_string();
-            let addrs = keep_allowed(tokio::net::lookup_host((host.as_str(), 0)).await?, tailnet);
-            if addrs.is_empty() {
-                return Err(format!("{host} resolves only to internal addresses").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
+        net::Guard(Mode::public(self.tailnet)).resolve(name)
     }
 }
 
 /// Only the addresses an alert may connect to.
+#[cfg(test)]
 fn keep_allowed(addrs: impl Iterator<Item = SocketAddr>, tailnet: bool) -> Vec<SocketAddr> {
-    addrs.filter(|a| allowed(a.ip(), tailnet)).collect()
+    net::keep(addrs, Mode::public(tailnet), &[])
 }
 
 /// The client for one destination. `open_for_tests` allows plain HTTP to the loopback
 /// receiver, and only in test builds: a release build ignores it.
 fn client(d: &Dest, open_for_tests: bool) -> reqwest::Client {
-    let b = reqwest::Client::builder()
-        .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10));
     let open = open_for_tests && cfg!(test);
-    let b = if open { b } else { b.https_only(true).dns_resolver(Arc::new(Guard { tailnet: d.tailnet })) };
-    b.build().expect("notify http client")
+    let b = if open { net::base() } else { net::builder(Mode::public(d.tailnet)) };
+    b.connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(10)).build().expect("notify http client")
 }
 
 #[derive(Debug)]
@@ -655,6 +606,18 @@ fn action_for(path: &str) -> Option<&'static str> {
     match path {
         "/api/config" => Some("settings changed"),
         "/api/token" => Some("GitHub token replaced"),
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/token") && r.matches('/').count() == 1) => {
+            Some("forge token replaced")
+        }
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/onboard") && r.matches('/').count() == 1) => {
+            Some("forge onboarded")
+        }
+        // Adding, removing or re-pointing a forge's repos: where kiln sends a token, and what it serves.
+        "/api/forges" => Some("forge added"),
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| r.ends_with("/repos") && r.matches('/').count() == 1) => {
+            Some("forge repos changed")
+        }
+        p if p.strip_prefix("/api/forges/").is_some_and(|r| !r.is_empty() && !r.contains('/')) => Some("forge removed"),
         // Every write to /api/app is a real change (create or remove); refresh and manifest are not.
         "/api/app" | "/api/app/convert" => Some("GitHub App changed"),
         _ => None,
@@ -726,10 +689,10 @@ fn new_msg_id() -> String {
 
 /// One POST. Every message returned is a fixed string: never the URL, path, query or body.
 /// `msg_id` is the event's: the same on every retry, so a receiver can de-duplicate.
-async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool) -> Outcome {
+async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_for_tests: bool, origins: &[String]) -> Outcome {
     let Ok(u) = reqwest::Url::parse(&d.url) else { return Outcome::Permanent("bad URL".into()) };
     let open = open_for_tests && cfg!(test);
-    if !open && literal_ip(&u).is_some_and(|ip| !allowed(ip, d.tailnet)) {
+    if !open && literal_ip(&u).is_some_and(|ip| net::own_addrs().map_or(true, |own| !Mode::public(d.tailnet).permits(ip, &own))) {
         return Outcome::Permanent("refused: internal address".into());
     }
     // The URL rules again, on every send: a hand-edited notify.json must not get past them.
@@ -740,7 +703,7 @@ async fn send_once(c: &reqwest::Client, d: &Dest, e: &Event, msg_id: &str, open_
         (Detail::Job(j), true) => dashboard_base().map(|b| format!("{b}/#/jobs/{}", j.vm_id)),
         _ => None,
     };
-    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, msg_id, crate::now(), link.as_deref()) {
+    let r = match render(d.kind, d.secret.as_deref(), d.token.as_deref(), e, msg_id, crate::now(), link.as_deref(), origins) {
         Ok(r) => r,
         Err(m) => return Outcome::Permanent(m),
     };
@@ -830,7 +793,7 @@ async fn deliver(app: &crate::App, c: &reqwest::Client, d: &Dest, e: &Event) {
     let waits = [5u64, 30, 120];
     let id = new_msg_id();
     for attempt in 0..=waits.len() {
-        let out = send_once(c, d, e, &id, false).await;
+        let out = send_once(c, d, e, &id, false, &link_origins(&app.cfg())).await;
         let now = crate::now();
         // Record under the lock in its own scope: a guard must not live across the sleep.
         let (m, after) = {
@@ -1004,9 +967,17 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     }
     let Some(oc) = outcome(v) else { return };
     let ok = oc == "succeeded";
-    let wf = v.run.as_ref().map(|r| r.file.as_str()).filter(|w| !w.is_empty());
-    let mut to: Vec<String> =
-        app.cfg().notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
+    let cfg = app.cfg();
+    let forge_id = crate::forge::RepoRef::parse(&v.repo).map_or_else(|_| crate::forge::ForgeId::github(), |r| r.forge);
+    let fcfg = crate::forge::effective(&cfg.forges, &cfg.repos).into_iter().find(|f| f.id == forge_id);
+    let kind = fcfg.as_ref().map_or(crate::forge::Kind::GitHub, |f| f.kind);
+    // What a rule's `workflow` names: the run's file (GitHub, Gitea) or the pipeline name (GitLab has no workflow file).
+    let wf = v
+        .run
+        .as_ref()
+        .map(|r| if kind == crate::forge::Kind::GitLab { r.workflow.as_str() } else { r.file.as_str() })
+        .filter(|w| !w.is_empty());
+    let mut to: Vec<String> = cfg.notify_rules.iter().filter(|r| rule_matches(r, &v.repo, wf, ok)).flat_map(|r| r.to.clone()).collect();
     if ok && to.is_empty() {
         return;
     }
@@ -1023,8 +994,18 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
     }
     let run = v.run.clone().unwrap_or_default();
     let opt = |s: &str| (!s.is_empty()).then(|| clean(s));
+    // The forge's own server-built link, on that forge's origin only (GitHub keeps its job URL).
+    let origin: Vec<String> = fcfg.as_ref().and_then(forge_origin).into_iter().collect();
+    let url = if kind == crate::forge::Kind::GitHub { None } else { run.links.job.as_deref().or(run.links.run.as_deref()) };
     let info = JobInfo {
         repo: clean(&v.repo),
+        forge: forge_id.as_str().to_string(),
+        forge_kind: match kind {
+            crate::forge::Kind::GitHub => "github",
+            crate::forge::Kind::GitLab => "gitlab",
+            crate::forge::Kind::Gitea => "gitea",
+        }
+        .to_string(),
         workflow: opt(&run.file),
         workflow_name: opt(&run.workflow),
         job: clean(v.job.as_deref().unwrap_or("job")),
@@ -1033,7 +1014,7 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         outcome: oc.to_string(),
         // A lost VM with no measurable run has no duration worth stating.
         duration_s: v.busy_since.zip(v.done_at.or(v.ended)).map(|(a, b)| b.saturating_sub(a)).filter(|d| *d > 0 || oc != "lost"),
-        url: v.job_url.clone(),
+        url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
         vm_id: v.id.clone(),
     };
     let (ty, class) = if ok { ("job.finished", Class::Direct) } else { ("job.failed", Class::Job) };
@@ -1536,6 +1517,186 @@ mod tests {
         (app, q)
     }
 
+    fn gl_app() -> (Arc<crate::App>, Arc<Queue>) {
+        let (app, q) = job_app();
+        let f: Vec<crate::forge::ForgeCfg> = serde_json::from_str(
+            r#"[{"id":"github","kind":"github"},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["g/p"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["o/n"]}]"#,
+        )
+        .unwrap();
+        let mut c = app.cfg();
+        c.forges = Some(f);
+        *app.cfg.write().unwrap() = c;
+        (app, q)
+    }
+
+    fn other_vm(repo: &str, id: &str, file: &str, link: &str) -> Vm {
+        let run = crate::vm::Run {
+            workflow: "pipeline".into(),
+            file: file.into(),
+            links: crate::forge::Links { job: Some(link.into()), ..Default::default() },
+            ..Default::default()
+        };
+        Vm { id: id.into(), repo: repo.into(), run: Some(run), ..vm_end(crate::vm::State::Done, Some("Failed")) }
+    }
+
+    #[test]
+    fn other_forges_name_themselves_and_match_by_their_own_workflow() {
+        let (app, q) = gl_app();
+        job_ended(&app, &other_vm("gl:g/p", "kiln-9-1", ".gitlab-ci.yml", "https://gitlab.example.com/g/p/-/jobs/7"));
+        job_ended(&app, &other_vm("ge:o/n", "kiln-9-2", "ci.yml", "https://gitea.example.com/o/n/actions/runs/3"));
+        // A link on another forge's origin (here github.com) is dropped, not trusted.
+        job_ended(&app, &other_vm("ge:o/n", "kiln-9-3", "ci.yml", "https://github.com/o/n/actions/runs/3"));
+        let got: Vec<JobInfo> =
+            q.q.lock()
+                .unwrap()
+                .iter()
+                .map(|e| match &e.detail {
+                    Detail::Job(j) => j.clone(),
+                    _ => panic!(),
+                })
+                .collect();
+        assert_eq!((got[0].forge.as_str(), got[0].forge_kind.as_str()), ("gl", "gitlab"));
+        assert_eq!(got[0].url.as_deref(), Some("https://gitlab.example.com/g/p/-/jobs/7"));
+        assert_eq!((got[1].forge.as_str(), got[1].forge_kind.as_str()), ("ge", "gitea"));
+        assert!(got[2].url.is_none());
+        let e = Event { ty: "job.failed", class: Class::Job, detail: Detail::Job(got[0].clone()), to: vec![] };
+        let t = summary(&e, &|s| s.to_string());
+        assert!(t.contains("gl:g/p (GitLab) · pipeline ·"), "{t}");
+        // A success reaches only a rule: GitLab's workflow is the pipeline name, Gitea's the file.
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let rule = |repo: &str, wf: &str| Rule { repo: repo.into(), workflow: wf.into(), outcome: "success".into(), to: vec![d.clone()] };
+        let mut c = app.cfg();
+        c.notify_rules = vec![rule("gl:g/p", "pipeline"), rule("ge:o/n", "ci.yml")];
+        *app.cfg.write().unwrap() = c;
+        let ok = |repo: &str, id: &str, file: &str| Vm {
+            result: Some("Succeeded".into()),
+            ..other_vm(repo, id, file, "https://gitlab.example.com/x")
+        };
+        let n = q.q.lock().unwrap().len();
+        job_ended(&app, &ok("gl:g/p", "kiln-9-4", ".gitlab-ci.yml"));
+        job_ended(&app, &ok("ge:o/n", "kiln-9-5", "ci.yml"));
+        job_ended(&app, &ok("ge:o/n", "kiln-9-6", "other.yml"));
+        assert_eq!(q.q.lock().unwrap().len(), n + 2);
+    }
+
+    /// One kiln, the same `acme/demo` path on a GitHub, a GitLab and a Gitea forge.
+    fn trio_app() -> (Arc<crate::App>, Arc<Queue>) {
+        let (app, q) = job_app();
+        let f: Vec<crate::forge::ForgeCfg> = serde_json::from_str(
+            r#"[{"id":"github","kind":"github","repos":["acme/demo"]},{"id":"gl","kind":"gitlab","url":"https://gitlab.example.com","repos":["acme/demo"]},{"id":"ge","kind":"gitea","url":"https://gitea.example.com","repos":["acme/demo"]}]"#,
+        )
+        .unwrap();
+        let mut c = app.cfg();
+        c.forges = Some(f);
+        *app.cfg.write().unwrap() = c;
+        (app, q)
+    }
+
+    const GH_LINK: &str = "https://github.com/acme/demo/actions/runs/1/job/2";
+    const GL_LINK: &str = "https://gitlab.example.com/acme/demo/-/jobs/7";
+    const GE_LINK: &str = "https://gitea.example.com/acme/demo/actions/runs/3";
+
+    fn trio_vm(repo: &str, id: &str, link: &str) -> Vm {
+        let mut v = other_vm(repo, id, "ci.yml", link);
+        v.job_url = Some(link.into());
+        v
+    }
+
+    fn queued_jobs(q: &Queue) -> Vec<JobInfo> {
+        q.q.lock()
+            .unwrap()
+            .iter()
+            .map(|e| match &e.detail {
+                Detail::Job(j) => j.clone(),
+                _ => panic!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mixed_forge_failures_name_their_forge_and_keep_only_their_own_link() {
+        let (app, q) = trio_app();
+        for (repo, id, link) in
+            [("acme/demo", "kiln-9-1", GH_LINK), ("gl:acme/demo", "kiln-9-2", GL_LINK), ("ge:acme/demo", "kiln-9-3", GE_LINK)]
+        {
+            job_ended(&app, &trio_vm(repo, id, link));
+        }
+        // Another configured forge's origin is not this job's origin: dropped, whichever way round.
+        job_ended(&app, &trio_vm("gl:acme/demo", "kiln-9-4", GE_LINK));
+        job_ended(&app, &trio_vm("ge:acme/demo", "kiln-9-5", GL_LINK));
+        job_ended(&app, &trio_vm("ge:acme/demo", "kiln-9-6", GH_LINK));
+        job_ended(&app, &trio_vm("acme/demo", "kiln-9-7", GL_LINK));
+        let got = queued_jobs(&q);
+        let key = |j: &JobInfo| (j.forge.clone(), j.forge_kind.clone(), j.url.clone());
+        let some = |u: &str| Some(u.to_string());
+        assert_eq!(
+            got.iter().map(key).collect::<Vec<_>>(),
+            [
+                ("github".into(), "github".into(), some(GH_LINK)),
+                ("gl".into(), "gitlab".into(), some(GL_LINK)),
+                ("ge".into(), "gitea".into(), some(GE_LINK)),
+                ("gl".into(), "gitlab".into(), None),
+                ("ge".into(), "gitea".into(), None),
+                ("ge".into(), "gitea".into(), None),
+                ("github".into(), "github".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_forge_rules_route_by_forge_id_and_match_the_forges_own_workflow() {
+        let (app, q) = trio_app();
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let rule = |repo: &str, wf: &str| Rule { repo: repo.into(), workflow: wf.into(), outcome: "success".into(), to: vec![d.clone()] };
+        let mut c = app.cfg();
+        // GitLab names the pipeline ("pipeline"), GitHub and Gitea the file ("ci.yml").
+        c.notify_rules = vec![rule("gl:acme/demo", "pipeline"), rule("ge:acme/demo", "ci.yml"), rule("acme/demo", "ci.yml")];
+        *app.cfg.write().unwrap() = c;
+        let ok = |repo: &str, id: &str| Vm { result: Some("Succeeded".into()), ..trio_vm(repo, id, GL_LINK) };
+        let run = |repo: &str, id: &str, wf: &str, file: &str| {
+            let mut v = ok(repo, id);
+            let r = v.run.as_mut().unwrap();
+            (r.workflow, r.file) = (wf.into(), file.into());
+            job_ended(&app, &v);
+        };
+        let sent = || queued_jobs(&q).iter().map(|j| j.forge.clone()).collect::<Vec<_>>();
+        // Right matcher on each forge: one alert each, and only to its own forge's rule.
+        run("gl:acme/demo", "kiln-9-1", "pipeline", "");
+        assert_eq!(sent(), ["gl"]);
+        run("ge:acme/demo", "kiln-9-2", "other", "ci.yml");
+        run("acme/demo", "kiln-9-3", "other", "ci.yml");
+        assert_eq!(sent(), ["gl", "ge", "github"]);
+        // The wrong matcher on each forge matches nothing: GitLab's file, GitHub's and Gitea's pipeline name.
+        run("gl:acme/demo", "kiln-9-4", "other", "ci.yml");
+        run("ge:acme/demo", "kiln-9-5", "pipeline", "other.yml");
+        run("acme/demo", "kiln-9-6", "pipeline", "other.yml");
+        assert_eq!(sent().len(), 3);
+    }
+
+    #[test]
+    fn a_forge_id_rule_never_routes_another_forges_repo_of_the_same_path() {
+        let (app, q) = trio_app();
+        let d = app.notify.dests.lock().unwrap()[0].id.clone();
+        let mut c = app.cfg();
+        c.notify_rules = vec![Rule { repo: "gl:acme/demo".into(), workflow: "*".into(), outcome: "success".into(), to: vec![d] }];
+        *app.cfg.write().unwrap() = c;
+        for (i, repo) in ["acme/demo", "ge:acme/demo", "gl:acme/demo"].into_iter().enumerate() {
+            let v = Vm { result: Some("Succeeded".into()), ..trio_vm(repo, &format!("kiln-9-{i}"), GL_LINK) };
+            job_ended(&app, &v);
+        }
+        assert_eq!(queued_jobs(&q).iter().map(|j| j.forge.as_str()).collect::<Vec<_>>(), ["gl"]);
+    }
+
+    #[test]
+    fn generic_payload_names_the_forge_and_still_verifies() {
+        let e = job("acme/kiln", "build", "main");
+        let r = render(Kind::Generic, Some("whsec_dGVzdC1zZWNyZXQ="), None, &e, "msg_1", 1_700_000_000, None, &go()).unwrap();
+        let v = body(&r);
+        assert_eq!((v["job"]["forge"].as_str(), v["job"]["forge_kind"].as_str()), (Some("github"), Some("github")));
+        let sig = sign("whsec_dGVzdC1zZWNyZXQ=", "msg_1", 1_700_000_000, &r.body).unwrap();
+        assert_eq!(r.headers.iter().find(|h| h.0 == "webhook-signature").unwrap().1, sig);
+    }
+
     #[test]
     fn refused_fork_jobs_never_alert() {
         let (app, q) = job_app();
@@ -1677,6 +1838,10 @@ mod tests {
         assert_eq!(check_url(Kind::Ntfy, &long, false).unwrap_err(), "the URL is longer than 2048 characters");
     }
 
+    fn go() -> Vec<String> {
+        vec!["https://github.com".into()]
+    }
+
     fn job(repo: &str, job: &str, branch: &str) -> Event {
         Event {
             ty: "job.failed",
@@ -1684,6 +1849,9 @@ mod tests {
             to: vec![],
             detail: Detail::Job(JobInfo {
                 repo: clean(repo),
+                // forge and forge_kind are ADDED to every payload (forge support X-2); the rest is unchanged.
+                forge: "github".into(),
+                forge_kind: "github".into(),
                 workflow: Some(clean("ci.yml")),
                 workflow_name: Some(clean("ci")),
                 job: clean(job),
@@ -1713,9 +1881,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sink_drops_job_links_off_the_forge_origins() {
+        for bad in ["javascript:alert(1)", "https://evil.example/x", "https://github.com.evil.example/x"] {
+            let mut e = job("acme/kiln", "t", "main");
+            if let Detail::Job(j) = &mut e.detail {
+                j.url = Some(bad.into());
+            }
+            for k in [Kind::Slack, Kind::Discord, Kind::Ntfy] {
+                let r = render(k, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+                assert!(!String::from_utf8_lossy(&r.body).contains(bad), "{bad}");
+            }
+            let g = render(Kind::Generic, Some("whsec_dGVzdA=="), None, &e, "msg_1", 1, None, &go()).unwrap();
+            assert!(body(&g)["job"]["url"].is_null(), "{bad}");
+        }
+    }
+
+    #[test]
     fn slack_cannot_mention_or_link() {
         let e = job("acme/kiln", "<!channel> <@U123> <https://evil.example|click>", "main & co");
-        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let t = body(&r)["text"].as_str().unwrap().to_string();
         assert!(!t.contains("<!channel>") && !t.contains("<@U123>") && !t.contains("<https://evil"), "{t}");
         assert!(t.contains("&lt;!channel&gt;") && t.contains("main &amp; co"), "{t}");
@@ -1729,7 +1913,7 @@ mod tests {
     #[test]
     fn discord_cannot_ping_or_format() {
         let e = job("acme/kiln", "@everyone **bold** [x](https://evil.example)", "@here");
-        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let v = body(&r);
         let c = v["content"].as_str().unwrap();
         assert!(!c.contains("@everyone") && !c.contains("@here"), "{c}");
@@ -1742,7 +1926,7 @@ mod tests {
     #[test]
     fn discord_escapes_angle_brackets_in_repo_text() {
         let e = job("acme/kiln", "<t:1:R> </cmd:1> <:x:1>", "main");
-        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let c = body(&r)["content"].as_str().unwrap().to_string();
         // The first line is the summary; the kiln link follows on its own line.
         let summary = c.lines().next().unwrap();
@@ -1755,9 +1939,9 @@ mod tests {
     #[test]
     fn chat_targets_do_not_autolink_repo_text() {
         let e = job("acme/kiln", "evil.example", "https://evil.example/login");
-        let s = render(Kind::Slack, None, None, &e, "msg_1", 1, None).unwrap();
-        let d = render(Kind::Discord, None, None, &e, "msg_1", 1, None).unwrap();
-        let n = render(Kind::Ntfy, None, None, &e, "msg_1", 1, None).unwrap();
+        let s = render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+        let d = render(Kind::Discord, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+        let n = render(Kind::Ntfy, None, None, &e, "msg_1", 1, None, &go()).unwrap();
         let slack = body(&s)["text"].as_str().unwrap().to_string();
         let discord = body(&d)["content"].as_str().unwrap().to_string();
         let ntfy = String::from_utf8(n.body.clone()).unwrap();
@@ -1770,7 +1954,7 @@ mod tests {
     #[test]
     fn ntfy_keeps_untrusted_text_out_of_headers() {
         let e = job("acme/kiln", "evil\r\nX-Injected: 1", "main");
-        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None).unwrap();
+        let r = render(Kind::Ntfy, None, Some("tk_secret"), &e, "msg_1", 1, None, &go()).unwrap();
         for (k, v) in &r.headers {
             assert!(v.is_ascii() && !v.contains('\n') && !v.contains("evil"), "{k}: {v}");
         }
@@ -1782,9 +1966,9 @@ mod tests {
     #[test]
     fn generic_fails_closed_without_a_valid_secret() {
         let e = job("acme/kiln", "test", "main");
-        assert!(render(Kind::Generic, Some("whsec_!!notbase64"), None, &e, "msg_1", 1, None).is_err());
-        assert!(render(Kind::Generic, None, None, &e, "msg_1", 1, None).is_err());
-        assert!(render(Kind::Slack, None, None, &e, "msg_1", 1, None).is_ok());
+        assert!(render(Kind::Generic, Some("whsec_!!notbase64"), None, &e, "msg_1", 1, None, &go()).is_err());
+        assert!(render(Kind::Generic, None, None, &e, "msg_1", 1, None, &go()).is_err());
+        assert!(render(Kind::Slack, None, None, &e, "msg_1", 1, None, &go()).is_ok());
     }
 
     #[test]
@@ -1792,7 +1976,7 @@ mod tests {
         let e = job("acme/kiln", "test", "main");
         let s = new_secret();
         assert!(s.starts_with("whsec_") && s.len() > 40);
-        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None).unwrap();
+        let r = render(Kind::Generic, Some(&s), None, &e, "msg_1", 1791402114, None, &go()).unwrap();
         let v = body(&r);
         assert_eq!((v["type"].as_str(), v["id"].as_str(), v["at"].as_u64()), (Some("job.failed"), Some("msg_1"), Some(1791402114)));
         assert_eq!(v["job"]["workflow"], "ci.yml");
@@ -1813,11 +1997,29 @@ mod tests {
     }
 
     #[test]
-    fn links_only_to_github() {
-        assert!(github_link("https://github.com/acme/kiln/actions/runs/1/job/2").is_some());
+    fn links_only_to_forge_origins() {
+        // github_link became forge_link(url, origins) (forge support P0-8); github.com is one origin.
+        let gh = ["https://github.com".to_string()];
+        assert!(forge_link("https://github.com/acme/kiln/actions/runs/1/job/2", &gh).is_some());
         for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://github.com/x|y>", "javascript:alert(1)"] {
-            assert!(github_link(bad).is_none(), "{bad}");
+            assert!(forge_link(bad, &gh).is_none(), "{bad}");
         }
+        let more = ["https://github.com".to_string(), "http://10.1.2.3:3000".to_string()];
+        assert!(forge_link("http://10.1.2.3:3000/acme/demo/actions/runs/4", &more).is_some());
+        assert!(forge_link("http://10.1.2.3:30001/x", &more).is_none(), "a longer port is another origin");
+        assert!(forge_link("http://10.1.2.3:3000.evil.example/x", &more).is_none());
+    }
+
+    #[test]
+    fn forge_routes_are_audited() {
+        assert_eq!(action_for("/api/forges/gl/token"), Some("forge token replaced"));
+        assert_eq!(action_for("/api/forges"), Some("forge added"));
+        assert_eq!(action_for("/api/forges/gl"), Some("forge removed"));
+        assert_eq!(action_for("/api/forges/gl/repos"), Some("forge repos changed"));
+        assert_eq!(action_for("/api/forges/gl/check"), None);
+        assert_eq!(action_for("/api/forges/gl/onboard"), Some("forge onboarded"));
+        assert_eq!(action_for("/api/forges/gl/other"), None);
+        assert_eq!(action_for("/api/forges/a/b/token"), None);
     }
 
     fn dest(kind: Kind, url: &str) -> Dest {
@@ -1837,7 +2039,7 @@ mod tests {
     #[test]
     fn store_is_private_and_redacted() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("kiln-test-notify-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-store_is_private_and_redacted-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert_eq!(load(&d).unwrap().len(), 0, "missing file = none");
@@ -1858,7 +2060,7 @@ mod tests {
 
     #[test]
     fn load_errors_never_echo_file_contents() {
-        let d = std::env::temp_dir().join(format!("kiln-test-notify-err-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("kiln-test-load_errors_never_echo_file_contents-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let bad_type = r#"[{"id":"a1b2c3d4","name":"x","kind":"slack","url":"https://hooks.slack.com/services/T000/B000/XXXX","tailnet":"SECRETMARK_42"}]"#;
@@ -1943,14 +2145,17 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         let c = client(&d, true);
-        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Ok));
+        assert!(matches!(send_once(&c, &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await, Outcome::Ok));
         let (h, b) = got.lock().unwrap()[0].clone();
         let (id, ts) = (h["webhook-id"].to_str().unwrap(), h["webhook-timestamp"].to_str().unwrap().parse().unwrap());
         assert_eq!(h["webhook-signature"].to_str().unwrap(), sign(d.secret.as_deref().unwrap(), id, ts, &b).unwrap());
         assert!(h["user-agent"].to_str().unwrap().starts_with("kiln/"));
         let (url, got) = receiver(302).await;
         d.url = url;
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert_eq!(got.lock().unwrap().len(), 1, "the redirect target was not requested");
     }
 
@@ -1962,7 +2167,7 @@ mod tests {
         let e = job("acme/kiln", "t", "main");
         let id = new_msg_id();
         for _ in 0..2 {
-            assert!(matches!(send_once(&c, &d, &e, &id, true).await, Outcome::Retry(..)));
+            assert!(matches!(send_once(&c, &d, &e, &id, true, &go()).await, Outcome::Retry(..)));
         }
         let got = got.lock().unwrap();
         let ids: Vec<&str> = got.iter().map(|(h, _)| h["webhook-id"].to_str().unwrap()).collect();
@@ -1975,14 +2180,17 @@ mod tests {
         let (url, got) = receiver(204).await;
         let mut d = dest(Kind::Generic, &url);
         d.secret = Some("whsec_!!bad".into());
-        assert!(matches!(send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, true), &d, &job("acme/kiln", "t", "main"), "msg_a", true, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert!(got.lock().unwrap().is_empty(), "nothing is sent unsigned");
     }
 
     #[tokio::test]
     async fn refuses_literal_internal_address_before_connecting() {
         let d = dest(Kind::Generic, "https://169.254.169.254/latest");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             _ => panic!("must be refused"),
         }
@@ -2005,7 +2213,7 @@ mod tests {
     #[tokio::test]
     async fn name_resolving_inward_is_refused_not_retried() {
         let d = dest(Kind::Generic, "https://localhost/hook");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert!(m.contains("internal"), "{m}"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2266,7 +2474,7 @@ mod tests {
         assert_eq!(d.token, None, "a new host never inherits the token");
         assert_eq!(load(&app.data).unwrap()[0].token, None);
         let e = job("acme/kiln", "t", "main");
-        let h = render(d.kind, d.secret.as_deref(), d.token.as_deref(), &e, "msg_1", 1, None).unwrap().headers;
+        let h = render(d.kind, d.secret.as_deref(), d.token.as_deref(), &e, "msg_1", 1, None, &go()).unwrap().headers;
         assert!(!h.iter().any(|(k, _)| *k == "Authorization"), "{:?}", h);
     }
 
@@ -2326,7 +2534,7 @@ mod tests {
     #[tokio::test]
     async fn stored_url_is_rechecked_on_send() {
         let d = dest(Kind::Slack, "https://evil.example/x");
-        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await {
+        match send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await {
             Outcome::Permanent(m) => assert_eq!(m, "refused: stored URL no longer allowed"),
             o => panic!("must be refused, got {o:?}"),
         }
@@ -2336,7 +2544,10 @@ mod tests {
     async fn production_client_refuses_plain_http() {
         let (url, got) = receiver(204).await;
         let d = dest(Kind::Generic, &url);
-        assert!(matches!(send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false).await, Outcome::Permanent(_)));
+        assert!(matches!(
+            send_once(&client(&d, false), &d, &job("acme/kiln", "t", "main"), "msg_a", false, &go()).await,
+            Outcome::Permanent(_)
+        ));
         assert!(got.lock().unwrap().is_empty(), "nothing reached the receiver");
     }
 

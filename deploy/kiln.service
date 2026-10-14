@@ -4,7 +4,9 @@
 #   loginctl enable-linger $USER   # keep running while logged out
 [Unit]
 Description=kiln self-hosted CI (ephemeral QEMU/KVM GitHub Actions runners)
-After=network-online.target
+# No After=network-online.target: that is a system unit, which a user unit cannot order
+# against, so kiln may start before the network is up. It copes: GitHub calls are
+# retried each tick, and a failing filtered-egress probe is retried with backoff.
 
 [Service]
 ExecStart=%h/.local/bin/kiln serve

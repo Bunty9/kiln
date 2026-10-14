@@ -1,7 +1,10 @@
 #cloud-config
 # Bake recipe for the kiln base image. Runs once (`kiln bake`), then the image
 # is frozen; every job boots a throwaway qcow2 overlay of it.
-# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln.
+# {{RUNNER_VERSION}}, {{NODE_VERSIONS}} and {{APT_PACKAGES}} are filled in by kiln, and so are the GitLab and
+# Gitea runner pins (version and this architecture's SHA-256, compiled into kiln: GITLAB_RUNNER and
+# GITEA_RUNNER in src/vm.rs) and, per guest architecture (`Guest` in src/vm.rs): {{ARCH}} (GitHub's and Node's name for it),
+# {{CONSOLE}} (the kernel console, also kiln's control channel) and {{STEPS}} (the step-log device).
 hostname: kiln
 users:
   - name: runner
@@ -58,9 +61,19 @@ write_files:
       V={{RUNNER_VERSION}}
       usermod -aG docker runner
       mkdir -p /home/runner/actions-runner /opt/hostedtoolcache
-      curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" \
+      curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-{{ARCH}}-$V.tar.gz" \
         | tar -xz -C /home/runner/actions-runner
       /home/runner/actions-runner/bin/installdependencies.sh
+      # GitLab and Gitea runners: versions and checksums are pinned in kiln, never "latest".
+      # A mismatch fails sha256sum, and so the bake. /usr/local/bin is on every user's PATH (sudo's too).
+      for P in gitlab-runner:https://gitlab-runner-downloads.s3.amazonaws.com/v{{GITLAB_RUNNER_VERSION}}/binaries/gitlab-runner-linux-{{DEB_ARCH}}:{{GITLAB_RUNNER_SHA256}} \
+               gitea-runner:https://gitea.com/gitea/runner/releases/download/v{{GITEA_RUNNER_VERSION}}/gitea-runner-{{GITEA_RUNNER_VERSION}}-linux-{{DEB_ARCH}}:{{GITEA_RUNNER_SHA256}}; do
+        N=${P%%:*}; R=${P#*:}; U=${R%:*}; H=${R##*:}
+        curl -fsSL -o "/tmp/$N" "$U"
+        echo "$H  /tmp/$N" | sha256sum --strict -c -
+        install -m 0755 "/tmp/$N" "/usr/local/bin/$N"
+        rm -f "/tmp/$N"
+      done
       # Write environment variables to both .env and /etc/environment
       # setup-go keys caches on ImageOS; erlef/setup-beam refuses to run without it
       BAKE_DATE=$(date +%Y%m%d)
@@ -86,18 +99,18 @@ write_files:
       # the bare `node` on PATH is the newest.
       # Each tarball is checked against the release's SHASUMS256.txt before it is unpacked.
       for N in {{NODE_VERSIONS}}; do
-        T=node-v$N-linux-x64.tar.xz
+        T=node-v$N-linux-{{ARCH}}.tar.xz
         curl -fsSL -o "/tmp/$T" "https://nodejs.org/dist/v$N/$T"
         curl -fsSL -o /tmp/SHASUMS256.txt "https://nodejs.org/dist/v$N/SHASUMS256.txt"
         # Exactly this file's line; none (or a mismatch) fails sha256sum, and so the bake.
         awk -v f="$T" '$2 == f' /tmp/SHASUMS256.txt | (cd /tmp && sha256sum --strict -c -)
-        mkdir -p /opt/hostedtoolcache/node/$N/x64
-        tar -xJf "/tmp/$T" -C /opt/hostedtoolcache/node/$N/x64 --strip-components=1
+        mkdir -p /opt/hostedtoolcache/node/$N/{{ARCH}}
+        tar -xJf "/tmp/$T" -C /opt/hostedtoolcache/node/$N/{{ARCH}} --strip-components=1
         rm -f "/tmp/$T" /tmp/SHASUMS256.txt
-        touch /opt/hostedtoolcache/node/$N/x64.complete
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/node /usr/local/bin/node
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npm /usr/local/bin/npm
-        ln -sf /opt/hostedtoolcache/node/$N/x64/bin/npx /usr/local/bin/npx
+        touch /opt/hostedtoolcache/node/$N/{{ARCH}}.complete
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/node /usr/local/bin/node
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/npm /usr/local/bin/npm
+        ln -sf /opt/hostedtoolcache/node/$N/{{ARCH}}/bin/npx /usr/local/bin/npx
       done
       # Docker Hub mirror: kiln runs a registry proxy at 127.0.0.1:5000 (host); guests reach via 10.0.2.2:5000 (QEMU user networking)
       # Pulls are mirrored locally; falls back to Docker Hub if proxy is down
@@ -110,6 +123,12 @@ write_files:
       apt-get purge -y snapd unattended-upgrades || true
       systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer motd-news.timer \
         e2scrub_reap.service fwupd-refresh.timer
+      # arm64 guests get kiln's secrets over fw_cfg only (no SMBIOS without UEFI). Its module,
+      # qemu_fw_cfg, is in linux-modules-extra of the kernel kiln boots (the one running now).
+      if [ "$(dpkg --print-architecture)" = arm64 ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+        modinfo qemu_fw_cfg >/dev/null
+      fi
       # Extra packages from bake_apt_packages (names validated by kiln); none = skip.
       APT_EXTRA="{{APT_PACKAGES}}"
       if [ -n "$APT_EXTRA" ]; then
@@ -117,43 +136,189 @@ write_files:
       fi
       apt-get clean
       systemctl enable kiln-job.service kiln-cache.service
+      # dockerd must not start at boot from the cached /var/lib/docker: docker.socket stays (it activates dockerd), and
+      # the job's own path starts docker.service after its trust step (R3 M-2c).
+      systemctl disable docker.service
       # sshd only exists for held (failed) jobs: kiln-job starts it. Noble socket-activates it, so disable both.
       # No baked host keys: kiln-job generates fresh ones per boot, at hold time.
       rm -f /etc/ssh/ssh_host_*
       systemctl disable ssh.service ssh.socket || true
-      # kiln talks to the guest over ttyS0 input; nothing else may read it.
-      systemctl mask serial-getty@ttyS0.service
+      # kiln talks to the guest over the console's input; nothing else may read it.
+      systemctl mask serial-getty@{{CONSOLE}}.service
+      rm -f /var/lib/systemd/linger/runner
+      # Image checks: a bake that fails one does not print KILN_BAKE_OK, so no image is kept.
+      check() { local m=$1; shift; "$@" || { echo "kiln: image check failed: $m"; exit 1; }; }
+      # Only supported here: Gitea jobs set it at run time (run_gitea). Image-wide it would break runc's memfd re-exec.
+      check "vm.memfd_noexec supported (kernel 6.3+)" test -w /proc/sys/vm/memfd_noexec
+      check "gitlab-runner on the runner user's PATH" sudo -u runner bash -c 'command -v gitlab-runner'
+      check "gitlab-runner version" bash -c 'gitlab-runner --version | grep -qx "Version: *{{GITLAB_RUNNER_VERSION}}"'
+      check "gitea-runner version" bash -c 'gitea-runner --version | grep -qx "gitea-runner version v{{GITEA_RUNNER_VERSION}}"'
+      check "docker present" sudo -u runner bash -c 'command -v docker'
+      check "docker.service not enabled at boot" bash -c '! systemctl is-enabled docker.service'
+      check "docker.socket enabled" systemctl is-enabled docker.socket
+      check "sshd off" bash -c '! systemctl is-enabled ssh.service ssh.socket'
+      check "no linger for runner" test ! -e /var/lib/systemd/linger/runner
+      if [ -r "/boot/config-$(uname -r)" ]; then KCONF="cat /boot/config-$(uname -r)"
+      elif [ -r /proc/config.gz ]; then KCONF="zcat /proc/config.gz"
+      else echo "kiln: image check failed: no kernel config (/boot/config-$(uname -r), /proc/config.gz) to verify fanotify permission events"; exit 1; fi
+      check "CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y" bash -c "$KCONF | grep -qx CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y"
       touch /etc/cloud/cloud-init.disabled
       cloud-init clean --logs --machine-id
-      echo KILN_BAKE_OK > /dev/ttyS0
+      echo KILN_BAKE_OK > /dev/{{CONSOLE}}
   - path: /usr/local/sbin/kiln-job
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Boot entry of a job VM: read the JIT config kiln passed as an SMBIOS
-      # OEM string, run exactly one job, power off. QEMU exits and the
-      # overlay is deleted.
-      jit=$(dmidecode -q -t 11 | sed -n 's/^[[:space:]]*String [0-9]*: kiln.jit=//p')
-      if [ -z "$jit" ]; then
-        echo "kiln: no JIT config passed, powering off"
-      else
+      # Boot entry of a job VM: read the forge kind and credentials kiln passed
+      # as secrets (see below), run exactly one job, power off. QEMU exits and
+      # the overlay is deleted. A missing kiln.forge means github (an older
+      # kiln only passes kiln.jit), so a rollback keeps working.
+      # kiln's secrets ("kiln.<name>=<value>"): a fw_cfg file where the qemu_fw_cfg module
+      # exists (arm64 bakes install it; arm64 has nothing else), else an SMBIOS OEM string (x86).
+      # fw_cfg files are named after the host's secret files (jit, jit.1, ..., ssh), one `kiln.<name>=<value>` line
+      # each, so every file is scanned (the line's own name is the key).
+      secret() {
+        local d=/sys/firmware/qemu_fw_cfg/by_name/opt/kiln f
+        modprobe qemu_fw_cfg 2>/dev/null
+        if [ -d "$d" ]; then
+          for f in "$d"/*/raw; do [ -r "$f" ] && sed -n "s/^kiln\.$1=//p" "$f"; done
+        else
+          dmidecode -q -t 11 2>/dev/null | sed -n "s/^[[:space:]]*String [0-9]*: kiln\.$1=//p"
+        fi
+      }
+
+      # Host->guest control channel is the console input. Open it once and keep it open:
+      # input that arrives while no fd is open would be flushed.
+      open_tty() { stty -F /dev/{{CONSOLE}} -echo 2>/dev/null; exec 3</dev/{{CONSOLE}}; }
+
+      # Reads the host's lines on stdin. `kiln.verdict=<ok|cold|refuse> <job_id>`
+      # becomes /run/kiln/verdict, the first valid one only. Anything else is ignored.
+      verdict_reader() {
+        local line
+        install -d -m 755 /run/kiln
+        while read -r line; do
+          [[ $line =~ ^kiln\.verdict=(ok|cold|refuse)\ ([0-9]+)$ ]] || continue
+          [ -e /run/kiln/verdict ] && continue
+          printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" > /run/kiln/verdict.tmp
+          chmod 644 /run/kiln/verdict.tmp
+          mv /run/kiln/verdict.tmp /run/kiln/verdict
+        done
+      }
+      # For the gitlab and gitea branches: run the reader during the job.
+      start_verdict_reader() { open_tty; verdict_reader <&3 & reader=$!; }
+
+      run_github() {
+        jit=$(secret jit)
+        if [ -z "$jit" ]; then
+          echo "kiln: no JIT config passed, powering off"
+          return 1
+        fi
+        # dockerd is not started here (R4 M-1): it would run whatever the cached /var/lib/docker holds before a release
+        # job's prejob hook has decided cold or warm. docker.socket starts it on first use; the job-started hook runs
+        # in "Set up job", before "Initialize containers", so a cold detach always precedes the first docker call.
         /usr/local/sbin/kiln-steps &
         cd /home/runner/actions-runner
         sudo -u runner ./run.sh --jitconfig "$jit"
         echo "kiln: runner exited with $?"
+      }
+      # GitLab: one job through `gitlab-runner run-single` and the custom executor kiln-exec (which blocks on the
+      # verdict). No config.toml (run-single ignores -c): flags, and the token in CI_SERVER_TOKEN so it never shows
+      # in `ps`. sudo's env_reset drops everything else. The exit status says nothing (it is 0 after a failed job
+      # too), so it is ignored: kiln takes the result from the API. The runner's stdout is the unit's console, and
+      # its `received ... job=<id>` line is how kiln learns which job this is. Gitea gets its own branch later.
+      # --wait-timeout is a backstop only; the host's own idle deadline ends an idle VM first.
+      run_gitlab() {
+        local url cred tok x=/usr/local/bin/kiln-exec
+        url=$(secret url | head -n1); cred=$(secret cred | head -n1)
+        tok=$(printf '%s' "$cred" | base64 -d 2>/dev/null)
+        if [[ ! $url =~ ^https?://[A-Za-z0-9._~:/%@+-]+$ || ! $tok =~ ^glrt-[A-Za-z0-9_.-]+$ ]]; then
+          echo "kiln: no usable gitlab url or runner token passed, powering off"
+          return 1
+        fi
+        # kiln-exec runs as runner and keeps its gate marker here; /run is root's.
+        install -d -m 700 -o runner -g runner /run/kiln-exec
+        start_verdict_reader
+        CI_SERVER_TOKEN=$tok sudo -H -u runner --preserve-env=CI_SERVER_TOKEN gitlab-runner run-single \
+          -u "$url" --name kiln --executor custom --shell bash \
+          --builds-dir /home/runner/.cache/gitlab/builds --cache-dir /home/runner/.cache/gitlab/cache \
+          --custom-config-exec "$x" --custom-config-args config --custom-prepare-exec "$x" --custom-prepare-args prepare \
+          --custom-run-exec "$x" --custom-run-args run --custom-cleanup-exec "$x" --custom-cleanup-args cleanup \
+          --max-builds 1 --wait-timeout 86400
+        echo "kiln: runner exited with $?"
+      }
+      # Gitea guest hardening (6.4), at run time so GitHub and GitLab jobs (runc's memfd re-exec) are untouched.
+      # run_gitea calls it just before the gate arms. The hold's sshd is started on demand, unaffected.
+      harden_gitea() { sysctl -w vm.memfd_noexec=2 && { systemctl stop cron.service 2>/dev/null || true; }; }
+      # SIGKILL every process whose real or effective uid is $1, with builtins only: with a gate hung or dead, no exec can run.
+      kill_uid() {
+        local d k r e
+        for d in /proc/[0-9]*; do
+          while read -r k r e _; do
+            [ "$k" = Uid: ] && { [ "$r" = "$1" ] || [ "$e" = "$1" ]; } && kill -KILL "${d#/proc/}" 2>/dev/null
+          done 2> /dev/null < "$d/status"
+        done
+        return 0
+      }
+      # Gitea (5.3): one job through `gitea-runner daemon --once`, started by the exec gate (kiln-gate) and not by a shell:
+      # every exec of the runner's tree or uid is held until the host's verdict. Two gate processes (own fanotify groups)
+      # so that one dying leaves execs held. A gate dying before the verdict: runner processes killed, `kiln.gate=dead`
+      # on the console (the host kills the VM on it), power off. The secret is just the `.runner` JSON (base64) and the
+      # job timeout in minutes; the daemon logs at info (its debug level prints job text). Its artifact cache server runs from
+      # the start and its workdir becomes its cwd at pickup, so both are off the cache disk: a cold run's detach fails on a busy mount. The exit status says nothing
+      # (0 after a failed job), kiln takes the result from the API.
+      run_gitea() {
+        local cred mins dot=/home/runner/.runner cfg=/run/kiln/gitea.yaml g=/usr/local/sbin/kiln-gate ruid A B rc v
+        cred=$(secret cred | head -n1); mins=$(secret timeout | head -n1)
+        [[ $mins =~ ^[0-9]{1,5}$ ]] && [ "$mins" -ge 1 ] || mins=180
+        if ! printf '%s' "$cred" | base64 -d 2>/dev/null | jq -e '(.id | type) == "number" and (.uuid | type) == "string"
+            and (.token | type) == "string" and (.token | test("^[A-Za-z0-9_.-]+$")) and .ephemeral == true and (.labels | type) == "array"
+            and (.address | test("^https?://[A-Za-z0-9._~:/%@+-]+$"))' > /dev/null 2>&1; then
+          echo "kiln: no usable gitea runner credential passed, powering off"
+          return 1
+        fi
+        ruid=$(id -u runner) && harden_gitea || { echo "kiln: gitea guest hardening failed, powering off"; return 1; }
+        install -d -m 755 /run/kiln && start_verdict_reader
+        (umask 077; printf '%s' "$cred" | base64 -d > "$dot") && chown runner:runner "$dot" || return 1
+        printf 'log:\n  level: info\nrunner:\n  file: %s\n  capacity: 1\n  timeout: %sm\ncache:\n  dir: /home/runner/.local/share/gitea-runner/cache\nhost:\n  workdir_parent: /home/runner/work\n' \
+          "$dot" "$mins" > "$cfg" || return 1
+        # dockerd stays down until the verdict: docker.socket activates it, and docker.service waits for the verdict (kiln-gate drop-in).
+        touch /run/kiln/gate-docker && systemctl stop docker.service || return 1
+        rm -f /run/kiln/verdict.go /run/kiln/verdict.child /run/kiln/gate.armed
+        KILN_ARMED=/run/kiln/gate.armed "$g" runner & B=$!
+        for _ in $(seq 100); do [ -e /run/kiln/gate.armed ] && break; kill -0 "$B" 2>/dev/null || break; sleep 0.1; done
+        [ -e /run/kiln/gate.armed ] || { kill_uid "$ruid"; kill "$B" 2>/dev/null; echo "kiln: exec gate did not arm, powering off"; return 1; }
+        "$g" runner gitea-runner daemon --once -c "$cfg" & A=$!
+        wait -n "$A" "$B"; rc=$?
+        case $rc in
+          77) kill_uid "$ruid"; echo "kiln: job refused"; return 1 ;;
+          75) kill "$B" 2>/dev/null; echo "kiln: runner exited before taking a job"; return 1 ;;
+        esac
+        if [ ! -e /run/kiln/verdict ]; then   # a gate died before any verdict: nothing may run
+          kill_uid "$ruid"; echo kiln.gate=dead > /dev/{{CONSOLE}}   # the bare line, straight to the console: the host accepts no other form
+          echo o > /proc/sysrq-trigger   # builtins only, no sync: a hung gate would hold any exec
+          return 1
+        fi
+        kill -0 "$A" 2>/dev/null && { wait "$A"; rc=$?; }   # the twin finished first
+        # Never kill the twin: it exits by itself after any verdict, and killing it frees its fanotify group, which
+        # allows every exec it still holds, a refused job's included (R3 M-3). On refuse, kill the job's uid first.
+        wait "$B" 2>/dev/null
+        read -r v _ < /run/kiln/verdict
+        [ "$v" != refuse ] || { kill_uid "$ruid"; return 1; }
+        echo "kiln: runner exited with $rc"
+      }
+
+      # After the runner exits: the same for every forge.
+      finish() {
         /usr/local/sbin/kiln-cache scrub || echo "kiln: cache scrub failed"
         sleep 1 # let kiln-steps flush the last page
-        # Host->guest control channel is ttyS0 input. Open it once and keep it open:
-        # input that arrives while no fd is open would be flushed.
-        stty -F /dev/ttyS0 -echo 2>/dev/null
-        exec 3</dev/ttyS0
+        if [ -n "${reader-}" ]; then kill "$reader" 2>/dev/null; else open_tty; fi
         echo "kiln: decide"
         cmd=""
         read -r -t 20 cmd <&3 || true
         secs=${cmd#hold }
         if [ "$secs" != "$cmd" ] && [[ $secs =~ ^[0-9]+$ ]]; then
           echo "kiln: holding for ${secs}s"
-          keys=$(dmidecode -q -t 11 | sed -n 's/^[[:space:]]*String [0-9]*: kiln.ssh=//p')
+          keys=$(secret ssh)
           if [ -n "$keys" ]; then
             install -d -m 700 -o runner -g runner /home/runner/.ssh
             echo "$keys" | base64 -d > /home/runner/.ssh/authorized_keys
@@ -171,9 +336,341 @@ write_files:
           done
           echo "kiln: hold over"
         fi
-      fi
-      sync
-      echo o > /proc/sysrq-trigger
+      }
+
+      main() {
+        local forge reader
+        forge=$(secret forge | head -n1)
+        case ${forge:-github} in
+          github) run_github ;;
+          gitlab) run_gitlab ;;
+          gitea) run_gitea ;;
+          *) echo "kiln: unknown forge, powering off"; false ;;
+        esac && finish
+        sync
+        echo o > /proc/sysrq-trigger
+      }
+      # Sourced by the tests: define only.
+      (return 0 2>/dev/null) || main
+  - path: /usr/local/sbin/kiln-gate
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env python3
+      # kiln-gate USER [CMD...]: the exec gate of Gitea job VMs (design 5.3). Arms fanotify FAN_OPEN_EXEC_PERM on every
+      # mounted filesystem, then runs CMD as USER under it (no CMD = twin: watches only). Every execve by USER's process
+      # tree, or by any process whose real or effective uid is USER, is held until $KILN_VERDICT says ok, cold or refuse.
+      # ok: release. cold: the primary runs $KILN_DETACH, then writes $KILN_VERDICT.go (ok|refuse); the twin follows it.
+      # refuse, timeout, any handler error: deny, and kill USER's processes (exit 77). Exit 75: CMD exited first. Else it is CMD's status.
+      # Two of these run side by side, each its own fanotify group: an exec waits for every group, so one dying stays held.
+      import ctypes, os, pwd, re, resource, select, shlex, signal, struct, sys, time
+      VERDICT = os.environ.get("KILN_VERDICT", "/run/kiln/verdict")
+      GO = VERDICT + ".go"
+      CHILD = VERDICT + ".child"   # the primary writes CMD's pid here, so that the twin also lets CMD's own exec through
+      TIMEOUT = float(os.environ.get("KILN_GATE_TIMEOUT", 60))   # from the first held exec
+      DETACH = shlex.split(os.environ.get("KILN_DETACH", "/usr/local/sbin/kiln-cache detach"))
+      L = ctypes.CDLL(None, use_errno=True)
+      MAXFD = 1 << 20   # above any fd the gate can hold once RLIMIT_NOFILE is raised
+
+      def read(path):
+          try: return open(path).read()
+          except OSError: return ""
+
+      def ppid(p):
+          try: return int(read(f"/proc/{p}/stat").rsplit(")", 1)[1].split()[1])
+          except (IndexError, ValueError): return 0
+
+      def uids(p):
+          return {int(x) for l in read(f"/proc/{p}/status").splitlines() if l.startswith("Uid:") for x in l.split()[1:3]}
+
+      def user_pids(uid):
+          return [int(p) for p in os.listdir("/proc") if p.isdigit() and uid in uids(int(p))]
+
+      def job(pid, root, uid):
+          if pid <= 0: return True   # another pid namespace: hold
+          p = pid
+          while p > 1:
+              if p == root: return True
+              p = ppid(p)
+          return uid in uids(pid)    # reparented orphans keep the uid
+
+      def answer(fan, fd, resp):
+          try: os.write(fan, struct.pack("=ii", fd, resp))
+          except OSError: pass       # the process was killed meanwhile
+          os.close(fd)
+
+      def kill_user(uid, child=0):
+          for _ in range(100):
+              if child:
+                  try: os.waitpid(child, os.WNOHANG)
+                  except ChildProcessError: pass
+              ps = [p for p in user_pids(uid) if p != os.getpid()]
+              if not ps: return
+              for p in ps:
+                  try: os.kill(p, signal.SIGKILL)
+                  except OSError: pass
+              time.sleep(0.02)
+
+      def crash():
+          # A gate that dies frees its fanotify group, and the kernel then ALLOWS every exec still held or queued. The VM must
+          # die first: sysrq `b` is a synchronous emergency restart and QEMU runs with -no-reboot (R3 L-1). The host sees the
+          # VM end between a job start and its verdict and treats it as a gate death.
+          try: open("/proc/sysrq-trigger", "w").write("b")
+          except OSError: pass
+
+      def events(buf):
+          # The records of one fanotify read, stepping by event_len. An overflow record (fd < 0: the kernel could not queue
+          # an event, and allows it) or a malformed one is fatal.
+          off = 0
+          while off < len(buf):
+              if len(buf) - off < 24: raise RuntimeError("kiln-gate: short fanotify record")
+              evlen, _, _, _, mask, fd, pid = struct.unpack_from("=IBBHQii", buf, off)
+              if evlen < 24 or off + evlen > len(buf): raise RuntimeError("kiln-gate: bad fanotify record length")
+              if fd < 0 or mask & 0x4000: raise RuntimeError("kiln-gate: fanotify queue overflow")   # FAN_Q_OVERFLOW
+              yield fd, pid
+              off += evlen
+
+      def main():
+          user, cmd = sys.argv[1], sys.argv[2:]
+          pw = pwd.getpwnam(user)
+          open("/proc/self/oom_score_adj", "w").write("-1000")
+          # One fd per held exec, and both gates see the same events: a soft limit of 1024 would fail both at once.
+          hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+          resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+          fan = L.fanotify_init(4 | 1 | 0x10, os.O_RDONLY | os.O_LARGEFILE)   # FAN_CLASS_CONTENT | FAN_CLOEXEC | FAN_UNLIMITED_QUEUE
+          if fan < 0: sys.exit(f"kiln-gate: fanotify_init: {os.strerror(ctypes.get_errno())}")
+          bad = []
+          # One FILESYSTEM mark per mount. fsnotify delivers an exec event from the exec'd file's own superblock, inode and
+          # mount marks only, so every filesystem needs its own mark; the GT-5 log's "one mark covered every filesystem" was
+          # a control that did not test that (R3 L-7), and the battery only proves the per-mount marks below.
+          for l in open("/proc/self/mountinfo"):
+              f = l.split()
+              m = re.sub(r"\\([0-7]{3})", lambda x: chr(int(x.group(1), 8)), f[4])
+              if L.fanotify_mark(fan, 0x101, ctypes.c_uint64(0x40000), -100, m.encode()) < 0:   # ADD | FILESYSTEM, OPEN_EXEC_PERM
+                  bad.append((m, f[f.index("-") + 1], os.strerror(ctypes.get_errno())))
+          for m, t, e in bad:
+              if t not in PSEUDO or m == "/": print(f"kiln-gate: not marked: {m} ({t}): {e}", file=sys.stderr)
+          # Pseudo filesystems refuse a mark; any other one we could not mark could run code unseen: fail closed, the runner never starts.
+          if any(m == "/" or t not in PSEUDO for m, t, _ in bad): sys.exit("kiln-gate: a filesystem could not be marked")
+          kill_user(pw.pw_uid)      # nothing of the job uid may exist before arming completes
+          if os.environ.get("KILN_ARMED"): open(os.environ["KILN_ARMED"], "w").close()
+          child = 0
+          if cmd:
+              sync, go = os.pipe()
+              child = os.fork()
+              if child == 0:
+                  if os.read(sync, 1) != b"1": os._exit(1)   # the pid file exists before the exec event does; a parent that died first sends nothing
+                  os.closerange(3, MAXFD)   # the fanotify fd (never let the runner keep the group alive) and kiln-job's console fd 3
+                  os.setsid(); os.initgroups(user, pw.pw_gid); os.setgid(pw.pw_gid); os.setuid(pw.pw_uid)
+                  L.prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG after setuid, which clears it: gate dies -> runner dies
+                  env = {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "LANG": "C.UTF-8", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+                  env.update(l.rstrip("\n").split("=", 1) for l in read("/etc/environment").splitlines() if "=" in l and l[0] != "#")
+                  os.chdir(pw.pw_dir)
+                  os.execvpe(cmd[0], cmd, env)
+              open(CHILD, "w").write(str(child)); os.write(go, b"1")
+          me = os.readlink("/proc/self/exe")
+          pending, t0, mode, det, rc = [], None, None, None, None   # mode: None (holding), "cold" (detach / wait for the primary), "ok", "refuse"
+          try:
+              while True:
+                  if select.select([fan], [], [], 0.02)[0]:
+                      for fd, pid in events(os.read(fan, 65536)):
+                          try:
+                              # L-5: safe only because the primary does not reap CMD while it holds an exec (t0 set), so the pid
+                              # is not reused by a job-uid python3 meanwhile; a one-shot flag would make it explicit.
+                              if pid > 0 and pid == (child or int(read(CHILD) or 0)) and os.readlink(f"/proc/{pid}/exe") == me:   # the primary's exec of CMD (binary + interpreter)
+                                  answer(fan, fd, 1)
+                              elif mode == "ok" or not job(pid, child, pw.pw_uid):
+                                  answer(fan, fd, 1)                       # infrastructure (kiln-job, kernel helpers) or after the verdict
+                              elif mode == "refuse": answer(fan, fd, 2)
+                              else:
+                                  pending.append(fd); t0 = t0 or time.time()
+                          except Exception:
+                              answer(fan, fd, 2)                           # any handler bug: deny, never crash open
+                  if child and mode is None and not t0 and os.waitpid(child, os.WNOHANG)[0]:
+                      kill_user(pw.pw_uid); print("kiln-gate: the runner exited before the verdict", file=sys.stderr); sys.exit(75)
+                  if mode is None and (os.path.exists(VERDICT) or (t0 and time.time() - t0 > TIMEOUT)):
+                      v = (read(VERDICT).split() or ["refuse"])[0]
+                      mode, t0 = ("cold" if v == "cold" else "ok" if v == "ok" else "refuse"), time.time()
+                      if mode == "cold" and cmd:   # a plain fork: Popen or system() would wait for the exec event we have yet to answer
+                          det = os.fork()
+                          if det == 0:
+                              os.closerange(3, MAXFD); os.execv(DETACH[0], DETACH)
+                  if mode == "cold":   # keeps answering events meanwhile: the detach itself execs
+                      if cmd and rc is None and (r := os.waitpid(det, os.WNOHANG))[0]: rc = os.waitstatus_to_exitcode(r[1])
+                      if cmd and rc is not None or not cmd and read(GO) or time.time() - t0 > 150:   # the twin waits for non-empty: GO exists a moment before it is written
+                          if cmd:
+                              if rc is None: os.kill(det, signal.SIGKILL)
+                              open(GO, "w").write("ok" if rc == 0 else "refuse")
+                          mode = "ok" if read(GO) == "ok" else "refuse"
+                  if mode in ("ok", "refuse"):
+                      for fd in pending: answer(fan, fd, 1 if mode == "ok" else 2)
+                      pending = []
+                      if mode == "ok": break   # close fan below: the marks vanish with the group, zero overhead
+                      kill_user(pw.pw_uid, child)
+                      sys.exit(77)
+          except Exception:   # a bug in the loop itself (or a queue overflow): reset the VM at once, else deny what is held and die loudly
+              crash()
+              for fd in pending: answer(fan, fd, 2)
+              kill_user(pw.pw_uid, child)
+              raise
+          os.close(fan)
+          if child: sys.exit(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]))
+
+      PSEUDO = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "debugfs", "tracefs", "securityfs", "pstore", "bpf", "configfs",
+                "fusectl", "binfmt_misc", "autofs", "efivarfs", "devtmpfs", "hugetlbfs", "rpc_pipefs", "nsfs"}
+      if __name__ == "__main__":
+          main()
+  - path: /etc/systemd/system/docker.service.d/kiln-gate.conf
+    content: |
+      # Gitea job VMs only (run_gitea creates /run/kiln/gate-docker): dockerd does not start until the host's verdict is
+      # ok, or cold and the cache disk is detached (kiln-docker-gate), so a docker:// step cannot run before it, and a cold
+      # one never runs cache content. docker.socket accepts the connection meanwhile. No start limit: the
+      # runner's own connection, the verdict and a cold run's `kiln-cache detach` (stop, unmount, start) can start it several times at once.
+      [Unit]
+      StartLimitIntervalSec=0
+
+      [Service]
+      ExecStartPre=/usr/local/sbin/kiln-docker-gate
+  - path: /usr/local/sbin/kiln-docker-gate
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # docker.service ExecStartPre. Outside Gitea job VMs (no /run/kiln/gate-docker) it passes at once. In one: wait for the
+      # host's verdict. ok passes. cold passes only once /mnt/cache is unmounted (`kiln-cache detach` unmounts it before its
+      # own `systemctl start docker.service`, so this cannot deadlock), else a queued request could start dockerd on the
+      # cache disk's /var/lib/docker before the detach stops it (R3 M-2a). refuse, no verdict and a stuck detach fail.
+      [ -e /run/kiln/gate-docker ] || exit 0
+      v=$(/usr/local/sbin/kiln-verdict-wait) || exit 1
+      [ "$v" = ok ] && exit 0
+      for _ in $(seq 300); do
+        findmnt /mnt/cache > /dev/null || exit 0
+        sleep 0.2
+      done
+      exit 1
+  - path: /usr/local/sbin/kiln-verdict-wait
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # The guest gate (kiln-exec, kiln-gate) calls this: waits for the host's
+      # verdict in /run/kiln/verdict (written by kiln-job's reader). Prints ok,
+      # cold or refuse; exit 0 for ok and cold. A missing file after the wait or
+      # anything unreadable is refuse. The wait is 60 s at most; KILN_VERDICT_WAIT
+      # can only shorten it.
+      w=${KILN_VERDICT_WAIT:-60}
+      [[ $w =~ ^[0-9]+$ ]] && [ "$w" -le 60 ] || w=60
+      for ((i = 0; i <= w * 5; i++)); do
+        if [ -f /run/kiln/verdict ]; then
+          read -r v id < /run/kiln/verdict
+          if [[ $v =~ ^(ok|cold)$ ]] && [[ $id =~ ^[0-9]+$ ]]; then echo "$v"; exit 0; fi
+          break
+        fi
+        sleep 0.2
+      done
+      echo refuse
+      exit 1
+  - path: /usr/local/bin/kiln-exec
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # kiln-exec <stage> [script substage]: the GitLab custom executor (gitlab-runner run-single) in a kiln VM.
+      # Stages: config | prepare | run <script> <substage> | cleanup.
+      #
+      # Trust: everything in CUSTOM_ENV_* is job-controlled data (a job's `variables:` can set any of it,
+      # CI_JOB_ID and CI_JOB_IMAGE included). It is quoted everywhere, never eval'd, never used for a gate
+      # decision, and names go to docker after `--`. The gate reads only the verdict file, via
+      # kiln-verdict-wait, and the job id used for container names comes from that file, not from the job.
+      #
+      # Exit codes (SP-8): BUILD_FAILURE_EXIT_CODE (1) = the job failed, one attempt, no runner retry.
+      # SYSTEM_FAILURE_EXIT_CODE (2) = kiln infrastructure broke; the runner retries prepare 3 times.
+      # So refuse, timeout and a garbage verdict exit 1 (never 2), and any non-zero script exit maps to 1.
+      #
+      # Limits: the image's `entrypoint` and `pull_policy` are not exposed to a custom executor (only the
+      # image name is), so the container runs `tail -f /dev/null` with the entrypoint cleared and the image
+      # is pulled if missing. Service `entrypoint` and `command` are honoured. Services run privileged (dind);
+      # the VM is the isolation boundary. A cancel is noticed by the runner after up to 60 s, then it sends
+      # SIGTERM to the running stage, which is forwarded; after_script still runs.
+      BFEC=${BUILD_FAILURE_EXIT_CODE:-1}
+      SFEC=${SYSTEM_FAILURE_EXIT_CODE:-2}
+      S=/run/kiln-exec                 # per-VM state: the gate marker "<verdict> <job id>"
+      B=$HOME/.cache/gitlab            # builds and cache dirs: on the repo cache disk, after a cold run's detach it is plain disk
+      IMG=${CUSTOM_ENV_CI_JOB_IMAGE:-}
+      say() { echo "kiln-exec: $*" >&2; }
+      refuse() { say "$*"; exit "$BFEC"; }
+      NAME='^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'    # image, service and alias names: no leading '-', no shell or docker option syntax
+      gate() {
+        local v id jid
+        # One-shot (R2 M-3): the runner takes one job per VM, so a second prepare is a job the host never judged.
+        [ -e "$S/gate-ok" ] && refuse "a second job in this VM, job not run"
+        v=$(/usr/local/sbin/kiln-verdict-wait) || refuse "kiln did not allow this job (refused, or no verdict from the kiln host in time). No job code was run."
+        case $v in ok | cold) ;; *) refuse "unreadable verdict, job not run" ;; esac
+        read -r _ id _ < /run/kiln/verdict
+        [[ $id =~ ^[0-9]+$ ]] || refuse "unreadable verdict, job not run"
+        # The verdict must be for the job being prepared. The id comes from JOB_RESPONSE_FILE, which the runner
+        # itself sets (a job cannot set a variable without the CUSTOM_ENV_ prefix) and fills from the server's
+        # response; CUSTOM_ENV_CI_JOB_ID is job-overridable and never read here.
+        jid=$(jq -r '.id // empty' "${JOB_RESPONSE_FILE:-/nonexistent}" 2> /dev/null)
+        [[ $jid =~ ^[0-9]+$ && $jid = "$id" ]] || refuse "the verdict is not for this job, job not run"
+        if [ "$v" = cold ]; then
+          say "cold run: detaching the cache disk"
+          sudo /usr/local/sbin/kiln-cache detach >&2 || refuse "cache detach failed, job not run"
+          sudo systemctl restart docker.service >&2 || refuse "docker restart failed, job not run"
+        else
+          # dockerd is not started at boot (R3 M-2c): it starts now, after the trust step, on the cache the mount path cleaned.
+          sudo systemctl start docker.service >&2 || refuse "docker start failed, job not run"
+        fi
+        mkdir -p "$S" && echo "$v $id" > "$S/gate-ok" || exit "$SFEC"
+      }
+      load() { read -r _ J < "$S/gate-ok" 2> /dev/null && [[ $J =~ ^[0-9]+$ ]]; }   # J: the verdict's job id, trusted
+      prepare() {
+        gate; load || exit "$SFEC"
+        [[ -z $IMG || $IMG =~ $NAME ]] || refuse "invalid image name, job not run"
+        mkdir -p "$B/builds" "$B/cache" || exit "$SFEC"
+        [ -n "$IMG" ] || return 0     # no image: the job runs directly in the VM
+        docker network create "kiln-$J" > /dev/null && docker volume create "kiln-certs-$J" > /dev/null || exit "$SFEC"
+        local i=0 svc name alias base tls
+        while read -r svc; do   # one service per line; fields come out of jq as data, never through eval
+          i=$((i + 1))
+          name=$(jq -r '.name // empty' <<< "$svc"); alias=$(jq -r '.alias // empty' <<< "$svc")
+          [[ $name =~ $NAME ]] || refuse "invalid service name, job not run"
+          [[ -z $alias || $alias =~ $NAME ]] || refuse "invalid service alias, job not run"
+          base=${name%%:*}; base=${base%@*}
+          local a=(--network-alias "${base//\//__}" --network-alias "${base//\//-}") ep=() cmd=()
+          [ -n "$alias" ] && a+=(--network-alias "$alias")
+          mapfile -t ep < <(jq -r '.entrypoint // [] | .[]' <<< "$svc"); mapfile -t cmd < <(jq -r '.command // [] | .[]' <<< "$svc")
+          local e=(); [ ${#ep[@]} -gt 0 ] && e=(--entrypoint "${ep[0]}") && cmd=("${ep[@]:1}" "${cmd[@]}")
+          tls=${CUSTOM_ENV_DOCKER_TLS_CERTDIR-/certs}
+          say "service $name"
+          docker run -q -d --name "kiln-svc-$J-$i" --network "kiln-$J" "${a[@]}" --privileged -v "kiln-certs-$J:/certs" \
+            -e "DOCKER_TLS_CERTDIR=$tls" "${e[@]}" -- "$name" "${cmd[@]}" > /dev/null || exit "$SFEC"
+        done < <(jq -c '.[]' <<< "${CUSTOM_ENV_CI_JOB_SERVICES:-[]}")
+        say "image $IMG"
+        docker run -q -d --name "kiln-job-$J" --network "kiln-$J" -v "$B:$B" -v "kiln-certs-$J:/certs:ro" -w "$B" --entrypoint '' -- "$IMG" tail -f /dev/null > /dev/null || exit "$SFEC"
+      }
+      run() {   # $1 script file, $2 sub-stage
+        [ -e "$S/gate-ok" ] && load || refuse "gate not passed, job not run"
+        local rc pid
+        trap '[ -n "$pid" ] && kill "$pid" 2> /dev/null' TERM   # the runner's cancel: pass it on, then fall through
+        if [ -n "$IMG" ] && { [ "$2" = build_script ] || [ "$2" = after_script ]; }; then
+          docker exec -i "kiln-job-$J" sh -c 'if command -v bash > /dev/null; then exec bash; else exec sh; fi' < "$1" & pid=$!; wait $pid; rc=$?
+          # Files the container made as root would stop the next stage's git clean as `runner`.
+          docker exec -u 0 "kiln-job-$J" chown -R "$(id -u):$(id -g)" "$B/builds" > /dev/null 2>&1
+          [ $rc -ne 0 ] && [ -z "$(docker ps -q --filter "name=^kiln-job-$J\$" 2> /dev/null)" ] && exit "$SFEC"   # the container died: infrastructure
+        else
+          bash "$1" & pid=$!; wait $pid; rc=$?
+        fi
+        [ $rc -eq 0 ] || exit "$BFEC"
+      }
+      cleanup() {   # the VM is thrown away; this keeps a reused VM (laptop tests) tidy
+        load || return 0
+        docker rm -f $(docker ps -aq --filter "name=^kiln-(job|svc)-$J(-|\$)") > /dev/null 2>&1
+        docker network rm "kiln-$J" > /dev/null 2>&1; docker volume rm "kiln-certs-$J" > /dev/null 2>&1
+        true
+      }
+      case ${1:-} in
+        config) printf '{"builds_dir":"%s/builds","cache_dir":"%s/cache","builds_dir_is_shared":false}\n' "$B" "$B" ;;
+        prepare) prepare ;;
+        run) shift; run "$@" ;;
+        cleanup) cleanup ;;
+      esac
   - path: /usr/local/sbin/kiln-cache
     permissions: "0755"
     content: |
@@ -205,15 +702,21 @@ write_files:
       esac
       blkid /dev/vdb >/dev/null 2>&1 || mkfs.ext4 -q -L kilncache /dev/vdb
       mkdir -p /mnt/cache
-      mount -o noatime /dev/vdb /mnt/cache
+      mount -t ext4 -o noatime,nosuid,nodev /dev/vdb /mnt/cache
       # Whole ~/.cargo and ~/.rustup: the Rust toolchain itself is cached, not just crates.
       # Older caches kept ~/.cargo/{registry,git} separately: drop those obsolete dirs.
       rm -rf /mnt/cache/home_runner_.cargo_registry /mnt/cache/home_runner_.cargo_git
+      # Container records and managed plugins are what auto-start (restart policies, enabled plugins): images and volumes
+      # are what is worth caching. Gone before the bind mounts, so a container planted by a compromised default-branch
+      # job cannot run at boot, in any forge (R3 M-2b).
+      find /mnt/cache -maxdepth 1 -type l -delete   # a planted symlink would be chowned or followed below (R4 L-9)
+      # Allow-list (R4 M-1): only image data survives. swarm/ would recreate a root service, network/ and the rest are state.
+      [ -d /mnt/cache/var_lib_docker ] && find /mnt/cache/var_lib_docker -mindepth 1 -maxdepth 1 \( -type l -o ! \( -name image -o -name overlay2 -o -name volumes -o -name buildkit \) \) -exec rm -rf {} +
       for t in $DIRS; do
         src=/mnt/cache/$(echo "${t#/}" | tr / _)
         mkdir -p "$src"
         case $t in
-          /home/runner/*) runuser -u runner -- mkdir -p "$t"; chown runner:runner "$src" ;;
+          /home/runner/*) runuser -u runner -- mkdir -p "$t"; chown -h runner:runner "$src" ;;
           *) mkdir -p "$t" ;;
         esac
         mount --bind "$src" "$t"
@@ -269,12 +772,13 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/bash
-      # Mirror live step output (runner _diag/pages/*.log) to the second serial
-      # port, which kiln saves as steps.log. The runner deletes a page once
-      # uploaded, so poll fast and simply forget files that vanish.
+      # Mirror live step output (runner _diag/pages/*.log) to the steps channel (the
+      # second serial port, or a virtio-serial port on arm64), which kiln saves as
+      # steps.log. The runner deletes a page once uploaded, so poll fast and simply
+      # forget files that vanish.
       pages=/home/runner/actions-runner/_diag/pages
       declare -A off
-      exec >/dev/ttyS1
+      exec >{{STEPS}}
       while sleep 0.3; do
         for f in "$pages"/*.log; do
           size=$(stat -c %s "$f" 2>/dev/null) || continue
@@ -289,7 +793,7 @@ write_files:
     content: |
       [Unit]
       Description=kiln: run one GitHub Actions job
-      Wants=network-online.target docker.service
+      Wants=network-online.target
       After=network-online.target docker.service
 
       [Service]
