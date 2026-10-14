@@ -371,7 +371,7 @@ input[role=switch]:disabled{opacity:.5;cursor:not-allowed}
 /* settings and guides: side nav + one fixed-width body */
 .set{display:grid;gap:32px;grid-template-columns:200px minmax(0,1fr)}
 .sub{display:flex;flex-direction:column;gap:2px;position:sticky;top:80px;align-self:start}
-.sub a{height:36px;padding:0 10px;gap:10px}
+.sub a{height:auto;min-height:36px;padding:6px 10px;gap:10px;line-height:1.3}
 .sub hr{border:0;border-top:1px solid var(--line);margin:6px 10px}
 .sub .sh{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);padding:10px 10px 2px}.sub .sh:first-child{padding-top:0}
 html{scroll-padding-bottom:88px}
@@ -486,10 +486,17 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .fb{display:inline-block;height:18px;padding:0 7px;margin-right:8px;border-radius:999px;font:500 11px/18px var(--sans);color:var(--fg-2);box-shadow:inset 0 0 0 1px var(--line);vertical-align:1px;white-space:nowrap}
 .hlp{margin-left:auto;padding:0 10px;gap:6px}
 .hlp+.cdot{margin-left:0}
-.gd{max-width:68ch;line-height:1.65}.gd h2{font-size:20px;font-weight:600;letter-spacing:-.015em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
-.gd .tw,.an .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table,.an table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td,.an th,.an td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd tr:first-child th,.an tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}
+.gd{max-width:none;line-height:1.65}.gd>*{max-width:68ch}.gd>.tw{max-width:96ch}.gd h2{font-size:20px;font-weight:600;letter-spacing:-.015em}.gd>*+*{margin-top:14px}.gd ul,.gd ol{padding-left:20px}.gd li+li{margin-top:6px}
+.gd .tw,.an .tw{overflow-x:auto;background:var(--s1);border-radius:var(--r2);box-shadow:var(--e1)}.gd table,.an table{border-collapse:collapse;font-size:13px;width:100%}.gd th,.gd td,.an th,.an td{border-top:1px solid var(--line);padding:8px 14px;text-align:left}.gd thead th,.an tr:first-child th{border-top:0;color:var(--fg-2);font-weight:500}.gd tbody tr:first-child th,.gd tbody tr:first-child td{border-top:1px solid var(--line)}.gd tbody th{font-weight:600;color:var(--fg);vertical-align:top}.gd td{vertical-align:top}
 .gnav{display:flex;justify-content:space-between;gap:16px;margin-top:40px;font-size:14px}
 .gnav a{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 12px;border-radius:var(--rc);background:var(--s1);box-shadow:var(--e1);text-decoration:none}.gnav a:hover{box-shadow:var(--e2);background-image:linear-gradient(var(--hover),var(--hover))}
+.gs{margin-bottom:16px}.gs input{width:100%}#gres{margin-bottom:16px}.gr{display:block;padding:10px 14px;text-decoration:none;color:inherit}.gr span{display:block;color:var(--fg-2);font-size:13px;margin-top:2px}
+.grel{margin-top:32px;font-size:13px;color:var(--fg-2)}.gd h3{font-size:15px;font-weight:600;margin-top:24px}.gd kbd{font:inherit;font-size:12px;padding:1px 6px;border-radius:4px;box-shadow:inset 0 0 0 1px var(--line-strong)}
+.ft>input{position:absolute;opacity:0;width:1px;height:1px;margin:0}.ftl{display:flex;gap:4px;margin-bottom:8px}.fp{display:none}
+.ftl label{display:inline-flex;align-items:center;min-height:36px;padding:0 14px;border-radius:var(--rc);cursor:pointer;font-size:13px;font-weight:500;color:var(--fg-2);box-shadow:inset 0 0 0 1px var(--line)}
+.ft>input:nth-of-type(1):checked~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):checked~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):checked~.ftl label:nth-of-type(3){color:var(--fg);background:var(--active);box-shadow:inset 0 0 0 1px var(--accent)}
+.ft>input:nth-of-type(1):checked~.fp:nth-of-type(1),.ft>input:nth-of-type(2):checked~.fp:nth-of-type(2),.ft>input:nth-of-type(3):checked~.fp:nth-of-type(3){display:block}
+.ft>input:nth-of-type(1):focus-visible~.ftl label:nth-of-type(1),.ft>input:nth-of-type(2):focus-visible~.ftl label:nth-of-type(2),.ft>input:nth-of-type(3):focus-visible~.ftl label:nth-of-type(3){outline:2px solid var(--accent);outline-offset:2px}
 @media(max-width:719px){.hq::after{inset:-12px}.cb .btn{--bh:40px;width:40px}.cb pre.snip{padding-right:56px}.hlp{width:40px;height:40px;padding:0;justify-content:center}.hlp span{display:none}}
 /* installed app: content clears the notch, status bar and rounded corners (viewport-fit=cover) */
 .hlp.inst{border:0;background:none;cursor:pointer;font:inherit;font-size:14px;font-weight:500}
@@ -745,32 +752,45 @@ const isFail = v => { if (v.mint_failed) return false; const s = status(v); retu
 const notifiable = v => isFail(v) || (v.state === 'done' && status(v) !== 'passed');
 const sz = (v, f) => v.cpus ? `<span class="mono sm fg2"${f ? ' tabindex="0"' : ''} data-tip="VM size: ${+v.cpus} vCPU${v.mem_mb ? ', ' + Math.round(v.mem_mb / 1024) + ' GB memory' : ''}. Set by the job's runs-on label.">${+v.cpus} cpu</span>` : '';
 const jt = v => v.job || (v.state === 'booting' ? 'starting' : v.state === 'idle' ? (v.warm ? 'warm, waiting for a job' : 'waiting for a job') : 'no job');
-const wm = (v, f) => (v.warm && v.state === 'idle' ? `<span class="wm"${f ? ' tabindex="0"' : ''} data-tip="Warm VM: booted ahead of time so a job starts in about a second. Set per repo on its Repos page.">${ic('flame')}warm</span>` : '');
+const wm = (v, f) => (v.warm && v.state === 'idle' ? `<span class="wm"${f ? ' tabindex="0"' : ''} data-tip="Warm VM: booted ahead of time so a job starts in about 4 seconds. Set per repo on its Repos page.">${ic('flame')}warm</span>` : '');
 const md = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 const HELP = {
   maxvms: ["Max VMs", "How many job VMs may run at once. Each holds its vCPUs and memory while running. 0 pauses kiln: running jobs finish, new ones stay queued.", "stuck"],
   label: ["Runner label", "The word a job puts in `runs-on` to choose kiln. Add `-2cpu`, `-8cpu`… for other sizes. A job must name exactly one kiln label, or it is never picked up.", "move"],
   autorebake: ["Auto rebake", "When the image is stale (runner behind GitHub's latest, baked over 25 days ago, Node versions changed, or baked by an older kiln), kiln rebakes on its own, at most every 6 hours.", "image"],
   mirror: ["Docker mirror", "A local cache of Docker Hub images. Fresh VMs would otherwise hit Docker Hub's pull limit. Jobs use it automatically; if it is down, they pull from Docker Hub.", "cache"],
-  key: ["Dashboard key", "Tailnet devices are recognised by their Tailscale login. A browser on the CI box itself can't be, because job VMs look like local traffic too. So it has to show this key once. Open the dashboard from your laptop over Tailscale to skip it.", "network"],
+  key: ["Dashboard key", "Tailnet devices are recognised by their Tailscale login. A browser on the CI box itself can't be, because job VMs look like local traffic too. So it has to show this key once. From your laptop over Tailscale no key is needed: open the dashboard there.", "network"],
   serve: ["Serve over HTTPS", "Publishes the dashboard at `https://<box>.<tailnet>.ts.net:8443` with a real certificate. Still tailnet-only. Notifications need it. The tailnet must have HTTPS certificates on (Tailscale admin console › DNS › HTTPS Certificates).", "network"],
   doctor: ["Diagnostics", "Runs `kiln doctor`: KVM (Linux) or HVF (macOS), tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
   queued: ["Queued", "Jobs your forge is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
-  stale: ["Stale image", "The image needs a rebake: its runner is older than GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date. A rebake takes ~4 minutes and doesn't touch running jobs.", "image"],
+  stale: ["Stale image", "The image needs a rebake: it is over 25 days old, the Actions runner in it is older than GitHub's latest, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date, so the age and runner checks apply when this box serves a GitHub repo; GitLab and Gitea runners are pinned per kiln release. A rebake takes about 4 minutes and doesn't touch running jobs.", "image"],
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
   timeline: ["Timeline", "Queue: the forge waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until the forge hands it the job. Job: your steps.", "stuck"],
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
-  network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only (Linux only). Use filtered for pull requests you don't trust.", "network"],
+  network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only (Linux only). Use filtered for pull requests you don't trust. A forge set to Internal gets one extra exception: its own address and port.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
-  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min. Only GitHub jobs are priced; GitLab and Gitea minutes are shown as minutes.", "analytics"],
+  analytics: ["Analytics", "Built from the newest 100 VMs the dashboard gets, so earlier hours or days are hatched and not counted. The last chart, Job minutes over 30 days, reads the usage ledger and covers every job. Success rate is passed out of passed and failed; cancelled jobs count as neither. Saved is job minutes, each job rounded up to the minute as GitHub bills it, at the GitHub-hosted price for its VM size or your own $/min. Only GitHub jobs are priced; GitLab and Gitea minutes are shown as minutes, from their own ledger.", "usage"],
   privacy: ["Privacy", "Usage statistics and crash reports stay off unless you turn them on. This box sends them, never your browser, and they never include repo, account or host names, IPs, file paths, tokens or logs. `DO_NOT_TRACK=1` or `KILN_TELEMETRY=0` in kiln's environment turns both off, whatever is set here.", "privacy"],
   runinfo: ["Run details", "The branch, pull request, commit and title of the workflow run this job belongs to, and how it was started when that wasn't a push or pull request. kiln records them when the forge hands the job to this VM's runner, so jobs from before kiln 0.2.5, and VMs that never got a job, have none.", "debug"],
   failures: ["Recent failures", "Jobs that failed, were lost, or were killed mid-job in the last 15 minutes (not jobs kiln refused on purpose). The section hides when there are none. For older ones, click Failed in 24h or filter Jobs to failed.", "debug"],
   webhooks: ["Webhooks", "This box sends alerts to Slack, Discord, ntfy or any https URL, with no dashboard open. Each destination picks job, health and security alerts, and workflow rules add the successes you choose. A URL is a secret: it is never shown again after saving.", "alerts"],
   gitlab: ["GitLab", "kiln serves a GitLab project with a bot account's access token (`create_runner`, `manage_runner`, `read_api`). For each job it makes a one-job runner in the project, boots a VM for it and deletes both afterwards.", "gitlab"],
   gitea: ["Gitea", "kiln serves a Gitea repo with a dedicated service account's access token (`write:repository`, `read:user`). The account must own the repo or be in its organisation's Owners team, because only an Owner gets the runner registration token. For each job kiln makes a one-job runner in the repo, boots a VM for it and deletes both afterwards.", "gitea"],
-  warm: ["Warm VMs", "Keeps this many VMs booted and waiting so jobs start instantly instead of after ~10 s of boot. Each holds its memory while idle and is recycled every {R} min so it never goes stale.", "move"],
+  warm: ["Warm VMs", "Keeps this many VMs booted and waiting, so a job starts in about 4 seconds instead of waiting for a boot. Each holds its memory and a Max VMs slot while idle, and is recycled every {R} min so it never goes stale.", "warm"],
+  github: ["GitHub credential", "kiln signs in with a GitHub App (recommended: least power, and its tokens expire after an hour) or a personal access token with `repo`, plus `workflow` for test pull requests.", "start"],
+  forges: ["Forges", "A forge is a server kiln takes jobs from. One box can serve GitHub, GitLab and Gitea together.", "forges"],
+  refused: ["Refused job", "kiln declined this job on purpose, for example a pull request from a fork. No job code ran, and it is not a failure. If the reason says kiln could not decide (a timeout or API error), it failed closed: rerun the job.", "gate"],
+  cold: ["Cold run", "Tag and release builds run without the cache, so a poisoned cache can't reach what you ship. Other builds read it.", "cache-trust"],
+  privateforge: ["Internal network", "Internal opens job VMs to this forge's address and port, and to every site behind a proxy on it. With Filtered job networking the forge's URL must be an IPv4 address.", "private-forge"],
+  platform: ["Apple Silicon (arm64)", "This box runs arm64 Linux jobs. Use the `-arm64` label (for example `kiln-arm64`) in `runs-on`, or `tags` on GitLab: the plain label is never picked up here. On macOS, Filtered networking and the Docker mirror are not available.", "arm64"],
+  autoupdate: ["Updates", "kiln downloads a newer release, checks its signature, waits for running jobs, restarts, and goes back to the old version if the new one fails to start twice. Auto update does this by itself when no job is running.", "updates"],
+  restart: ["Restart", "Restart when idle drains first: no new VMs start, running jobs finish, then kiln restarts. Restart now kills running jobs, and they fail on their forge.", "updates"],
+  rules: ["Workflow rules", "Send the result of chosen workflows to chosen destinations. A GitLab repo has no workflow files, so its rules use the name `pipeline`.", "notify-rules"],
+  events: ["Alert types", "Jobs: a job failed, timed out, was killed or lost. Health: something stops launches. Security: a setting or a token changed. Refused jobs send nothing.", "alerts"],
+  warmbudget: ["Warm VM budget", "Warm VMs count against Max VMs: a slot held by a warm VM can't run another job.", "warm"],
+  timeouts: ["Timeouts", "Job timeout: longest a job may run. Idle timeout: a VM that gets no job is killed after this. Poll interval: how often kiln asks each forge for queued jobs. Stop grace: how long running jobs get to finish on `systemctl stop`.", "stuck"],
+  cachebranches: ["Cache branches", "Besides the default branch, successful pushes to these branches may also save the repo's cache. Pull requests and tags never do.", "cache-trust"],
 };
 const hqIf = id => HELP[id] ? hq(id) : ''; // a popover that exists only once its entry is added to HELP (refused)
 const hq = id => `<button class="hq" data-act="help" data-id="${id}" aria-label="About ${esc(HELP[id][0])}" aria-expanded="false">?</button>`;
@@ -785,14 +805,33 @@ const TIPS = {
   overview: "Each tile is a VM slot. Ember means a job is running now; click it for live logs. Banners appear only when something needs you.",
   jobs: "Every row is one throwaway VM that ran one job, with the branch, PR and commit it ran for. Open a row for its timeline and logs.",
   job: "Console is boot and runner output, Steps is your steps live, and the forge's own log (named for it) appears when the job ends.",
-  repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days.",
+  repos: "'Routing to kiln' means a kiln job ran for that repo in the last 14 days. GitLab projects and Gitea repos show a forge chip.",
   'settings-capacity': "Press Save changes at the bottom. Changes apply within seconds, with no restart.",
   'settings-timeouts': "Press Save changes at the bottom. Changes apply within seconds, with no restart.",
   'settings-access': "Press Save changes at the bottom. The listen address is the one setting that needs a restart: Overview then offers Restart when idle.",
   'settings-forges': "Each forge card saves at once, on its own buttons. Press Test after adding a project: it shows the bot's role on it.",
   'settings-notifications': "Destinations and their switches save at once. Workflow rules have their own Save button.",
   'settings-appearance': "These choices are kept in this browser only, not on the box.",
+  // Shown instead of the page's own tip when they apply (see tipKey).
+  setup: "Setup detects each step on its own, so you can close this page and come back. It is also under Help, and in Settings › Forges.",
+  analytics: "Charts use the newest 100 VMs. The last chart uses the full usage ledger.",
+  refused: "kiln refused this job on purpose, and no job code ran. The note says why.",
+  held: "This VM stays up until the time shown. Release it when you are done: it holds a slot.",
+  arm64: "This box runs arm64 jobs. Ask for the -arm64 label (kiln-arm64), not plain kiln.",
+  mixed: "Chips show which forge each job came from. Filter by forge above the list.",
+  update: "Updates are signed, and kiln waits for running jobs before it restarts.",
+  guides: "Press ? anywhere for keyboard shortcuts. The search box finds words in every guide.",
 };
+// The guide a tip links to.
+const TIPL = { setup: 'forges', 'settings-forges': 'forges', analytics: 'usage', refused: 'gate', held: 'debug', arm64: 'arm64', mixed: 'forges', update: 'updates' };
+// Which tip a page shows: the first of these that has not been dismissed. One tip per page.
+function tipKey(pk, pg, r) {
+  if (pk === 'repos' && r.seg.length) return null;
+  const base = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'settings' ? (pg.g === 'analytics' ? 'analytics' : 'settings-' + pg.g) : pk;
+  const v = pk === 'jobs' && r.seg[0] ? S.vms.find(x => x.id === r.seg[0]) : null;
+  const ks = [v && refusedBy(v) && 'refused', v?.state === 'held' && 'held', pk === 'overview' && S.update?.available && 'update', pk === 'overview' && /-arm64$/.test(JL()) && 'arm64', pk === 'jobs' && !r.seg[0] && mixed(F) && 'mixed', base];
+  return ks.find(k => k && TIPS[k] && !lsGet('kiln-tip-' + k)) || null;
+}
 const jdur = v => v.busy_since ? (v.ended || now()) - v.busy_since : v.ended ? v.ended - v.started : null;
 const timeHTML = v => ACTIVE(v) ? `<span data-t="${v.busy_since || v.started}" data-k="dur"></span>` : jdur(v) == null ? '—' : dur(jdur(v));
 // The runs-on label of the default size: the configured label, plus -arm64 on an arm64 host.
@@ -1041,12 +1080,12 @@ function route() {
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
   pg.mount(r);
-  const pk = Object.keys(pages).find(k => pages[k] === pg), tk = pk === 'jobs' && r.seg[0] ? 'job' : pk === 'repos' && r.seg.length ? null : pk === 'settings' ? 'settings-' + pg.g : pk;
+  const pk = Object.keys(pages).find(k => pages[k] === pg), tk = tipKey(pk, pg, r);
   if (pk === 'setup' || pk === 'repos' || !S.vms.length) loadHello();
   pg.update?.(); notifyState();
   // Tips go under the page header (on a job, above its log), so headers sit at the same place on every page.
-  const ph = $('#app > .ph'), lg = $('#jd-log'), html = `<div class="tip" role="note">${ic('tip')}<span><span class="sr">Tip: </span>${esc(TIPS[tk])}</span><button class="lnk sm" data-act="tipok" data-id="kiln-tip-${tk}">Got it</button></div>`;
-  if (TIPS[tk] && !lsGet('kiln-tip-' + tk) && !setupNeeded()) ph ? ph.insertAdjacentHTML('afterend', html) : lg ? lg.insertAdjacentHTML('beforebegin', html) : $('#app').insertAdjacentHTML('afterbegin', html);
+  const ph = $('#app > .ph'), lg = $('#jd-log'), html = `<div class="tip" role="note">${ic('tip')}<span><span class="sr">Tip: </span>${esc(TIPS[tk])}${TIPL[tk] ? ` <a href="#/guides/${TIPL[tk]}">Learn more</a>` : ''}</span><button class="lnk sm" data-act="tipok" data-id="kiln-tip-${tk}">Got it</button></div>`;
+  if (tk && (!setupNeeded() || pk === 'setup')) ph ? ph.insertAdjacentHTML('afterend', html) : lg ? lg.insertAdjacentHTML('beforebegin', html) : $('#app').insertAdjacentHTML('afterbegin', html);
   // Slide main's children, not main: main's overflow-x:clip clips only what is inside it, so a
   // shifted main would widen the page by 32px and phones would re-lay out the viewport and the tabs.
   if (sd && !still()) $$('#app > *').forEach(el => el.animate([{ transform: `translateX(${sd * 32}px)`, opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 180, easing: 'cubic-bezier(.2,0,0,1)' }));
@@ -1160,8 +1199,8 @@ function banners() {
   if (S.listen_fallback) B(0, 'fail', esc(S.listen_fallback) + '.', A('Fix listen address', '#/settings/access'));
   if (rs.state === 'stopping') B(0, 'ember', `<b>kiln is stopping</b> · ${esc(rs.progress || 'stopping VMs')}`);
   else if (rs.state === 'restarting') B(0, 'ember', '<b>Restarting kiln</b> · back in a few seconds.' + newListen());
-  else if (rs.state === 'draining') B(0, 'ember', `<b>Restart pending</b> · ${esc(rs.progress || 'draining')}. No new VMs start meanwhile.`, X('Cancel restart', 'rscancel') + X('Restart now', 'rsnow'));
-  else if (rs.needed?.length) B(1, 'warn', `A saved setting (${rs.needed.map(n => esc(RESTART_NAMES[n] || n)).join(', ')}) applies after a restart.`, X('Restart when idle', 'rsidle', 1) + X('Restart now', 'rsnow'));
+  else if (rs.state === 'draining') B(0, 'ember', `<b>Restart pending</b> · ${esc(rs.progress || 'draining')}. No new VMs start meanwhile.${hq('restart')}`, X('Cancel restart', 'rscancel') + X('Restart now', 'rsnow'));
+  else if (rs.needed?.length) B(1, 'warn', `A saved setting (${rs.needed.map(n => esc(RESTART_NAMES[n] || n)).join(', ')}) applies after a restart.${hq('restart')}`, X('Restart when idle', 'rsidle', 1) + X('Restart now', 'rsnow'));
   // An image from an older recipe both blocks launches and needs a rebake: one banner for both.
   const im = S.image, oldImg = im?.rebake && p.blocked_kind === 'old_image';
   if (p.blocked_kind === 'github_api') B(0, 'fail', esc(p.blocked) + '. githubstatus.com may not show it; queued jobs start once GitHub registers runners again.', '', GH);
@@ -1175,7 +1214,7 @@ function banners() {
   for (const [r, m] of Object.entries(p.repo_errors || {})) if (kindOf(F, r) === 'github' && !(/401|Bad credentials/i.test(m) && (bad401 || !S.token_set))) B(1, 'warn', `${esc(r)}: ${esc(ghMsg(m))}`, '', GH);
   const rf = Object.entries(p.refused_forks || {}), rn = rf.reduce((a, [, n]) => a + +n, 0);
   if (rn) B(1, 'warn', `${rn} job${rn > 1 ? 's' : ''} from fork pull requests refused (${rf.map(([r, n]) => esc(repoText(F, r)) + (rf.length > 1 || n > 1 ? ': ' + +n : '')).join(', ')}). kiln never runs fork code on this box; cancel ${rn > 1 ? 'them' : 'it'} or run forks on the forge's own runners.${hqIf('refused')}`);
-  for (const [col, m, id] of forgeBanners(F, p, S.vms, now())) B(col === 'fail' && !/expire/.test(m) ? 0 : 1, col, m, A('Forges', '#/settings/forges'), { forge: id });
+  for (const [col, m, id] of forgeBanners(F, p, S.vms, now())) B(col === 'fail' && !/expire/.test(m) ? 0 : 1, col, m + (/fork is waiting/.test(m) ? hq('refused') : ''), A('Forges', '#/settings/forges'), { forge: id });
   if (err && !/401|Bad credentials/i.test(err) && !(p.paused_until > now()) && !Object.keys(p.repo_errors || {}).some(r => kindOf(F, r) === 'github')) B(1, 'warn', 'Last poll failed: ' + esc(err), '', GH);
   if (im?.rebake) B(1, 'warn', `${oldImg ? 'Not launching VMs. ' : ''}Image needs a rebake: ${esc(im.rebake)}.`, X('Rebake', 'rebake'));
   else if (im?.stale && im.runner_latest && im.runner_latest !== im.runner_version) B(1, 'warn', `Runner ${esc(im.runner_version)} is behind ${esc(im.runner_latest)}. Rebake to update.${hq('stale')}`, X('Rebake', 'rebake'));
@@ -1409,7 +1448,7 @@ pages.jobs = {
     markSeen();
     const repos = [...new Set([...REPOS(), ...S.vms.map(v => v.repo)])];
     $('#app').innerHTML = `<div class="ph"><h1>Jobs</h1></div><div class="bar">
-      <div class="seg" role="radiogroup" aria-label="Filter">${[['all', 'All'], ['running', 'Running'], ['failed', 'Failed'], ['held', 'Held'], ['refused', 'Refused']].map(([k, l]) => `<button role="radio" data-act="jf" data-v="${k}"${k === 'refused' ? tip('Jobs kiln declined on purpose, such as pull requests from forks') : ''}>${l}</button>`).join('')}</div>
+      <div class="seg" role="radiogroup" aria-label="Filter">${[['all', 'All'], ['running', 'Running'], ['failed', 'Failed'], ['held', 'Held'], ['refused', 'Refused']].map(([k, l]) => `<button role="radio" data-act="jf" data-v="${k}"${k === 'refused' ? tip('Jobs kiln declined on purpose, such as pull requests from forks') : ''}>${l}</button>`).join('')}</div>${hq('refused')}
       ${mixed(F) ? `<label class="sr" for="jf-forge">Forge</label><select id="jf-forge" data-act="jfforge"><option value="">All forges</option>${F.map(f => `<option value="${esc(f.id)}" ${f.id === jf.forge ? 'selected' : ''}>${esc(fl(f))}</option>`).join('')}</select>` : ''}
       <label class="sr" for="jf-repo">Repository</label><select id="jf-repo" data-act="jfrepo"><option value="">All repos</option>${repos.map(r => `<option value="${esc(r)}" ${r === jf.repo ? 'selected' : ''}>${esc(repoText(F, r))}</option>`).join('')}</select></div><div id="jl"></div>`;
   },
@@ -1465,7 +1504,7 @@ pages.job = {
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<p class="sm" style="margin-top:4px">Needs your SSH key (Settings › Debugging) and a tailnet connection. Release now frees the slot.</p><div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
-      <div class="card"><h2>Details</h2><dl class="kv"><dt>Size</dt><dd>${sz(v, 1) || '—'}${v.cpus ? hq('size') : ''}${wm(v, 1)}</dd><dt>Runner</dt><dd${kt('Runner id ' + fname(fg) + ' gave this VM')}>${esc(v.runner_id ?? '—')}</dd>${ci ? `<dt>Cache</dt><dd>${ci}${hq('cache')}</dd>` : ''}${v.egress ? `<dt>Network</dt><dd>${esc(v.egress)}${hq('network')}</dd>` : ''}</dl></div>
+      <div class="card"><h2>Details</h2><dl class="kv"><dt>Size</dt><dd>${sz(v, 1) || '—'}${v.cpus ? hq('size') : ''}${wm(v, 1)}</dd><dt>Runner</dt><dd${kt('Runner id ' + fname(fg) + ' gave this VM')}>${esc(v.runner_id ?? '—')}</dd>${ci ? `<dt>Cache</dt><dd>${ci}${hq(v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '') ? 'cold' : 'cache')}</dd>` : ''}${v.egress ? `<dt>Network</dt><dd>${esc(v.egress)}${hq('network')}</dd>` : ''}</dl></div>
       ${rfd ? refusedBox(v, fg) : v.note && !(v.state === 'held' && /held for debugging/i.test(v.note)) ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv && F) {
       const id = v.id;
@@ -1639,7 +1678,7 @@ async function saveCfg(c) {
 }
 const repoForm = () => `<form class="bar" data-form="addrepo" style="margin:16px 0 0"><label class="sr" for="repo-in">${mixed(F) ? 'GitHub repository' : 'Repository'}</label><input type="text" id="repo-in" placeholder="${mixed(F) ? 'GitHub owner/name' : 'owner/name'}" autocomplete="off" spellcheck="false" style="width:260px"><button class="btn pri">Add repo</button></form>`;
 // GitHub repos are added here; a GitLab or Gitea project belongs to its forge's card.
-const repoAdd = () => !F || F.some(f => f.kind === 'github') ? repoForm() + `<p class="fg2 sm" style="margin-top:8px">${mixed(F) ? 'This adds a GitHub repo. ' : ''}GitLab or Gitea project? Add it on its forge's card in <a href="#/settings/forges">Settings › Forges</a>.</p>`
+const repoAdd = () => !credsOk(F, S.token_set) ? `<div class="bar" style="margin:16px 0 0"><a class="btn pri" href="#/settings/forges">Connect a forge first</a></div>` : !F || F.some(f => f.kind === 'github') ? repoForm() + `<p class="fg2 sm" style="margin-top:8px">${mixed(F) ? 'This adds a GitHub repo. ' : ''}GitLab or Gitea project? Add it on its forge's card in <a href="#/settings/forges">Settings › Forges</a>.</p>`
   : `<div class="bar" style="margin:16px 0 0"><a class="btn pri" href="#/settings/forges">Add a project in Settings › Forges</a></div>`;
 const rd = { repo: null, wfs: null, runs: null, err: null, open: new Set(), jobs: new Map() };
 pages.repos = {
@@ -1682,6 +1721,7 @@ pages.repos = {
           <span class="lr">${lr ? lr === 'err' ? `<span class="fg3 sm"${tip("Couldn't read this repo's runs from the forge")}>unavailable</span>` : badge(lr, lr, 'Latest workflow run: ' + lr) : '<span class="fg3 sm">…</span>'}</span><span class="qn sm"${tip(ht('queued'))}>${n ? n + ' queued' : ''}</span></div>
           ${open ? `<div class="sn"><p class="fg2 sm" style="margin-bottom:8px">No job from this repo has run on kiln in the last 14 days. ${fg && fg.kind !== 'github' ? `Point a job at kiln${fg.kind === 'gitlab' ? ' with a tag' : ''}:</p>` : `Let kiln open a pull request with a small test workflow, or point an existing job at kiln:</p><div style="margin-bottom:8px">${helloBtn(r)}</div>`}${cb(snippet(fg?.kind))}<p class="fg2 sm" style="margin-top:8px">${esc(SIZES(fg?.kind))}</p></div>` : ''}</li>`;
       }).join('')}</ul>` : S.app ? `<div class="empty card">${ic('github')}<p>The GitHub App is not installed on any repo yet. kiln serves exactly the repos the App is installed on${appAccounts(S.app).length ? ` under ${appAccounts(S.app).map(x => `<b>${esc(x)}</b>`).join(', ')}` : ''}, and checks for new installations every 30 seconds until it serves one.</p>${S.app.error ? `<div class="cal" style="margin:0">${esc(S.app.error)}</div>` : ''}<div class="acts">${appInstall(1)}${appRefresh()}</div></div>`
+        : !credsOk(F, S.token_set) ? `<div class="empty">${ic('repos')}<p>Connect a forge first. kiln needs a token before it can see any repo. Setup takes you through it.</p><div class="acts"><a class="btn pri" href="#/settings/forges">Connect a forge</a><a href="#/guides/forges">About forges</a></div></div>`
         : `<div class="empty">${ic('repos')}<p>Add a repo so kiln knows where to look for jobs. It checks your forge every ${+S.config.poll_secs}s; nothing is installed in the repo.</p></div>`);
       if ($('#rl-add')) setHTML($('#rl-add'), repoAdd());
       if ($('#rl-app')) setHTML($('#rl-app'), rs.length ? `<p class="fg2 sm" style="margin:16px 0 8px">These are the repos the GitHub App is installed on. Install or uninstall it on GitHub to change the list.</p><div class="bar">${appInstall()}${appRefresh()}</div>` : '');
@@ -1692,7 +1732,7 @@ pages.repos = {
     const cg = ciGet(S.config.repo_cache_gb, this.r);
     setHTML($('#rd-warm'), `<div class="card"><h2>Repo settings</h2><form data-form="reposet">
       ${fld('warm-in', 'Warm VMs', `<input type="number" id="warm-in" min="0" max="4" step="1" value="${wn}" style="width:80px">`, '0 to 4. Counts against Max VMs; only default-size jobs use them.', 'warm')}
-      ${fld('cb-in', 'Cache branches', `<input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px">`, "Successful pushes to these branches also save the repo cache, besides the repo's default branch. Pull requests never do, and tags and releases never use the cache.")}
+      ${fld('cb-in', 'Cache branches', `<input id="cb-in" placeholder="dev, release" value="${esc(cb)}" style="width:240px">`, "Successful pushes to these branches also save the repo cache, besides the repo's default branch. Pull requests never do, and tags and releases never use the cache.", 'cachebranches')}
       ${fld('cg-in', 'Cache size (GB)', `<input type="number" id="cg-in" min="0" max="500" step="1" placeholder="${+S.config.cache_gb}" value="${cg || ''}" style="width:80px">`, `GB for this repo's cache disk, 5 to 500. Empty uses the global ${+S.config.cache_gb} GB. An existing disk keeps its size until it is reset or cleared.`)}
       <div class="bar" style="margin:12px 0 0"><button class="btn pri">Save</button></div></form></div>`);
     const e = rd.err; setHTML($('#rd-err'), e ? `<div class="cal">${esc(e)} <button class="btn" data-act="rdretry" style="margin-left:12px">${ic('refresh')}Retry</button></div>` : '');
@@ -1738,7 +1778,7 @@ const PRIV = {
 };
 const consentHTML = here =>  `<div class="card"><h2>${ic('shield', 20)} Help improve kiln?</h2>
   <p class="fg2">kiln can send anonymous reports to its maintainers. Both are off unless you turn them on. They never include repo, account or host names, IPs, file paths on this box, tokens or logs. You can change this any time in Settings › Privacy, where you can also see exactly what is sent.</p>
-  ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><span class="lb">${l}</span><label class="sw"><input type="checkbox" role="switch" id="cs-${k}" aria-label="${l}"><span class="fg2 sm">${h}</span></label></div>`).join('')}
+  ${Object.entries(PRIV).map(([k, [l, h]]) => `<div class="fld"><div><span class="lb">${l}</span>${hq('privacy')}</div><label class="sw"><input type="checkbox" role="switch" id="cs-${k}" aria-label="${l}"><span class="fg2 sm">${h}</span></label></div>`).join('')}
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"><button class="btn pri" data-act="consent">Save choice</button>${here ? '' : '<a class="btn" href="#/settings/privacy">See what is sent</a>'}</div></div>`;
 
 /* ---------- settings ---------- */
@@ -1840,7 +1880,7 @@ function addForgeForm(used, kind) {
     ${FX[kind] ? `<input type="hidden" id="af-kind" value="${k}">` : `<div style="${col}">${L('kind', 'Forge')}<select id="af-kind" data-act="afkind">${Object.entries(FX).map(([y, v]) => `<option value="${y}"${y === k ? ' selected' : ''}>${v.name}</option>`).join('')}</select></div>`}
     <div style="${col}">${L('url', 'Address')}<input type="text" id="af-url" placeholder="${x.url}" autocomplete="off" spellcheck="false" required><span class="fg2 sm">The address of the site, not of a project or repo. https, unless the network is internal.</span></div>
     <div style="${col}">${L('id', 'Short name (used as a prefix)')}<input type="text" id="af-id" value="${nid}" pattern="[a-z][a-z0-9\\-]{0,23}" autocomplete="off" spellcheck="false" required><span class="fg2 sm">Lowercase letters, digits and dashes. It prefixes this forge's project names, like <code id="af-hint">name:${x.path}</code> (for example <code>gl:group/project</code>), and cannot change later.</span></div>
-    <div style="${col}">${L('net', 'Network')}<select id="af-net"><option value="public">Public: https over the internet</option><option value="internal">Internal: LAN or tailnet, http allowed</option></select><span class="fg2 sm">Internal opens job VMs' network to this forge's address and port, and to every site behind a reverse proxy on it. Loopback and this machine's own address are refused.</span></div>
+    <div style="${col}"><span>${L('net', 'Network')}${hq('privateforge')}</span><select id="af-net"><option value="public">Public: https over the internet</option><option value="internal">Internal: LAN or tailnet, http allowed</option></select><span class="fg2 sm">Internal opens job VMs' network to this forge's address and port, and to every site behind a reverse proxy on it. Loopback and this machine's own address are refused.</span></div>
     <div style="${col}">${L('repo', 'First project or repo (optional)')}<input type="text" id="af-repo" placeholder="${x.path} or paste its URL" autocomplete="off" spellcheck="false"></div>
     <div><button class="btn pri" id="af-btn">Add ${x.name}</button></div></form>`;
 }
@@ -1848,7 +1888,7 @@ function addForgeForm(used, kind) {
 const fgOk = f => f.kind === 'github' ? !!(S.token_set || S.app) && !/401|Bad credentials/i.test(ghErr(S.poll, F)) && !S.app?.error
   : !!(f.auth?.source && f.auth.source !== 'none') && !forgeBanners([f], S.poll, S.vms, now()).length && !(FC[f.id]?.problems || []).length;
 // One row per forge at the top of Settings › Forges (shown once there is more than GitHub).
-const fgStrip = () => `<div class="card"><h2>Forges</h2><ul class="list">${F.map(f => {
+const fgStrip = () => `<div class="card"><h2>Forges${hq('forges')}</h2><ul class="list">${F.map(f => {
   const set = f.kind === 'github' ? S.token_set || S.app : f.auth?.source && f.auth.source !== 'none', n = f.repos.length;
   return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${fbadge(f)}${esc(f.id)} <span class="fg2 sm" style="font-weight:400">${esc(f.url.replace(/^https?:\/\//, ''))}</span></span><span class="id" style="font-family:var(--sans)">${set ? 'Token set' : '<span class="fail">No token</span>'} · ${n} ${f.kind === 'github' ? 'repo' : FX[f.kind].unit}${n === 1 ? '' : 's'}${fgOk(f) ? '' : ' · <span class="warn">Needs attention</span>'}</span></span>
     <button class="btn" data-act="fgjump" data-id="${esc(f.id)}">Open</button></div></li>`;
@@ -1888,7 +1928,7 @@ const forgeCard = () => ({
     if (dl !== null && dl <= 14) note.push(`<div class="cal${dl <= 7 ? '' : ' w'}">The token ${dl < 0 ? 'has expired' : dl === 0 ? 'expires today' : `expires in ${dl} day${dl > 1 ? 's' : ''}`}. Create a new one and save it here before then.</div>`);
     const ver = FC[id]?.version || at.version;
     setHTML(q('st'), `<dl class="kv" style="margin-bottom:16px"><dt>Address</dt><dd><a href="${forgeUrl(f, f.url + '/')}" target="_blank" rel="noopener">${esc(f.url)}</a></dd>
-      <dt>Network</dt><dd>${f.network === 'internal' ? '<span class="warn">internal</span> <span class="fg2">(job VMs can reach this address and port, and every site served there)</span>' : 'public'}</dd>
+      <dt>Network</dt><dd>${f.network === 'internal' ? '<span class="warn">internal</span> <span class="fg2">(job VMs can reach this address and port, and every site served there)</span>' + hq('privateforge') : 'public'}</dd>
       <dt>Token</dt><dd>${set ? `<span class="ok">Set</span> <span class="fg2">(${at.source === 'env' ? 'environment variable' : 'saved file'})</span>` : '<span class="fail">Not set</span>'}</dd>
       ${at.login ? `<dt>${gt ? 'Account' : 'Signed in as'}</dt><dd>${esc(at.login)}</dd>` : ''}
       ${gt ? `<dt>Version</dt><dd>${ver ? esc(ver) : set ? '<span class="fg2">press Test to read it</span>' : '—'}</dd>` : `<dt>Scopes</dt><dd>${sc ? at.scopes.map(x => `<code>${esc(x)}</code>`).join(' ') : set ? '<span class="fg2">not read yet</span>' : '—'}</dd>
@@ -1906,18 +1946,19 @@ const G = {
         ${fld('f-max_vms', 'Max VMs', num('max_vms', c.max_vms), '', 'maxvms')}${fld('f-vm_cpus', 'vCPUs per VM', num('vm_cpus', c.vm_cpus), '', '', 'Default size: VMs for jobs with the plain label get this many vCPUs')}
         ${fld('f-vm_mem_gb', 'Memory per VM (GB)', num('vm_mem_gb', +(c.vm_mem_mb / 1024).toFixed(2), 0.5), '', '', 'Memory of a default-size VM. Held for as long as the VM runs.')}${fld('f-vm_disk_gb', 'Disk per VM (GB)', num('vm_disk_gb', c.vm_disk_gb), '', '', "Size of each VM's throwaway disk, deleted with the VM")}
         ${fld('f-size_mem_gb', 'Memory by size (GB)', `<input id="f-size_mem_gb" data-k="size_mem_gb" placeholder="8=12, 16=20" value="${esc(Object.entries(c.size_mem_mb || {}).map(([n, m]) => `${n}=${+(m / 1024).toFixed(2)}`).join(', '))}" style="width:200px">`, 'Memory for the other sizes, as <span class="mono">vCPUs=GB</span> pairs. Unlisted sizes get 2 GB per vCPU, at most 24 GB.')}
-        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, esc(labelHint(F, JL())), 'label')}
+        ${fld('f-label', 'Runner label', `<input type="text" id="f-label" data-k="label" value="${esc(c.label)}" spellcheck="false">`, esc(labelHint(F, JL())) + (/-arm64$/.test(JL()) ? hq('platform') : ''), 'label')}
         ${fld('f-warm_recycle_mins', 'Warm VM recycle (min)', `<input type="number" id="f-warm_recycle_mins" data-k="warm_recycle_mins" value="${esc(c.warm_recycle_mins ?? 30)}" min="5" max="1440" step="1">`, 'Idle warm VMs are replaced after this long (5 to 1440). Set warm VMs per repo on its Repos page.')}
         <div class="fld"><span></span><div id="cap-hint" class="sm"></div></div></div>`;
     },
     live() {
       const h = S.host, c = draft, el = $('#cap-hint'); if (!el || !c) return;
       const cpu = c.max_vms * c.vm_cpus, gb = c.max_vms * c.vm_mem_mb / 1024, tg = h.mem_total_mb / 1024;
-      el.innerHTML = `<span class="fg2">Uses ${cpu}/${h.cpus} CPUs, ${gb.toFixed(0)}/${tg.toFixed(0)} GB</span>` + (cpu > h.cpus ? `<div class="warn">max VMs × vCPUs exceeds ${h.cpus} host CPUs</div>` : '') + (gb > tg ? `<div class="warn">max VMs × memory exceeds ${tg.toFixed(0)} GB of host memory</div>` : '');
+      const wn = Object.values(c.warm || {}).reduce((a, n) => a + n, 0);
+      el.innerHTML = `<span class="fg2">Uses ${cpu}/${h.cpus} CPUs, ${gb.toFixed(0)}/${tg.toFixed(0)} GB</span>` + (wn ? `<div class="fg2">Warm VMs: up to ${wn} of ${c.max_vms} slots${hq('warmbudget')}</div>` : '') + (cpu > h.cpus ? `<div class="warn">max VMs × vCPUs exceeds ${h.cpus} host CPUs</div>` : '') + (gb > tg ? `<div class="warn">max VMs × memory exceeds ${tg.toFixed(0)} GB of host memory</div>` : '');
       const p = $('#f-pause'); if (p) p.checked = c.max_vms === 0;
     },
   },
-  timeouts: { html: () => `<div class="card"><h2>Timeouts</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
+  timeouts: { html: () => `<div class="card"><h2>Timeouts${hq('timeouts')}</h2>${fld('f-job_timeout_mins', 'Job timeout (min)', num('job_timeout_mins', draft.job_timeout_mins), 'A job running longer than this is killed.')}
     ${fld('f-idle_timeout_mins', 'Idle timeout (min)', num('idle_timeout_mins', draft.idle_timeout_mins), 'A VM that gets no job is killed after this.')}${fld('f-poll_secs', 'Poll interval (s)', num('poll_secs', draft.poll_secs), 'How often kiln asks your forge for queued jobs.')}
     ${fld('f-stop_grace_secs', 'Stop grace (s)', num('stop_grace_secs', draft.stop_grace_secs ?? 25), 'On systemctl stop/restart, running jobs get this long to finish before their VMs are killed (0 to 570). A host shutdown or logout waits up to this long too.')}</div>` },
   access: {
@@ -1933,7 +1974,7 @@ const G = {
       <form data-form="token" class="bar" style="margin:0"><label class="sr" for="tok-in">Personal access token</label><input type="password" id="tok-in" placeholder="ghp_…" autocomplete="off" required style="width:320px"><button class="btn pri">Validate and save</button></form>
       <p class="fg2 sm" style="margin-top:8px">Classic token, <span class="mono">repo</span> scope (add <span class="mono">workflow</span> for test PRs). Stored on the server, never shown again.</p><div id="tok-res">${tokHTML()}</div><p class="sm" style="margin-top:16px"><a href="#/setup">Run setup again</a></p>`;
       // The App is the recommended credential (docs/configuration.md#github-app), here and in the setup wizard; the token stays one click away.
-      return `<div class="card" id="fc-github"><h2>GitHub App${SV}</h2><div id="app-st"></div></div>
+      return `<div class="card" id="fc-github"><h2>GitHub App${hq('github')}${SV}</h2><div id="app-st"></div></div>
         <details class="card"${!S.app && S.token_set ? ' open' : ''}><summary><b>Use a personal access token instead</b>${S.app ? ' <span class="fg2 sm">· not used while the GitHub App is configured</span>' : ''}</summary><div style="margin-top:12px">${tok}</div></details>`;
     },
     live() {
@@ -1990,26 +2031,27 @@ const G = {
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
       const c = S.caches || {}, repos = REPOS();
-      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${repoLabel(F, r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. It is created on the first job and saved after a successful push to the default branch or a cache branch.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : '<p class="fg2">Add a repo first.</p>');
+      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${repoLabel(F, r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. A successful push to the default branch creates it.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : `<div class="empty">${ic('cache')}<p>Add a repo first. Each repo gets its own cache, created by the first successful push to its default branch.</p><a href="#/guides/cache-trust">Who may write the cache</a></div>`);
     },
   },
   debug: {
-    html: () => `<div class="card"><h2>Debug hold</h2>
-      ${fld('f-debug_hold_mins', 'Hold failed jobs (min)', `<input type="number" id="f-debug_hold_mins" data-k="debug_hold_mins" value="${esc(draft.debug_hold_mins)}" min="0" max="120" step="1">`, '0 = off. A job that fails keeps its VM (and its memory and slot) for this long so you can SSH in. Max 120.')}
-      <div class="fld"><label for="f-ssh">SSH public keys</label><div><textarea id="f-ssh" data-k="debug_ssh_keys" rows="4" spellcheck="false" class="mono" style="width:100%" placeholder="ssh-ed25519 AAAA… you@laptop">${esc((draft.debug_ssh_keys || []).join('\n'))}</textarea></div><div class="h">One per line. Key-only login as <span class="mono">runner</span>, on the tailnet address of this box. Needs both settings.</div></div></div>`,
+    html: () => `<div class="card"><h2>Debug hold</h2><div id="dbg-w"></div>
+      ${fld('f-debug_hold_mins', 'Hold failed jobs (min)', `<input type="number" id="f-debug_hold_mins" data-k="debug_hold_mins" value="${esc(draft.debug_hold_mins)}" min="0" max="120" step="1">`, '0 = off. A job that fails keeps its VM (and its memory and slot) for this long so you can SSH in. Max 120.', 'held')}
+      <div class="fld"><div><label for="f-ssh">SSH public keys</label>${hq('held')}</div><div><textarea id="f-ssh" data-k="debug_ssh_keys" rows="4" spellcheck="false" class="mono" style="width:100%" placeholder="ssh-ed25519 AAAA… you@laptop">${esc((draft.debug_ssh_keys || []).join('\n'))}</textarea></div><div class="h">One per line. Key-only login as <span class="mono">runner</span>, on the tailnet address of this box. Needs both settings.</div></div></div>`,
+    live() { const el = $('#dbg-w'); if (el) el.innerHTML = draft.debug_hold_mins > 0 && !(draft.debug_ssh_keys || []).length ? '<div class="cal w" style="margin:0 0 16px">Holds need at least one SSH key. Add yours below, or no failed job will be held.</div>' : ''; },
   },
   network: {
     html: () => `<h2 class="sech">Jobs</h2><div class="card"><h2>What jobs can reach</h2>
       <div class="fld"><div><span class="lb" id="eg-l">Job network</span>${hq('network')}</div><div><div class="seg" role="radiogroup" aria-labelledby="eg-l">${['open', 'filtered'].map(m => `<button role="radio" aria-checked="${(draft.egress || 'open') === m}" data-act="egress" data-id="${m}"${m === 'filtered' && onMac() ? ` disabled${tip('Filtered needs Linux (rootlesskit, nftables). On a Mac, do not run untrusted pull requests.')}` : ''}>${m === 'open' ? 'Open' : 'Filtered'}</button>`).join('')}</div>
       <div class="h">${onMac() ? "Jobs route like any process on this Mac, so they can reach your LAN and tailnet. Filtered needs Linux." : "Filtered: jobs reach the internet and kiln's Docker mirror only — not your LAN, tailnet, or other services on this box. Recommended before running untrusted pull requests. Open: jobs route like any process on the host."}</div>
-      ${onMac() ? '<div class="cal w" style="margin:12px 0 0"><b>Do not run untrusted pull requests on a Mac.</b> Filtered egress is not available here, so a job can reach everything this Mac can.</div>' : ''}<div id="eg-st" class="sm" style="margin-top:8px"></div></div></div></div>
+      ${onMac() ? `<div class="cal w" style="margin:12px 0 0"><b>Do not run untrusted pull requests on a Mac.</b> Filtered egress is not available here, so a job can reach everything this Mac can.${hq('platform')}</div>` : ''}<div id="eg-st" class="sm" style="margin-top:8px"></div></div></div></div>
       <div id="eg-fg"></div><h2 class="sech">This dashboard</h2><div id="ts"></div><div class="card" style="margin-top:16px"><h2>Netcheck <button class="btn" data-act="netcheck" style="margin-left:auto">${ic('pulse')}Run netcheck</button></h2><div id="nc" class="fg2 sm">${ncHTML || 'Measures UDP reachability and latency to relay regions. Takes a few seconds.'}</div></div>`,
     open() { loadTs(); if (!doctor?.checks?.length) runDoctor(); },
     live() {
       const c = (doctor?.checks || []).find(x => x.name === 'filtered egress'), el = $('#eg-st');
       if (el) setHTML(el, c ? egCheck(c) : '<span class="fg2">Checking…</span>');
       const open = (draft?.egress || 'open') === 'open';
-      setHTML($('#eg-fg'), (F || []).filter(f => f.network === 'internal').map(f => `<div class="cal w" style="margin-top:16px"><b>${esc(fl(f))} is on an internal network.</b> ${open ? `Job VMs can already reach everything, including ${esc(f.url)}.` : `Job VMs can reach ${esc(f.url)} even when the job network is Filtered, and every site served at that address (a reverse proxy there opens all of its hosts).`}</div>`).join(''));
+      setHTML($('#eg-fg'), (F || []).filter(f => f.network === 'internal').map(f => `<div class="cal w" style="margin-top:16px"><b>${esc(fl(f))} is on an internal network.</b> ${open ? `Job VMs can already reach everything, including ${esc(f.url)}.` : `Job VMs can reach ${esc(f.url)} even when the job network is Filtered, and every site served at that address (a reverse proxy there opens all of its hosts).`}${hq('privateforge')}</div>`).join(''));
       if (TS) renderTs();
     },
   },
@@ -2022,7 +2064,7 @@ const G = {
         ${window.isSecureContext ? '' : `<p class="fg2 sm" style="margin-top:8px">Installing kiln as an app also needs HTTPS (Settings › Network › Serve over HTTPS).</p>`}</div>
         <div class="card"><h2>Webhooks${hq('webhooks')}${SV}</h2><p class="fg2 sm">Send job results, health problems and security changes to Slack, Discord, ntfy or any URL. Saved URLs are never shown again.</p>
           <div id="nlist" style="margin-top:12px"></div><div id="nsecret">${nSecretHTML()}</div><div id="nform" style="margin-top:12px">${nFormHTML()}</div></div>
-        <div class="card"><h2>Workflow rules<span class="sv">Needs Save</span></h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Changes here take effect when you press Save rules.</p>
+        <div class="card"><h2>Workflow rules${hq('rules')}<span class="sv">Needs Save</span></h2><p class="fg2 sm">Send a job result to chosen destinations when a workflow finishes. Changes here take effect when you press Save rules.</p>
           <div id="nrules" style="margin-top:12px">${nRulesHTML()}</div>
           <div class="bar" id="nrules-save" hidden style="margin:12px 0 0"><span class="fg2 sm">Unsaved rule changes</span><button class="btn" data-act="discard">Discard</button><button class="btn pri" data-act="save">${ic('check')}Save rules</button></div></div>`;
     },
@@ -2045,8 +2087,8 @@ const G = {
   updates: {
     html: () => `<div class="card"><h2>Updates</h2><div id="upd"></div></div>
       <div class="card"><h2>Update settings</h2>
-      <div class="fld"><span class="lb">Auto update</span><label class="sw"><input type="checkbox" role="switch" id="f-auto_update" data-k="auto_update" aria-label="Auto update" ${draft.auto_update ? 'checked' : ''}><span class="fg2 sm">Install a newer release on its own, once no VM is running. kiln checks every 6 hours.</span></label></div>
-      ${fld('f-update_repo', 'Release repo', `<input type="text" id="f-update_repo" data-k="update_repo" value="${esc(draft.update_repo || 'Bunty9/kiln')}" spellcheck="false" class="mono">`, "owner/name whose GitHub releases kiln installs. Only releases signed with kiln's release key are accepted, whatever the repo.")}</div>`,
+      <div class="fld"><div><span class="lb">Auto update</span>${hq('autoupdate')}</div><label class="sw"><input type="checkbox" role="switch" id="f-auto_update" data-k="auto_update" aria-label="Auto update" ${draft.auto_update ? 'checked' : ''}><span class="fg2 sm">Install a newer release on its own, once no VM is running. kiln checks every 6 hours.</span></label></div>
+      ${fld('f-update_repo', 'Release repo', `<input type="text" id="f-update_repo" data-k="update_repo" value="${esc(draft.update_repo || 'Bunty9/kiln')}" spellcheck="false" class="mono">`, "owner/name whose GitHub releases kiln installs. Only releases signed with kiln's release key are accepted, whatever the repo.", 'autoupdate')}</div>`,
     open() { loadUpd(); },
     live() {
       const u = S.update || {};
@@ -2101,8 +2143,8 @@ function nListHTML() {
   const n = S.notify || {}, ds = nDests();
   const st = d => { const s = d.status || {}; return s.last_error && (!s.last_ok || s.last_error[0] > s.last_ok) ? `<span class="fail">failing · ${esc(s.last_error[1])}</span>` : s.last_ok ? `<span class="ok">ok · ${relH(s.last_ok)}</span>` : '<span class="fg2">not used yet</span>'; };
   return (n.load_error ? `<div class="cal w" style="margin-top:0">${esc(n.load_error)}</div>` : '') + (ds.length ? `<ul class="list">${ds.map(d => `<li><div class="nd"><span class="t"><span class="tt">${esc(d.name)} <span class="bdg">${esc(NK[d.kind] || d.kind)}</span></span><span class="id" style="font-family:var(--sans)">${esc(d.host)} · ${st(d)}${d.status?.dropped ? ` · ${+d.status.dropped} dropped` : ''}</span></span>
-    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''} ${nbusy.has(d.id) ? 'disabled' : ''}><span class="sm">${l}</span></label>`).join('')}</span>
-    <span class="nb"><button class="btn sm" data-act="ntest" data-id="${esc(d.id)}"${tip('Send a test message. One every 10 seconds.')}>Send test</button><button class="btn sm" data-act="nedit" data-id="${esc(d.id)}">Edit</button>${d.kind === 'generic' ? `<button class="btn sm" data-act="nrot" data-id="${esc(d.id)}"${tip('Make a new signing secret. The old one stops working.')}>Rotate secret</button>` : ''}<button class="btn sm dng" data-act="ndel" data-id="${esc(d.id)}">${ic('trash')}Remove</button></span></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No destinations yet.</p>');
+    <span class="nsw">${NEV.map(([e, l]) => `<label class="sw"><input type="checkbox" role="switch" data-act="nev" data-id="${esc(d.id)}" data-e="${e}" aria-label="${l} for ${esc(d.name)}" ${d.events?.[e] ? 'checked' : ''} ${nbusy.has(d.id) ? 'disabled' : ''}><span class="sm">${l}</span></label>`).join('')}${hq('events')}</span>
+    <span class="nb"><button class="btn sm" data-act="ntest" data-id="${esc(d.id)}"${tip('Send a test message. One every 10 seconds.')}>Send test</button><button class="btn sm" data-act="nedit" data-id="${esc(d.id)}">Edit</button>${d.kind === 'generic' ? `<button class="btn sm" data-act="nrot" data-id="${esc(d.id)}"${tip('Make a new signing secret. The old one stops working.')}>Rotate secret</button>` : ''}<button class="btn sm dng" data-act="ndel" data-id="${esc(d.id)}">${ic('trash')}Remove</button></span></div></li>`).join('')}</ul>` : `<div class="empty">${ic('bell')}<p>No destinations yet. Start with a Slack or ntfy URL, then press Send test.</p><a href="#/guides/alerts">How alerts work</a></div>`);
 }
 function nSecretHTML() {
   if (!nsecret) return '';
@@ -2135,7 +2177,7 @@ function nRulesHTML() {
   nRulesKey = nKey();
   const sel = (i, f, v, opts) => `<select data-act="nrule" data-i="${i}" data-f="${f}" aria-label="${f === 'repo' ? 'Repository' : 'Outcome'}, rule ${i + 1}">${opts.map(([o, l]) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   return (rs.length ? `<ul class="list">${rs.map((r, i) => `<li><div class="nd"><span class="nb">${sel(i, 'repo', r.repo, [['*', 'Any repo'], ...[...new Set([...repos, ...(r.repo === '*' ? [] : [r.repo])])].map(x => [x, repoText(F, x)])])}
-    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="release.yml" aria-label="Workflow file, rule ${i + 1}" spellcheck="false" style="width:150px"${tip('A workflow file name such as release.yml, or * for all')}>
+    <input type="text" data-act="nrule" data-i="${i}" data-f="workflow" value="${esc(r.workflow)}" placeholder="${kindOf(F, r.repo) === 'gitlab' ? 'pipeline' : 'release.yml'}" aria-label="Workflow, rule ${i + 1}" spellcheck="false" style="width:150px"${tip(kindOf(F, r.repo) === 'gitlab' ? 'GitLab has no workflow files: use pipeline, or * for all' : 'A workflow file name such as release.yml, or * for all')}>
     ${sel(i, 'outcome', r.outcome, [['success', 'On success'], ['failure', 'On failure'], ['any', 'Any outcome']])}</span>
     <span class="nsw">${ds.map(d => `<label class="sw"><input type="checkbox" data-act="nrule" data-i="${i}" data-f="to" data-d="${esc(d.id)}" aria-label="Send to ${esc(d.name)}, rule ${i + 1}" ${r.to.includes(d.id) ? 'checked' : ''}><span class="sm">${esc(d.name)}</span></label>`).join('')}${r.to.length ? '' : '<span class="fail sm">pick at least one destination</span>'}</span>
     <button class="btn sm ic" data-act="nruledel" data-i="${i}" aria-label="Remove rule ${i + 1}"${tip('Remove this rule')}>${ic('x')}</button></div></li>`).join('')}</ul>` : '<p class="fg2 sm">No rules.</p>')
@@ -2144,7 +2186,7 @@ function nRulesHTML() {
 // A signing secret must not outlive the page it was shown on. One that arrived while elsewhere waits until it has been shown.
 addEventListener('hashchange', () => { if (nsecret?.seen && !onN()) { nsecret = null; const e = $('#nsec-t'); if (e) e.textContent = ''; } });
 document.addEventListener('input', e => {
-  const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t);
+  const t = e.target; if (t.dataset?.act === 'nrule' && t.type === 'text') ACT.nrule(t); if (t.dataset?.act === 'gsearch') ACT.gsearch(t);
   // Keep what was typed in nf, so a form rebuild (kind change) keeps it. Never the URL or token.
   if (nf && t.id === 'nf-name') nf.name = t.value; if (nf && t.id === 'nf-ts') nf.tailnet = t.checked;
 });
@@ -2192,7 +2234,7 @@ function anHTML() {
   const ledger = `<div class="card"><h2>Job minutes, last 30 days <span class="fg2 sm" style="font-weight:400">all repos · by the UTC day each job finished</span></h2>${use.length ? bars(Array.from({ length: 30 }, (_, i) => { const d = ld - 29 + i; return { l: new Date(d * 86400000).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' }), v: us.map(([c]) => use.filter(u => u[0] === d && u[1] === c).reduce((a, u) => a + u[3], 0)) }; }), us, x => x + ' min', 'Job minutes per day by VM size, last 30 days', 'ledger')
     + `<p class="foot">${use.reduce((a, u) => a + u[3], 0)} min, ${use.reduce((a, u) => a + u[2], 0)} jobs · ≈ $${use.reduce((a, u) => a + u[3] * rate(u[1]), 0).toFixed(2)} at ${myRate() ? '$' + myRate() + '/min' : 'GitHub-hosted rates'}. ${lom ? ` Not priced: ${esc(lom)}.` :''} From the usage ledger, which isn't limited to the newest 100 VMs.</p>`
     : `<p class="fg2">${AN.cpus ? `No job minutes for ${AN.cpus} cpu VMs in the last 30 days.` : 'No job minutes recorded yet.'}</p>`}</div>`;
-  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}.</p></div>` + ledger;
+  if (!jobs.length) return note + `<div class="empty card">${ic('chart')}<p>No finished jobs ${AN.repo || AN.cpus ? 'match these filters' : 'ran'} in this range${cut ? ' among the newest 100 VMs' : ''}. Charts need finished jobs, so they fill in after the first one ends.</p><a href="#/guides/analytics">How analytics work</a></div>` + ledger;
   const at = t => { let i = B.length - 1; while (i > 0 && B[i][0] > t) i--; return i; };
   const x = i => cut && (B[i + 1]?.[0] ?? Infinity) <= oldest;
   const n = [0, 0, 0]; jobs.forEach(v => n[outcome(v)]++);
@@ -2411,7 +2453,7 @@ pages.setup = {
       `<p class="fg2">Which repository should kiln take jobs from? Nothing gets installed in it.</p>${tokHTML()}<form data-form="addrepo"><label class="sr" for="repo-in">Repository</label><input type="text" id="repo-in" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="btn pri">Add repo</button></form>`,
       test(),
     ];
-    const BB = useGl ? glB : B, titles = useGl ? [`Add your ${xn} server`, gt ? 'Add the repo' : 'Add the project', 'Run a job'] : ['Connect a forge', S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'];
+    const BB = useGl ? glB : B, titles = useGl ? [`Add your ${xn} server`, gt ? 'Add the repo' : 'Add the project', 'Run a job'] : ['Connect a forge' + hq('forges'), S.app ? 'Install the App on a repo' : 'Choose a repo', 'Run a test job'];
     setHTML($('#su'), strip + `<ol class="stp">${titles.map((t, i) => {
       const d = done[i] && i !== open;
       return `<li><span class="mk ${i === open ? 'cur' : d ? 'done' : ''}">${d ? ic('check') : i + 1}</span><h3>${t}${d ? `<span class="fg2 sm" style="font-weight:400">${sum[i]}</span><button class="lnk fg2 sm" style="font-weight:400" data-act="stepopen" data-id="${i}">Edit</button>` : ''}</h3>${i === open ? `<div class="bd2">${BB[i]}</div>` : ''}</li>`;
@@ -2421,16 +2463,42 @@ pages.setup = {
 };
 
 /* ---------- guides ---------- */
+// One snippet per forge, as tabs (radio buttons, so it works without script). `n` makes the radio group unique on the page.
+let ftN = 0;
+const forgeTabs = (L, snip = ciSnippet) => {
+  const n = ++ftN, P = [['github', 'GitHub'], ['gitlab', 'GitLab'], ['gitea', 'Gitea']];
+  return `<div class="ft">${P.map(([k], i) => `<input type="radio" name="ft${n}" id="ft${n}${k}" aria-label="${FN[k]}"${i ? '' : ' checked'}>`).join('')}<span class="ftl">${P.map(([k, l]) => `<label for="ft${n}${k}">${l}</label>`).join('')}</span>${P.map(([k]) => `<div class="fp">${cb(snip(k, L))}</div>`).join('')}</div>`;
+};
+const rows = (...r) => r.map(c => `<tr>${c.map((x, i) => i ? `<td>${x}</td>` : `<th scope="row">${x}</th>`).join('')}</tr>`).join('');
+const table = (head, ...r) => `<div class="tw"><table><thead><tr>${head.map(h => `<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows(...r)}</tbody></table></div>`;
+// [id, title, page, group, related ids]. The array is the sidebar's order, grouped.
 const GUIDES = [
   ['start', 'Getting started', L => `<h2>Getting started</h2>
-    <p>When your forge (GitHub, GitLab or Gitea) queues a job that asks for kiln (<code>runs-on</code>, or <code>tags</code> on GitLab), kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
+    <p>When your forge (GitHub, GitLab or Gitea) queues a job that asks for kiln, kiln boots a fresh Ubuntu 24.04 VM on this box and registers a single-use runner. It runs one job, then the VM is deleted.</p>
     <p>You need three things:</p>
-    <ol><li><b>A token for your forge</b> (Settings › Forges), so kiln can see queued jobs.</li><li><b>The base image</b> that every VM starts from. It is built once (~4 min) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that says <code>runs-on: [self-hosted, ${L}]</code>.</li></ol>
-    <p>Setup walks you through all three and can open a test pull request for you. Using GitLab or Gitea? <a href="#/guides/gitlab">Use GitLab</a> and <a href="#/guides/gitea">Use Gitea</a> say what to set up.</p><p><a class="btn" href="#/setup">Open setup</a></p>
-    <p>Day to day, glance at Overview: banners mean something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
-    <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header).</p>`],
+    <ol><li><b>A credential for your forge</b> (Settings › Forges), so kiln can see queued jobs. On GitHub, a GitHub App is the safer choice.</li><li><b>The base image</b> that every VM starts from. It is built once (about 4 minutes) and refreshed automatically.</li><li><b>A repo</b> (Repos) with a job that asks for kiln:</li></ol>
+    ${forgeTabs(L)}
+    <p>Setup walks you through all three. On GitHub it can open a test pull request for you. For GitLab or Gitea you first add your server: see <a href="#/guides/gitlab">Use GitLab</a> and <a href="#/guides/gitea">Use Gitea</a>. One box can serve all three: see <a href="#/guides/forges">Forges</a>.</p><p><a class="btn" href="#/setup">Open setup</a></p>
+    <p>Day to day, glance at Overview: banners appear only when something needs you. Settings › Analytics shows how jobs went over the last day, week or month.</p>
+    <p>On a phone, swipe sideways to move between the bottom tabs. Over HTTPS you can also install kiln as an app (Install app in the header). Press <kbd>?</kbd> on a keyboard for shortcuts.</p>`, 'Start', ['forges', 'move', 'stuck']],
+
+  ['forges', 'Forges: GitHub, GitLab, Gitea', L => `<h2>Forges: GitHub, GitLab, Gitea</h2>
+    <p>A forge is a server that holds your repos and queues your CI jobs. kiln polls it, and registers a runner on it for each job it takes. One kiln box can serve GitHub, GitLab and Gitea at the same time. When it serves more than GitHub, the dashboard shows a forge chip next to every repo and job.</p>
+    ${table(['', 'GitHub', 'GitLab', 'Gitea'],
+      ['Credential', 'A GitHub App (recommended), or a personal access token with <code>repo</code> (add <code>workflow</code> for test pull requests)', 'A bot account\'s access token with <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>', 'A service account\'s access token with <code>write:repository</code> and <code>read:user</code>'],
+      ['Role needed', 'The App installed on the repo, or a token that can administer it', 'Maintainer on each project', 'Owner of each repo (the account owns it, or is in its Owners team)'],
+      ['A job asks for kiln with', `<code>runs-on: [self-hosted, ${L}]</code>`, `<code>tags: [${L}]</code>`, `<code>runs-on: [${L}]</code>`],
+      ['What runs', 'Plain steps, Docker, <code>services:</code>, <code>container:</code>', 'Plain jobs, or <code>image:</code> and <code>services:</code> in Docker inside the VM', 'Plain steps, <code>container:</code> and <code>services:</code>'],
+      ['Cache', 'Per-repo cache disk', 'Same disk and rule', 'Same disk and rule. Gitea\'s own <code>actions/cache</code> does not persist'],
+      ['Fork pull requests', 'Never run: the VM\'s runner hook fails the job', 'Never run: the host decides from GitLab\'s API', 'Never run: a guard in the VM stops the job before it starts'],
+      ['Costs shown', 'Priced as GitHub-hosted minutes', 'Minutes only', 'Minutes only'],
+      ['Limits', 'GitHub\'s API rate limit (shown in the status line)', 'GitLab 16.0 or newer (17+ recommended). Rerun, Cancel and Run pipeline need the wider <code>api</code> scope', 'Gitea 1.25 or newer (1.26.3+ recommended). Rerun needs 1.26, Cancel needs 28'])}
+    <p><b>Project keys.</b> GitHub repos are written <code>owner/name</code>. A GitLab or Gitea project is written <code>forge-id:path</code>, for example <code>gitlab:platform/backend</code>. You see this form in <code>config.json</code>, in notification rules and in URLs. The dashboard shows the clean path with a forge chip.</p>
+    <p><b>Where tokens live.</b> A GitHub token or App key is saved on this box. A GitLab or Gitea token is saved under <code>forges/&lt;id&gt;.token</code> in kiln's data directory (mode 0600), or read from the environment. kiln never shows a token again, and no job VM ever gets one.</p>
+    <p>Add a forge in Settings › Forges. Next: <a href="#/guides/gitlab">Use GitLab</a>, <a href="#/guides/gitea">Use Gitea</a>, and <a href="#/guides/gate">Fork pull requests</a>.</p>`, 'Start', ['gitlab', 'gitea', 'gate', 'private-forge']],
+
   ['gitlab', 'Use GitLab', L => `<h2>Use GitLab</h2>
-    <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need a GitLab 16.0 or newer, on your own server or gitlab.com.</p>
+    <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need GitLab 16.0 or newer, on your own server or gitlab.com.</p>
     <ol><li><b>Make a bot account.</b> A separate GitLab user, such as <code>kiln-bot</code>, added as <b>Maintainer</b> to only the projects kiln serves. Not your own account.</li>
     <li><b>Create its access token</b> (signed in as the bot: Preferences › Access tokens) with exactly <code>create_runner</code>, <code>manage_runner</code> and <code>read_api</code>. Give it an expiry; kiln warns two weeks before.</li>
     <li><b>Add the forge</b> with its address, then paste the token. kiln tries the token before it saves it and says what is wrong, for example <i>the token lacks create_runner</i>, or <i>Developer is below Maintainer</i> for a project.</li>
@@ -2439,7 +2507,8 @@ const GUIDES = [
     <p><b>Token power.</b> With <code>read_api</code>, a Maintainer's token can read the project's CI/CD variables, values included, masked and protected ones too. GitHub never allows that. So the bot should belong only to the projects kiln serves, and the token should be used for nothing else. A job VM never receives it: it gets a runner credential for one project, and kiln deletes that runner when the job ends.</p>
     <p><b>Rerun, Cancel and Run pipeline</b> need the wider <code>api</code> scope. kiln recommends leaving it off, and hides those buttons unless the token has it. Without them you still rerun and cancel in GitLab itself.</p>
     <p><b>A 403 when kiln creates a runner</b> has three causes that GitLab does not tell apart: the bot's role is below Maintainer; the instance setting <i>valid_runner_registrars</i> (Admin › Settings › CI/CD › Runner registration) does not include <i>project</i>; or runner registration is turned off for the project or its group. Check each. A missing scope gets a different error, which kiln names.</p>
-    <p><b>Forks.</b> kiln never runs a job from a fork's merge request. GitLab can also run a fork's pipeline <i>in your project</i> when someone with access clicks Run pipeline, and that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave <i>Run pipelines in the parent project for merge requests from forks</i> off, or do not run them.</p>`],
+    <p><b>Forks.</b> kiln never runs a job from a fork's merge request. GitLab can also run a fork's pipeline <i>in your project</i> when someone with access clicks Run pipeline, and that exposes the project's unprotected CI/CD variables to the fork's code on any runner. Leave <i>Run pipelines in the parent project for merge requests from forks</i> off, or do not run them. More in <a href="#/guides/gate">Fork pull requests and refused jobs</a>.</p>`, 'Start', ['forges', 'gate', 'cache-trust']],
+
   ['gitea', 'Use Gitea', L => `<h2>Use Gitea</h2>
     <p>Add a forge in Settings › Forges (Add a forge), or in the first setup step. You need Gitea 1.25 or newer, on your own server. 1.26.3 or newer is recommended (before it, approving one fork pull request once trusts that user's later ones), and 28 or newer for Cancel.</p>
     <ol><li><b>Make a service account.</b> A separate Gitea user, such as <code>kiln-bot</code>, not your own. Gitea hands out the runner registration token only to a repo's <b>Owner</b>, so it must <b>own the repo</b> (a personal namespace holding just the repos kiln serves) or be a member of the <b>Owners</b> team of a small organisation that holds only those repos. A collaborator with Admin permission is refused (403).</li>
@@ -2449,70 +2518,221 @@ const GUIDES = [
     <li><b>Ask for kiln</b> in <code>.gitea/workflows/ci.yml</code>:${cb(`name: CI\non: [push]\njobs:\n  test:\n    runs-on: [${L}]\n    steps:\n      - run: make test`)}Use <code>${L}-4cpu</code> and the other size labels like the GitHub ones. Jobs that do not ask for kiln are left to your other runners.</li></ol>
     <p><b>Token power.</b> An Owner can push code, change the repo's settings and, in the worst case, delete it, and the registration token it gets is reusable and registers more runners. That is broader than a GitHub App, so use a dedicated account that owns only the repos kiln serves, and use the token for nothing else. A job VM never receives it: it gets a runner credential for one job, which kiln deletes when the job ends.</p>
     <p><b>Versions.</b> Rerun needs Gitea 1.26, Cancel needs 28. kiln hides a button the server cannot do.</p>
-    <p><b>Forks.</b> kiln never runs a job from a fork's pull request, including <code>pull_request_target</code>, and refuses every <code>workflow_run</code> job. Do not let a workflow check out an untrusted ref after a trusted trigger.</p>`],
+    <p><b>Forks.</b> kiln never runs a job from a fork's pull request, including <code>pull_request_target</code>, and refuses every <code>workflow_run</code> job. Do not let a workflow check out an untrusted ref after a trusted trigger. Turn on approval for fork pull requests in Gitea too. More in <a href="#/guides/gate">Fork pull requests and refused jobs</a>.</p>`, 'Start', ['forges', 'gate', 'cache-trust']],
+
   ['move', 'Move a workflow to kiln', (L, D) => `<h2>Move a workflow to kiln</h2><p>Change one line per job:</p>
-    ${cb(`jobs:\n  test:\n    runs-on: [self-hosted, ${L}]   # was: ubuntu-latest`)}
-    <p>For another size, use exactly one size label:</p>
-    <div class="tw"><table><tr><th>runs-on</th><th>vCPU</th><th>RAM</th></tr><tr><td><code>[self-hosted, ${L}]</code></td><td>${D}</td><td>default</td></tr>
-    ${[[2, 4], [4, 8], [8, 16], [16, 24]].map(([c, m]) => `<tr><td><code>[self-hosted, ${L}-${c}cpu]</code></td><td>${c}</td><td>${m} GB</td></tr>`).join('')}</table></div>
-    <ul><li>Never combine labels: <code>[${L}, ${L}-8cpu]</code> is never picked up.</li><li>A size above this box's CPU count waits forever.</li><li>Each job gets a fresh VM. Install steps rerun every time, but downloads come from the repo cache.</li><li>To skip the ~10 s boot, keep <b>warm VMs</b> ready: Repos › your repo › Warm VMs. They hold memory while idle and are recycled so they never go stale.</li></ul>
-    <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. Jobs run in Linux VMs (arm64 on Apple Silicon). Windows, macOS guests and GPUs are not supported.</p>`],
+    ${forgeTabs(L, (k, l) => k === 'gitlab' ? `build:\n  tags: [${l}]   # was: no tags, or your shared runners\n  script:\n    - make test\n` : k === 'gitea' ? `jobs:\n  test:\n    runs-on: [${l}]   # was: ubuntu-latest\n` : `jobs:\n  test:\n    runs-on: [self-hosted, ${l}]   # was: ubuntu-latest\n`)}
+    <p>For another size, use exactly one size label (on GitLab put it in <code>tags</code>, on Gitea in <code>runs-on</code> without <code>self-hosted</code>):</p>
+    <div class="tw"><table><thead><tr><th scope="col">Label</th><th scope="col">vCPU</th><th scope="col">RAM</th></tr></thead><tbody><tr><th scope="row"><code>${L}</code></th><td>${D}</td><td>default</td></tr>
+    ${[[2, 4], [4, 8], [8, 16], [16, 24]].map(([c, m]) => `<tr><th scope="row"><code>${L}-${c}cpu</code></th><td>${c}</td><td>${m} GB</td></tr>`).join('')}</tbody></table></div>
+    <ul><li>Never combine labels: <code>[${L}, ${L}-8cpu]</code> is never picked up.</li><li>A size above this box's CPU count waits forever.</li><li>Each job gets a fresh VM. Install steps rerun every time, but downloads come from the repo cache.</li><li>To skip the boot wait, keep <a href="#/guides/warm">warm VMs</a> ready.</li></ul>
+    <p>Docker, <code>services:</code>, <code>container:</code> and <code>sudo</code> work as on GitHub-hosted Ubuntu. Jobs run in Linux VMs, with the box's own CPU type: x64, or arm64 on Apple Silicon and aarch64 Linux (see <a href="#/guides/arm64">Apple Silicon</a>). Windows and macOS guests and GPUs are not supported.</p>`, 'Start', ['start', 'warm', 'arm64']],
+
+  ['cache', 'Caching', () => `<h2>Caching</h2>
+    <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
+    <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch, or to one of the repo's <b>cache branches</b> (Repos › your repo). Pull and merge requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, for example "Cache: read-only (pull_request event)". The rule is the same on GitHub, GitLab and Gitea. Details per forge and for release builds: <a href="#/guides/cache-trust">Release builds and cache trust</a>.</p>
+    <p><b>Size:</b> set in Settings › Cache (default 30 GB, or per repo on the Repos page). A cache that grows past 1.2 times its size is reset.</p>
+    <p><b>Clear:</b> Settings › Cache › Clear. It is refused while that repo has jobs running. Clear after resizing.</p>
+    <p><b>Docker mirror:</b> on Linux, kiln also runs a local copy of Docker Hub images, so fresh VMs don't hit Docker Hub's pull limit. On macOS there is no mirror and VMs pull from Docker Hub directly.</p>`, 'Run', ['cache-trust', 'move']],
+
+  ['cache-trust', 'Release builds and cache trust', () => `<h2>Release builds and cache trust</h2>
+    <p>Only a trusted job may change the cache. A job for a tag or a release builds what you ship, so it does not use the cache at all: it starts clean, on purpose. This is a safety rule, not a bug. If a dependency were ever compromised in a default-branch job, it could plant a tool in the cache that a later release build would run.</p>
+    ${table(['Event', 'GitHub', 'GitLab', 'Gitea'],
+      ['Push to the default branch', 'Reads, saves', 'Reads, saves', 'Reads, saves'],
+      ['Push to a cache branch', 'Reads, saves', 'Reads, saves (the branch must be protected)', 'Reads, saves'],
+      ['Pull or merge request, same repo', 'Reads, discards', 'Reads, discards', 'Reads, discards'],
+      ['Pull or merge request from a fork', 'Refused', 'Refused', 'Refused'],
+      ['Tag or release', 'Cold: no cache', 'Cold: no cache', 'Cold: no cache'],
+      ['Other triggers (manual, scheduled)', 'Reads, discards', 'Reads, discards. A merge train is cold', 'Reads, discards']
+    )}
+    <p>A job saves the cache only if it also <i>succeeded</i> according to the forge's API, not just its own console, and its commit really is on that branch. Child pipelines on GitLab never save.</p>
+    <p><b>Read "Cache:" on a job page.</b> <i>committed</i>: this job saved the cache. <i>read-only (reason)</i>: it used the cache, and its changes were discarded. <i>not used</i>: a cold release build. <i>disabled</i>: the cache is off in Settings › Cache.</p>
+    <p><b>Cache branches.</b> Besides the default branch, you can name branches whose pushes may save the cache, for example <code>dev</code> (Repos › your repo › Cache branches). Names are exact; a tag with the same name does not count.</p>
+    <p>The cache belongs to one repo on one forge. Two repos never share it, and removing a forge deletes its caches. To start over, clear it in Settings › Cache.</p>
+    <p>A cold build is slower. If you need speed for releases, keep release steps small and let earlier jobs on the default branch do the heavy work.</p>`, 'Run', ['cache', 'gate']],
+
+  ['warm', 'Warm VMs', () => `<h2>Warm VMs</h2>
+    <p>Normally kiln boots a VM after a job is queued. A <b>warm VM</b> is booted ahead of time and waits for a job, so the job starts in about 4 seconds (measured median) instead of waiting for a boot.</p>
+    <p>Turn it on per repo: Repos › your repo › Warm VMs (0 to 4). Only the default VM size is kept warm.</p>
+    <p><b>What it costs.</b> A warm VM holds its memory while it waits, and it counts against <b>Max VMs</b>. With Max VMs at 4 and 1 warm VM, only 3 more can run at once. Settings › Capacity shows how many slots warm VMs may hold.</p>
+    <p><b>Recycling.</b> An idle warm VM is replaced after Warm VM recycle (default 30 minutes, set in Settings › Capacity), so it never goes stale. Its idle time is not counted as job minutes.</p>
+    <p><b>When kiln keeps none.</b> While paused (Max VMs 0) or draining for a restart or update, kiln keeps no warm VMs and removes idle ones. It also starts none while a forge refuses runner registration.</p>
+    <p><b>How to tell.</b> A warm VM shows a <i>warm</i> badge on Overview and Jobs. Its flag clears when it takes a job.</p>
+    <p><b>When it helps.</b> Open Settings › Analytics › <i>Where the time goes</i>. If Boot is the biggest part of the time to start, a warm VM will help. If it is Queue, the box is full: raise Max VMs.</p>`, 'Run', ['move', 'usage']],
+
+  ['image', 'Keeping the image fresh', () => `<h2>Keeping the image fresh</h2>
+    <p>Every job boots from one base image: Ubuntu 24.04 with Docker, build tools and the runners for your forges (the GitHub Actions runner, the GitLab Runner and the Gitea runner), each pinned to a version.</p>
+    <p><b>Why rebake:</b> GitHub stops sending jobs to Actions runners that are about 30 days out of date. So when this box serves a GitHub repo, the image is <i>stale</i> if its runner is behind the latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it. GitLab and Gitea runners are pinned by kiln release and checked by SHA-256 at bake time, so for a box with no GitHub repo only the last three reasons apply.</p>
+    <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in. After a kiln update that changes the image recipe, nothing launches until the rebake is done.</p>
+    <p><b>By hand:</b> Settings › Image › Rebake image. It takes about 4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
+    <p>For extra tools in every VM, add apt packages in Settings › Image (up to 32) and rebake.</p>`, 'Run', ['updates', 'stuck']],
+
+  ['updates', 'Updates, restarts and self-heal', () => `<h2>Updates, restarts and self-heal</h2>
+    <p><b>Signed self-update.</b> kiln checks its release repo 60 seconds after it starts, then every 6 hours (Settings › Updates › Check now). It installs only a newer release that is signed with the key built into kiln. It downloads the tarball for this build, checks the signature and the checksum, and refuses anything else. Builds exist for five platforms: x86_64 Linux and aarch64 Linux (each glibc and static musl), and Apple Silicon macOS. An Intel Mac has no build, so it cannot update.</p>
+    <p><b>What an update does.</b> It drains first: no new VMs start (warm ones included), idle VMs are removed, and kiln waits for running jobs, at most the job timeout plus 2 minutes. Then it keeps the old program as <code>kiln.prev</code> and restarts into the new one. Open dashboards reload themselves. If the new version fails to start twice, kiln puts the old one back, and Overview shows <i>Update rolled back</i>. A rolled-back version is not installed again by itself; only a newer one is.</p>
+    <p><b>Auto update</b> is off by default. When on, kiln installs by itself once no job runs, no VM waits for a job, none is held for debugging and no bake runs.</p>
+    <p><b>Restart when idle</b> drains the same way, then restarts without killing jobs. <b>Restart now</b> does not wait: running jobs are killed and fail on their forge. Only the listen address needs a restart; every other setting applies within seconds.</p>
+    <p><b>After a reboot.</b> kiln starts a second or two after your user session, often before the network is up. For the first 3 minutes, checks that are only waiting for the network, tailscaled, the Docker mirror or the egress probe say <i>starting: waiting for the network</i>. That is not a failure and sends no alert. kiln retries by itself with a growing delay. After 3 minutes the same check shows its real error.</p>
+    <p><b>Self-heal at startup.</b> Any VM that was running when kiln stopped is marked <i>lost</i>; its forge may show that job as cancelled. kiln deletes the runners it registered and left behind on every forge, removes leftover disks and secrets, and Diagnostics reports any QEMU process left running. Running <code>systemctl --user stop kiln</code> gives running jobs <i>Stop grace</i> seconds (Settings › Timeouts) to finish first.</p>
+    <p>If Diagnostics reports <i>kiln.service TimeoutStopSec</i> as too short, reinstall the unit file from the release; kiln works without it, with a shorter grace.</p>`, 'Run', ['stuck', 'image']],
+
   ['debug', 'Debug a failed job', () => `<h2>Debug a failed job</h2><p>Each job page has three logs:</p>
     <ul><li><b>Console:</b> boot and runner output (start here if the job never started).</li><li><b>Steps:</b> your steps, live.</li><li><b>GitHub, GitLab or Gitea:</b> the forge's own final log, named for the forge.</li></ul>
     <p>Under the job's name you see the branch, PR and commit it ran for, linked to the forge. The note under the timeline says why the VM stopped.</p><p>To get a shell in a failed job's VM:</p>
-    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (e.g. 30 min) and add your SSH public key.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
-    <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done. A held VM keeps its memory and slot.</li></ol>
-    <p>If holds stop working after you update kiln, rebake the image.</p>`],
-  ['alerts', 'Alerts & webhooks', () => `<h2>Alerts &amp; webhooks</h2>
-    <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
-    <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Click <b>Send test</b> to check it.</p>
-    <p>Each destination picks what it gets:</p>
-    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears.</li><li><b>Security:</b> settings saved (only the names of what changed), the GitHub token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
-    <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. A failed job matched by a rule is still sent only once.</p>
-    <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
-    <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
-    <p><b>Generic</b> destinations are signed the Standard Webhooks way. The signing secret is shown once, when you create the destination or rotate its secret. To verify it, see Notifications in <code>docs/configuration.md</code>.</p>`],
-  ['cache', 'Caching', () => `<h2>Caching</h2>
-    <p>Each repo has one cache disk, which every job gets. It holds Docker layers, <code>~/.cache</code>, <code>~/.npm</code>, Cargo and the Rust toolchain (<code>~/.cargo</code>, <code>~/.rustup</code>), Go modules, Gradle and Maven. You don't need to change your workflow.</p>
-    <p><b>Trust rule:</b> every job reads the cache, but changes are saved only when the job succeeded <i>and</i> it was a push to the default branch, or to one of the repo's <b>cache branches</b> (Repos › your repo). Pull requests start warm, but their changes are discarded, so they can't poison the cache. The job page says why, e.g. "Cache: read-only (pull_request event)".</p>
-    <p><b>Size:</b> set in Settings › Cache (default 30 GB). A cache that grows past 1.2× its size is reset.</p>
-    <p><b>Clear:</b> Settings › Cache › Clear. It is refused while that repo has jobs running. Clear after resizing.</p>`],
+    <ol><li>In Settings › Debugging, set <i>Hold failed jobs</i> (for example 30 minutes) and add your SSH public key. Both are needed.</li><li>Rerun the job. If it fails, its VM stays up and the job page shows a command like this:${cb('ssh -p 2201 runner@100.64.0.7')}</li>
+    <li>Compare the host key fingerprints shown on the page, then connect from any tailnet device. Login is key-only, as <code>runner</code>.</li><li>Click <b>Release now</b> when you're done.</li></ol>
+    <p><b>Rules of a hold.</b> It works the same on GitHub, GitLab and Gitea, and only on this box's tailnet address.</p>
+    <ul><li>Only <i>failed</i> jobs are held. Cancelled jobs, refused jobs and jobs kiln itself stopped (timeout, Kill VM) are not.</li><li>A held VM keeps its memory and one slot, so it counts against Max VMs.</li><li>A hold never takes the last free slot. With Max VMs 1, nothing is held.</li><li>If a job is queued and no slot is free, kiln releases the hold that would end first. Its note says so. SSH in quickly when the box is busy.</li><li>An update or restart that drains waits for holds up to its deadline; auto update waits until none is held.</li></ul>
+    <p>If holds stop working after you update kiln, rebake the image.</p>`, 'Run', ['stuck', 'gate']],
+
+  ['gate', 'Fork pull requests and refused jobs', () => `<h2>Fork pull requests and refused jobs</h2>
+    <p>kiln never runs code from a fork on your box. A pull request from a fork can contain anything, and a kiln VM can reach your cache and, on an open network, your LAN. So kiln looks at every job before any of its code runs. We call that check the <b>verdict gate</b>.</p>
+    <p><b>How the check works.</b> On GitHub, kiln does not count queued fork runs, and a hook in the VM fails a fork job before its first step. On GitLab and Gitea, the host decides: it asks the forge's own API where the job came from, never the job's own variables or claims, and tells the VM <i>run</i>, <i>run clean</i> or <i>refuse</i>. If anything is unclear, kiln refuses.</p>
+    <p><b>What you see.</b> The job gets a <i>refused</i> badge and a neutral note with the reason. No job code ran. A refusal is not a failure: it is not counted in Failed, flips no tab title and sends no alert. The forge usually shows the job as failed or cancelled. Overview may show <i>N jobs from fork pull requests refused</i>, or <i>a pull request from a fork is waiting</i> (on Gitea each such job can still cost a VM, which is refused and killed).</p>
+    <p><b>Refusals on purpose (policy):</b></p>
+    ${table(['Reason', 'What it means', 'What to do'],
+      ['pull request from a fork', 'The job came from another repo\'s pull or merge request.', 'Close or cancel it on the forge, or run fork code on the forge\'s own runners. Turn on "approve before run" for forks on the forge.'],
+      ['workflow_run is never run', 'Gitea: a workflow triggered by another workflow runs with your repo\'s trust on input a stranger chose.', 'Run that workflow on another runner, or trigger it another way.'],
+      ['multi-project downstream pipelines are not run', 'GitLab: another project started this pipeline.', 'Run it on another runner, or start it from inside this project.'],
+      ['unknown job source', 'kiln does not recognise how the job started (for example a comment trigger).', 'Run it on another runner. kiln refuses what it cannot classify.'],
+      ['job is not for this repo', 'The job does not belong to the project this runner serves.', 'Usually harmless. If it repeats, check Settings › Diagnostics.'])}
+    <p><b>Refusals because kiln could not decide.</b> These fail closed: kiln refuses rather than guess, and the job did nothing wrong.</p>
+    ${table(['Reason', 'What it means', 'What to do'],
+      ['verdict timed out', 'The forge did not answer in 30 seconds.', 'Press Test on the forge card, then rerun the job.'],
+      ['API error: …', 'A forge API call failed.', 'Same: check the forge is reachable and the token is valid, then rerun.'],
+      ['pause failed: …', 'GitLab: kiln could not pause the runner.', 'Check the token still has <code>manage_runner</code>. Rerun.'],
+      ['runner holds N job(s), not only the one it started', 'GitLab: the runner holds another job too.', 'Rerun the job.'],
+      ['killed: the guest\'s exec gate died', 'Gitea: the guard inside the VM stopped, so kiln killed the VM. This one shows as <i>killed</i>, not refused.', 'Rerun. If it repeats, rebake the image and check Diagnostics.'])}
+    <p>On every forge, also keep workflows that run on comments or manual triggers away from untrusted pull request code. kiln can see where an event came from, but not what your workflow then checks out.</p>`, 'Safety', ['forges', 'network', 'cache-trust']],
+
   ['network', 'Network & security', () => `<h2>Network &amp; security</h2><p><b>What jobs can reach</b> (Settings › Network):</p>
     <ul><li><b>Open</b> (default): anything this box can reach, including your LAN and tailnet.</li><li><b>Filtered:</b> only the internet, DNS and the Docker mirror. LAN, tailnet, this box, cloud metadata and port 25 are blocked; IPv6 is off. If the filter fails, nothing launches. The host needs Linux and these packages (macOS has no Filtered mode):${cb('sudo apt install rootlesskit slirp4netns nftables uidmap')}</li></ul>
-    <p>Use Filtered before running pull requests from forks.</p><p><b>Who can open this dashboard:</b></p>
-    <ul><li>Tailnet devices are let in by their Tailscale login. By default that is only this box's owner; see Settings › Access.</li><li>A browser on the CI box itself needs the key from <code>~/.local/share/kiln/dashboard.key</code>.</li><li>LAN access is always refused.</li></ul>`],
-  ['image', 'Keeping the image fresh', () => `<h2>Keeping the image fresh</h2>
-    <p>Every job boots from one base image: Ubuntu 24.04 with Docker, build tools and a pinned Actions runner.</p>
-    <p><b>Why rebake:</b> GitHub stops sending jobs to runners that are about 30 days out of date. The image is <i>stale</i> when its runner is behind GitHub's latest, it is over 25 days old, the baked Node versions or apt packages changed, or an older kiln baked it.</p>
-    <p><b>Auto rebake</b> (on by default) rebuilds a stale image by itself, at most every 6 hours. Jobs that queue meanwhile run on the old image until the new one is swapped in.</p>
-    <p><b>By hand:</b> Settings › Image › Rebake image. It takes ~4 minutes, and the bake log shows progress. Running jobs aren't affected.</p>
-    <p>Also rebake after updating kiln. For extra tools in every VM, edit <code>guest/user-data.yaml</code> and rebake.</p>`],
-  ['analytics', 'Analytics & savings', () => `<h2>Analytics &amp; savings</h2>
-    <p>Settings › Analytics sums up finished jobs for the last 24 hours, 7 or 30 days, for all repos or one, and all VM sizes or one.</p>
-    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from the forge queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try warm VMs (Repos › your repo).</li>
-    <li><b>Job minutes and Saved:</b> each job is rounded up to the minute, as GitHub bills it, and priced at the GitHub-hosted rate for its size (2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042 per minute). To use one flat rate instead, click the rate under the Overview stats. Only GitHub jobs are priced: GitLab and Gitea jobs have no GitHub-hosted equivalent, so their minutes are shown without dollars.</li>
-    <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
-    <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
-    <p>Each chart's numbers are also a table under <b>Show numbers</b>.</p>`],
+    <p>Use Filtered before running pull requests you don't fully trust. To let Filtered jobs reach your own forge, see <a href="#/guides/private-forge">Private forges and the job network</a>.</p><p><b>Who can open this dashboard:</b></p>
+    <ul><li>Tailnet devices are let in by their Tailscale login. By default that is only this box's owner; see Settings › Access. From your laptop over Tailscale no key is needed.</li><li>A browser on the CI box itself needs the key from <code>~/.local/share/kiln/dashboard.key</code>.</li><li>LAN access is always refused.</li></ul>`, 'Safety', ['private-forge', 'gate', 'arm64']],
+
+  ['private-forge', 'Private forges and the job network', () => `<h2>Private forges and the job network</h2>
+    <p>Each GitLab or Gitea forge has a <b>Network</b> setting. <b>Public</b> (the default) is for a forge on the internet: https only. <b>Internal</b> is for a forge on your LAN or tailnet: http is allowed.</p>
+    <p><b>What Internal does.</b> Job VMs can reach that forge's address and port, and nothing else private. If other sites sit behind the same address (a reverse proxy with several virtual hosts), jobs can reach all of them too. Loopback, this machine's own address and link-local addresses are always refused.</p>
+    <p><b>With Open job networking</b> nothing more is needed: jobs already reach your LAN.</p>
+    <p><b>With Filtered job networking</b>, kiln adds exactly one allowed address: the forge's. For that, the forge's URL must be an <b>IPv4 address</b>, such as <code>http://192.168.1.20:8080</code>, not a name. A name could be pointed at any private host, so kiln will not use one for Filtered jobs. The address cannot be loopback, this box, link-local, kiln's own VM network (10.0.2.0/24) or port 25.</p>
+    <p><b>Advice.</b> Use a bot account that owns only the repos kiln serves. Keep nothing that jobs must not see on the forge's address or behind its proxy. Use a dedicated forge if you can. kiln has no setting for a private certificate authority, so use http on a trusted network, or a certificate the image already trusts.</p>
+    <p><b>When it does not work.</b> A banner such as <i>GitLab: cannot reach it</i> means kiln cannot reach the address from this box. Press Test on the forge card, and read Settings › Diagnostics (the filtered egress check tries each forge's own address). If a Filtered box refuses to launch for a forge, check that its URL is an IPv4 address.</p>`, 'Safety', ['network', 'forges', 'stuck']],
+
   ['privacy', 'Privacy & reports', () => `<h2>Privacy &amp; reports</h2>
     <p>kiln can send two kinds of anonymous report to its maintainers. Both are off until you choose; kiln asks once, during setup or with an Overview banner.</p>
-    <ul><li><b>Usage statistics:</b> once a day, the kiln version, host CPU and memory size, how many repos and VMs, which features are on, and job counts and minutes for the last 24 hours.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
-    <p>Neither includes repo, account or host names, IPs, file paths on this box, tokens or logs. This box sends them; your browser never does. Settings › Privacy shows the usage report exactly as it would be sent, and an example crash report.</p>
-    <p>To turn both off for good, whatever the dashboard says, set <code>DO_NOT_TRACK=1</code> in kiln's environment. Under systemd, run <code>systemctl --user edit kiln</code>, add these lines, then restart kiln:${cb('[Service]\nEnvironment=DO_NOT_TRACK=1')}</p>`],
+    <ul><li><b>Usage statistics:</b> at most once a day. The kiln version and build, CPU type, host thread count and memory size, how the box signs in (token, App or none), how many repos, Max VMs, default VM size and warm VMs, the network mode, which features are on (cache, Docker mirror, auto rebake, auto update, debug hold, QEMU confinement), uptime, and job counts, passes, minutes and sizes for the last 24 hours. It does not say which forges you use.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
+    <p>Neither includes repo, account or host names, IPs, file paths on this box, tokens, job names or logs. This box sends them; your browser never does. Settings › Privacy shows the usage report exactly as it would be sent, and an example crash report.</p>
+    <p><b>The random id.</b> Reports carry a random install id so one box's reports can be grouped. It is made at the first send, not when you look at Settings › Privacy. When both switches are off it is deleted, and turning them on again makes a new one.</p>
+    <p>To turn both off for good, whatever the dashboard says, set <code>DO_NOT_TRACK=1</code> or <code>KILN_TELEMETRY=0</code> in kiln's environment. Under systemd, run <code>systemctl --user edit kiln</code>, add these lines, then restart kiln:${cb('[Service]\nEnvironment=DO_NOT_TRACK=1')}</p>`, 'Safety', ['network', 'stuck']],
+
+  ['alerts', 'Alerts & webhooks', () => `<h2>Alerts &amp; webhooks</h2>
+    <p>Settings › Notifications has two kinds of alert. <b>Browser notifications</b> come from an open dashboard tab and need HTTPS. <b>Webhooks</b> are sent by this box itself, so they arrive even when no dashboard is open.</p>
+    <p><b>Add a destination</b> under Webhooks: a Slack incoming webhook, a Discord webhook, an ntfy topic (with an optional token), or <i>Generic</i>, which posts signed JSON to any https URL. The URL is a secret: kiln never shows it again, and an edit keeps it unless you type a new one. Start with a Slack or ntfy URL, then click <b>Send test</b>.</p>
+    <p>Each destination picks what it gets:</p>
+    <ul><li><b>Jobs:</b> a job failed, was cancelled, timed out, was killed after it started, or was lost when kiln restarted. A job kiln refused on purpose is not a failure and sends nothing.</li><li><b>Health:</b> something stops launches (an old image, a registration outage on a forge, a broken network filter, low memory or disk) or polling fails, and again when it clears. A check that is only waiting for the network after a restart raises nothing.</li><li><b>Security:</b> settings saved (only the names of what changed), a forge token replaced or the GitHub App changed, or a destination added, changed or removed.</li></ul>
+    <p><b>Workflow rules</b> send results you choose, such as <code>release.yml</code> on success to one channel. See <a href="#/guides/notify-rules">Notification rules per forge</a>.</p>
+    <p><b>Addresses:</b> only public https URLs. For a receiver on your tailnet, tick <i>On my tailnet</i>. LAN, loopback and cloud metadata addresses are always refused.</p>
+    <p><b>When sending fails</b>, kiln retries 3 times, after about 5 seconds, 30 seconds and 2 minutes. A destination that keeps failing for an hour, or is rejected outright 3 times in a row, gets an Overview banner.</p>
+    <p><b>Generic</b> destinations are signed the Standard Webhooks way. The signing secret is shown once, when you create the destination or rotate its secret. To verify it, see Notifications in <code>docs/configuration.md</code>.</p>`, 'Alerts and usage', ['notify-rules', 'stuck']],
+
+  ['notify-rules', 'Notification rules per forge', () => `<h2>Notification rules per forge</h2>
+    <p>By default a destination gets failures. A <b>workflow rule</b> adds results you choose, for example "tell #releases when release.yml succeeds". Rules live in Settings › Notifications › Workflow rules (up to 50), and in <code>notify_rules</code> in <code>config.json</code>.</p>
+    ${cb('"notify_rules": [\n  { "repo": "gitlab:platform/backend", "workflow": "pipeline",\n    "outcome": "success", "to": ["a1b2c3d4"] }\n]')}
+    <ul><li><b>repo</b>: <code>owner/name</code> for GitHub; <code>forge-id:path</code> for GitLab and Gitea (the same key as everywhere else, such as <code>gitea:acme/site</code>); or <code>*</code> for any repo you serve.</li>
+    <li><b>workflow</b>: a file name such as <code>release.yml</code> on GitHub and Gitea, or <code>*</code> for all. GitLab has no workflow files, so a GitLab rule uses the name <code>pipeline</code> (or <code>*</code>).</li>
+    <li><b>outcome</b>: <code>success</code>, <code>failure</code> or <code>any</code>.</li>
+    <li><b>to</b>: one to twenty destination ids. The dashboard fills these in.</li></ul>
+    <p>A failed job that matches a rule is sent once, to the rules' destinations and to every destination that has Jobs alerts on. A job whose workflow file is unknown matches only <code>*</code>.</p>
+    <p><b>Which events alert.</b> Jobs, Health and Security switches on each destination decide the rest: see <a href="#/guides/alerts">Alerts &amp; webhooks</a>. Refused jobs send no Jobs alert on any forge.</p>
+    <p><b>What the message says.</b> For a GitLab or Gitea repo the chat message adds the forge name after the repo, for example <code>gitlab:platform/backend (GitLab)</code>. A link is sent only if it points at that job's own forge. Generic destinations get <code>job.forge</code> (the forge id) and <code>job.forge_kind</code> (<code>github</code>, <code>gitlab</code> or <code>gitea</code>) in the signed JSON.</p>`, 'Alerts and usage', ['alerts', 'forges']],
+
+  ['analytics', 'Analytics', () => `<h2>Analytics</h2>
+    <p>Settings › Analytics sums up finished jobs for the last 24 hours, 7 or 30 days, for all repos or one, and all VM sizes or one.</p>
+    <ul><li><b>Success rate:</b> passed out of passed and failed. Cancelled and refused jobs count as neither; lost jobs and jobs killed mid-run count as failed.</li><li><b>Time to start:</b> from the forge queueing the job to it starting in a VM. <i>Where the time goes</i> splits it into queue, boot and wait. If boot dominates, try <a href="#/guides/warm">warm VMs</a>.</li>
+    <li><b>Job minutes and Saved:</b> see <a href="#/guides/usage">Usage and savings by forge</a>.</li>
+    <li><b>By repository:</b> click a repo to filter every chart to it.</li></ul>
+    <p><b>Limits:</b> the dashboard gets the newest 100 VMs. On a busy box they may not reach back 30 days: earlier columns are hatched and left out. The last chart, <i>Job minutes, last 30 days</i>, reads kiln's usage ledger instead, which keeps every job.</p>
+    <p>Each chart's numbers are also a table under <b>Show numbers</b>. Charts need finished jobs: a new box shows none until the first job ends.</p>`, 'Alerts and usage', ['usage', 'warm']],
+
+  ['usage', 'Usage and savings by forge', () => `<h2>Usage and savings by forge</h2>
+    <p>kiln keeps a <b>usage ledger</b>: one row per day, VM size and forge, with how many jobs ran and for how many minutes. It keeps every job, unlike the list of the newest 100 VMs.</p>
+    <p><b>Minutes.</b> A job counts from the moment it starts to its result, rounded up to the next minute (at least 1), as GitHub bills. The idle wait of a warm VM and a debug hold after a failure are not counted.</p>
+    <p><b>Only GitHub is priced.</b> The price is the GitHub-hosted Linux rate for the job's VM size per minute: 2-core $0.006, 4-core $0.012, 8-core $0.022, 16-core $0.042. GitLab and Gitea have no hosted-runner price to compare with, so their minutes are shown as minutes, with no dollars: for example "GitLab: 40 min, not priced". They sit in their own ledger, so they never change the GitHub total.</p>
+    <p><b>This month.</b> The month is a UTC calendar month, like GitHub's billing.</p>
+    <p><b>Your own rate.</b> Click the rate under the Overview stats to use one flat $/min for GitHub jobs instead. It is saved in this browser only.</p>
+    <p><b>Why numbers differ.</b> Overview "Jobs today" counts today's jobs in the newest 100 VMs. Analytics counts finished jobs in the range you pick. The 30-day minutes chart reads the full ledger.</p>`, 'Alerts and usage', ['analytics', 'forges']],
+
+  ['arm64', 'Apple Silicon (arm64)', L => { const A = /-arm64$/.test(L) ? L : L + '-arm64'; return `<h2>Apple Silicon (arm64)</h2>
+    <p>On a Mac with Apple Silicon, kiln runs native linux/arm64 job VMs: one fresh Ubuntu 24.04 arm64 VM per job, started by QEMU with Apple's Hypervisor.framework (HVF). It is the same kiln, with the differences below. An aarch64 Linux box with KVM works the same way. This support has been tested in emulation, not yet on a real Mac, so treat it as experimental.</p>
+    <p><b>Labels.</b> An arm64 box answers to <code>${A}</code> and sizes like <code>${A}-8cpu</code>. It never answers to the plain <code>${L.replace(/-arm64$/, '')}</code>, so a job written for x64 never lands on it. An x64 kiln and an arm64 kiln can serve the same repos.</p>
+    ${forgeTabs(A)}
+    <p><b>What is different on macOS:</b></p>
+    <ul><li>Jobs run on arm64. Container images and <code>services:</code> need arm64 variants. x64-only images run only emulated, and slowly. Prebuilt x64 binaries will not run.</li><li>No nested virtualization: a job can't use <code>/dev/kvm</code>.</li><li><b>Filtered network is refused.</b> Jobs have open access to your LAN and tailnet, so do not run untrusted pull requests on a Mac kiln.</li><li><b>No Docker mirror.</b> VMs pull from Docker Hub directly, with its rate limits.</li><li>kiln runs as a launchd agent, which only runs while you are logged in. Logs are in <code>~/Library/Logs/kiln.log</code>.</li><li>Self-update uses the macOS build (Settings › Updates shows it). There is no Intel Mac build.</li></ul>
+    <p>Diagnostics checks HVF (<code>kern.hv_support</code>) instead of KVM. The dashboard hides the settings macOS refuses.</p>`; }, 'Reference', ['move', 'network', 'updates']],
+
   ['stuck', 'Troubleshooting', L => `<h2>Troubleshooting</h2><p><i>A job stays queued.</i> Check these in order:</p>
-    <ol><li><b>Labels:</b> <code>[self-hosted, ${L}]</code> or one size label, never both, and no size above this box's CPUs.</li>
-    <li><b>Repo:</b> it is listed on Repos with no access error. Fine-grained tokens need Administration: write and Actions: read/write.</li>
+    <ol><li><b>Label:</b> exactly one kiln label, and no size above this box's CPUs. GitHub: <code>[self-hosted, ${L}]</code>. GitLab: <code>tags: [${L}]</code>. Gitea: <code>runs-on: [${L}]</code>. On an arm64 box use the <code>-arm64</code> label.</li>
+    <li><b>Repo:</b> it is listed on Repos with no access error. GitHub fine-grained tokens need Administration: write and Actions: read/write. For GitLab the bot must be Maintainer on the project; for Gitea the account must be the repo's Owner. Press Test on the forge card.</li>
     <li><b>Paused or full:</b> Max VMs 0 means paused. Otherwise every slot may be busy, held for debugging, or taken by warm VMs.</li>
-    <li><b>Overview banners:</b><ul><li><i>Not launching VMs:</i> kiln is holding back, e.g. memory is too low for another VM.</li><li><i>Launches paused after N failures:</i> VMs failed to start. kiln retries by itself; read the Console log.</li><li><i>GitHub is rejecting runner registration:</i> GitHub refuses to issue runner credentials (an outage on its side). kiln launches nothing and retries after 1, 2, 5, then every 10 minutes.</li><li><i>Rate limit:</i> polling resumes at the time shown.</li><li><i>A banner naming GitLab or Gitea:</i> that forge has no token, rejected it, is unreachable, or refuses runner registration (GitLab needs Maintainer, Gitea the repo owner or an Owners-team member). Settings › Forges has the fix.</li><li><i>Notifications failing:</i> a webhook destination keeps failing; its row in Settings › Notifications shows the last error.</li></ul></li>
+    <li><b>An Overview banner:</b> see the table below.</li>
     <li><b>Filtered network failing its check:</b> nothing launches until it passes.</li><li><b>Runner too old:</b> rebake.</li></ol>
-    <p><b>Diagnostics</b> runs <code>kiln doctor</code>: KVM and tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress.</p>`],
+    <p><b>Diagnostics</b> (Settings › Diagnostics) runs <code>kiln doctor</code>: KVM (Linux) or HVF (macOS), tools, disk and memory headroom, image and token, Docker mirror and Tailscale, and filtered egress. Just after a start, a check may say <i>starting: waiting for the network</i>: give it 3 minutes (see <a href="#/guides/updates">Updates, restarts and self-heal</a>).</p>
+    <h3>Banner text, what it means, what to do</h3>
+    ${table(['Banner', 'What it means', 'What to do'],
+      ['No GitHub token. kiln can\'t see queued jobs.', 'No GitHub credential is set.', 'Settings › Forges: add the App or a token.'],
+      ['GitHub rejected the token. / …the GitHub App credentials.', 'GitHub says the credential is wrong, revoked or expired.', 'Replace the token, or check the App.'],
+      ['GitLab: no token. kiln can\'t see its queued jobs. (also Gitea)', 'That forge has no token.', 'Settings › Forges: save one.'],
+      ['GitLab rejected the token. Replace it in Settings › Forges.', 'The forge returned 401.', 'Make a new token and save it.'],
+      ['GitLab: the token lacks create_runner, manage_runner.', 'The token has too few scopes.', 'Create a token with the three scopes.'],
+      ['GitLab token expires in N days. / has expired.', 'The token is near its end date.', 'Rotate it before then.'],
+      ['GitLab: kiln cannot create a runner in …', 'GitLab refused to make a runner (403).', 'Role must be Maintainer; check runner registration for the project. See Use GitLab.'],
+      ['Gitea: kiln cannot register a runner for …', 'Gitea gives the registration token only to an Owner.', 'Use an account that owns the repo or is in its Owners team.'],
+      ['Gitea: o/n: could not reach … / GitLab: cannot reach it', 'The forge did not answer.', 'Check its address and network (see Private forges), then Test.'],
+      ['N jobs from fork pull requests refused (…)', 'kiln declined fork code.', 'See Fork pull requests and refused jobs.'],
+      ['…: a pull request from a fork is waiting.', 'A fork job is queued on a Gitea repo.', 'Close or cancel it on Gitea.'],
+      ['Not launching VMs: …', 'kiln is holding back: low memory or disk, a draining restart, or a broken network filter.', 'Read the reason; see Diagnostics.'],
+      ['Not launching VMs: starting: waiting for …', 'kiln just started and the network is not up yet.', 'Wait up to 3 minutes. It retries by itself.'],
+      ['egress filtering unavailable: …', 'Filtered networking failed its check, so nothing launches.', 'Install the packages in Network &amp; security, then Diagnostics.'],
+      ['GitHub is rejecting runner registration (HTTP …) — launches paused', 'GitHub refuses runner credentials (an outage on its side).', 'Wait. kiln retries after 1, 2, 5, then every 10 minutes.'],
+      ['N of M slots held for debugging — jobs are waiting', 'Debug holds fill the slots while jobs queue.', 'Release oldest, or lower the hold time.'],
+      ['GitHub rate limit reached. Polling paused until …', 'GitHub asked kiln to wait.', 'Nothing. Polling resumes at that time.'],
+      ['…: launches paused after N failures, retry in …', 'VMs for that repo failed to start several times.', 'It retries by itself. Read the last job\'s Console log.'],
+      ['Image needs a rebake: … / Base image not baked.', 'The image is stale, or missing.', 'Rebake. Nothing launches without an image.'],
+      ['Runner X is behind Y. Rebake to update.', 'GitHub\'s runner is newer than the image\'s.', 'Rebake before GitHub stops accepting it.'],
+      ['Update rolled back: …', 'The new version failed to start twice and the old one is back.', 'See Updates, restarts and self-heal. Update installs it anyway.'],
+      ['A saved setting (listen address) applies after a restart.', 'The listen address needs a restart.', 'Restart when idle.'],
+      ['Restart pending · … / kiln is stopping', 'kiln is draining or shutting down.', 'Wait, or Cancel restart.'],
+      ['Paused. Max VMs is 0, so no new jobs start.', 'You paused kiln.', 'Resume.'],
+      ['Docker mirror is on but isn\'t running.', 'The local Docker Hub copy is down.', 'Jobs pull from Docker Hub meanwhile. See Image.'],
+      ['N health checks failing.', 'Diagnostics has red checks.', 'View checks.'],
+      ['Notifications failing: …', 'A destination has failed for an hour or been rejected 3 times.', 'Fix its URL in Settings › Notifications.'],
+      ['Last poll failed: …', 'The last request to the forge failed.', 'Usually a network blip. If it stays, check the address and token.'],
+      ['Setup isn\'t finished: no job has run on kiln yet.', 'No job has run here.', 'Resume setup.'])}`, 'Reference', ['forges', 'gate', 'updates', 'private-forge']],
 ];
+const GROUP_ORDER = ['Start', 'Run', 'Safety', 'Alerts and usage', 'Reference'];
+const GD = { start: 'tip', forges: 'github', gitlab: 'key', gitea: 'key', move: 'next', cache: 'cache', 'cache-trust': 'cache', warm: 'flame', image: 'image', updates: 'update', debug: 'debug', gate: 'shield', network: 'network', 'private-forge': 'network', privacy: 'shield', alerts: 'bell', 'notify-rules': 'bell', analytics: 'chart', usage: 'chart', arm64: 'cpu', stuck: 'help' };
+// Plain text of a guide, for the search box (built once).
+const gtext = new Map();
+const guideText = g => gtext.get(g[0]) ?? (gtext.set(g[0], (g[1] + ' ' + g[2](esc(JL()), +S.config.vm_cpus)).replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ')), gtext.get(g[0]));
+let gq = '';
 pages.guides = {
   mount(r) {
-    const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>', GD = { start: 'tip', gitlab: 'key', gitea: 'key', move: 'next', debug: 'debug', alerts: 'bell', cache: 'cache', network: 'network', image: 'image', analytics: 'chart', privacy: 'shield', stuck: 'help' };
-    $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GUIDES.map(x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`).join('')}</nav>
-      <div><label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GUIDES.map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
-      <article class="gd">${g[2](L, +S.config.vm_cpus)}</article><div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div>`;
+    gq = ''; const i = Math.max(0, GUIDES.findIndex(g => g[0] === r.seg[0])), g = GUIDES[i], L = esc(JL()), nav = (x, l) => x ? `<a href="#/guides/${x[0]}">${l}</a>` : '<span></span>';
+    const link = x => `<a href="#/guides/${x[0]}" ${x === g ? 'aria-current="page"' : ''}>${ic(GD[x[0]])}${x[1]}</a>`;
+    const rl = g[4].map(id => GUIDES.find(x => x[0] === id)).filter(Boolean);
+    $('#app').innerHTML = `<div class="ph"><h1>Help</h1></div><div class="set"><nav class="sub" aria-label="Guides">${GROUP_ORDER.map(n => `<div class="sh">${n}</div>${GUIDES.filter(x => x[3] === n).map(link).join('')}`).join('')}</nav>
+      <div><div class="gs"><label class="sr" for="guide-q">Search guides</label><input type="text" inputmode="search" id="guide-q" data-act="gsearch" placeholder="Search guides" autocomplete="off" ></div>
+      <label class="sr" for="guide-sel">Guide</label><select id="guide-sel" data-act="gdsel">${GROUP_ORDER.map(n => `<optgroup label="${n}">${GUIDES.filter(x => x[3] === n).map(x => `<option value="${x[0]}" ${x === g ? 'selected' : ''}>${x[1]}</option>`).join('')}</optgroup>`).join('')}</select>
+      <div id="gres" hidden></div><div id="gbody"><article class="gd">${g[2](L, +S.config.vm_cpus)}</article>
+      ${rl.length ? `<p class="grel"><b>Related:</b> ${rl.map(x => `<a href="#/guides/${x[0]}">${x[1]}</a>`).join(' · ')}</p>` : ''}
+      <div class="gnav">${nav(GUIDES[i - 1], ic('back') + esc(GUIDES[i - 1]?.[1] || ''))}${nav(GUIDES[i + 1], esc(GUIDES[i + 1]?.[1] || '') + ic('next'))}</div></div></div></div>`;
+  },
+  // The search box: guides whose title or text holds every word.
+  find(q) {
+    gq = q.trim().toLowerCase();
+    const w = gq.split(/\s+/).filter(Boolean), hits = w.length ? GUIDES.filter(g => w.every(x => guideText(g).toLowerCase().includes(x))) : [];
+    $('#gres').hidden = !w.length; $('#gbody').hidden = !!w.length;
+        $('#gres').innerHTML = w.length ? (hits.length ? `<ul class="list">${hits.map(g => { const t = guideText(g), k = t.toLowerCase().indexOf(w[0]), s = t.slice(Math.max(0, k - 40), k + 90); return `<li><a class="gr" href="#/guides/${g[0]}" data-act="gclear"><b>${esc(g[1])}</b><span>${k > 0 ? '…' : ''}${esc(s)}…</span></a></li>`; }).join('')}</ul>` : `<div class="empty">${ic('help')}<p>No guide mentions "${esc(gq)}". Try fewer words.</p></div>`) : '';
   },
 };
 
@@ -2624,6 +2844,8 @@ const ACT = {
   },
   guides() { dlg.close(); location.hash = '#/guides'; },
   gdsel: s => (location.hash = '#/guides/' + s.value),
+  gsearch: i => pages.guides.find(i.value),
+  gclear(a) { gq = ''; if (a.getAttribute('href') === location.hash) pages.guides.mount(parse()); },
   rate(b) { openPop(b, `<form data-form="rate"><label for="rate-in">$ per minute</label><input type="number" id="rate-in" step="0.001" min="0" placeholder="GitHub-hosted, by size" value="${myRate() || ''}"><button class="btn pri">Save</button></form>`); },
   jf(b) { jf.f = b.dataset.v; pages.jobs.update(); },
   jfrepo(s) { jf.repo = s.value; pages.jobs.update(); },
