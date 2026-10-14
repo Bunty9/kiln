@@ -38,6 +38,13 @@ Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Ap
 
 ### Fixed
 
+- **kiln is healthy after a reboot without a restart.** It used to start before the network, and several things failed once and stayed failed. Now each retries with backoff until the network, DNS and tailscaled are up, and for the first 3 minutes the dashboard and `kiln doctor` say "starting: waiting for the network" instead of failing (no alerts either); after that a check that still fails shows its real error. See [After a reboot](docs/configuration.md#after-a-reboot).
+  - **Docker mirror.** The registry crashed (exit status 2) when Docker Hub did not resolve as it started, and was restarted with a growing delay. It now starts only once `registry-1.docker.io` resolves, and counts as running once it answers (the egress probe could meet it half-started).
+  - **Filtered egress.** The probe is no longer run in a namespace while DNS is down (each target cost an 8 s timeout); it retries every 5 s then.
+  - **Leftover runners.** The startup sweep ran once, and not at all for an App whose repos were not discovered yet, so a boot with a slow network left the previous run's runners registered. The runners of lost VMs are now deleted by id on every forge, and the sweep is retried (and covers repos discovered late) without touching VMs that are booting. A reboot also deletes every VM's disks, JIT secret files and rootlesskit state, and `rk/` and `egress-check/` leftovers.
+  - **Retries.** App discovery retries after 5 s (not 30 s or 5 minutes); a failed update check after 5 minutes (not 6 hours); a failed auto-rebake after 5 minutes, doubling (not 6 hours); no rebake starts before the network is up.
+  - **Listen address.** A `listen` on a tailnet address that tailscaled assigns late no longer leaves kiln on loopback until a restart: it serves on the address as soon as it binds. An unreadable `tailscale serve status` is rechecked after 5 s, not 60, and is no longer logged as an unsafe config.
+  - **systemd unit.** `deploy/kiln.service` waits up to 30 s for a default route before starting kiln (reinstall the unit to get it; kiln copes without).
 - GitLab jobs could not start in a VM: the executor's state directory `/run/kiln-exec` is now created for the `runner` user.
 - Gitea jobs ended as `failed` ("runner exited without a result") and never saved the cache even when they passed: the result now comes from Gitea's job API for the VM's own runner.
 - The dashboard refreshes its forge list with every state poll and retries after a failed load, so a restart or a newly installed App repo no longer leaves Rerun, Cancel and the forge links missing until a reload.

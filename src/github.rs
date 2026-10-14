@@ -657,14 +657,15 @@ impl Gh {
 
     /// Delete offline, idle `kiln-*` runners left behind by a crash. Only runners of this
     /// host's architecture: a kiln of the other one may serve the same repo, and its
-    /// runners are offline while their VMs boot.
-    pub async fn sweep_runners(&self, repo: &str) -> Result<usize> {
+    /// runners are offline while their VMs boot. `keep`: runner names of VMs that are active
+    /// now (a sweep after startup can meet one still booting).
+    pub async fn sweep_runners(&self, repo: &str, keep: &std::collections::HashSet<String>) -> Result<usize> {
         let arm64 = crate::platform::host_arm64();
         let v = self.get(&format!("repos/{repo}/actions/runners?per_page=100")).await?;
         let mut n = 0;
         for r in v["runners"].as_array().into_iter().flatten() {
             if let Some(id) = r["id"].as_u64()
-                && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-"))
+                && r["name"].as_str().is_some_and(|n| n.starts_with("kiln-") && !keep.contains(n))
                 && crate::forge::same_arch(&r["labels"], arm64)
                 && r["status"] == "offline"
                 && r["busy"] == false
@@ -1272,14 +1273,27 @@ mod characterization {
         let m = Mock::github().await;
         let gh = Gh::for_mock(&m.base);
         // 11 and 15: offline, idle, kiln-*. Kept: 12 (busy), 13 (online), 14 (not ours).
-        assert_eq!(gh.sweep_runners("acme/demo").await.unwrap(), 2);
+        assert_eq!(gh.sweep_runners("acme/demo", &Default::default()).await.unwrap(), 2);
         let r = "/repos/acme/demo/actions/runners";
         assert_eq!(m.requests(), [format!("GET {r}?per_page=100"), format!("DELETE {r}/11"), format!("DELETE {r}/15")]);
         // A refused delete (422) stops the sweep with an error.
         m.clear_log();
         m.fail("DELETE", &format!("{r}/11"), 422, "busy");
-        assert!(gh.sweep_runners("acme/demo").await.is_err());
+        assert!(gh.sweep_runners("acme/demo", &Default::default()).await.is_err());
         assert_eq!(m.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sweep_spares_the_runners_of_active_vms() {
+        let m = Mock::github().await;
+        let gh = Gh::for_mock(&m.base);
+        // 11 (kiln-1-0) belongs to a VM that is booting now: its runner is offline until the guest connects.
+        let keep = ["kiln-1-0".to_string()].into();
+        assert_eq!(gh.sweep_runners("acme/demo", &keep).await.unwrap(), 1);
+        assert_eq!(
+            m.requests().iter().filter(|r| r.starts_with("DELETE")).collect::<Vec<_>>(),
+            ["DELETE /repos/acme/demo/actions/runners/15"]
+        );
     }
 
     #[tokio::test]

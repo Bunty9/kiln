@@ -5,10 +5,15 @@
 [Unit]
 Description=kiln self-hosted CI (ephemeral QEMU/KVM GitHub Actions runners)
 # No After=network-online.target: that is a system unit, which a user unit cannot order
-# against, so kiln may start before the network is up. It copes: GitHub calls are
-# retried each tick, and a failing filtered-egress probe is retried with backoff.
+# against, so kiln may start before the network is up. ExecStartPre below waits for a default
+# route (at most 30 s), and kiln itself copes with a network that is still not usable: GitHub
+# calls, runner sweeps, the docker mirror and the filtered-egress probe are all retried with
+# backoff, and for the first 3 minutes the dashboard and `kiln doctor` say "starting".
 
 [Service]
+# `-`: a box with no default route at all (offline LAN) still starts. $$ is systemd's escape for $.
+ExecStartPre=-/bin/sh -c 'i=0; while [ $$i -lt 30 ]; do while read -r a b c; do [ "$$b" = 00000000 ] && exit 0; done < /proc/net/route; i=$$((i+1)); sleep 1; done'
+TimeoutStartSec=60
 ExecStart=%h/.local/bin/kiln serve
 Restart=on-failure
 RestartSec=5

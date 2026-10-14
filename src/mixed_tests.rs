@@ -469,6 +469,42 @@ async fn retire_reaches_the_right_forge_with_the_right_reason() {
     assert!(t.gh.requests().is_empty(), "GitHub is not gated: {:?}", t.gh.requests());
 }
 
+/// A reboot loses the VMs and the network is not up when kiln starts: the lost VMs' runners are deleted
+/// on every forge, and the sweep of GitHub's repo that failed is retried, not skipped for good.
+#[tokio::test]
+async fn startup_cleanup_is_retried_until_it_worked() {
+    let t = Trio::new("mixed-cleanup", 0, |_| {}).await;
+    let list = "/repos/acme/demo/actions/runners?per_page=100";
+    t.gl.route("GET", &format!("{GL}/projects/1/runners?type=project_type&per_page=100&page=1"), 200, "[]");
+    t.gt.route("GET", &format!("{GT}/runners?limit=50&page=1"), 200, r#"{"runners":[],"total_count":0}"#);
+    // The last run's GitHub VM, lost in the reboot; GitHub is unreachable for now.
+    seed(&t.app, "seed-lost", GH_REPO, "lost", 11, 1, 64);
+    t.app.vms.lock().unwrap().iter_mut().for_each(|v| v.ended = Some(now()));
+    t.gh.fail("GET", list, 503, "down");
+    t.gh.fail("DELETE", "/repos/acme/demo/actions/runners/11", 503, "down");
+
+    let mut c = Cleanup::default();
+    c.step(&t.app).await;
+    assert!(!c.retired && c.fails == 1 && c.next > now(), "nothing worked yet: retry later");
+    assert!(c.swept.contains("gitea:acme/demo") && c.swept.contains("gl:acme/demo") && !c.swept.contains("acme/demo"), "{:?}", c.swept);
+
+    // Not before its time; then the network is up.
+    t.gh.clear_log();
+    c.step(&t.app).await;
+    assert!(t.gh.requests().is_empty(), "waits out its backoff: {:?}", t.gh.requests());
+    t.gh.route("GET", list, 200, fixture("runners.json"));
+    t.gh.route("DELETE", "/repos/acme/demo/actions/runners/11", 204, "");
+    c.next = 0;
+    c.step(&t.app).await;
+    assert!(c.retired && c.fails == 0 && c.swept.contains("acme/demo"), "{:?}", c.swept);
+    assert!(t.gh.requests().iter().any(|r| r == "DELETE /repos/acme/demo/actions/runners/11"), "{:?}", t.gh.requests());
+
+    // Done: later steps ask nobody.
+    t.gh.clear_log();
+    c.step(&t.app).await;
+    assert!(t.gh.requests().is_empty() && t.gl.requests().iter().filter(|r| r.contains("runners?")).count() == 1);
+}
+
 #[tokio::test]
 async fn the_hourly_sweep_hits_each_gated_forge_and_one_failure_stops_no_other() {
     let t = Trio::new("mixed-sweep", 0, |_| {}).await;

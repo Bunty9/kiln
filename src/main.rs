@@ -1,5 +1,6 @@
 mod app_auth;
 mod audit;
+mod boot;
 mod confine;
 mod forge;
 #[cfg(test)]
@@ -668,11 +669,19 @@ async fn run() -> Result<()> {
                 true if !d.starts_with("warning") => tracing::info!("{d}"),
                 _ => tracing::warn!("job VM confinement: {d}"),
             }
+            // Starts the grace period in which a missing network reads as "starting", not failed.
+            let a = app.clone();
+            boot::watch(move || vm::probe_host(&a.cfg()));
             if app.cfg().egress == "filtered" {
                 let a = app.clone();
                 tokio::spawn(async move {
+                    // The scheduler's ticks retry it with backoff, so a failure here may be only "not yet".
                     if let Err(e) = vm::egress_ready(&a, true).await {
-                        tracing::error!("egress filtering unavailable: {e}");
+                        if boot::starting() {
+                            tracing::info!("egress filtering not available yet, retrying: {e}");
+                        } else {
+                            tracing::error!("egress filtering unavailable: {e}");
+                        }
                     }
                 });
             }
@@ -862,57 +871,142 @@ async fn shutdown(app: &Arc<App>) {
 
 /// Seconds between App discoveries: 30 while it serves no repo or has never discovered
 /// successfully (so a fresh install shows up quickly), else 5 minutes.
-fn app_refresh_secs(repos: usize, ever_ok: bool) -> u64 {
-    if repos == 0 || !ever_ok { 30 } else { 300 }
+/// After `fails` failed discoveries in a row (GitHub or the network down) it is retried quickly,
+/// 5 s growing to a minute, so a box that booted before its network is serving within seconds of it.
+fn app_refresh_secs(repos: usize, ever_ok: bool, fails: u32) -> u64 {
+    if fails > 0 {
+        boot::retry_secs(fails, 60)
+    } else if repos == 0 || !ever_ok {
+        30
+    } else {
+        300
+    }
 }
 
 /// App mode: refresh which repos the App is installed on (see `app_refresh_secs`).
 /// A failure keeps the previous list (a GitHub hiccup must not unschedule every repo).
 async fn refresh_app(app: &Arc<App>) {
     static LAST: AtomicU64 = AtomicU64::new(0);
+    static FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let Some(a) = app.gh.app() else { return };
-    let every = app_refresh_secs(a.names.read().unwrap().len(), a.discovered_at.load(Ordering::Relaxed) != 0);
+    let every =
+        app_refresh_secs(a.names.read().unwrap().len(), a.discovered_at.load(Ordering::Relaxed) != 0, FAILS.load(Ordering::Relaxed));
     if now() < LAST.load(Ordering::Relaxed) + every {
         return;
     }
     LAST.store(now(), Ordering::Relaxed);
     match app.gh.discover_now().await {
         Ok(n) => {
+            FAILS.store(0, Ordering::Relaxed);
             tracing::info!("GitHub App: {n} repo(s) installed");
             // Per-installation failures and ignored installations.
             if let Some(e) = a.error.lock().unwrap().clone() {
                 tracing::warn!("GitHub App discovery: {e}");
             }
         }
-        Err(e) => tracing::warn!("GitHub App discovery: {e:#}"),
+        Err(e) if boot::waiting_for_network() => {
+            FAILS.fetch_add(1, Ordering::Relaxed);
+            tracing::info!("GitHub App discovery waits for the network: {e:#}");
+        }
+        Err(e) => {
+            FAILS.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("GitHub App discovery: {e:#}");
+        }
     }
 }
 
 const SWEEP_EVERY: u64 = 3600;
 
 async fn sweep_runners(app: &App, gated_only: bool) {
+    sweep_pending(app, gated_only, &mut Default::default(), false).await;
+}
+
+/// Sweeps the repos not in `done` yet and adds each that worked, so a repo whose sweep failed
+/// (no network yet) or that was not known yet (an App not discovered yet) is tried again.
+/// True when no sweep failed. `quiet`: this is a retry, whose failures are not worth a warning.
+async fn sweep_pending(app: &App, gated_only: bool, done: &mut std::collections::HashSet<String>, quiet: bool) -> bool {
     let cfg = app.cfg();
     let cfgs = forge::effective(&cfg.forges, &cfg.repos);
+    let mut ok = true;
     for f in app.forges.all().iter().filter(|f| f.has_credential() && (f.gated() || !gated_only)) {
         for rr in cfgs.iter().find(|c| c.id == f.id()).map(|c| f.repos(c)).unwrap_or_default() {
             let repo = rr.key();
-            match f.sweep(&rr).await {
-                Ok(n) if n > 0 => tracing::info!("{repo}: removed {n} stale runner(s)"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("{repo}: runner sweep: {e:#}"),
+            if done.contains(&repo) {
+                continue;
             }
+            // Looked up per repo: a VM launched since the last one has its runner registered, offline while it boots.
+            let keep = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
+            match f.sweep(&rr, &keep).await {
+                Ok(n) => {
+                    done.insert(repo.clone());
+                    if n > 0 {
+                        tracing::info!("{repo}: removed {n} stale runner(s)");
+                    }
+                }
+                Err(e) => {
+                    ok = false;
+                    if boot::waiting_for_network() {
+                        tracing::info!("{repo}: runner sweep waits for the network: {e:#}");
+                    } else if quiet {
+                        tracing::debug!("{repo}: runner sweep: {e:#}");
+                    } else {
+                        tracing::warn!("{repo}: runner sweep: {e:#}");
+                    }
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// Seconds before the n-th retry of a failed startup cleanup.
+fn cleanup_retry_secs(fails: u32) -> u64 {
+    boot::retry_secs(fails, 300)
+}
+
+/// What kiln must do once after a start to clear the previous run's leftovers from the forges,
+/// retried until it worked: the network or the GitHub App's repo list may not be there yet at boot.
+#[derive(Default)]
+struct Cleanup {
+    /// The runners of VMs the last run lost are deleted.
+    retired: bool,
+    /// Repos whose orphaned runners were swept.
+    swept: std::collections::HashSet<String>,
+    fails: u32,
+    next: u64,
+}
+
+impl Cleanup {
+    async fn step(&mut self, app: &App) {
+        if now() < self.next {
+            return;
+        }
+        if !self.retired {
+            self.retired = vm::retire_ended(app).await;
+        }
+        let swept = sweep_pending(app, false, &mut self.swept, self.fails > 0).await;
+        if self.retired && swept {
+            if self.fails > 0 {
+                tracing::info!("startup cleanup of stale runners done after {} retries", self.fails);
+            }
+            (self.fails, self.next) = (0, 0);
+        } else {
+            self.fails += 1;
+            self.next = now() + cleanup_retry_secs(self.fails);
         }
     }
 }
 
 async fn scheduler(app: Arc<App>) {
     refresh_app(&app).await;
-    // Runners a crashed kiln left registered (offline) would otherwise linger for a day. A gated forge's
-    // ended VMs first: their runners were never removed by the runner itself (R2b B-L2).
-    vm::retire_ended(&app).await;
-    sweep_runners(&app, false).await;
+    // Runners a crashed kiln or a reboot left registered (offline) would otherwise linger for a day: those of the
+    // VMs it lost, a gated forge's ended VMs (never removed by the runner itself, R2b B-L2), then every repo's
+    // orphans. Before the first tick, so nothing launched since is swept; retried while the network is not up.
+    let mut cleanup = Cleanup::default();
+    cleanup.step(&app).await;
     let mut swept = now();
     while !app.stopping.load(Ordering::SeqCst) {
+        cleanup.step(&app).await;
         // GitLab and Gitea runners that a failed delete left behind; GitHub's JIT runners go by the startup sweep alone.
         if now() >= swept + SWEEP_EVERY {
             swept = now();
@@ -929,6 +1023,7 @@ async fn scheduler(app: Arc<App>) {
                     p.queued = q.iter().map(|(r, s)| (r.clone(), s.values().sum())).collect();
                     p.queued_by_size = q;
                 }
+                Err(e) if boot::waiting_for_network() => p.error = Some(boot::waiting_msg(&format!("{e:#}"))),
                 Err(e) => p.error = Some(format!("{e:#}")),
             }
         }
@@ -954,7 +1049,8 @@ async fn scheduler(app: Arc<App>) {
 
 /// Everything the box health tracker sees this tick. A poll error adds to the tick's blockers
 /// instead of replacing them. "draining" is left out: health state is in memory, so a restart
-/// would orphan its raise with no clear.
+/// would orphan its raise with no clear. What only says "starting: ..." (the network is not up yet,
+/// see `boot`) is no problem to alert on: if it lasts, the message turns into the real error.
 fn health_list(
     health: &[(String, String)],
     poll_error: Option<&str>,
@@ -976,6 +1072,7 @@ fn health_list(
         let f = failing.iter().map(|f| f.1.as_str()).collect::<Vec<_>>().join("; ");
         l.push(("notify_failing".into(), format!("notifications failing: {f}")));
     }
+    l.retain(|h| !h.1.starts_with("starting:"));
     l
 }
 
@@ -1021,17 +1118,28 @@ async fn reload_token(app: &Arc<App>) {
     }
 }
 
+const REBAKE_EVERY: u64 = 6 * 3600;
+
 /// Not more than every 6h (a failing bake must not loop). Running VMs keep the
 /// old base inode and the swap is atomic, so baking next to jobs is safe.
 fn should_rebake(cfg: &Config, stale: bool, baking: bool, t: u64, last: u64) -> bool {
-    cfg.auto_rebake && stale && !baking && t >= last + 6 * 3600
+    cfg.auto_rebake && stale && !baking && t >= last + REBAKE_EVERY
+}
+
+/// The `last` that lets a bake that failed at `t` (the `fails`-th time in a row) be tried again in
+/// 5 minutes, doubling up to the 6 h: one that failed because the network was not up yet (a boot
+/// that finds the image stale) must not wait the whole 6 h.
+fn rebake_last_after_failure(t: u64, fails: u32) -> u64 {
+    (t + boot::retry_secs(fails, REBAKE_EVERY / 60) * 60).saturating_sub(REBAKE_EVERY)
 }
 
 fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     static LAST: AtomicU64 = AtomicU64::new(0);
+    static FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let stale = vm::image_info(&app.data, app.gh.latest_cached(), cfg)["stale"] == true;
     // vm::bake would refuse: do not spend the 6 h slot on it.
-    let baking = app.baking.load(Ordering::SeqCst) || app.draining.load(Ordering::SeqCst);
+    // Nor before the network is up at boot: it would only fail on the first download.
+    let baking = app.baking.load(Ordering::SeqCst) || app.draining.load(Ordering::SeqCst) || boot::waiting_for_network();
     if !should_rebake(cfg, stale, baking, now(), LAST.load(Ordering::Relaxed)) {
         return;
     }
@@ -1039,8 +1147,13 @@ fn auto_rebake(app: &Arc<App>, cfg: &Config) {
     tracing::info!("base image is stale: rebaking");
     let app = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = vm::bake(app).await {
-            tracing::error!("auto-rebake failed: {e:#}");
+        match vm::bake(app).await {
+            Ok(()) => FAILS.store(0, Ordering::Relaxed),
+            Err(e) => {
+                let fails = FAILS.fetch_add(1, Ordering::Relaxed) + 1;
+                LAST.store(rebake_last_after_failure(now(), fails), Ordering::Relaxed);
+                tracing::error!("auto-rebake failed (trying again in {} min): {e:#}", boot::retry_secs(fails, REBAKE_EVERY / 60));
+            }
         }
     });
 }
@@ -1110,7 +1223,11 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         }
     }
     if let Some(e) = egress_err.as_ref() {
-        problems.push(("egress", format!("egress filtering unavailable: {e}")));
+        // Retried with backoff: during the first minutes it is "starting", which raises no alert.
+        problems.push((
+            "egress",
+            if boot::starting() { boot::waiting_for("filtered egress", e) } else { format!("egress filtering unavailable: {e}") },
+        ));
     }
     if let Some(g) = gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)) {
         problems.push(g);
@@ -1742,6 +1859,12 @@ mod tests {
         assert_eq!(kinds(health_list(&base, Some("x"), true, None, &[])), ["disk", "poll"]);
         assert_eq!(kinds(health_list(&[], None, false, None, &[])), ["landlock"]);
         assert_eq!(kinds(health_list(&[], None, true, Some("bad"), &[h("d1")])), ["notify_failing", "notify_failing"]);
+        let starting = ("egress".to_string(), boot::waiting_for("filtered egress", "step: internet unreachable"));
+        assert_eq!(
+            kinds(health_list(&[starting, h("disk")], Some(&boot::waiting_msg("dns error")), true, None, &[])),
+            ["disk"],
+            "starting alerts nobody"
+        );
     }
 
     #[test]
@@ -1936,6 +2059,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_rebake_is_retried_soon() {
+        let cfg = Config::default();
+        let t = 1_000_000;
+        let last = rebake_last_after_failure(t, 1);
+        assert!(!should_rebake(&cfg, true, false, t + 299, last));
+        assert!(should_rebake(&cfg, true, false, t + 300, last), "first retry after 5 minutes");
+        assert!(should_rebake(&cfg, true, false, t + 600, rebake_last_after_failure(t, 2)));
+        assert!(!should_rebake(&cfg, true, false, t + 599, rebake_last_after_failure(t, 2)), "then doubling");
+        assert!(
+            !should_rebake(&cfg, true, false, t + REBAKE_EVERY - 1, rebake_last_after_failure(t, 40)),
+            "never sooner than 6 h at the cap"
+        );
+        assert!(should_rebake(&cfg, true, false, t + REBAKE_EVERY, rebake_last_after_failure(t, 40)));
+    }
+
+    #[test]
     fn rebake_rules() {
         let c = Config::default();
         let h = 3600;
@@ -1961,10 +2100,15 @@ mod tests {
 
     #[test]
     fn app_refresh_cadence() {
-        assert_eq!(app_refresh_secs(0, false), 30, "never discovered");
-        assert_eq!(app_refresh_secs(3, false), 30, "only an old map, never a successful discovery");
-        assert_eq!(app_refresh_secs(0, true), 30, "installed nowhere yet: pick up a new install quickly");
-        assert_eq!(app_refresh_secs(3, true), 300);
+        assert_eq!(app_refresh_secs(0, false, 0), 30, "never discovered");
+        assert_eq!(app_refresh_secs(3, false, 0), 30, "only an old map, never a successful discovery");
+        assert_eq!(app_refresh_secs(0, true, 0), 30, "installed nowhere yet: pick up a new install quickly");
+        assert_eq!(app_refresh_secs(3, true, 0), 300);
+        assert_eq!(
+            [1, 2, 3, 6, 50].map(|f| app_refresh_secs(0, false, f)),
+            [5, 10, 20, 60, 60],
+            "a failure is retried quickly, not after 5 minutes"
+        );
     }
 
     #[test]
