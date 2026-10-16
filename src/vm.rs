@@ -417,6 +417,32 @@ fn backoff_secs(fails: u32) -> u64 {
     (30u64 << fails.min(5)).min(900)
 }
 
+/// A launch failed for want of io_uring locked memory: hold every launch with a doubling delay. The first
+/// failure keeps its (Failed) record to explain; repeats are probes of the same cause and leave no record.
+/// True when the VM was dropped, the caller then does nothing more.
+async fn io_uring_hit(app: &Arc<App>, id: &str, repo: &str, dir: &Path) -> bool {
+    let (repeat, secs) = {
+        let mut g = app.io_uring.lock().unwrap();
+        let repeat = g.0 > 0;
+        *g = (g.0 + 1, now() + backoff_secs(g.0 + 1));
+        (repeat, g.1 - now())
+    };
+    tracing::warn!("{id}: {} (launches paused {secs} s)", crate::resil::IO_URING_FAIL);
+    if !repeat {
+        return false;
+    }
+    finish_cache(app, id, repo, dir, false).await;
+    let rid = app.vms.lock().unwrap().iter().find(|v| v.id == id).and_then(|v| v.runner_id);
+    app.vms.lock().unwrap().retain(|v| v.id != id);
+    let _ = tokio::fs::remove_dir_all(dir).await;
+    if let Some(rid) = rid {
+        retire(app, repo, vec![(id.to_string(), rid)], Reason::Unused).await;
+    }
+    app.releases.lock().unwrap().remove(id);
+    app.kills.lock().unwrap().remove(id);
+    true
+}
+
 /// Register the VM synchronously (so the next scheduler tick counts it), then
 /// boot it in the background.
 pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
@@ -466,6 +492,12 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     tokio::spawn(async move {
         let dir = app.data.join("vms").join(&id);
         let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
+        // Whatever is left in the VM's scope would hold the cache's write lock below.
+        crate::resil::stop_scope(&id).await;
+        let uring = outcome.as_ref().err().is_some_and(|e| crate::resil::io_uring_exhausted(&format!("{e:#}")));
+        if uring && io_uring_hit(&app, &id, &repo, &dir).await {
+            return;
+        }
         // A refused runner registration: no VM was booted and no directory created.
         let mint = outcome.as_ref().err().and_then(registration_refusal);
         finish_cache(&app, &id, &repo, &dir, matches!(outcome, Ok(State::Done))).await;
@@ -484,6 +516,10 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 }
             };
             v.mint_failed = mint.is_some();
+            // Booted fine: the io_uring limit (if it was the problem) has cleared.
+            if v.online_at.is_some() {
+                *app.io_uring.lock().unwrap() = (0, 0);
+            }
             // Failed means kiln or the host broke; a job's own verdict is Done.
             if v.result.is_some() {
                 v.state = State::Done;
@@ -870,6 +906,9 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
         cmd = Command::new(&confined[0]);
         cmd.args(&confined[1..]).kill_on_drop(true);
     }
+    // Its own cgroup, so memory pressure takes this VM and not kiln with every other job.
+    cmd = crate::resil::in_scope(cmd, id, mem_mb).await;
+    cmd.kill_on_drop(true);
     no_secrets(&mut cmd);
     // Out of kiln's process group: a Ctrl-C at a foreground `kiln serve` reaches kiln only,
     // which then gives the job its stop grace. Kills target the child's pid, never a group.
@@ -1121,6 +1160,16 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     }
     let status = child.wait().await?;
     if !status.success() && !dropped {
+        use std::os::unix::process::ExitStatusExt;
+        if let Ok(c) = tokio::fs::read_to_string(dir.join("console.log")).await
+            && crate::resil::io_uring_exhausted(&c)
+        {
+            bail!("qemu: {}", crate::resil::IO_URING_FAIL);
+        }
+        if crate::resil::looks_oom_killed(status.code(), status.signal()) {
+            note(app, id, crate::resil::OOM_NOTE);
+            return Ok(State::Killed);
+        }
         bail!("qemu exited with {status}; see console log");
     }
     let mut v = update(app, id, |_| {}).context("vm vanished")?;
@@ -3065,6 +3114,23 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     let (ok, detail) = memory_check(platform::mem_avail_mb(), crate::host::vms_mb(), cfg.max_vms, cfg.vm_mem_mb);
     out.push(check("memory", ok, detail));
+    let psi = crate::resil::memory_psi();
+    let held = crate::resil::pressure_gate(psi);
+    out.push(match (psi, held) {
+        (_, Some(m)) => check("memory pressure", false, m),
+        (Some(p), None) => check(
+            "memory pressure",
+            true,
+            format!("{p:.0}% of the last 10 s stalled on memory (launches hold above {:.0}%)", crate::resil::PSI_HOLD_PCT),
+        ),
+        (None, None) => check("memory pressure", true, "not measured (no /proc/pressure/memory)"),
+    });
+    let (ok, detail) = crate::resil::io_uring_check();
+    out.push(check("io_uring", ok, detail));
+    if !platform::MACOS {
+        let (ok, detail) = crate::resil::scope_check().await;
+        out.push(check("vm cgroups", ok, detail));
+    }
 
     app.gh.refresh_latest().await;
     let info = image_info(&app.data, app.gh.latest_cached(), &cfg);
@@ -5808,6 +5874,27 @@ print("ok")
             (Some("2.329.0"), Some("2.330.0"), Some(true))
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn io_uring_exhaustion_backs_off_and_collapses_repeats() {
+        let app = App::for_tests();
+        let dir = app.data.join("vms").join("a");
+        std::fs::create_dir_all(&dir).unwrap();
+        app.vms.lock().unwrap().push(vm("a", State::Booting, None));
+        // The first failure keeps its record and starts the pause (30 s << 1).
+        assert!(!io_uring_hit(&app, "a", "acme/demo", &dir).await);
+        let (fails, at) = *app.io_uring.lock().unwrap();
+        assert_eq!(fails, 1);
+        assert!((at - now()).abs_diff(60) <= 1, "{}", at - now());
+        assert_eq!(app.vms.lock().unwrap().len(), 1);
+        // A repeat is dropped (record and directory), and the delay doubles.
+        app.vms.lock().unwrap().push(vm("b", State::Booting, None));
+        let dir = app.data.join("vms").join("b");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(io_uring_hit(&app, "b", "acme/demo", &dir).await);
+        assert!(!app.vms.lock().unwrap().iter().any(|v| v.id == "b") && !dir.exists());
+        assert_eq!(app.io_uring.lock().unwrap().0, 2);
     }
 
     /// An idle waiting VM with runner `rid`, registered with `app`.

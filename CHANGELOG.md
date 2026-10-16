@@ -4,6 +4,15 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- Each job VM now runs in its own transient systemd scope (`kiln-vm-<id>.scope`, memory-capped at its RAM plus 1.5 GB) on Linux hosts with `systemd-run`, so systemd-oomd or the kernel OOM killer takes one VM instead of the whole `kiln.service` with every running job. A VM killed that way ends as killed with "likely out of memory". Without systemd (macOS, containers) nothing changes. The shipped unit stops leftover scopes on stop, and kiln stops them at start. Reinstall the unit to get that (kiln does it at start regardless).
+- Launches hold while the host stalls on memory: Linux PSI `some avg10` above 20% (`/proc/pressure/memory`) shows "host memory pressure ... holding launches" on the Overview and in `kiln doctor`, and resumes by itself.
+
+### Fixed
+
+- `qemu-img` failing with "Failed to initialize io_uring: Cannot allocate memory" (the user's shared locked-memory limit used up by other processes, such as editors) no longer creates a Failed VM every minute. kiln pauses launches with a doubling delay (1 min up to 15), keeps only the first failed VM, probes with one launch, and shows the cause on the Overview. `kiln doctor` has new `io_uring`, `memory pressure` and `vm cgroups` checks. The shipped unit sets `LimitMEMLOCK=infinity`; see Troubleshooting in docs/configuration.md.
+
 ## [0.2.6] - 2026-10-14
 
 Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 Linux hosts, and ships signed releases for Linux x86_64 and arm64 and for macOS arm64. Hosts self-heal at boot after a restart, and the dashboard has a refresh with full help for every feature. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).

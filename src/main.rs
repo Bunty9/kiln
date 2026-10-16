@@ -13,6 +13,7 @@ mod mirror;
 mod mixed_tests;
 mod notify;
 mod platform;
+mod resil;
 mod telemetry;
 mod update;
 mod vm;
@@ -456,6 +457,8 @@ pub struct App {
     pub stopping: AtomicBool,
     /// repo -> (consecutive launch failures, retry_at unix time).
     pub backoff: Mutex<HashMap<String, (u32, u64)>>,
+    /// (consecutive launches that found the io_uring locked-memory limit exhausted, retry_at): holds every launch.
+    pub io_uring: Mutex<(u32, u64)>,
     /// Per forge: registration failures that hold every launch on it.
     pub api_backoff: Mutex<HashMap<forge::ForgeId, ApiBackoff>>,
     pub mirror: Mutex<mirror::Status>,
@@ -482,12 +485,15 @@ pub struct HostReadings {
     pub mem_avail_mb: u64,
     pub disk_free_gb: Option<u64>,
     pub threads: u32,
+    /// PSI `some avg10` of memory, in percent (Linux with PSI).
+    pub mem_psi: Option<f64>,
 }
 
 impl HostReadings {
     /// A roomy, fixed host for tests: 8 threads, 64 GB of memory, 500 GB of disk.
     #[cfg(test)]
-    pub const TEST: HostReadings = HostReadings { mem_total_mb: 65536, mem_avail_mb: 65536, disk_free_gb: Some(500), threads: 8 };
+    pub const TEST: HostReadings =
+        HostReadings { mem_total_mb: 65536, mem_avail_mb: 65536, disk_free_gb: Some(500), threads: 8, mem_psi: None };
 }
 
 impl App {
@@ -523,6 +529,7 @@ impl App {
             baking: Default::default(),
             stopping: Default::default(),
             backoff: Default::default(),
+            io_uring: Default::default(),
             api_backoff: Default::default(),
             mirror: Default::default(),
             app_states: Mutex::new(app_auth::States::open(data.join("app_states.json"))),
@@ -553,6 +560,7 @@ impl App {
                 mem_avail_mb: platform::mem_avail_mb(),
                 disk_free_gb: vm::disk_free_gb(&self.data).await,
                 threads: host_threads(),
+                mem_psi: resil::memory_psi(),
             },
         }
     }
@@ -706,6 +714,8 @@ async fn run() -> Result<()> {
                 bail!("data directory {} is under {p}, which job VMs' QEMU may read: move it (KILN_DATA) elsewhere", app.data.display());
             }
             // Only serve may touch leftovers: bake/doctor can run next to a live serve.
+            // Job VMs run in scopes that outlive the service: none can belong to this start.
+            resil::reap_scopes().await;
             *app.vms.lock().unwrap() = vm::load_history(&app.data);
             tokio::spawn(host::run(app.clone()));
             notify::start(&app);
@@ -1328,6 +1338,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     if let Some(g) = gated(vm::launch_gate(mem_avail, cfg.vm_mem_mb, disk, mirror_mb, cache_mb)) {
         problems.push(g);
     }
+    // Memory stalls (PSI) and an exhausted io_uring limit hold launches host-wide, however much memory is free.
+    if let Some(m) = resil::pressure_gate(host.mem_psi) {
+        problems.push(("memory", m));
+    }
+    let (uring_fails, uring_at) = *app.io_uring.lock().unwrap();
+    if uring_fails > 0 && uring_at > now() {
+        problems.push(("io_uring", format!("{}; launches paused, retry in {} s", resil::io_uring_banner(), uring_at - now())));
+    }
+    let host_hold = problems.iter().any(|(k, _)| matches!(*k, "io_uring")) || resil::pressure_gate(host.mem_psi).is_some();
     let mut blocked = problems.first().cloned();
     // Background failures (cache saves, the startup cleanup), one health item per kind.
     for (kind, msgs) in notice_kinds(&app.notices.lock().unwrap()) {
@@ -1426,7 +1445,13 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 blocked = gated(gate.clone());
             }
             any_queued |= queued > 0;
-            let held = backed_off || old_image || gate.is_some() || egress_err.is_some() || draining || app.stopping.load(Ordering::SeqCst);
+            let held = backed_off
+                || host_hold
+                || old_image
+                || gate.is_some()
+                || egress_err.is_some()
+                || draining
+                || app.stopping.load(Ordering::SeqCst);
             let (demand, mut warm) = vm::launch_split(queued, waiting, target);
             // Replacements wait for a cache commit so they boot on the new cache.
             if warm > 0 && vm::cache_busy(app, repo) {
@@ -1434,6 +1459,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
             let want = api.allow(now(), want, probing.contains(&forge.id()));
+            // After an io_uring pause one launch tests whether the limit has cleared.
+            let want = if uring_fails > 0 { want.min(1) } else { want };
             if want > 0 {
                 probing.insert(forge.id());
             }
@@ -1761,6 +1788,28 @@ mod tests {
         let kinds: Vec<_> =
             app.poll.lock().unwrap().health.iter().map(|(k, _)| k.clone()).filter(|k| k != "memory" && k != "disk").collect();
         assert_eq!(kinds, ["forge", "forge_api"]);
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_and_an_exhausted_io_uring_hold_launches() {
+        let m = forge_test_mock::Mock::github().await;
+        let (mut app, cfg) = tick_app("tick-resil", &m, None);
+        Arc::get_mut(&mut app).unwrap().host_fixed = Some(HostReadings { mem_psi: Some(45.0), ..HostReadings::TEST });
+        tick(&app, &cfg).await.unwrap();
+        let p = app.poll.lock().unwrap().clone();
+        assert_eq!(p.blocked_kind.as_deref(), Some("memory"));
+        assert!(p.blocked.unwrap().contains("holding launches"));
+        // Calm again, but the last launch hit the io_uring limit: held until the retry time.
+        Arc::get_mut(&mut app).unwrap().host_fixed = Some(HostReadings::TEST);
+        *app.io_uring.lock().unwrap() = (1, now() + 100);
+        tick(&app, &cfg).await.unwrap();
+        let p = app.poll.lock().unwrap().clone();
+        assert_eq!(p.blocked_kind.as_deref(), Some("io_uring"));
+        assert!(p.blocked.unwrap().contains("RLIMIT_MEMLOCK"));
+        // Past the retry time nothing blocks (one probe launch is allowed).
+        *app.io_uring.lock().unwrap() = (1, now() - 1);
+        tick(&app, &cfg).await.unwrap();
+        assert_eq!(app.poll.lock().unwrap().blocked_kind, None);
     }
 
     #[tokio::test]
