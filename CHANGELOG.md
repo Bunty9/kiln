@@ -7,20 +7,20 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 ### Changed
 
 - **Usage statistics say why jobs did not pass.** The opt-in daily report gains `fail_causes_24h`: a count of the last 24 hours' non-passing jobs by cause (`failed`, `cancelled`, `timeout`, `killed`, `lost`, `no_result`, `refused_policy`, `refused_failure`, `other`), from kiln's own VM records. Counts only, no names, URLs or messages; `GET /api/telemetry` shows the exact report.
-
-### Security
-
-- rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
-
-### Changed
-
 - **Overview: the host graphs hover together.** Hovering (or tapping, or arrowing along) either the CPU or the Memory chart draws the crosshair on both at the same moment and shows a popup on each, with that chart's own values and unit (cores, GB). The popups sit beside the line and move above and below their charts when they would touch. Leaving the charts clears both.
 - **Overview: Recent jobs have a hover card.** Rest the pointer on a row (mouse and trackpad only) or focus it with the keyboard and a card shows the job's full branch or PR, title, commit, event, workflow, outcome, size, warm or cold start, cache outcome, refusal reason, the timeline with its durations and clock times, and peak CPU and memory when the host graph has samples. The card stays open under the pointer so text can be copied, closes on Escape, scroll or leaving, and never shows on touch screens, where a tap still opens the job.
 - **Event icons.** Recent jobs, the Jobs list, the job page and a repo's runs show a small coloured icon for what started the run: pull or merge request, merge group or merge train, branch push, tag or release, manual run, schedule, a workflow or pipeline triggered by another, and refused fork pull requests. Each has a light and a dark colour token (`--ev-*`, at least 4:1 on the card) and a name for screen readers.
+- Each job VM now runs in its own transient systemd scope (`kiln-vm-<id>.scope`, memory-capped at its RAM plus 1.5 GB) on Linux hosts with `systemd-run`, so systemd-oomd or the kernel OOM killer takes one VM instead of the whole `kiln.service` with every running job. A VM killed that way ends as killed with "likely out of memory". Without systemd (macOS, containers) nothing changes. The shipped unit stops leftover scopes on stop, and kiln stops them at start. Reinstall the unit to get that (kiln does it at start regardless).
+- Launches hold while the host stalls on memory: Linux PSI `some avg10` above 20% (`/proc/pressure/memory`) shows "host memory pressure ... holding launches" on the Overview and in `kiln doctor`, and resumes by itself.
 
 ### Fixed
 
 - **Hover hints in dark mode.** The small hints that appear when you hover or focus badges, stats and times were a bright box with dark text in dark mode. They now use the same surface, text, ring and shadow as the `?` popovers in both themes. (The browser's own `title` tooltips are drawn by the browser or OS and cannot be styled; the dashboard sets `color-scheme` per theme, so the page's form controls and scrollbars follow the theme, and kiln uses its own hint for its text.)
+- `qemu-img` failing with "Failed to initialize io_uring: Cannot allocate memory" (the user's shared locked-memory limit used up by other processes, such as editors) no longer creates a Failed VM every minute. kiln pauses launches with a doubling delay (1 min up to 15), keeps only the first failed VM, probes with one launch, and shows the cause on the Overview. `kiln doctor` has new `io_uring`, `memory pressure` and `vm cgroups` checks. The shipped unit sets `LimitMEMLOCK=infinity`; see Troubleshooting in docs/configuration.md.
+
+### Security
+
+- rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
 
 ## [0.2.6] - 2026-10-14
 

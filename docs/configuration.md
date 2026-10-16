@@ -417,6 +417,19 @@ def verify(secret, headers, body: bytes) -> bool:
 
 Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub webhooks are a separate, future feature.
 
+## Troubleshooting host resources
+
+**Every launch fails with `Failed to initialize io_uring: Cannot allocate memory`.** io_uring rings are charged to the user's shared locked-memory counter against `RLIMIT_MEMLOCK` (8 MiB by default). Other processes of the same user (Node.js opens rings, so editors and agent tools can hold hundreds) can use it up, and then `qemu-img` cannot create one. kiln recognises the message, pauses launches with a doubling delay (1 minute, up to 15), keeps only the first failed VM, tries one launch to see whether it has cleared, and shows "io_uring: locked-memory limit reached" on the Overview. `kiln doctor` reports the same in its `io_uring` check by creating and closing a ring. Fix it by closing the processes that hold rings, or raise the limit: a user unit cannot exceed its manager's hard limit, so first
+
+```
+sudo systemctl edit user@.service      # add: [Service]  LimitMEMLOCK=infinity
+sudo systemctl restart user@$(id -u).service   # ends the user's running services; or reboot
+```
+
+then `LimitMEMLOCK=infinity` in `kiln.service` (the shipped unit has it). A unit asking for more than the manager allows still starts; the limit is silently clamped to the manager's, so `grep locked /proc/$(pidof kiln)/limits` shows what applies.
+
+**The whole kiln service was killed under memory pressure** (`systemd-oomd killed N process(es) in this unit`). Job VMs now run in their own scopes (`systemctl --user list-units 'kiln-vm-*'`), so the killer's biggest candidate is one VM; the job shows as killed with "likely out of memory". The scope is capped at the VM's RAM plus 1.5 GB (`MemoryMax`, effective only if the memory controller is delegated to the user manager, the default). `kiln doctor` shows `vm cgroups`; without `systemd-run` (no systemd, a container) VMs stay in kiln's cgroup. kiln also holds launches while Linux's memory pressure (`/proc/pressure/memory`, `some avg10`) is above 20%, in addition to the free-memory check; there is no setting for it.
+
 ## Data directory
 
 ```
