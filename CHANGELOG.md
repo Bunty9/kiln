@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- **Usage statistics say why jobs did not pass.** The opt-in daily report gains `fail_causes_24h`: a count of the last 24 hours' non-passing jobs by cause (`failed`, `cancelled`, `timeout`, `killed`, `lost`, `no_result`, `refused_policy`, `refused_failure`, `other`), from kiln's own VM records. Counts only, no names, URLs or messages; `GET /api/telemetry` shows the exact report.
+
 ### Security
 
 - rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
