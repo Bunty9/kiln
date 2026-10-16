@@ -114,6 +114,30 @@ impl Vm {
     pub fn refused_by_failure(&self) -> bool {
         self.refused() && self.refuse_failure
     }
+
+    /// Why a finished job did not pass, from the VM record alone (None: it passed). The receiver
+    /// accepts exactly these names (its lib/validate.js `CAUSES`). Refusals come first: the guest
+    /// fails a refused job cleanly, so its result alone would read as `failed`.
+    pub fn fail_cause(&self) -> Option<&'static str> {
+        if self.result.as_deref() == Some("Succeeded") {
+            return None;
+        }
+        if self.refused() {
+            return Some(if self.refuse_failure { "refused_failure" } else { "refused_policy" });
+        }
+        let note = self.note.as_deref().unwrap_or("");
+        Some(match self.result.as_deref() {
+            Some("Failed") => "failed",
+            Some("Canceled" | "Cancelled") => "cancelled",
+            Some(_) => "other",
+            None if self.state == State::Lost => "lost",
+            None if note.starts_with("job timeout") => "timeout",
+            None if note.starts_with("killed: the pipeline was cancelled") => "cancelled",
+            None if note.starts_with("killed") || note == "kiln shutting down" => "killed",
+            None if self.state == State::Failed => "no_result",
+            None => "other",
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -3901,6 +3925,30 @@ mod tests {
         assert!(!s.is_active() && !s.is_waiting());
         let s: State = serde_json::from_str("\"unneeded\"").unwrap();
         assert_eq!(s, State::Unneeded);
+    }
+
+    #[test]
+    fn failures_are_counted_by_cause() {
+        let vm = |state, result: Option<&str>, note: Option<&str>| Vm {
+            result: result.map(String::from),
+            note: note.map(String::from),
+            ..vm("c", state, None)
+        };
+        let c = |v: &Vm| v.fail_cause();
+        assert_eq!(c(&vm(State::Done, Some("Succeeded"), None)), None);
+        assert_eq!(c(&vm(State::Done, Some("Failed"), None)), Some("failed"));
+        assert_eq!(c(&vm(State::Done, Some("Cancelled"), None)), Some("cancelled"));
+        assert_eq!(c(&vm(State::Done, Some("Skipped"), None)), Some("other"));
+        assert_eq!(c(&vm(State::Lost, None, None)), Some("lost"));
+        assert_eq!(c(&vm(State::Killed, None, Some("job timeout after 360 min"))), Some("timeout"));
+        assert_eq!(c(&vm(State::Killed, None, Some("killed from dashboard"))), Some("killed"));
+        assert_eq!(c(&vm(State::Killed, None, Some("kiln shutting down"))), Some("killed"));
+        assert_eq!(c(&vm(State::Killed, None, Some("killed: the pipeline was cancelled"))), Some("cancelled"));
+        assert_eq!(c(&vm(State::Failed, None, Some("runner exited without a result"))), Some("no_result"));
+        // A refused job reports Failed from the guest: still a refusal.
+        let policy = vm(State::Killed, Some("Failed"), Some("refused: pull request from a fork"));
+        assert_eq!(c(&policy), Some("refused_policy"));
+        assert_eq!(c(&Vm { refuse_failure: true, ..policy }), Some("refused_failure"));
     }
 
     fn vm(id: &str, state: State, online_at: Option<u64>) -> Vm {
