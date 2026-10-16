@@ -169,7 +169,7 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
   const g = { document: doc, window: { isSecureContext: false }, location: { hash: '', search: '', hostname: 'box', pathname: '/', protocol: 'http:' }, history: { replaceState() {} }, localStorage: ls, matchMedia: () => ({ matches: false }),
     addEventListener() {}, setInterval: () => 0, setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {}, CSS: { escape: x => x }, navigator: {}, fetch: async u => ({ ok: true, status: 200, text: async () => JSON.stringify(u === '/api/forges' ? serve.forges : {}) }),
     innerHeight: 800, innerWidth: 1000, scrollTo() {}, getComputedStyle: () => ({}), getSelection: () => '', kilnAppearance() {}, Notification: undefined };
-  const hooks = `return { pages, G, AN, anHTML, GROUPS, GUIDES, GROUP_ORDER, GD, HELP, TIPS, TIPL, tipKey, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
+  const hooks = `return { pages, G, jobCard, evKind, evIcon, EVI, AN, anHTML, GROUPS, GUIDES, GROUP_ORDER, GD, HELP, TIPS, TIPL, tipKey, banners, stats, set(s, f) { S = s; F = f; setupForge = null; draft = JSON.parse(JSON.stringify(s.config)); }, setupAs(k) { setupForge = k; } };`;
   const K = new Function(...Object.keys(g), main.replace(tail, hooks))(...Object.values(g));
   const cfg = { listen: '100.64.0.7:7878', repos: ['acme/api'], label: 'kiln', max_vms: 2, vm_cpus: 2, vm_mem_mb: 4096, vm_disk_gb: 40, size_mem_mb: {}, poll_secs: 5, job_timeout_mins: 60, idle_timeout_mins: 10, allowed_users: [], notify_rules: [], docker_mirror: true,
     auto_rebake: true, bake_node_versions: ['24'], bake_apt_packages: [], cache: true, cache_branches: {}, cache_gb: 30, repo_cache_gb: {}, debug_hold_mins: 0, debug_ssh_keys: [], egress: 'open', warm: {}, warm_recycle_mins: 30, auto_update: false,
@@ -236,6 +236,28 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     assert(sprite.has(K.GD[g[0]]), `${g[0]} has an icon`);
   }
   for (const grp of K.GROUP_ORDER) assert(K.GUIDES.some(g => g[3] === grp), `group ${grp} has guides`);
+  // Event kinds: kiln's own kind (GitLab, Gitea) or the forge's event name (GitHub) picks the icon; a refused fork wins over the event.
+  for (const [run, v, want] of [[{ event: 'push' }, null, 'push'], [{ event: 'pull_request' }, null, 'pr'], [{ event: 'merge_group' }, null, 'merge'], [{ event: 'merge_train' }, null, 'merge'],
+    [{ event: 'workflow_dispatch' }, null, 'manual'], [{ event: 'schedule' }, null, 'schedule'], [{ event: 'workflow_run' }, null, 'trigger'], [{ event: 'release' }, null, 'tag'],
+    [{ kind: 'tag', event: 'push' }, null, 'tag'], [{ kind: 'manual', event: 'pipeline' }, null, 'manual'], [{ kind: 'pull_request', event: 'merge_request_event' }, null, 'pr'], [{ kind: 'other', event: 'pipeline' }, null, 'trigger'],
+    [{ event: 'pull_request' }, { fork: true }, 'fork'], [{ event: 'pull_request' }, { state: 'killed', note: 'refused: pull request from a fork' }, 'fork'], [{ event: 'workflow_run' }, { state: 'killed', note: 'refused: workflow_run' }, 'trigger'],
+    [{ event: 'something_new' }, null, 'other'], [undefined, null, 'other']]) assert.equal(K.evKind(run, v), want, JSON.stringify([run, v]));
+  assert(Object.keys(K.EVI).every(k => sprite.has(K.EVI[k][0])), 'every event kind has an icon in the sprite');
+  for (const k of Object.keys(K.EVI)) assert(src.includes(`--ev-${k}:`), `event colour token --ev-${k}`);
+  assert(/aria-label="Pull request"/.test(K.evIcon({ event: 'pull_request' })) && /aria-label="Event: odd"/.test(K.evIcon({ event: 'odd' })), 'the icon names its event');
+  // The Recent jobs hover card: the full branch and title, the facts of the job page, the timeline, and no logs or steps.
+  {
+    const long = 'feature/' + 'x'.repeat(90), title = 'Retry on 502 and 503 from the billing service with exponential backoff and jitter, then surface the final error to the caller',
+      pr = { id: 'kiln-9', repo: 'acme/api', state: 'done', result: 'failure', job: 'test', cpus: 4, mem_mb: 8192, started: t0 - 900, queued_at: t0 - 906, online_at: t0 - 896, busy_since: t0 - 890, done_at: t0 - 800, ended: t0 - 790, cache: 'read', warm: true,
+        run: { branch: long, sha: 'a'.repeat(40), pr: 212, event: 'pull_request', title, workflow: 'CI', number: 413 } };
+    K.set(mkS({ token_set: true, image_ready: true, vms: [pr, vms[1]] }), [fg('github', 'github', { repos: ['acme/api'] })]);
+    const h = K.jobCard(pr);
+    for (const x of [long, title, 'a'.repeat(40), 'Pull request', 'CI #413', '#212', '4 cpu · 8 GB', 'Warm', 'attached', 'failed', 'Queue', 'Boot', 'Wait', 'Job', 'Done', '#/jobs/kiln-9']) assert(h.includes(x), `card shows ${x}`);
+    assert(!/Console|Steps|<pre/.test(h), 'no console, step or forge log in the card');
+    assert(!/tabindex/.test(h), 'the card adds no tab stops');
+    const rf = K.jobCard(vms[1]);
+    assert(rf.includes('Refused') && rf.includes('pull request from a fork') , 'a refused job with no run record shows why');
+  }
   // Search finds a guide by a word in its body.
   K.set(mkS({ token_set: true, image_ready: true, vms }), [fg('github', 'github')]);
   K.pages.guides.mount({ seg: ['start'], q: new URLSearchParams() }); K.pages.guides.find('refused fork');
@@ -294,7 +316,7 @@ console.log('dashboard analytics ok');
 // setHTML: a poll that renders after navigating away finds no element; that is a no-op, not a throw.
 {
   const el = { _h: null, contains: () => false, innerHTML: '', querySelector: () => null };
-  const setHTML = new Function('$$', 'document', 'fillTimes', 'popEl', 'popAnchor', 'tipFor', grab('setHTML') + '\nreturn setHTML;')(() => [], { activeElement: null }, () => {}, null, null, null);
+  const setHTML = new Function('$$', 'document', 'fillTimes', 'popEl', 'popAnchor', 'tipFor', 'jcFollow', grab('setHTML') + '\nreturn setHTML;')(() => [], { activeElement: null }, () => {}, null, null, null, () => {});
   setHTML(null, 'x'); setHTML(undefined, 'x');
   setHTML(el, 'a'); assert.equal(el.innerHTML, 'a');
   el.innerHTML = 'b'; setHTML(el, 'a'); assert.equal(el.innerHTML, 'b', 'unchanged html is skipped');
