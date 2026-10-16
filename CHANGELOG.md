@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
+
 ### Changed
 
 - **Overview: the host graphs hover together.** Hovering (or tapping, or arrowing along) either the CPU or the Memory chart draws the crosshair on both at the same moment and shows a popup on each, with that chart's own values and unit (cores, GB). The popups sit beside the line and move above and below their charts when they would touch. Leaving the charts clears both.
