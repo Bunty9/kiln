@@ -160,6 +160,7 @@ fn usage(app: &App, id: &str) -> Value {
     let since = now().saturating_sub(86_400);
     let (mut jobs, mut passed, mut secs) = (0u64, 0u64, 0u64);
     let mut sizes = BTreeMap::<u32, u64>::new();
+    let mut causes = BTreeMap::<&str, u64>::new();
     for v in app.vms.lock().unwrap().iter() {
         let (Some(b), Some(e)) = (v.busy_since, v.ended) else { continue };
         if e < since {
@@ -168,6 +169,9 @@ fn usage(app: &App, id: &str) -> Value {
         jobs += 1;
         passed += u64::from(v.result.as_deref() == Some("Succeeded"));
         secs += e.saturating_sub(b);
+        if let Some(c) = v.fail_cause() {
+            *causes.entry(c).or_default() += 1;
+        }
         *sizes.entry(v.cpus).or_default() += 1;
     }
     json!({
@@ -196,6 +200,7 @@ fn usage(app: &App, id: &str) -> Value {
         "passed_24h": passed,
         "job_minutes_24h": secs / 60,
         "sizes_24h": sizes,
+        "fail_causes_24h": causes,
         "uptime_hours": now().saturating_sub(*STARTED.get().unwrap_or(&now())) / 3600,
     })
 }
@@ -375,6 +380,7 @@ mod tests {
                 "auth",
                 "build",
                 "egress",
+                "fail_causes_24h",
                 "features",
                 "host_mem_gb",
                 "host_threads",

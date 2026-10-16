@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- **Usage statistics say why jobs did not pass.** The opt-in daily report gains `fail_causes_24h`: a count of the last 24 hours' non-passing jobs by cause (`failed`, `cancelled`, `timeout`, `killed`, `lost`, `no_result`, `refused_policy`, `refused_failure`, `other`), from kiln's own VM records. Counts only, no names, URLs or messages; `GET /api/telemetry` shows the exact report.
+
 ## [0.2.6] - 2026-10-14
 
 Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 Linux hosts, and ships signed releases for Linux x86_64 and arm64 and for macOS arm64. Hosts self-heal at boot after a restart, and the dashboard has a refresh with full help for every feature. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).
