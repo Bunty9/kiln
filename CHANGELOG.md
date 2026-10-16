@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Security
+
+- rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
+
 ## [0.2.6] - 2026-10-14
 
 Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 Linux hosts, and ships signed releases for Linux x86_64 and arm64 and for macOS arm64. Hosts self-heal at boot after a restart, and the dashboard has a refresh with full help for every feature. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).
