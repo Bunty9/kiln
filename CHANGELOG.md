@@ -4,6 +4,16 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- **Overview: the host graphs hover together.** Hovering (or tapping, or arrowing along) either the CPU or the Memory chart draws the crosshair on both at the same moment and shows a popup on each, with that chart's own values and unit (cores, GB). The popups sit beside the line and move above and below their charts when they would touch. Leaving the charts clears both.
+- **Overview: Recent jobs have a hover card.** Rest the pointer on a row (mouse and trackpad only) or focus it with the keyboard and a card shows the job's full branch or PR, title, commit, event, workflow, outcome, size, warm or cold start, cache outcome, refusal reason, the timeline with its durations and clock times, and peak CPU and memory when the host graph has samples. The card stays open under the pointer so text can be copied, closes on Escape, scroll or leaving, and never shows on touch screens, where a tap still opens the job.
+- **Event icons.** Recent jobs, the Jobs list, the job page and a repo's runs show a small coloured icon for what started the run: pull or merge request, merge group or merge train, branch push, tag or release, manual run, schedule, a workflow or pipeline triggered by another, and refused fork pull requests. Each has a light and a dark colour token (`--ev-*`, at least 4:1 on the card) and a name for screen readers.
+
+### Fixed
+
+- **Hover hints in dark mode.** The small hints that appear when you hover or focus badges, stats and times were a bright box with dark text in dark mode. They now use the same surface, text, ring and shadow as the `?` popovers in both themes. (The browser's own `title` tooltips are drawn by the browser or OS and cannot be styled; the dashboard sets `color-scheme` per theme, so the page's form controls and scrollbars follow the theme, and kiln uses its own hint for its text.)
+
 ## [0.2.6] - 2026-10-14
 
 Multi-forge release: kiln now serves GitLab and Gitea next to GitHub, runs on Apple Silicon and arm64 Linux hosts, and ships signed releases for Linux x86_64 and arm64 and for macOS arm64. Hosts self-heal at boot after a restart, and the dashboard has a refresh with full help for every feature. The base image recipe changed (`RECIPE` is 14), so every install rebakes once on upgrade (automatic with `auto_rebake`; until then no VM launches).
