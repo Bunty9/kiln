@@ -2294,7 +2294,7 @@ function nFormHTML() {
     <div class="fld" id="nf-tokf" ${k === 'ntfy' ? '' : 'hidden'}><div><label for="nf-token">ntfy token</label></div><div><input type="text" class="mask" id="nf-token" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="${edit ? 'leave empty to keep the current token' : 'optional'}"></div></div>
     <div class="fld"><span class="lb">Options</span><div>
       <label class="sw"${tip('Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.')}><input type="checkbox" id="nf-ts" ${nf.tailnet ? 'checked' : ''}><span>On my tailnet</span></label><p class="fg2 sm" style="margin:0 0 8px 0">Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.</p>
-      <label class="sw"${tip('Needs Serve over HTTPS; coming in a later version')}><input type="checkbox" id="nf-link" disabled><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS; coming in a later version.</p></div></div>
+      <label class="sw"${tip('Adds a link to the job in this dashboard, when Serve over HTTPS is on')}><input type="checkbox" id="nf-link"><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS (Settings › Network); without it messages carry no link.</p></div></div>
     <p class="ferr" id="nf-err" role="alert"></p>
     <div class="bar" style="margin:12px 0 0"><button class="btn pri" ${nf.busy ? 'disabled' : ''}>${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel" ${nf.busy ? 'disabled' : ''}>Cancel</button></div></form>`;
 }
@@ -3103,7 +3103,7 @@ const ACT = {
     nbusy.add(d.id); sw(true);
     try {
       // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
-      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: d.link, events: { ...d.events, [b.dataset.e]: b.checked } } });
       await poll();
     } finally { nbusy.delete(d.id); sw(false); }
   },
@@ -3127,7 +3127,7 @@ const ACT = {
     if (!f.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
     // An edit sends the event switches as they are now (they may have changed since the form opened).
     const events = f.id ? { ...(nDests().find(x => x.id === f.id)?.events || f.events) } : f.events;
-    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: false, events };
+    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: $('#nf-link').checked, events };
     if (url) body.url = url; if (f.kind === 'ntfy' && token) body.token = token;
     const cancel = $('#nform [data-act=ncancel]'); if (cancel) cancel.disabled = true;
     let r; f.busy = 1;

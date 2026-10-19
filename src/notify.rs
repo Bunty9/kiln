@@ -588,8 +588,8 @@ fn classify(status: u16, retry_after: Option<&str>) -> Outcome {
 /// The dashboard's own address for links: an https `.ts.net` URL, else none (a LAN or loopback
 /// address in a chat message is useless and leaks topology).
 fn dashboard_base() -> Option<String> {
-    // ponytail: no link until web.rs caches the serve URL; never shell out to tailscale from the send path
-    None::<String>.filter(|b| link_base_ok(b))
+    // web.rs caches it when it reads `tailscale serve status`; the send path never runs tailscale.
+    crate::web::dashboard_url().filter(|b| link_base_ok(b))
 }
 
 /// Only `https://<lowercase host>.ts.net[:port][/path]`: no userinfo, query or fragment, and nothing
