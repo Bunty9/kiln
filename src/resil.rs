@@ -165,6 +165,7 @@ fn memlock_limit() -> Option<u64> {
 /// charged to this limit, shared by all of the user's processes; QEMU exits when it cannot get a ring but
 /// falls back to epoll and threads when the limit is 0. Unlimited cannot be exhausted. Lowering the soft
 /// limit never needs privilege and never exceeds the hard one.
+#[cfg(any(target_os = "linux", test))]
 pub fn memlock_target(soft: u64) -> Option<u64> {
     (soft != 0 && soft != libc::RLIM_INFINITY).then_some(0)
 }
