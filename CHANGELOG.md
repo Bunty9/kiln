@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-20
+
+Reliability release: VM launches no longer fail when other programs of the same user hold io_uring memory, a VM that runs out of memory takes only itself, a scheduler panic restarts kiln instead of leaving it idle, and only one `kiln serve` runs per data directory. The Overview gains job hover cards, synced host graphs and event icons; burning cards now show on phones; notification messages can link to the dashboard; usage statistics count why jobs did not pass. rustls is updated for RUSTSEC-2026-0346. The base image recipe is unchanged (`RECIPE` 14): no rebake.
+
 ### Added
 
 - **Notification dashboard links.** The "Include dashboard link" option on a notification destination now works: a job message links to the job's page in the dashboard when Serve over HTTPS is on (a `.ts.net` address only; no link otherwise). kiln caches the address from the serve config it already reads and never runs `tailscale` while sending.
@@ -301,7 +305,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/Bunty9/kiln/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Bunty9/kiln/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Bunty9/kiln/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
