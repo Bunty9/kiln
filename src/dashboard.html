@@ -148,7 +148,6 @@ main{max-width:1120px;margin:0 auto;padding:24px 16px 56px;transition:opacity va
 /* page header: identical height on every page so titles never jump */
 .ph{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:40px;margin-bottom:20px}
 .ph h1{display:flex;align-items:center;min-height:40px;font-size:24px;font-weight:600;line-height:1.25;letter-spacing:-.02em;min-width:0;overflow-wrap:anywhere}
-.ph .sub-h{color:var(--fg-2);font-size:13px}
 .lead{color:var(--fg-2);margin:-8px 0 20px;max-width:68ch}
 .ov{display:grid;gap:24px 32px;grid-template-columns:minmax(0,1fr)}
 @media(min-width:960px){.ov{grid-template-columns:minmax(0,1fr) 280px}.ov>aside{position:sticky;top:80px;align-self:start}}
@@ -265,7 +264,7 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .rr .qn{text-align:right;color:var(--queued)}
 @media(max-width:719px){.rr{grid-template-areas:"n n" "r l";grid-template-columns:auto auto;justify-content:start;gap:4px 12px}.rr .nm{grid-area:n}.rr .rt{grid-area:r}.rr .lr{grid-area:l}.rr .qn{display:none}}
 .sn{padding:0 16px 16px}
-@media(max-width:719px){.row.flat{grid-template-areas:none!important}.row.flat>*{grid-area:auto!important}.row.flat .id{display:block}.row.flat.bf{grid-template-columns:auto minmax(0,1fr) auto!important}}
+@media(max-width:719px){.row.flat{grid-template-areas:none!important}.row.flat>*{grid-area:auto!important}.row.flat .id{display:block}.row.flat.bf{grid-template-columns:auto minmax(0,1fr) auto!important}.row.flat.bf>.ra{grid-column:1/-1!important;flex-wrap:wrap;margin-top:8px}}
 .pr{grid-template-columns:minmax(0,1fr) 190px 90px 80px;grid-template-areas:"n c s p" "g g g g"}
 .pr .pc{grid-area:c}.pr .ps{grid-area:s}
 @media(max-width:719px){.pr{grid-template-areas:"n p" "c c" "s s" "g g";grid-template-columns:minmax(0,1fr) auto}.pr .id{display:block}}
@@ -283,7 +282,7 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .chip button:hover{background:var(--active);color:var(--fg)}
 .chip.jump{padding:0 12px;height:32px;gap:6px}
 .tag{font-size:12px;color:var(--warn);margin-left:8px}
-/* buttons: default (secondary), .pri, .ghost, .dng, .dng.fill; .sm 32px, .ic square. Hover lays a
+/* buttons: default (secondary), .pri, .dng, .dng.fill; .sm 32px, .ic square. Hover lays a
    translucent layer over whatever fill the variant has, so every variant hovers the same way. */
 .btn{--bh:36px;height:var(--bh);padding:0 14px;border-radius:var(--rc);border:0;background:var(--s2);box-shadow:var(--e1);cursor:pointer;font-size:14px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;white-space:nowrap;color:var(--fg);transition:background-color var(--ease),box-shadow var(--ease),color var(--ease)}
 .btn:not([disabled]):hover{background-image:linear-gradient(var(--hover),var(--hover));box-shadow:var(--e2)}
@@ -295,8 +294,8 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .btn.dng.fill{background-color:var(--fail);color:var(--on-accent);box-shadow:none}
 .btn.dng.fill:not([disabled]):hover{background-color:color-mix(in srgb,var(--fail) 86%,var(--fg))}
 /* ghost: no fill until hovered (log toolbar, back arrow, copy-on-snippet) */
-.btn.ghost,.lt .btn,.back{background:none;box-shadow:none;color:var(--fg-2)}
-.btn.ghost:not([disabled]):hover,.lt .btn:not([disabled]):hover,.back:hover{background:var(--hover);color:var(--fg);box-shadow:none}
+.lt .btn,.back{background:none;box-shadow:none;color:var(--fg-2)}
+.lt .btn:not([disabled]):hover,.back:hover{background:var(--hover);color:var(--fg);box-shadow:none}
 .btn[aria-pressed=true]{background:var(--active);color:var(--fg)}
 .btn[aria-pressed=true] .i{color:var(--accent)}
 .btn.ic{width:var(--bh);padding:0}
@@ -607,9 +606,9 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
   <a class="hlp" href="#/guides" data-p="guides" aria-label="Help and guides" data-tip="Guides and troubleshooting (g h). Press ? for keyboard shortcuts."><svg class="i l" aria-hidden="true"><use href="#i-help"/></svg><span>Help</span></a>
   <span class="cdot" id="cdot" role="img" aria-label="Connected" tabindex="0"></span>
 </div></header>
-<div id="conn" role="status"></div>
+<div id="conn" role="alert"></div>
 <main id="app"></main>
-<nav class="tabs" id="tabs" aria-label="Sections"></nav>
+<nav class="tabs" id="tabs" aria-label="Primary"></nav>
 <div id="toasts" role="status"></div>
 <div id="tip" role="tooltip"></div>
 <div id="jcard" class="jcard" role="tooltip" hidden></div>
@@ -640,7 +639,6 @@ function dur(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return h ? `${h}h ${m}m` : m ? `${m}m ${x}s` : `${x}s`;
 }
-const bytes = n => { n = +n || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(1) : n) + ' ' + u[i]; };
 const when = t => (t ? new Date(t * 1000).toLocaleString() : '—');
 const hhmm = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 // Icons come from the <symbol> sprite at the top of <body>.
@@ -713,6 +711,7 @@ const fbadge = f => FN[f?.kind] ? `<span class="fb">${esc(fl(f))}</span>` : '';
 // The forge a canonical repo key belongs to, even when the project is no longer listed (old jobs): by its `id:` prefix.
 const forgeByKey = (F, key) => forgeOf(F, key) || (F || []).find(f => String(key).startsWith(f.id + ':'));
 // A repo key as people read it: the path without the `id:` prefix. GitHub keys are paths already.
+const repoPath = (id, key) => String(key).startsWith(id + ':') ? String(key).slice(id.length + 1) : String(key);
 const keyPath = (F, key) => { const f = forgeByKey(F, key); return f && f.kind !== 'github' ? repoPath(f.id, key) : String(key); };
 // Plain text for <option>s and tips: "GitLab · platform/backend" once more than GitHub is served, else the path.
 const repoText = (F, key) => { const f = forgeByKey(F, key); return mixed(F) && f ? `${fl(f)} · ${keyPath(F, key)}` : keyPath(F, key); };
@@ -1042,13 +1041,14 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 const FAV = dot => !dot ? '/icon.svg' : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="3.5" fill="#171717"/><g transform="translate(2 1.8) scale(.75)"><path d="M2.5 14.5V7.5a5.5 5.5 0 0 1 11 0v7z" fill="none" stroke="#FAFAFA" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 13c-1.5 0-2.4-.9-2.4-2.1 0-1.4 1.3-2 1.5-3.4 1 .7 1.4 1.6 1.3 2.4.4-.2.7-.7.8-1.1.8.6 1.2 1.4 1.2 2.1C10.4 12.1 9.4 13 8 13z" fill="#F59E4C"/></g><circle cx="12.5" cy="3.5" r="3" fill="${dot}" stroke="#0A0A0A" stroke-width="1"/></svg>`)}`;
 const seen = () => new Set(lsJ('kiln-seen', null) || []);
 function markSeen() { if (S) lsSet('kiln-seen', JSON.stringify(S.vms.filter(isFail).map(v => v.id).slice(0, 300))); }
+let pageTitle = 'kiln';
 function notifyState() {
   const run = S.vms.filter(v => v.state === 'busy').length;
   if (lsGet('kiln-seen') == null) markSeen();
   const unseen = S.vms.some(v => isFail(v) && !seen().has(v.id));
   const hot = !(cur === pages.jobs && !parse().seg[0]);
   const un = unseen && hot;
-  document.title = un ? '✕ kiln' : run ? `(${run}) kiln` : 'kiln';
+  document.title = (un ? '✕ ' : run ? `(${run}) ` : '') + pageTitle;
   $('#fav').href = FAV(un ? '#FF8A80' : run ? '#F59E4C' : null);
   if (cur === pages.jobs && !parse().seg[0] && unseen) markSeen();
   const done = new Set(lsJ('kiln-notified', null) || []), first = lsGet('kiln-notified') == null;
@@ -1118,6 +1118,8 @@ function route() {
   const r = parse(), pg = pages[r.page] || pages.notfound;
   $$('[data-p]').forEach(a => a.dataset.p === (r.page === 'setup' ? 'overview' : r.page) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   cur = pg; scrollTo(0, 0);
+  const tl = r.page === 'repos' && r.seg.length ? r.seg.join('/') : r.page === 'jobs' && r.seg.length ? 'Job ' + r.seg[0] : r.page === 'settings' ? 'Settings' : { overview: 'Overview', jobs: 'Jobs', repos: 'Repos', setup: 'Setup', guides: 'Guides' }[r.page];
+  pageTitle = tl ? tl + ' · kiln' : 'kiln';
   if (!S) { $('#app').innerHTML = skeleton(); mounted = false; return; }
   mounted = true; $('#app').innerHTML = ''; $('#app')._h = null;
   pg.mount(r);
@@ -1189,11 +1191,10 @@ function evKind(r, v) {
 }
 const evIcon = (r, v) => { const k = evKind(r, v), l = k === 'other' && r?.event ? 'Event: ' + r.event : EVI[k][1]; return `<span class="ev" style="color:var(--ev-${k})" role="img" aria-label="${esc(l)}" data-tip="${esc(l)}">${ic(EVI[k][0])}</span>`; };
 // Where the job's code came from: branch, PR, commit, and the run's title.
-const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', schedule: 'scheduled' };
-const EVK = { push: '', pull_request: '', manual: 'manual', schedule: 'scheduled' };
+const EV = { push: '', pull_request: '', workflow_dispatch: 'manual', manual: 'manual', schedule: 'scheduled' };
 function gitLine(v) {
   const r = v.run; if (!r) return '';
-  const ev = r.kind && r.kind !== 'other' ? (EVK[r.kind] ?? r.kind) : r.event in EV ? EV[r.event] : r.event;
+  const ev = r.kind && r.kind !== 'other' ? (EV[r.kind] ?? r.kind) : r.event in EV ? EV[r.event] : r.event;
   return `<span class="g">${evIcon(r, v)}<span>${esc(r.branch)}</span>${r.pr ? `<span>#${+r.pr}</span>` : ''}${r.sha ? `<span class="mono">${esc(r.sha.slice(0, 7))}</span>` : ''}${ev ? `<span>${esc(ev)}</span>` : ''}${r.title ? `<span class="gt">${esc(r.title)}</span>` : ''}</span>`;
 }
 function jobRow(v) {
@@ -1325,9 +1326,13 @@ function meter(l, val, max, txt, t) {
 // the chart interpolates, never guesses, and scrolls every frame instead of jumping per sample.
 const LAG = 4500, HV = { open: lsGet('kiln-hostx') === '1', win: +lsGet('kiln-hostwin') || 300, buf: [], base: -Infinity, shown: null, raf: 0, hover: null, hf: 0, pk: {}, tipKey: {} };
 const still = () => { const m = document.documentElement.dataset.motion; return m === 'reduce' || (m !== 'full' && matchMedia('(prefers-reduced-motion: reduce)').matches); };
-// Six colours rotate over the per-VM sequence number the sampler gives each new VM.
-const gcol = k => `var(--g${k % 6 + 1})`;
-const vcol = gcol;
+// Six colours rotate over the per-VM sequence number the sampler gives each new VM. Each lap past six
+// keeps the hue but shifts its lightness (towards the text colour, then towards the page), so 18 stay apart.
+// cs given: resolved values for the canvas, which cannot read var().
+function vcol(k, cs) {
+  const v = n => cs ? cs.getPropertyValue(n).trim() : `var(${n})`, b = v(`--g${k % 6 + 1}`), lap = Math.floor(k / 6) % 3;
+  return lap ? `color-mix(in srgb,${b} 55%,${v(lap === 1 ? '--fg' : '--bg')})` : b;
+}
 const vmName = id => { const v = S.vms.find(x => x.id === id); return v ? `${v.repo.split('/').pop()} / ${jt(v)}` : id; };
 const fmtC = c => c.toFixed(1) + ' cores', fmtM = mb => (mb / 1024).toFixed(1) + ' GB';
 const winTxt = w => w < 3600 ? w / 60 + 'm' : '1h';
@@ -1395,7 +1400,7 @@ function chart(id, key, max, tR, cs) {
     let run = [];
     const flush = () => {
       if (run.length) {
-        const k = run[0][1].k, host = k === 'h', c = host ? cs.getPropertyValue('--fg-3') : cs.getPropertyValue(`--g${k % 6 + 1}`);
+        const k = run[0][1].k, host = k === 'h', c = host ? cs.getPropertyValue('--fg-3') : vcol(k, cs);
         g.beginPath(); run.forEach(([x, l]) => g.lineTo(x, Y(l.hi)));
         for (let i = run.length - 1; i >= 0; i--) g.lineTo(run[i][0], Y(run[i][1].lo));
         g.closePath(); g.fillStyle = c; g.globalAlpha = host ? .18 : .32; g.fill();
@@ -1505,6 +1510,7 @@ const hostSkel = () => `<h2><button class="hh" data-act="hostx" aria-expanded="$
 function hostWire() {
   const hx = $('#hx'), at = (c, x) => { HV.hover = { id: c.id, x }; hvKick(); }, clr = () => { HV.hover = null; hvTips(null); hvKick(); };
   if (HV.open) hvLoad();
+  if (hx._w) return; hx._w = 1; // listeners go on once per element
   hx.addEventListener('pointerdown', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.clientX - e.target.getBoundingClientRect().left); }); // a tap on touch, which may never move
   // Off both charts (still inside the card) clears the line and both popups, like leaving the card.
   hx.addEventListener('pointermove', e => { if (e.target.tagName === 'CANVAS') at(e.target, e.clientX - e.target.getBoundingClientRect().left); else if (HV.hover && document.activeElement?.tagName !== 'CANVAS') clr(); });
@@ -1895,7 +1901,7 @@ function runHTML(run, f) {
   const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
     <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${evIcon({ kind: run.event, event: run.event })} ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
+    <span class="${rf ? 'ra' : ''}" style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
   try { const x = (await api(fq('runs', r))).runs[0]; lastRun[r] = x ? runStatus(x) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
@@ -1947,7 +1953,6 @@ function nextForgeId(base, used) {
   return id;
 }
 // A project's path inside forge `id`, from the canonical key kiln lists (`gl:group/proj`).
-const repoPath = (id, key) => String(key).startsWith(id + ':') ? String(key).slice(id.length + 1) : String(key);
 const FC = {}, FB = {}; // forge id -> last setup check; forge id -> { busy } or { err } for the card
 // Redraw whatever shows forges: Settings › Forges, or the setup steps.
 const forgeUI = () => { if (cur === pages.settings && pages.settings.g === 'forges') pages.settings.live(); else if (cur === pages.setup) pages.setup.update(); };
@@ -2462,10 +2467,17 @@ pages.settings = {
       <div id="set-body"></div><div id="dbar" hidden><span class="sp fg2">Unsaved changes</span><button class="btn" data-act="discard"${tip('Undo the changes on this page')}>Discard</button><button class="btn pri" data-act="save"${tip('Applies within seconds, no restart (except the listen address)')}>${ic('check')}Save changes</button></div></div></div>`;
     this.render();
   },
-  render() { G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html(); G[this.g].open?.(); this.live(); rove($('#set-body')); },
+  render() {
+    // An open destination form keeps its URL and token across a rebuild (they are not kept in nf).
+    const keep = ['#nf-url', '#nf-token'].map(i => [i, $(i)?.value]);
+    G[this.g].close?.(); $('#set-body').innerHTML = G[this.g].html();
+    for (const [i, v] of keep) if (v && $(i)) $(i).value = v;
+    G[this.g].open?.(); this.live(); rove($('#set-body'));
+  },
   unmount() { G[this.g]?.close?.(); },
   update() {
-    if (!isDirty()) { const j = JSON.stringify(S.config); if (j !== cfgJ) { cfgJ = j; draft = JSON.parse(j); if (!$('#set-body').contains(document.activeElement)) { G[this.g].close?.(); this.render(); } } }
+    // A destination form is open: a rebuild would empty its URL and token fields (kept out of nf on purpose).
+    if (!isDirty() && !(this.g === 'notifications' && nf)) { const j = JSON.stringify(S.config); if (j !== cfgJ) { cfgJ = j; draft = JSON.parse(j); if (!$('#set-body').contains(document.activeElement)) { G[this.g].close?.(); this.render(); } } }
   },
   live() { G[this.g].live?.(); $('#dbar').hidden = this.g === 'notifications' || (!isDirty() && !$('#f-adduser')?.value); },
 };
