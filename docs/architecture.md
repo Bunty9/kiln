@@ -246,6 +246,8 @@ Everything is under the access guard (see [SECURITY.md](../SECURITY.md)). All wr
 |---|---|
 | `GET /` | The dashboard page |
 | `GET /api/state` | Config, token status, GitHub App (`app`: id, slug, owner, accounts, repos, last refresh, error, skipped installations), poll status (queued, errors, backoff, rate limit: the token's, or in App mode the most constrained installation's with each one's in `rates` by installation id; blocked reason and `blocked_kind`: `draining`, `old_image`, `github_api`, `forge_api`, `egress`, `memory`, `disk`, `budget` or `held`), the last 100 VMs (a job the verdict gate refused has `verdict: ["refuse", job id]` and a `note` starting `refused:`), `platform` (`{os, arch}` as Rust's `std::env::consts` names them: `macos` or `linux`, `aarch64` or `x86_64`), image info, host stats, mirror status, cache sizes |
+| `GET /api/analytics?days=&repo=&cpus=` | Finished jobs of the last 1, 7 or 30 days from the 90-day history, for Settings › Analytics: `{first, repos, sizes, rows}` |
+| `GET /api/host` | The host sampler's retained CPU and memory samples (per VM), oldest first, for the Overview host graphs |
 | `POST /api/config` | Save settings (validated); returns `{restart_required, restart_needed}` |
 | `POST /api/token` | Validate and save a GitHub token |
 | `POST /api/app/manifest` | Start the one-click GitHub App creation: returns GitHub's form URL, the manifest and a one-time state |

@@ -286,7 +286,7 @@ console.log('dashboard analytics ok');
 // Host graphs: a VM's band exists only in the columns of samples that list it, and the
 // per-VM sequence number the sampler hands out rotates six colours over consecutive VMs.
 {
-  const { hvCols, gcol } = new Function(['layers', 'hvCols', 'gcol'].map(grab).join('\n') + '\nreturn { hvCols, gcol };')();
+  const { hvCols, vcol } = new Function(['layers', 'hvCols', 'vcol'].map(grab).join('\n') + '\nreturn { hvCols, vcol };')();
   const smp = (t, ...vms) => ({ t, cpu: 4, mem: 9000, vms: vms.map(([k, id]) => [k, id, 1, 2000]) });
   // vm-a (seq 0) ends after t=4000; vm-b (seq 1) starts at t=8000; one slot throughout.
   const S = [smp(0, [0, 'a']), smp(2000, [0, 'a']), smp(4000, [0, 'a']), smp(6000), smp(8000, [1, 'b']), smp(10000, [1, 'b'])];
@@ -299,9 +299,13 @@ console.log('dashboard analytics ok');
   // Two VMs ending together and one starting in the same tick: no step columns, bands still bounded.
   const c2 = hvCols([smp(0, [0, 'a']), smp(2000, [1, 'b'])], 'cpu');
   assert.equal(c2.length, 2); assert.deepEqual(c2.map(c => c.L.map(l => l.id)), [['a', 'h'], ['b', 'h']]);
-  const cs = [0, 1, 2, 3, 4, 5, 6, 7].map(gcol);
-  assert.equal(new Set(cs.slice(0, 6)).size, 6, 'six distinct colours'); assert.equal(cs[6], cs[0]);
-  assert.notEqual(gcol(0), gcol(1), 'consecutive VMs differ even on a 2-slot box');
+  const cs = Array.from({ length: 18 }, (_, k) => vcol(k));
+  assert.deepEqual(cs.slice(0, 6), [1, 2, 3, 4, 5, 6].map(n => `var(--g${n})`), 'the first six are unchanged');
+  assert.equal(new Set(cs).size, 18, 'eighteen distinct colours');
+  assert.equal(vcol(18), cs[0], 'then the cycle repeats');
+  assert.notEqual(vcol(0), vcol(1), 'consecutive VMs differ even on a 2-slot box');
+  const rs = { getPropertyValue: n => n === '--g1' ? '#111' : '#222' };
+  assert.equal(vcol(0, rs), '#111'); assert(/^color-mix\(in srgb,#111 55%,#222\)$/.test(vcol(6, rs)), 'canvas gets resolved values');
 }
 
 // Build reload: differing builds reload once per build; the guard stops a loop; no build id means no decision.
