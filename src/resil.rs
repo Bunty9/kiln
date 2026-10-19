@@ -40,31 +40,58 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Whether VMs get scopes: Linux with a working `systemd-run`, probed once (a scope that does nothing).
+/// How long a failed scope probe stands before the next launch probes again.
+const REPROBE: Duration = Duration::from_secs(300);
+
+type Probe = Option<(std::time::Instant, Option<String>)>;
+
+/// The last scope probe: when, and why not (None = it worked).
+static PROBE: std::sync::Mutex<Probe> = std::sync::Mutex::new(None);
+
+/// Whether the last probe still stands: a success for the life of the process, a failure for
+/// [`REPROBE`] (the user manager may just have been busy at boot).
+fn probe_fresh(p: &Probe) -> bool {
+    p.as_ref().is_some_and(|(at, why)| why.is_none() || at.elapsed() < REPROBE)
+}
+
+/// Whether VMs get scopes: Linux with a working `systemd-run`.
 async fn scopes_work() -> bool {
-    static OK: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    *OK.get_or_init(|| async {
-        if !cfg!(target_os = "linux") || !crate::platform::which("systemd-run") {
-            return false;
+    scope_state().await.is_none()
+}
+
+/// None when scopes work, else why not.
+async fn scope_state() -> Option<String> {
+    {
+        let p = PROBE.lock().unwrap();
+        if probe_fresh(&p) {
+            return p.as_ref().and_then(|(_, why)| why.clone());
         }
-        let probe = format!("probe-{}", std::process::id());
-        let mut c = Command::new("systemd-run");
-        c.args(scope_args(!is_root(), &probe, 0)).arg("true").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let r = tokio::time::timeout(Duration::from_secs(10), c.kill_on_drop(true).output()).await;
-        match r {
-            Ok(Ok(o)) if o.status.success() => true,
-            other => {
-                let why = match other {
-                    Ok(Ok(o)) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                    Ok(Err(e)) => e.to_string(),
-                    Err(_) => "timed out".into(),
-                };
-                tracing::info!("job VMs share kiln's cgroup (systemd-run --scope unavailable: {why})");
-                false
-            }
-        }
-    })
-    .await
+    }
+    let why = probe_scopes().await;
+    if let Some(w) = &why {
+        tracing::info!(
+            "job VMs share kiln's cgroup (systemd-run --scope unavailable: {w}); probing again in {} min",
+            REPROBE.as_secs() / 60
+        );
+    }
+    *PROBE.lock().unwrap() = Some((std::time::Instant::now(), why.clone()));
+    why
+}
+
+/// One probe: a scope that does nothing.
+async fn probe_scopes() -> Option<String> {
+    if !cfg!(target_os = "linux") || !crate::platform::which("systemd-run") {
+        return Some("no systemd-run".into());
+    }
+    let probe = format!("probe-{}", std::process::id());
+    let mut c = Command::new("systemd-run");
+    c.args(scope_args(!is_root(), &probe, 0)).arg("true").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    match tokio::time::timeout(Duration::from_secs(10), c.kill_on_drop(true).output()).await {
+        Ok(Ok(o)) if o.status.success() => None,
+        Ok(Ok(o)) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some("timed out".into()),
+    }
 }
 
 /// `cmd` (program and args as set) run in the VM's own scope, or `cmd` unchanged without systemd.
@@ -107,12 +134,15 @@ async fn systemctl(args: &[&str]) {
     .await;
 }
 
-/// Doctor's line: whether job VMs get their own cgroup.
+/// Doctor's line: whether job VMs get their own cgroup. Without scopes it is a warning (ok: kiln
+/// runs, just without the OOM protection), with the probe's reason.
 pub async fn scope_check() -> (bool, String) {
-    if scopes_work().await {
-        (true, "each job VM runs in its own systemd scope (memory pressure kills one VM, not kiln)".into())
-    } else {
-        (true, "job VMs share kiln's cgroup (no systemd-run --scope): memory pressure may kill kiln with its jobs".into())
+    match scope_state().await {
+        None => (true, "each job VM runs in its own systemd scope (memory pressure kills one VM, not kiln)".into()),
+        Some(why) => (
+            true,
+            format!("warning: job VMs share kiln's cgroup ({why}): memory pressure may kill kiln with its jobs; retried every 5 minutes"),
+        ),
     }
 }
 
@@ -161,11 +191,43 @@ fn memlock_limit() -> Option<u64> {
     (ok && r.rlim_cur != libc::RLIM_INFINITY).then_some(r.rlim_cur)
 }
 
+/// The soft `RLIMIT_MEMLOCK` to set given the current soft limit (`None` = leave it). io_uring rings are
+/// charged to this limit, shared by all of the user's processes; QEMU exits when it cannot get a ring but
+/// falls back to epoll and threads when the limit is 0. Unlimited cannot be exhausted. Lowering the soft
+/// limit never needs privilege and never exceeds the hard one.
+#[cfg(any(target_os = "linux", test))]
+pub fn memlock_target(soft: u64) -> Option<u64> {
+    (soft != 0 && soft != libc::RLIM_INFINITY).then_some(0)
+}
+
+/// Lower our soft locked-memory limit so QEMU and qemu-img (children inherit it) never fight other
+/// processes for io_uring memory. Nothing kiln runs needs locked memory.
+#[cfg(target_os = "linux")]
+pub fn lower_memlock() {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut r) } != 0 {
+        return;
+    }
+    let Some(t) = memlock_target(r.rlim_cur) else { return };
+    let was = r.rlim_cur;
+    r.rlim_cur = t;
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &r) } == 0 {
+        tracing::info!("lowered the soft locked-memory limit from {} KiB to 0 so QEMU does not use io_uring", was >> 10);
+    } else {
+        tracing::warn!("could not lower RLIMIT_MEMLOCK: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lower_memlock() {}
+
 pub fn io_uring_message(limit: Option<u64>) -> String {
     let l = limit.map_or("unlimited".to_string(), |b| format!("{} MiB", b >> 20));
     format!(
         "io_uring: locked-memory limit reached (RLIMIT_MEMLOCK {l}; other processes of this user hold io_uring memory). \
-         Raise LimitMEMLOCK for kiln (see Troubleshooting in configuration.md) or close those processes"
+         kiln normally lowers its own limit to avoid this; see Troubleshooting in configuration.md"
     )
 }
 
@@ -177,6 +239,9 @@ pub fn io_uring_banner() -> String {
 /// Doctor: set up and tear down a ring like QEMU's (128 entries). Linux only.
 #[cfg(target_os = "linux")]
 pub fn io_uring_check() -> (bool, String) {
+    if memlock_limit() == Some(0) {
+        return (true, "QEMU does not use io_uring (RLIMIT_MEMLOCK soft limit 0): other processes cannot exhaust it".into());
+    }
     // struct io_uring_params is 120 bytes; the kernel fills it.
     let mut params = [0u8; 120];
     // SAFETY: io_uring_setup(entries, params*) with a buffer of the size the kernel expects.
@@ -208,6 +273,43 @@ mod tests {
         assert!(!io_uring_exhausted("qemu-img create: No space left on device"));
         assert!(io_uring_message(Some(8 << 20)).contains("RLIMIT_MEMLOCK 8 MiB"));
         assert!(io_uring_message(None).contains("unlimited"));
+    }
+
+    #[test]
+    fn a_failed_scope_probe_expires_a_good_one_does_not() {
+        use std::time::Instant;
+        let old = Instant::now().checked_sub(REPROBE * 2).unwrap();
+        assert!(!probe_fresh(&None));
+        assert!(probe_fresh(&Some((Instant::now(), None))));
+        assert!(probe_fresh(&Some((old, None))));
+        assert!(probe_fresh(&Some((Instant::now(), Some("busy".into())))));
+        assert!(!probe_fresh(&Some((old, Some("busy".into())))));
+    }
+
+    #[test]
+    fn memlock_is_lowered_unless_unlimited_or_zero() {
+        assert_eq!(memlock_target(8 << 20), Some(0));
+        assert_eq!(memlock_target(0), None);
+        assert_eq!(memlock_target(libc::RLIM_INFINITY), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lowered_memlock_is_inherited() {
+        // Lowered in a forked child only, so other tests keep their limits.
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "ulimit -l"]);
+        // SAFETY: the closure only calls getrlimit/setrlimit (and logs, which is a no-op without a subscriber).
+        unsafe {
+            c.pre_exec(|| {
+                lower_memlock();
+                Ok(())
+            })
+        };
+        let out = c.output().unwrap();
+        let v = String::from_utf8_lossy(&out.stdout);
+        assert!(["0", "unlimited"].contains(&v.trim()), "got {v}");
     }
 
     #[test]

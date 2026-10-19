@@ -924,7 +924,8 @@ fn secondary_limit(status: u16, body: &str) -> bool {
     status == 403 && body.to_ascii_lowercase().contains("secondary rate limit")
 }
 
-/// "2026-10-06T10:51:50Z" -> unix seconds (UTC only, which is all GitHub sends).
+/// "2026-10-06T10:51:50Z" -> unix seconds. Also "2026-10-06T16:21:50.123+05:30" (fraction dropped, offset
+/// applied), "-0700", and GitHub's "2026-10-06 10:51:50 UTC". No zone means UTC; anything else is None.
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
@@ -935,7 +936,25 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let yoe = y - era * 400;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec).ok()
+    let rest = s.get(19..)?;
+    let rest = rest.strip_prefix('.').map_or(rest, |f| f.trim_start_matches(|c: char| c.is_ascii_digit()));
+    let off = match rest.trim() {
+        "" | "Z" | "z" | "UTC" => 0,
+        z => {
+            let sign = match z.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let digits: String = z[1..].chars().filter(|&c| c != ':').collect();
+            if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let (oh, om) = (digits[..2].parse::<i64>().ok()?, digits[2..].parse::<i64>().ok()?);
+            sign * (oh * 3600 + om * 60)
+        }
+    };
+    u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - off).ok()
 }
 
 #[cfg(test)]
@@ -1061,6 +1080,16 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-10-06T10:51:50Z"), Some(1791283910));
         assert_eq!(parse_rfc3339("2024-02-29T23:59:59Z"), Some(1709251199));
         assert_eq!(parse_rfc3339("garbage"), None);
+        // Offsets are applied, fractions dropped (Gitea answers in the server's zone).
+        assert_eq!(parse_rfc3339("2026-10-06T16:21:50+05:30"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T03:51:50-07:00"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T03:51:50-0700"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T10:51:50.123456Z"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T16:21:50.9+05:30"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T10:51:50"), Some(1791283910));
+        assert_eq!(parse_rfc3339("2026-10-06T10:51:50+5"), None);
+        assert_eq!(parse_rfc3339("2026-10-06T10:51:50 CEST"), None);
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00+01:00"), None, "before the epoch");
     }
 
     #[test]

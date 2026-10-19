@@ -727,7 +727,7 @@ impl Gitea {
                     JobInfo {
                         id: j["id"].as_u64().context("job id")?.to_string(),
                         url: r.links.job.clone().unwrap_or_default(),
-                        queued_at: j["created_at"].as_str().and_then(crate::github::parse_rfc3339).unwrap_or(0),
+                        queued_at: j["created_at"].as_str().and_then(crate::github::parse_rfc3339).unwrap_or_else(crate::now),
                         fork: run.fork,
                         run: r,
                     },
@@ -1857,6 +1857,11 @@ mod tests {
             assert_ne!(b, "main", "{path}");
             assert!(b.contains(' '), "a marked name no branch can have: {b:?}");
         }
+        // A push to a non-default branch comes back as that branch next to the default: `cache_verdict`
+        // then trusts it only when `cache_branches` names it ("branch dev is not the default (main)").
+        job_routes(&m, 116, 316, "completed", Some("success"));
+        m.route("GET", &format!("{API}/runs/316"), 200, run_with(316, "x.yml@refs/heads/dev", Some("dev")));
+        assert_eq!(trust(116).await.unwrap(), t("push", "dev", "success"));
         // A job of another repo's run is an error, and so is an unreadable one.
         job_routes(&m, 120, 70, "completed", Some("success"));
         let mut r: Value = serde_json::from_str(&fx("run_70.json")).unwrap();
