@@ -664,6 +664,7 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     tracing_subscriber::fmt().with_target(false).init();
+    resil::lower_memlock();
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
