@@ -20,6 +20,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- **Overview: the burning card edges show on phones.** Running cards showed a flat card, with no burnt edge and no still frame, on an installed Android app and some browsers. The edge sprite sheets were 5248 px tall, over the 4096 px texture limit of many phone GPUs and WebViews, and the browser dropped the image. Each edge sheet is now two files of 20 frames, 2688 px tall, and the animation switches file halfway through the loop. The frames, resolution, speed and encoder settings are unchanged (the same recorder re-run; the decoded pixels differ from the old sheets only by WebP noise).
 - **The dashboard key is no longer replaced on a read error.** A permission or I/O error reading `dashboard.key` at start now stops kiln with the reason; the key is regenerated only when the file is missing or too short.
 - **A bad update rolls back even when the boot count can't be saved.** If the data directory is full or read-only, kiln now rolls back to `kiln.prev` at once instead of crash-looping the new build forever.
 - **Time stamps with a zone offset or fractional seconds parse correctly** (`+05:30`, `.123Z`). A Gitea server not on UTC no longer shifts job wait times by hours, and an unreadable Gitea time no longer shows 1970.

@@ -557,12 +557,15 @@ fn icon_file(name: &str) -> Response {
     ([(header::CONTENT_TYPE, ty), (header::CACHE_CONTROL, "public, max-age=604800")], body).into_response()
 }
 
-/// The pre-recorded burning-card sprite sheets (scripts/burn/record.py): `<scheme>-<variant>[s].webp`.
+/// The pre-recorded burning-card sprite sheets (scripts/burn/record.py): `<scheme>-<variant>[b|s].webp` (b: second half of the edge frames).
 fn burn_file(name: &str) -> Response {
     macro_rules! sheets {
         ($($n:literal),*) => { match name { $(concat!($n, ".webp") => include_bytes!(concat!("../assets/burn-", $n, ".webp")).as_slice(),)* _ => return StatusCode::NOT_FOUND.into_response() } };
     }
-    let body: &'static [u8] = sheets!("dark-0", "dark-0s", "dark-1", "dark-1s", "light-0", "light-0s", "light-1", "light-1s");
+    let body: &'static [u8] = sheets!(
+        "dark-0", "dark-0b", "dark-0s", "dark-1", "dark-1b", "dark-1s", "light-0", "light-0b", "light-0s", "light-1", "light-1b",
+        "light-1s"
+    );
     // The dashboard links them with ?v=<version>, so they can be cached for good.
     ([(header::CONTENT_TYPE, "image/webp"), (header::CACHE_CONTROL, "public, max-age=31536000, immutable")], body).into_response()
 }
@@ -2494,7 +2497,7 @@ mod tests {
         assert_eq!(icon_file("../Cargo.toml").status(), StatusCode::NOT_FOUND);
         // every sheet the page links is served, as a WebP
         let sheets: Vec<&str> = PAGE.split("url(/burn/").skip(1).map(|s| s.split('?').next().unwrap()).collect();
-        assert_eq!(sheets.len(), 8);
+        assert_eq!(sheets.len(), 12);
         for f in sheets {
             let r = burn_file(f);
             assert_eq!(r.status(), StatusCode::OK, "{f}");

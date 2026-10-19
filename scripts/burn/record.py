@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Record the Overview "burning card" edge into sprite sheets (assets/burn-<scheme>-<variant>.webp).
+"""Record the Overview "burning card" edge into sprite sheets (assets/burn-<scheme>-<variant>[b|s].webp).
 
 The live effect (SVG feTurbulence + feDisplacementMap, conic-mask hot spots, a crawling noise offset,
 breathing burn depth, flicker) cost ~87% of a core with 2 cards.  This renders it offline, in headless
 Chromium, into seamless loops, and the dashboard plays the frames back with a CSS border-image, so a
 card costs almost nothing.  Every time function is periodic in T, so the loop has no seam.
 
-  python3 scripts/burn/record.py            # writes assets/burn-{dark,light}-{0,1}{,s}.webp
+  python3 scripts/burn/record.py            # writes assets/burn-{dark,light}-{0,1}{,b,s}.webp
   python3 scripts/burn/record.py --check    # also asserts the loop closes (last frame -> first)
 
 The loop is T = 13/3 s.  The hot-spot masks are made 3-fold symmetric, so one 120 degree turn of the
@@ -104,18 +104,25 @@ def record(job):
         d = ImageChops.difference(frames[0], frames.pop()).getchannel("A").getextrema()[1]
         assert d <= 2, f"loop does not close: max alpha difference {d}"
     fw, fh = frames[0].size
-    sheet = Image.new("RGBA", (fw, fh * (n + 1)))  # +1 blank row: the border-image slice animation ends there
-    for k, f in enumerate(frames):
-        sheet.paste(f, (0, k * fh))
-    out = os.path.join(a.out, f"burn-{scheme}-{variant}{'' if layer == 'e' else 's'}.webp")
     import numpy as np
-    px = np.asarray(sheet).copy()
-    px[px[..., 3] < a.min_alpha] = 0   # the scorch's faint tail costs bytes and is invisible
+    # The edge sheet is cut into two files of n/2 frames: one 5248 px tall sheet is over the 4096 px max texture
+    # of many phones.  (A grid cannot do it: border-image keeps the sheet's left/right caps, so frames must
+    # share one column.)  Each file ends with a blank row: the slice animation's last step lands there.
+    parts = [frames] if layer == "s" else [frames[:n // 2], frames[n // 2:]]
     q = (a.quality, a.alpha_quality) if layer == "e" else (a.quality_soft, 100)
-    Image.fromarray(px).save(out, "WEBP", quality=q[0], alpha_quality=q[1], method=6)
-    if a.png:
-        sheet.save(out.replace(".webp", ".png"))
-    return out, n, os.path.getsize(out)
+    size = 0
+    for i, part in enumerate(parts):
+        sheet = Image.new("RGBA", (fw, fh * (len(part) + 1)))
+        for k, f in enumerate(part):
+            sheet.paste(f, (0, k * fh))
+        out = os.path.join(a.out, f"burn-{scheme}-{variant}{'' if layer == 'e' else 's'}{'b' if i else ''}.webp")
+        px = np.asarray(sheet).copy()
+        px[px[..., 3] < a.min_alpha] = 0   # the scorch's faint tail costs bytes and is invisible
+        Image.fromarray(px).save(out, "WEBP", quality=q[0], alpha_quality=q[1], method=6)
+        if a.png:
+            sheet.save(out.replace(".webp", ".png"))
+        size += os.path.getsize(out)
+    return out, n, size
 
 
 if __name__ == "__main__":
