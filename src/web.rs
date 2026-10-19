@@ -381,20 +381,27 @@ async fn self_info(max_age: u64) -> SelfInfo {
 static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub fn load_key(data: &std::path::Path) -> anyhow::Result<()> {
-    use std::io::Read;
-    let path = data.join("dashboard.key");
-    let key = match std::fs::read_to_string(&path) {
-        Ok(k) if k.trim().len() >= 32 => k.trim().to_string(),
-        _ => {
-            let mut raw = [0u8; 24];
-            std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
-            let k: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            crate::app_auth::write_private(&path, k.as_bytes())?;
-            k
-        }
-    };
-    let _ = KEY.set(key);
+    let _ = KEY.set(read_key(&data.join("dashboard.key"))?);
     Ok(())
+}
+
+fn read_key(path: &std::path::Path) -> anyhow::Result<String> {
+    Ok(match std::fs::read_to_string(path) {
+        Ok(k) if k.trim().len() >= 32 => k.trim().to_string(),
+        // Missing or truncated: make a new one. Any other read error (EACCES, EIO) must not rotate the owner's key.
+        Ok(_) => new_key(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_key(path)?,
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}: refusing to replace the dashboard key", path.display()))),
+    })
+}
+
+fn new_key(path: &std::path::Path) -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut raw = [0u8; 24];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    let k: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    crate::app_auth::write_private(path, k.as_bytes())?;
+    Ok(k)
 }
 
 fn key_ok(given: Option<&str>) -> bool {
@@ -619,15 +626,38 @@ fn serve_use(status: &Value, sock: &std::path::Path) -> ServeUse {
     serve_use_in(status, status, sock)
 }
 
-fn serve_use_in(cfg: &Value, root: &Value, sock: &std::path::Path) -> ServeUse {
+/// Whether a serve target ("unix:/p", "unix:///p" or a bare path; symlinks resolved when they exist) is `sock`.
+fn proxies_to(v: &Value, sock: &std::path::Path) -> bool {
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    // "unix:/p", "unix:///p" or a bare path; symlinks resolved when they exist.
-    let to_us = |v: &Value| {
-        v.as_str().is_some_and(|t| {
-            let p = t.strip_prefix("unix:").unwrap_or(t);
-            canon(std::path::Path::new(&format!("/{}", p.trim_start_matches('/')))) == canon(sock)
-        })
-    };
+    v.as_str().is_some_and(|t| {
+        let p = t.strip_prefix("unix:").unwrap_or(t);
+        canon(std::path::Path::new(&format!("/{}", p.trim_start_matches('/')))) == canon(sock)
+    })
+}
+
+/// The https base URL the dashboard is served at: the `Web` entry ("<host>:<port>") whose handler proxies
+/// to `sock`, when the whole config is judged [`ServeUse::Proxied`]. Port 443 is left out.
+fn serve_url(status: &Value, sock: &std::path::Path) -> Option<String> {
+    if serve_use(status, sock) != ServeUse::Proxied {
+        return None;
+    }
+    let (hp, _) = status["Web"]
+        .as_object()?
+        .iter()
+        .find(|(_, w)| w["Handlers"].as_object().is_some_and(|h| h.values().any(|h| proxies_to(&h["Proxy"], sock))))?;
+    Some(format!("https://{}", hp.strip_suffix(":443").unwrap_or(hp)))
+}
+
+/// The dashboard's served base URL as of the last `tailscale serve status` we read; None when unknown,
+/// not served, or served unsafely. The notification sender reads this: it never runs tailscale itself.
+static SERVE_URL: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn dashboard_url() -> Option<String> {
+    SERVE_URL.lock().unwrap().clone()
+}
+
+fn serve_use_in(cfg: &Value, root: &Value, sock: &std::path::Path) -> ServeUse {
+    let to_us = |v: &Value| proxies_to(v, sock);
     let entries = |v: &Value| v.as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>();
     let mut found = ServeUse::Unused;
     for (port, h) in entries(&cfg["TCP"]) {
@@ -658,11 +688,13 @@ fn serve_use_in(cfg: &Value, root: &Value, sock: &std::path::Path) -> ServeUse {
 
 /// `tailscale serve status`, judged; Err when it can't be read.
 async fn serve_status(sock: &std::path::Path) -> Result<ServeUse, String> {
+    *SERVE_URL.lock().unwrap() = None; // unreadable or unsafe: no link
     let o = tailscale(&["serve", "status", "--json"]).await.map_err(|e| format!("{e:#}"))?;
     if !o.status.success() {
         return Err(format!("`tailscale serve status` failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
     }
     let v = serde_json::from_slice::<Value>(&o.stdout).map_err(|e| format!("unreadable `tailscale serve status --json`: {e}"))?;
+    *SERVE_URL.lock().unwrap() = serve_url(&v, sock);
     Ok(serve_use(&v, sock))
 }
 
@@ -1272,9 +1304,12 @@ pub fn no_certs(status: &Value) -> bool {
     status["BackendState"] == "Running" && status["CertDomains"].as_array().is_none_or(|a| a.is_empty())
 }
 
-async fn ts_status() -> R<Json<Value>> {
+async fn ts_status(State(app): S) -> R<Json<Value>> {
     let status = tailscale(&["status", "--json"]).await?;
     let serve = tailscale(&["serve", "status", "--json"]).await?;
+    if serve.status.success() {
+        *SERVE_URL.lock().unwrap() = serde_json::from_slice(&serve.stdout).ok().and_then(|v| serve_url(&v, &app.data.join("serve.sock")));
+    }
     Ok(Json(json!({
         "status": serde_json::from_slice::<Value>(&status.stdout).unwrap_or(Value::Null),
         "serve": serde_json::from_slice::<Value>(&serve.stdout).unwrap_or(Value::Null),
@@ -1326,6 +1361,7 @@ async fn ts_serve(State(app): S, Json(b): Json<ServeBody>) -> R<Json<Value>> {
     let out = bounded(platform::tailscale(), &args, SERVE_LIMIT).await;
     // Even a timed-out attempt may have changed the config.
     *SERVE_CHECK.lock().unwrap() = None;
+    *SERVE_URL.lock().unwrap() = None;
     let out = out?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
@@ -2546,6 +2582,56 @@ mod tests {
         assert!(!refresh_due(&info(1000, 1005), 1010, 10));
         assert!(!refresh_due(&info(0, 1005), 1010, 300));
         assert!(refresh_due(&info(0, 0), 1010, 300));
+    }
+
+    #[test]
+    fn serve_url_is_the_proxied_web_entry() {
+        let sock = std::path::Path::new("/home/k/.local/share/kiln/serve.sock");
+        let host = "box.example.ts.net";
+        let mine = format!("unix:{}", sock.display());
+        let cfg = |hp: &str| {
+            json!({ "Web": {
+            format!("{host}:443"): { "Handlers": { "/": { "Proxy": "http://127.0.0.1:8789" } } },
+            hp: { "Handlers": { "/": { "Proxy": mine } } } } })
+        };
+        assert_eq!(serve_url(&cfg(&format!("{host}:8443")), sock).as_deref(), Some("https://box.example.ts.net:8443"));
+        assert_eq!(
+            serve_url(&json!({ "Web": { format!("{host}:443"): { "Handlers": { "/": { "Proxy": mine } } } } }), sock).as_deref(),
+            Some("https://box.example.ts.net")
+        );
+        assert_eq!(serve_url(&json!({}), sock), None);
+        let mut funnel = cfg(&format!("{host}:8443"));
+        funnel["AllowFunnel"] = json!({ format!("{host}:8443"): true });
+        assert_eq!(serve_url(&funnel, sock), None, "never a link when exposed");
+    }
+
+    #[test]
+    fn dashboard_url_is_what_the_last_serve_read_said() {
+        assert_eq!(dashboard_url(), None);
+        *SERVE_URL.lock().unwrap() = Some("https://box.example.ts.net:8443".into());
+        assert_eq!(dashboard_url().as_deref(), Some("https://box.example.ts.net:8443"));
+        *SERVE_URL.lock().unwrap() = None;
+        assert_eq!(dashboard_url(), None);
+    }
+
+    #[test]
+    fn dashboard_key_survives_a_read_error() {
+        let dir = std::env::temp_dir().join(format!("kiln-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dashboard.key");
+        // Not a file: reading it fails with something other than NotFound, so the path is left alone.
+        std::fs::create_dir(&path).unwrap();
+        assert!(read_key(&path).is_err());
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        // Missing, then short: a new 48-char key each time.
+        read_key(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), 48);
+        std::fs::write(&path, "short").unwrap();
+        read_key(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), 48);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

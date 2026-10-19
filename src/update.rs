@@ -563,25 +563,31 @@ pub fn on_start(data: &Path) {
         }
         Boot::Retry(p) => {
             tracing::info!("kiln {} started after an update (boot {} of {MAX_BOOTS})", p.to, p.attempts);
-            let _ = write_synced(&path, &serde_json::to_vec(&p).unwrap_or_default());
-        }
-        Boot::Rollback(p) => {
-            let _ = std::fs::remove_file(&path);
-            let msg = format!("kiln {} failed to start {MAX_BOOTS} times after the update: rolled back to kiln {}", p.to, p.from);
-            tracing::error!("{msg}");
-            let _ = std::fs::write(data.join("update/error"), &msg);
-            let _ = std::fs::write(data.join("update/skip"), &p.to);
-            let exe = match current_exe() {
-                Ok(e) => e,
-                Err(e) => return tracing::error!("rollback: {e:#}"),
-            };
-            if let Err(e) = std::fs::rename(sibling(&exe, ".prev"), &exe) {
-                return tracing::error!("rollback: restoring {}.prev: {e}", exe.display());
+            // If the count can't be saved, a crash-looping build would never reach MAX_BOOTS: don't trust it.
+            if let Err(e) = write_synced(&path, &serde_json::to_vec(&p).unwrap_or_default()) {
+                roll_back(data, &path, &p, &format!("could not record its boot count ({e})"));
             }
-            tracing::error!("rollback: re-exec {}: {:#}", exe.display(), reexec(&exe));
-            std::process::exit(1);
         }
+        Boot::Rollback(p) => roll_back(data, &path, &p, &format!("failed to start {MAX_BOOTS} times")),
     }
+}
+
+/// Restore `<exe>.prev` and exec it (returns only if that fails), skipping the failed version.
+fn roll_back(data: &Path, pending: &Path, p: &Pending, why: &str) {
+    let _ = std::fs::remove_file(pending);
+    let msg = format!("kiln {} {why} after the update: rolled back to kiln {}", p.to, p.from);
+    tracing::error!("{msg}");
+    let _ = std::fs::write(data.join("update/error"), &msg);
+    let _ = std::fs::write(data.join("update/skip"), &p.to);
+    let exe = match current_exe() {
+        Ok(e) => e,
+        Err(e) => return tracing::error!("rollback: {e:#}"),
+    };
+    if let Err(e) = std::fs::rename(sibling(&exe, ".prev"), &exe) {
+        return tracing::error!("rollback: restoring {}.prev: {e}", exe.display());
+    }
+    tracing::error!("rollback: re-exec {}: {:#}", exe.display(), reexec(&exe));
+    std::process::exit(1);
 }
 
 /// Seconds until the next update check: 6 hours, or after `fails` failed checks in a row 5

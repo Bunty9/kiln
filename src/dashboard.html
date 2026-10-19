@@ -804,7 +804,7 @@ const HELP = {
   doctor: ["Diagnostics", "Runs `kiln doctor`: KVM (Linux) or HVF (macOS), tools, disk, memory, image, token, Docker mirror, Tailscale and filtered egress. A red check usually explains stuck jobs.", "stuck"],
   queued: ["Queued", "Jobs your forge is holding for a kiln label. kiln boots one VM per job, up to Max VMs. If this number doesn't go down, something is blocking launches.", "stuck"],
   stale: ["Stale image", "The image needs a rebake: it is over 25 days old, the Actions runner in it is older than GitHub's latest, the baked Node versions or apt packages changed, or an older kiln baked it. GitHub stops sending jobs to runners about 30 days out of date, so the age and runner checks apply when this box serves a GitHub repo; GitLab and Gitea runners are pinned per kiln release. A rebake takes about 4 minutes and doesn't touch running jobs.", "image"],
-  iouring: ["io_uring limit", "QEMU's disk I/O rings count against the locked-memory limit (RLIMIT_MEMLOCK, 8 MiB by default) that all processes of this user share, and editors or agents running on the box can use it up. kiln retries by itself with a growing delay. To fix it, give kiln `LimitMEMLOCK=infinity`: see Troubleshooting in docs/configuration.md.", "stuck"],
+  iouring: ["io_uring limit", "QEMU's disk I/O rings count against the locked-memory limit (RLIMIT_MEMLOCK, 8 MiB by default) that all processes of this user share, and editors or agents running on the box can use it up. kiln normally lowers its own limit so QEMU skips io_uring; if you still see this, kiln retries by itself with a growing delay. Optionally give kiln `LimitMEMLOCK=infinity`: see Troubleshooting in docs/configuration.md.", "stuck"],
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
   timeline: ["Timeline", "Queue: the forge waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until the forge hands it the job. Job: your steps.", "stuck"],
@@ -2298,7 +2298,7 @@ function nFormHTML() {
     <div class="fld" id="nf-tokf" ${k === 'ntfy' ? '' : 'hidden'}><div><label for="nf-token">ntfy token</label></div><div><input type="text" class="mask" id="nf-token" autocomplete="off" spellcheck="false" autocapitalize="off" data-1p-ignore data-lpignore="true" placeholder="${edit ? 'leave empty to keep the current token' : 'optional'}"></div></div>
     <div class="fld"><span class="lb">Options</span><div>
       <label class="sw"${tip('Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.')}><input type="checkbox" id="nf-ts" ${nf.tailnet ? 'checked' : ''}><span>On my tailnet</span></label><p class="fg2 sm" style="margin:0 0 8px 0">Allow a 100.64.0.0/10 or *.ts.net address. LAN, loopback and cloud metadata are always refused.</p>
-      <label class="sw"${tip('Needs Serve over HTTPS; coming in a later version')}><input type="checkbox" id="nf-link" disabled><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS; coming in a later version.</p></div></div>
+      <label class="sw"${tip('Adds a link to the job in this dashboard, when Serve over HTTPS is on')}><input type="checkbox" id="nf-link"><span class="fg2">Include dashboard link</span></label><p class="fg2 sm" style="margin:0">Needs Serve over HTTPS (Settings › Network); without it messages carry no link.</p></div></div>
     <p class="ferr" id="nf-err" role="alert"></p>
     <div class="bar" style="margin:12px 0 0"><button class="btn pri" ${nf.busy ? 'disabled' : ''}>${ic('check')}Save</button><button type="button" class="btn" data-act="ncancel" ${nf.busy ? 'disabled' : ''}>Cancel</button></div></form>`;
 }
@@ -3107,7 +3107,7 @@ const ACT = {
     nbusy.add(d.id); sw(true);
     try {
       // PUT replaces the destination: send what it already has, and no URL so the stored one stays.
-      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: false, events: { ...d.events, [b.dataset.e]: b.checked } } });
+      await api('/api/notify/' + encodeURIComponent(d.id), { method: 'PUT', body: { name: d.name, kind: d.kind, tailnet: d.tailnet, link: d.link, events: { ...d.events, [b.dataset.e]: b.checked } } });
       await poll();
     } finally { nbusy.delete(d.id); sw(false); }
   },
@@ -3131,7 +3131,7 @@ const ACT = {
     if (!f.id && !url) { err.textContent = 'A URL is required.'; return $('#nf-url').focus(); }
     // An edit sends the event switches as they are now (they may have changed since the form opened).
     const events = f.id ? { ...(nDests().find(x => x.id === f.id)?.events || f.events) } : f.events;
-    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: false, events };
+    const body = { name, kind: f.kind, tailnet: $('#nf-ts').checked, link: $('#nf-link').checked, events };
     if (url) body.url = url; if (f.kind === 'ntfy' && token) body.token = token;
     const cancel = $('#nform [data-act=ncancel]'); if (cancel) cancel.disabled = true;
     let r; f.busy = 1;

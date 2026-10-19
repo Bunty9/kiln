@@ -133,6 +133,7 @@ impl Vm {
             None if self.state == State::Lost => "lost",
             None if note.starts_with("job timeout") => "timeout",
             None if note.starts_with("killed: the pipeline was cancelled") => "cancelled",
+            None if note == crate::resil::OOM_NOTE => "oom",
             None if note.starts_with("killed") || note == "kiln shutting down" => "killed",
             None if self.state == State::Failed => "no_result",
             None => "other",
@@ -346,6 +347,14 @@ fn read_ledger<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str
     }
 }
 
+/// A ledger for display: a corrupt or unreadable one reads as zero, with a warning (writers move it aside).
+fn ledger_or_zero<T: serde::de::DeserializeOwned + Default>(data: &Path, name: &str) -> T {
+    read_ledger(data, name).unwrap_or_else(|e| {
+        tracing::warn!("{name} is unreadable, showing zero usage: {e}");
+        T::default()
+    })
+}
+
 /// Add a finished job, counted the way GitHub bills it: from the job starting to its
 /// result, rounded up to the minute. A debug hold after the result is not counted.
 /// GitHub jobs go to `usage.json`, other forges' to `usage-other.json`.
@@ -397,8 +406,7 @@ fn bump_ledger<V: Default + Serialize + serde::de::DeserializeOwned>(data: &Path
 
 /// GitHub usage from UTC day `since` on, as [day, cpus, jobs, minutes] rows.
 pub fn usage_since(data: &Path, since: u64) -> Vec<[u64; 4]> {
-    read_ledger::<Usage>(data, "usage.json")
-        .unwrap_or_default()
+    ledger_or_zero::<Usage>(data, "usage.json")
         .range(since..)
         .flat_map(|(&d, m)| m.iter().map(move |(&c, &[j, n])| [d, c.into(), j, n]))
         .collect()
@@ -406,8 +414,7 @@ pub fn usage_since(data: &Path, since: u64) -> Vec<[u64; 4]> {
 
 /// Other forges' usage from UTC day `since` on, as [day, forge id, jobs, minutes] rows.
 pub fn usage_other_since(data: &Path, since: u64) -> Vec<(u64, String, u64, u64)> {
-    read_ledger::<UsageOther>(data, USAGE_OTHER)
-        .unwrap_or_default()
+    ledger_or_zero::<UsageOther>(data, USAGE_OTHER)
         .range(since..)
         .flat_map(|(&d, m)| m.iter().map(move |(f, &[j, n])| (d, f.clone(), j, n)))
         .collect()
@@ -782,9 +789,9 @@ fn stale_policy(vms: &[Vm], repo: &str, policy: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
-pub async fn recycle_stale_policy(app: &App, repo: &str, policy: &str) {
+pub async fn recycle_stale_policy(app: &App, repo: &str, policy: &str) -> bool {
     let c = stale_policy(&app.vms.lock().unwrap(), repo, policy);
-    retire(app, repo, c, Reason::StalePolicy).await;
+    retire(app, repo, c, Reason::StalePolicy).await
 }
 
 pub async fn recycle_warm(app: &App, repo: &str, recycle_mins: u64) {
@@ -1861,7 +1868,11 @@ pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
     {
         bail!("jobs of {repo} are running: clear the cache when they finish");
     }
-    let _ = std::fs::remove_file(pending_file(&app.data, repo));
+    // A pending overlay left behind would be merged into the next cache: fail rather than clear half.
+    match std::fs::remove_file(pending_file(&app.data, repo)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).context("removing the pending cache overlay"),
+        _ => {}
+    }
     match std::fs::remove_file(cache_file(&app.data, repo)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -2093,7 +2104,7 @@ fn cmdline(g: &Guest, base: &str, now_us: u128) -> String {
 }
 
 fn now_us() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros())
 }
 
 /// Secret lines a job VM can be given (`kiln.forge`, `kiln.url`, `kiln.cred`, `kiln.timeout`, ...).
@@ -3410,6 +3421,15 @@ mod tests {
         assert!(app.vms.lock().unwrap().iter().find(|v| v.id == "late").unwrap().cache_note.as_deref().unwrap().starts_with("cache busy"));
         assert!(clear_cache(&app, "acme/demo").is_err());
         app.committing.lock().unwrap().clear();
+        app.vms.lock().unwrap().clear();
+        // 6b. a parked overlay that cannot be removed (here a non-empty directory) fails the clear
+        std::fs::remove_file(pending_file(&app.data, "acme/demo")).ok();
+        std::fs::create_dir_all(pending_file(&app.data, "acme/demo").join("x")).unwrap();
+        std::fs::write(cache_file(&app.data, "acme/demo"), b"c").unwrap();
+        assert!(clear_cache(&app, "acme/demo").is_err());
+        assert!(cache_file(&app.data, "acme/demo").exists(), "nothing is cleared half way");
+        std::fs::remove_dir_all(pending_file(&app.data, "acme/demo")).unwrap();
+        assert!(clear_cache(&app, "acme/demo").is_ok());
         // 7. repo `x` and repo `x.pending` never share a parked file
         assert_ne!(pending_file(&app.data, "acme/x"), pending_file(&app.data, "acme/x.pending"));
         assert_ne!(pending_file(&app.data, "acme/x.pending"), cache_file(&app.data, "acme/x.pending"));
@@ -3943,6 +3963,7 @@ mod tests {
         assert_eq!(c(&vm(State::Killed, None, Some("job timeout after 360 min"))), Some("timeout"));
         assert_eq!(c(&vm(State::Killed, None, Some("killed from dashboard"))), Some("killed"));
         assert_eq!(c(&vm(State::Killed, None, Some("kiln shutting down"))), Some("killed"));
+        assert_eq!(c(&vm(State::Killed, None, Some(crate::resil::OOM_NOTE))), Some("oom"));
         assert_eq!(c(&vm(State::Killed, None, Some("killed: the pipeline was cancelled"))), Some("cancelled"));
         assert_eq!(c(&vm(State::Failed, None, Some("runner exited without a result"))), Some("no_result"));
         // A refused job reports Failed from the guest: still a refusal.

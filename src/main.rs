@@ -609,7 +609,7 @@ pub fn host_threads() -> u32 {
 }
 
 pub fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// GitHub tokens the environment may hold. kiln reads the first two itself; `GH_TOKEN` reaches
@@ -664,6 +664,7 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     tracing_subscriber::fmt().with_target(false).init();
+    resil::lower_memlock();
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
@@ -751,7 +752,7 @@ async fn run() -> Result<()> {
                     tracing::warn!("{p}");
                 }
             }
-            tokio::spawn(scheduler(app.clone()));
+            let sched = tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
             tokio::spawn(telemetry::supervise(app.clone()));
@@ -759,6 +760,14 @@ async fn run() -> Result<()> {
             let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {
                 r = web => r?,
+                // It only returns when kiln stops; a panic would otherwise end all scheduling while the dashboard stays up.
+                r = sched => {
+                    let e = scheduler_ended(r);
+                    tracing::error!("{e}");
+                    // Same drain as a stop, then a non-zero exit: systemd restarts kiln, and its startup cleanup runs.
+                    shutdown(&app).await;
+                    Err(e)
+                }
                 _ = stop_signal() => {
                     stop_drain(&app).await;
                     shutdown(&app).await;
@@ -789,6 +798,14 @@ fn load_config(data: &std::path::Path) -> Result<Config> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).context("reading config.json"),
+    }
+}
+
+/// Why the scheduler task ended while kiln was still serving.
+fn scheduler_ended(r: Result<(), tokio::task::JoinError>) -> anyhow::Error {
+    match r {
+        Err(e) => anyhow::anyhow!("the scheduler task died ({e}): exiting so the service restarts"),
+        Ok(()) => anyhow::anyhow!("the scheduler task returned: exiting so the service restarts"),
     }
 }
 
@@ -1582,6 +1599,20 @@ pub fn test_app(name: &str) -> Arc<App> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_panicking_scheduler_is_reported() {
+        let e = scheduler_ended(tokio::spawn(async { panic!("boom") }).await);
+        assert!(format!("{e}").contains("scheduler task died"), "{e}");
+        assert!(format!("{}", scheduler_ended(Ok(()))).contains("returned"));
+    }
+
+    #[test]
+    fn the_clock_before_1970_is_zero_not_a_panic() {
+        // now() itself cannot be faked; this pins the saturating form it uses.
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(5);
+        assert_eq!(before.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()), 0);
+    }
+
     #[test]
     fn a_cleanup_that_keeps_failing_becomes_a_health_item() {
         let app = App::for_tests();
