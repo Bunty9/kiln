@@ -191,11 +191,43 @@ fn memlock_limit() -> Option<u64> {
     (ok && r.rlim_cur != libc::RLIM_INFINITY).then_some(r.rlim_cur)
 }
 
+/// The soft `RLIMIT_MEMLOCK` to set given the current soft limit (`None` = leave it). io_uring rings are
+/// charged to this limit, shared by all of the user's processes; QEMU exits when it cannot get a ring but
+/// falls back to epoll and threads when the limit is 0. Unlimited cannot be exhausted. Lowering the soft
+/// limit never needs privilege and never exceeds the hard one.
+#[cfg(any(target_os = "linux", test))]
+pub fn memlock_target(soft: u64) -> Option<u64> {
+    (soft != 0 && soft != libc::RLIM_INFINITY).then_some(0)
+}
+
+/// Lower our soft locked-memory limit so QEMU and qemu-img (children inherit it) never fight other
+/// processes for io_uring memory. Nothing kiln runs needs locked memory.
+#[cfg(target_os = "linux")]
+pub fn lower_memlock() {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut r) } != 0 {
+        return;
+    }
+    let Some(t) = memlock_target(r.rlim_cur) else { return };
+    let was = r.rlim_cur;
+    r.rlim_cur = t;
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &r) } == 0 {
+        tracing::info!("lowered the soft locked-memory limit from {} KiB to 0 so QEMU does not use io_uring", was >> 10);
+    } else {
+        tracing::warn!("could not lower RLIMIT_MEMLOCK: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lower_memlock() {}
+
 pub fn io_uring_message(limit: Option<u64>) -> String {
     let l = limit.map_or("unlimited".to_string(), |b| format!("{} MiB", b >> 20));
     format!(
         "io_uring: locked-memory limit reached (RLIMIT_MEMLOCK {l}; other processes of this user hold io_uring memory). \
-         Raise LimitMEMLOCK for kiln (see Troubleshooting in configuration.md) or close those processes"
+         kiln normally lowers its own limit to avoid this; see Troubleshooting in configuration.md"
     )
 }
 
@@ -207,6 +239,9 @@ pub fn io_uring_banner() -> String {
 /// Doctor: set up and tear down a ring like QEMU's (128 entries). Linux only.
 #[cfg(target_os = "linux")]
 pub fn io_uring_check() -> (bool, String) {
+    if memlock_limit() == Some(0) {
+        return (true, "QEMU does not use io_uring (RLIMIT_MEMLOCK soft limit 0): other processes cannot exhaust it".into());
+    }
     // struct io_uring_params is 120 bytes; the kernel fills it.
     let mut params = [0u8; 120];
     // SAFETY: io_uring_setup(entries, params*) with a buffer of the size the kernel expects.
@@ -249,6 +284,32 @@ mod tests {
         assert!(probe_fresh(&Some((old, None))));
         assert!(probe_fresh(&Some((Instant::now(), Some("busy".into())))));
         assert!(!probe_fresh(&Some((old, Some("busy".into())))));
+    }
+
+    #[test]
+    fn memlock_is_lowered_unless_unlimited_or_zero() {
+        assert_eq!(memlock_target(8 << 20), Some(0));
+        assert_eq!(memlock_target(0), None);
+        assert_eq!(memlock_target(libc::RLIM_INFINITY), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lowered_memlock_is_inherited() {
+        // Lowered in a forked child only, so other tests keep their limits.
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "ulimit -l"]);
+        // SAFETY: the closure only calls getrlimit/setrlimit (and logs, which is a no-op without a subscriber).
+        unsafe {
+            c.pre_exec(|| {
+                lower_memlock();
+                Ok(())
+            })
+        };
+        let out = c.output().unwrap();
+        let v = String::from_utf8_lossy(&out.stdout);
+        assert!(["0", "unlimited"].contains(&v.trim()), "got {v}");
     }
 
     #[test]
