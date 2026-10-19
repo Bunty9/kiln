@@ -28,9 +28,9 @@ TimeoutStopSec=600
 # Job VMs run in their own transient scopes (kiln-vm-<id>.scope) so memory pressure kills one VM, not kiln;
 # scopes outlive the service, so stopping it kills whatever is left of them.
 ExecStopPost=-/usr/bin/systemctl --user kill --signal=SIGKILL 'kiln-vm-*.scope'
-# io_uring rings count against the user's shared locked-memory limit. This only has an effect once the user
-# manager's own limit is raised too; see Troubleshooting in docs/configuration.md. Above the manager's limit the
-# unit still starts, with the limit clamped.
+# Optional. io_uring rings count against the user's shared locked-memory limit; kiln lowers its own soft limit to 0
+# so QEMU skips io_uring (an unlimited soft limit is left alone). See Troubleshooting in docs/configuration.md.
+# Above the user manager's limit the unit still starts, with the limit clamped.
 LimitMEMLOCK=infinity
 # Files kiln and its VMs create (logs, overlays, sockets) are private to this user.
 UMask=0077
