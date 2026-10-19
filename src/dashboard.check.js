@@ -3,11 +3,13 @@
 const fs = require('fs'), assert = require('assert');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const grab = n => { const m = src.match(new RegExp(`^(?:const ${n} = .*|function ${n}\\([\\s\\S]*?\\n})$`, 'm')); assert(m, n); return m[0]; };
-const esc = x => String(x);
+const esc = new Function(grab('esc') + '\nreturn esc;')();
 const { pctl, jobMins, timed, outcome, anBuckets, runStatus, forgeOf, can, runActs, forgeUrl } = new Function('esc',
   ['hhmm', 'pctl', 'jobEnd', 'jobMins', 'refusedBy', 'refusedWhy', 'status', 'isFail', 'timed', 'outcome', 'anBuckets', 'runStatus', 'forgeOf', 'can', 'runActs', 'forgeUrl'].map(grab).join('\n') +
   '\nreturn { pctl, jobMins, timed, outcome, anBuckets, runStatus, forgeOf, can, runActs, forgeUrl };')(esc);
 
+assert.equal(esc('</span><button data-act="kill">'), '&lt;/span&gt;&lt;button data-act=&quot;kill&quot;&gt;', 'esc neutralises markup and quotes');
+assert.equal(esc(null), ''); assert.equal(esc("a&'"), 'a&amp;&#39;');
 assert.equal(pctl([], .95), null);
 assert.equal(pctl([5], .95), 5);
 const a = [...Array(100).keys()].reverse();

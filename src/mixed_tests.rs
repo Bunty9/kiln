@@ -466,7 +466,8 @@ async fn a_stale_policy_vm_dies_even_when_its_runner_cannot_be_deleted() {
     let t = Trio::new("mixed-retire-err", 99, |_| {}).await;
     t.gh.fail("DELETE", "/repos/acme/demo/actions/runners/11", 500, "boom");
     t.gl.route("PUT", &format!("{GL}/runners/79"), 500, "{}");
-    let vms = [("seed-gh", GH_REPO, 11), ("seed-gl", GL_REPO, 79), ("seed-none", "gl2:acme/demo", 5)];
+    t.gt.route("PATCH", &format!("{GT}/runners/52"), 500, "{}");
+    let vms = [("seed-gh", GH_REPO, 11), ("seed-gl", GL_REPO, 79), ("seed-gt", GT_REPO, 52), ("seed-none", "gl2:acme/demo", 5)];
     let kills: Vec<_> = vms
         .iter()
         .map(|&(id, repo, rid)| {
@@ -479,7 +480,9 @@ async fn a_stale_policy_vm_dies_even_when_its_runner_cannot_be_deleted() {
     t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-job").unwrap().job_url = Some("https://x/1".into());
     let busy = watch(&t.app, "seed-job");
     for (_, repo, _) in vms {
-        vm::recycle_stale_policy(&t.app, repo, "new").await;
+        let ok = vm::recycle_stale_policy(&t.app, repo, "new").await;
+        // GitLab goes on to delete after a failed pause when the policy is stale; the others report the failure.
+        assert_eq!(ok, repo == GL_REPO, "{repo}: a failed delete is reported so it is retried");
     }
     for k in &kills {
         assert!(killed(k).await);
