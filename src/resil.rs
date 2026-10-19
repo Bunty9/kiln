@@ -40,31 +40,58 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Whether VMs get scopes: Linux with a working `systemd-run`, probed once (a scope that does nothing).
+/// How long a failed scope probe stands before the next launch probes again.
+const REPROBE: Duration = Duration::from_secs(300);
+
+type Probe = Option<(std::time::Instant, Option<String>)>;
+
+/// The last scope probe: when, and why not (None = it worked).
+static PROBE: std::sync::Mutex<Probe> = std::sync::Mutex::new(None);
+
+/// Whether the last probe still stands: a success for the life of the process, a failure for
+/// [`REPROBE`] (the user manager may just have been busy at boot).
+fn probe_fresh(p: &Probe) -> bool {
+    p.as_ref().is_some_and(|(at, why)| why.is_none() || at.elapsed() < REPROBE)
+}
+
+/// Whether VMs get scopes: Linux with a working `systemd-run`.
 async fn scopes_work() -> bool {
-    static OK: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    *OK.get_or_init(|| async {
-        if !cfg!(target_os = "linux") || !crate::platform::which("systemd-run") {
-            return false;
+    scope_state().await.is_none()
+}
+
+/// None when scopes work, else why not.
+async fn scope_state() -> Option<String> {
+    {
+        let p = PROBE.lock().unwrap();
+        if probe_fresh(&p) {
+            return p.as_ref().and_then(|(_, why)| why.clone());
         }
-        let probe = format!("probe-{}", std::process::id());
-        let mut c = Command::new("systemd-run");
-        c.args(scope_args(!is_root(), &probe, 0)).arg("true").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let r = tokio::time::timeout(Duration::from_secs(10), c.kill_on_drop(true).output()).await;
-        match r {
-            Ok(Ok(o)) if o.status.success() => true,
-            other => {
-                let why = match other {
-                    Ok(Ok(o)) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                    Ok(Err(e)) => e.to_string(),
-                    Err(_) => "timed out".into(),
-                };
-                tracing::info!("job VMs share kiln's cgroup (systemd-run --scope unavailable: {why})");
-                false
-            }
-        }
-    })
-    .await
+    }
+    let why = probe_scopes().await;
+    if let Some(w) = &why {
+        tracing::info!(
+            "job VMs share kiln's cgroup (systemd-run --scope unavailable: {w}); probing again in {} min",
+            REPROBE.as_secs() / 60
+        );
+    }
+    *PROBE.lock().unwrap() = Some((std::time::Instant::now(), why.clone()));
+    why
+}
+
+/// One probe: a scope that does nothing.
+async fn probe_scopes() -> Option<String> {
+    if !cfg!(target_os = "linux") || !crate::platform::which("systemd-run") {
+        return Some("no systemd-run".into());
+    }
+    let probe = format!("probe-{}", std::process::id());
+    let mut c = Command::new("systemd-run");
+    c.args(scope_args(!is_root(), &probe, 0)).arg("true").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    match tokio::time::timeout(Duration::from_secs(10), c.kill_on_drop(true).output()).await {
+        Ok(Ok(o)) if o.status.success() => None,
+        Ok(Ok(o)) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some("timed out".into()),
+    }
 }
 
 /// `cmd` (program and args as set) run in the VM's own scope, or `cmd` unchanged without systemd.
@@ -107,12 +134,15 @@ async fn systemctl(args: &[&str]) {
     .await;
 }
 
-/// Doctor's line: whether job VMs get their own cgroup.
+/// Doctor's line: whether job VMs get their own cgroup. Without scopes it is a warning (ok: kiln
+/// runs, just without the OOM protection), with the probe's reason.
 pub async fn scope_check() -> (bool, String) {
-    if scopes_work().await {
-        (true, "each job VM runs in its own systemd scope (memory pressure kills one VM, not kiln)".into())
-    } else {
-        (true, "job VMs share kiln's cgroup (no systemd-run --scope): memory pressure may kill kiln with its jobs".into())
+    match scope_state().await {
+        None => (true, "each job VM runs in its own systemd scope (memory pressure kills one VM, not kiln)".into()),
+        Some(why) => (
+            true,
+            format!("warning: job VMs share kiln's cgroup ({why}): memory pressure may kill kiln with its jobs; retried every 5 minutes"),
+        ),
     }
 }
 
@@ -243,6 +273,17 @@ mod tests {
         assert!(!io_uring_exhausted("qemu-img create: No space left on device"));
         assert!(io_uring_message(Some(8 << 20)).contains("RLIMIT_MEMLOCK 8 MiB"));
         assert!(io_uring_message(None).contains("unlimited"));
+    }
+
+    #[test]
+    fn a_failed_scope_probe_expires_a_good_one_does_not() {
+        use std::time::Instant;
+        let old = Instant::now().checked_sub(REPROBE * 2).unwrap();
+        assert!(!probe_fresh(&None));
+        assert!(probe_fresh(&Some((Instant::now(), None))));
+        assert!(probe_fresh(&Some((old, None))));
+        assert!(probe_fresh(&Some((Instant::now(), Some("busy".into())))));
+        assert!(!probe_fresh(&Some((old, Some("busy".into())))));
     }
 
     #[test]

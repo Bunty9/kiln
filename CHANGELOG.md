@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- **Notification dashboard links.** The "Include dashboard link" option on a notification destination now works: a job message links to the job's page in the dashboard when Serve over HTTPS is on (a `.ts.net` address only; no link otherwise). kiln caches the address from the serve config it already reads and never runs `tailscale` while sending.
+
 ### Changed
 
 - **Usage statistics say why jobs did not pass.** The opt-in daily report gains `fail_causes_24h`: a count of the last 24 hours' non-passing jobs by cause (`failed`, `cancelled`, `timeout`, `killed`, `oom`, `lost`, `no_result`, `refused_policy`, `refused_failure`, `other`), from kiln's own VM records. Counts only, no names, URLs or messages; `GET /api/telemetry` shows the exact report.
@@ -16,6 +20,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- **The dashboard key is no longer replaced on a read error.** A permission or I/O error reading `dashboard.key` at start now stops kiln with the reason; the key is regenerated only when the file is missing or too short.
+- **A bad update rolls back even when the boot count can't be saved.** If the data directory is full or read-only, kiln now rolls back to `kiln.prev` at once instead of crash-looping the new build forever.
+- **Time stamps with a zone offset or fractional seconds parse correctly** (`+05:30`, `.123Z`). A Gitea server not on UTC no longer shifts job wait times by hours, and an unreadable Gitea time no longer shows 1970.
+- **The per-VM systemd scope probe is retried** every 5 minutes after a failure instead of staying off until kiln restarts, and `kiln doctor` shows `vm cgroups` as a warning with the reason when scopes are unavailable.
 - **A panic in the scheduler no longer leaves kiln serving but idle.** If the scheduler task ends while kiln is not stopping, kiln logs an error, drains like a stop and exits non-zero, so systemd restarts it (and the startup cleanup runs). Before, nothing would ever launch, poll or clean up again while the dashboard stayed up.
 - **Pre-1970 clock.** A host clock set before 1970 no longer panics; time reads as 0.
 - **Corrupt usage ledger.** An unreadable `usage.json` or `usage-other.json` now logs a warning instead of silently showing zero usage.
