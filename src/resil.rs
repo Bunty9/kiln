@@ -83,7 +83,8 @@ async fn probe_scopes() -> Option<String> {
     if !cfg!(target_os = "linux") || !crate::platform::which("systemd-run") {
         return Some("no systemd-run".into());
     }
-    let probe = format!("probe-{}", std::process::id());
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let probe = format!("probe-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut c = Command::new("systemd-run");
     c.args(scope_args(!is_root(), &probe, 0)).arg("true").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     match tokio::time::timeout(Duration::from_secs(10), c.kill_on_drop(true).output()).await {

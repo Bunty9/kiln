@@ -711,6 +711,8 @@ async fn run() -> Result<()> {
             Ok(())
         }
         a if is_serve(a) => {
+            // Before reap_scopes: a second serve must not kill the live one's VM scopes.
+            lock_serve(&app.data)?;
             if let Some(p) = confine::exposed(&app.data) {
                 bail!("data directory {} is under {p}, which job VMs' QEMU may read: move it (KILN_DATA) elsewhere", app.data.display());
             }
@@ -762,11 +764,17 @@ async fn run() -> Result<()> {
                 r = web => r?,
                 // It only returns when kiln stops; a panic would otherwise end all scheduling while the dashboard stays up.
                 r = sched => {
-                    let e = scheduler_ended(r);
-                    tracing::error!("{e}");
-                    // Same drain as a stop, then a non-zero exit: systemd restarts kiln, and its startup cleanup runs.
-                    shutdown(&app).await;
-                    Err(e)
+                    // A stop or an update restart (`restart_into`) already shut down: the scheduler ending is
+                    // expected, and that path finishes the exit or the re-exec.
+                    if scheduler_fault(app.stopping.load(std::sync::atomic::Ordering::SeqCst), &r) {
+                        let e = scheduler_ended(r);
+                        tracing::error!("{e}");
+                        // Shut down (no grace drain), then a non-zero exit: systemd restarts kiln, and its startup cleanup runs.
+                        shutdown(&app).await;
+                        Err(e)
+                    } else {
+                        std::future::pending::<Result<()>>().await
+                    }
                 }
                 _ = stop_signal() => {
                     stop_drain(&app).await;
@@ -799,6 +807,37 @@ fn load_config(data: &std::path::Path) -> Result<Config> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).context("reading config.json"),
     }
+}
+
+/// Whether the scheduler task ending should end kiln: always for a panic, otherwise only when not stopping.
+fn scheduler_fault(stopping: bool, r: &Result<(), tokio::task::JoinError>) -> bool {
+    r.is_err() || !stopping
+}
+
+/// Takes an exclusive lock on `<data>/serve.lock` for the life of the process, so a second `kiln serve`
+/// on the same data directory fails before it can touch the live one's VMs. The fd is close-on-exec:
+/// an update re-exec releases the lock and the new image takes it again.
+fn lock_serve(data: &std::path::Path) -> Result<()> {
+    static HELD: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    let f = try_lock(&data.join("serve.lock"))?;
+    let _ = HELD.set(f);
+    Ok(())
+}
+
+fn try_lock(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("another kiln serve is running on this data directory ({})", path.display());
+    }
+    Ok(f)
 }
 
 /// Why the scheduler task ended while kiln was still serving.
@@ -1604,6 +1643,25 @@ mod tests {
         let e = scheduler_ended(tokio::spawn(async { panic!("boom") }).await);
         assert!(format!("{e}").contains("scheduler task died"), "{e}");
         assert!(format!("{}", scheduler_ended(Ok(()))).contains("returned"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_ending_while_stopping_is_not_a_fault() {
+        assert!(!scheduler_fault(true, &Ok(())));
+        assert!(scheduler_fault(false, &Ok(())));
+        let panicked = tokio::spawn(async { panic!("boom") }).await;
+        assert!(scheduler_fault(true, &panicked), "a panic always exits");
+    }
+
+    #[test]
+    fn second_serve_lock_fails_while_first_is_held() {
+        let p = std::env::temp_dir().join(format!("kiln-lock-test-{}", std::process::id()));
+        let first = try_lock(&p).unwrap();
+        let e = try_lock(&p).unwrap_err().to_string();
+        assert!(e.contains("another kiln serve"), "{e}");
+        drop(first);
+        try_lock(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
