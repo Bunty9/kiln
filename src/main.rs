@@ -58,6 +58,8 @@ pub struct Config {
     pub docker_mirror: bool,
     /// Rebake by itself when the image is stale.
     pub auto_rebake: bool,
+    /// Force-cancel the GitHub run whose job kiln lost (a crash, a restart, a timeout kill) so it does not hang.
+    pub reclaim_lost_jobs: bool,
     /// Node versions baked into the tool cache ("20" = newest 20.x, or exact "20.19.5").
     /// The newest is the bare `node`. Takes effect at the next bake.
     pub bake_node_versions: Vec<String>,
@@ -123,6 +125,7 @@ impl Default for Config {
             app_accounts: vec![],
             docker_mirror: true,
             auto_rebake: true,
+            reclaim_lost_jobs: true,
             bake_node_versions: vec!["24".into()],
             bake_apt_packages: vec![],
             cache: true,

@@ -636,3 +636,210 @@ async fn the_vms_forge_picks_the_guest_secret() {
     assert!(t.gh.requests().iter().all(|r| r.contains("generate-jitconfig") || r.starts_with("GET ")), "{:?}", t.gh.requests());
     assert_eq!(t.gt.requests().iter().filter(|r| r.starts_with("POST ")).count(), 2);
 }
+
+const GH: &str = "/repos/acme/demo/actions";
+
+/// A GitHub VM kiln lost while `job` of `run` ran on it, with a busy runner 11.
+fn lost_gh(t: &Trio, id: &str, run: u64, job: u64) {
+    seed(&t.app, id, GH_REPO, "lost", 11, 1, 64);
+    let mut vms = t.app.vms.lock().unwrap();
+    let v = vms.iter_mut().find(|v| v.id == id).unwrap();
+    v.ended = Some(now());
+    v.busy_since = Some(5);
+    v.job = Some("build".into());
+    v.job_url = Some(format!("https://github.com/acme/demo/actions/runs/{run}/job/{job}"));
+}
+
+fn gh_job(t: &Trio, job: u64, status: &str, runner: &str) {
+    t.gh.route("GET", &format!("{GH}/jobs/{job}"), 200, json!({ "id": job, "status": status, "runner_name": runner }).to_string());
+}
+
+fn forced(t: &Trio) -> usize {
+    t.gh.requests().iter().filter(|r| r.ends_with("/force-cancel")).count()
+}
+
+fn gh_note(t: &Trio, id: &str) -> Option<String> {
+    t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().note.clone()
+}
+
+#[tokio::test]
+async fn a_lost_vms_busy_runner_gets_its_run_force_cancelled_once_then_the_delete_is_retried() {
+    let t = Trio::new("mixed-reclaim", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "Bad request - Runner is busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    assert!(!vm::retire_ended(&t.app).await, "the delete is to be retried");
+    assert_eq!(forced(&t), 1);
+    assert!(gh_note(&t, "seed-a").unwrap().starts_with("kiln force-cancelled run 9001: its job was lost when"));
+    // The retry: still busy for a moment, then gone. No second cancel either way.
+    assert!(!vm::retire_ended(&t.app).await);
+    t.gh.route("DELETE", &format!("{GH}/runners/11"), 204, "");
+    assert!(vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 1);
+    assert_eq!(t.gh.requests().iter().filter(|r| r.starts_with("GET ") && r.contains("/jobs/")).count(), 1);
+}
+
+#[tokio::test]
+async fn nothing_is_cancelled_unless_the_job_runs_on_that_runner() {
+    let t = Trio::new("mixed-reclaim-no", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    for (status, runner) in [("in_progress", "someone-else"), ("completed", "seed-a"), ("in_progress", "")] {
+        gh_job(&t, 7001, status, runner);
+        assert!(vm::retire_ended(&t.app).await, "nothing to retry");
+    }
+    // The job cannot be read at all: no cancel, and the check is repeated later.
+    t.gh.fail("GET", &format!("{GH}/jobs/7001"), 500, "boom");
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 0);
+    assert_eq!(gh_note(&t, "seed-a"), None);
+}
+
+#[tokio::test]
+async fn a_run_another_active_vm_holds_is_cancelled_only_after_it_ends() {
+    let t = Trio::new("mixed-reclaim-shared", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    seed(&t.app, "seed-b", GH_REPO, "busy", 12, 1, 64);
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-b").unwrap().job_url =
+        Some("https://github.com/acme/demo/actions/runs/9001/job/7002".into());
+    assert!(!vm::retire_ended(&t.app).await, "retried later");
+    assert_eq!(forced(&t), 0);
+    assert!(!t.gh.requests().iter().any(|r| r.contains("/jobs/")), "not even asked");
+    // The sibling ends: the next try cancels.
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-b").unwrap().state = vm::State::Done;
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 1);
+}
+
+/// A VM kiln ended while the job ran: the record `launch` leaves after a shutdown or dashboard kill.
+fn killed_gh(t: &Trio, id: &str, note: &str) {
+    lost_gh(t, id, 9001, 7001);
+    let mut vms = t.app.vms.lock().unwrap();
+    let v = vms.iter_mut().find(|v| v.id == id).unwrap();
+    (v.state, v.note) = (vm::State::Killed, Some(note.into()));
+}
+
+fn cause(t: &Trio, id: &str) -> Option<&'static str> {
+    t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().fail_cause()
+}
+
+#[tokio::test]
+async fn a_reclaim_appends_to_the_note_and_keeps_the_failure_cause() {
+    for (note, state, want) in [
+        ("kiln shutting down", vm::State::Killed, "killed"),
+        ("killed from dashboard", vm::State::Killed, "killed"),
+        ("", vm::State::Lost, "lost"),
+    ] {
+        let t = Trio::new("mixed-reclaim-note", 99, |_| {}).await;
+        t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+        gh_job(&t, 7001, "in_progress", "seed-a");
+        t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+        killed_gh(&t, "seed-a", note);
+        t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-a").unwrap().state = state;
+        assert_eq!(cause(&t, "seed-a"), Some(want));
+        assert!(!vm::retire_ended(&t.app).await, "{note}");
+        assert_eq!(forced(&t), 1, "{note}");
+        let n = gh_note(&t, "seed-a").unwrap();
+        assert!(n.starts_with(note) && n.contains("kiln force-cancelled run 9001"), "{n}");
+        assert_eq!(cause(&t, "seed-a"), Some(want), "{n}");
+        // The cancel is not repeated on the next start, even though the note changed.
+        vm::retire_ended(&t.app).await;
+        assert_eq!(forced(&t), 1, "{note}");
+    }
+}
+
+#[tokio::test]
+async fn a_job_timeout_kill_is_not_reclaimed() {
+    let t = Trio::new("mixed-reclaim-timeout", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    killed_gh(&t, "seed-a", "job timeout after 60 min");
+    assert!(vm::retire_ended(&t.app).await);
+    assert!(t.gh.requests().is_empty(), "today's behaviour: not even retired at start: {:?}", t.gh.requests());
+}
+
+#[tokio::test]
+async fn a_rate_limited_force_cancel_is_retried() {
+    let t = Trio::new("mixed-reclaim-rate", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.fail("POST", &format!("{GH}/runs/9001/force-cancel"), 403, "API rate limit exceeded for installation");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(gh_note(&t, "seed-a"), None, "not final");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 2);
+    assert!(gh_note(&t, "seed-a").unwrap().starts_with("kiln force-cancelled"));
+}
+
+/// Without a VM scope a kill -9 of kiln leaves QEMU running: the job is healthy, nothing is cancelled.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_vm_whose_qemu_still_runs_is_not_reclaimed() {
+    let t = Trio::new("mixed-reclaim-qemu", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    let q = format!("{}/vms/seed-a/q/disk", t.app.data.display());
+    let mut qemu = std::process::Command::new("bash").args(["-c", "exec -a \"qemu-system-x86_64 $0\" sleep 30", &q]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!vm::retire_ended(&t.app).await, "retried later");
+    assert_eq!(forced(&t), 0);
+    qemu.kill().unwrap();
+    qemu.wait().unwrap();
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 1);
+}
+
+#[tokio::test]
+async fn reclaim_lost_jobs_off_cancels_nothing() {
+    let t = Trio::new("mixed-reclaim-off", 99, |c| c.reclaim_lost_jobs = false).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    assert!(vm::retire_ended(&t.app).await);
+    assert_eq!(t.gh.requests(), [format!("DELETE {}/runners/11", "/repos/acme/demo/actions")]);
+}
+
+#[tokio::test]
+async fn a_refused_force_cancel_is_final() {
+    for status in [409, 403, 404] {
+        let t = Trio::new("mixed-reclaim-409", 99, |_| {}).await;
+        t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+        gh_job(&t, 7001, "in_progress", "seed-a");
+        t.gh.fail("POST", &format!("{GH}/runs/9001/force-cancel"), status, "no");
+        lost_gh(&t, "seed-a", 9001, 7001);
+        assert!(vm::retire_ended(&t.app).await, "{status}: no retry");
+        assert!(vm::retire_ended(&t.app).await);
+        assert_eq!(forced(&t), 1, "{status}: asked once");
+        assert!(gh_note(&t, "seed-a").unwrap().starts_with("kiln could not force-cancel run 9001"));
+    }
+}
+
+#[tokio::test]
+async fn gitlab_and_gitea_vms_are_never_force_cancelled() {
+    let t = Trio::new("mixed-reclaim-others", 99, |_| {}).await;
+    gt_runner(&t.gt, true);
+    gl_runner(&t.gl, "runner_jobs_running.json");
+    for (id, repo, rid) in [("seed-gt", GT_REPO, 52), ("seed-gl", GL_REPO, 79)] {
+        seed(&t.app, id, repo, "lost", rid, 1, 64);
+        let mut vms = t.app.vms.lock().unwrap();
+        let v = vms.iter_mut().find(|v| v.id == id).unwrap();
+        v.ended = Some(now());
+        v.busy_since = Some(5);
+        v.job_url = Some("https://github.com/acme/demo/actions/runs/9001/job/7001".into());
+    }
+    vm::retire_ended(&t.app).await;
+    for m in [&t.gh, &t.gt, &t.gl] {
+        assert!(!m.requests().iter().any(|r| r.contains("force-cancel")), "{:?}", m.requests());
+    }
+    assert!(t.gh.requests().is_empty(), "{:?}", t.gh.requests());
+}
