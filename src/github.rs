@@ -26,6 +26,8 @@ pub struct Gh {
     // URL -> (etag, body). Conditional GETs that return 304 are free against
     // the rate limit, which is what makes 5s polling of several repos viable.
     etags: Mutex<HashMap<String, (String, Value)>>,
+    /// lowercase repo -> (read at unix time, runs GitHub holds as `pending`): re-read at most once a minute.
+    pending: std::sync::Mutex<HashMap<String, (u64, Vec<crate::forge::PendingRun>)>>,
     /// lowercase "owner/name" -> GitHub's spelling, from App discovery.
     spelled: std::sync::Mutex<HashMap<String, String>>,
     /// GitHub App mode: tokens come from the App's installations, not `token`.
@@ -113,6 +115,7 @@ impl Gh {
             paused: Default::default(),
             latest: Default::default(),
             etags: Mutex::default(),
+            pending: Default::default(),
             defaults: Default::default(),
             expires: Default::default(),
             app: Default::default(),
@@ -460,7 +463,7 @@ impl Gh {
         repo: &str,
         label: &str,
         default_cpus: u32,
-    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize)> {
+    ) -> Result<(HashMap<u32, usize>, HashMap<String, JobInfo>, usize, Vec<crate::forge::PendingRun>)> {
         let arm64 = crate::platform::host_arm64();
         let host = crate::host_threads();
         let mut queued: HashMap<u64, u32> = HashMap::new();
@@ -502,7 +505,36 @@ impl Gh {
         for n in queued.into_values() {
             *by_size.entry(n).or_default() += 1;
         }
-        Ok((by_size, ours, forks.len()))
+        Ok((by_size, ours, forks.len(), self.pending_runs(repo).await))
+    }
+
+    /// Runs GitHub holds as `pending` (a concurrency group or an approval wait): runs only, no jobs.
+    /// Read-only and best-effort: an error is an empty list. Cached for a minute per repo.
+    async fn pending_runs(&self, repo: &str) -> Vec<crate::forge::PendingRun> {
+        let key = repo.to_ascii_lowercase();
+        let now = crate::now();
+        if let Some((at, runs)) = self.pending.lock().unwrap().get(&key)
+            && now < at + 60
+        {
+            return runs.clone();
+        }
+        let runs: Vec<_> = match self.get(&format!("repos/{repo}/actions/runs?status=pending&per_page=30")).await {
+            Ok(v) => v["workflow_runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    Some(crate::forge::PendingRun {
+                        workflow: r["name"].as_str().unwrap_or("workflow").chars().take(100).collect(),
+                        number: r["run_number"].as_u64().unwrap_or_default(),
+                        since: r["created_at"].as_str().and_then(parse_rfc3339)?,
+                    })
+                })
+                .collect(),
+            Err(_) => vec![],
+        };
+        self.pending.lock().unwrap().insert(key, (now, runs.clone()));
+        runs
     }
 
     /// Exchange a manifest-flow code for the new App's id, slug, html_url, owner and pem (no auth).
@@ -1180,7 +1212,8 @@ mod characterization {
         let m = Mock::github().await;
         let gh = Gh::for_mock(&m.base);
         // Default size 1 (host_threads is at least 1), so `kiln` and `kiln-2cpu` are different sizes.
-        let (by_size, ours, forks) = gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        let (by_size, ours, forks, pending) = gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        assert!(pending.is_empty());
         // 5001 (kiln) + 5002 (kiln-2cpu) + 5203 (kiln-2cpu, in a running run); 5003 is someone else's
         // self-hosted job, 5004 GitHub-hosted, 5101 a queued fork job (refused, never demand).
         // Run 1001 is listed as queued and as in_progress, so its jobs are read twice but counted once.
@@ -1195,6 +1228,8 @@ mod characterization {
                 format!("GET {RUNS}?status=in_progress&per_page=30"),
                 format!("GET {RUNS}/1004/jobs?per_page=100"),
                 format!("GET {RUNS}/1001/jobs?per_page=100"),
+                // Runs only, no jobs read, and cached for a minute.
+                format!("GET {RUNS}?status=pending&per_page=30"),
             ]
         );
         let first = m.log().remove(0);
