@@ -230,6 +230,27 @@ pub fn lower_memlock() {
 #[cfg(not(target_os = "linux"))]
 pub fn lower_memlock() {}
 
+/// Raise the soft open-files limit to the hard one: a download of the local Actions cache holds one descriptor per block.
+#[cfg(target_os = "linux")]
+pub fn raise_nofile() {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } != 0 || r.rlim_cur >= r.rlim_max {
+        return;
+    }
+    let was = r.rlim_cur;
+    r.rlim_cur = r.rlim_max;
+    // SAFETY: r is a valid rlimit.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &r) } == 0 {
+        tracing::info!("raised the soft open-files limit from {was} to {}", r.rlim_max);
+    } else {
+        tracing::warn!("could not raise RLIMIT_NOFILE: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn raise_nofile() {}
+
 pub fn io_uring_message(limit: Option<u64>) -> String {
     let l = limit.map_or("unlimited".to_string(), |b| format!("{} MiB", b >> 20));
     format!(
