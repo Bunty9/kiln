@@ -58,7 +58,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `gha_cache` | bool | `false` | | live (new connections) | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; a connection that is not a live kiln VM, a VM whose image is not patched, the `cache` setting off and every tag or release build is proxied to GitHub unchanged. |
-| `gha_cache_gb` | integer | `20` | `1` to `500` | live | Storage cap of the Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted after each promotion and hourly. A job's uploads are never made room for: a PUT that would push the store over the cap, or one VM over 10 GB of staged uploads, is refused. |
+| `gha_cache_gb` | integer | `20` | `1` to `500` | live | Size cap of the shared (trusted) Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted after each promotion and hourly, so a full cache keeps rotating. A job's uploads are staged outside that budget and never evict anything: they are refused (the save is skipped) once one VM has staged 10 GB, all VMs together have staged this many GB, or the data disk would be left with under max(2 GB, 5%) free. An entry bigger than the whole cap is dropped at promotion. |
 
 **Trust.** kiln learns which VM a request comes from from the kernel (the socket's owning process and its `kiln-vm-<id>.scope` cgroup; where systemd scopes do not work the local cache is off for every job, and the process kiln started for the VM only identifies traffic to proxy), never from the request; the job's token is only cross-checked against the VM's runner id. A job's saves are staged privately and visible to that job alone; they are promoted into the repo's shared cache only under the verdict that commits the repo cache disk (a successful `push` to the default branch or a `cache_branches` branch, one job on the VM, and the forge's own check where it applies) and deleted otherwise. Entries are stored per repo under a hash of the forge kind, host and full repo path, and that identity is checked on every read. "Clear cache" on a repo clears its Actions cache as well.
 
@@ -77,7 +77,7 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 **Limits.**
 - Clients that speak protobuf instead of JSON (sccache's GitHub Actions backend) are proxied to GitHub, not served locally.
 - A single entry can be up to 10 GB.
-- Over `gha_cache_gb`, the least recently used shared entries are evicted after each promotion and hourly; staged uploads never evict them, a PUT over the cap is refused instead. Entries are not expired by age.
+- Over `gha_cache_gb`, the least recently used shared entries are evicted after each promotion and hourly; staged uploads never evict them and are limited separately (see `gha_cache_gb`). Entries are not expired by age.
 - A re-run of a pull request starts from the shared cache, not from what an earlier run of that PR saved.
 - A guest that is not a live kiln VM, or a VM on an unpatched image, is proxied to GitHub as if kiln were not there.
 

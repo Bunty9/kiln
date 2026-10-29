@@ -34,6 +34,8 @@ const CACHE_SVC: &str = "/twirp/github.actions.results.api.v1.CacheService/";
 const ENTRY_CAP: u64 = 10 << 30;
 /// Most one VM may have staged (uploads in progress plus finished, not yet promoted).
 const STAGED_CAP: u64 = 10 << 30;
+/// Never let a reservation leave the data disk with less free than the larger of this and 5% of it.
+const DISK_FLOOR: u64 = 2 << 30;
 /// Most blocks one entry's block list may name.
 const MAX_BLOCKS: usize = 4096;
 /// Twirp and block-list bodies are tiny; anything bigger is a mistake.
@@ -60,6 +62,8 @@ struct Inner {
     resolve: Resolver,
     upstream: String,
     budget: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// (free, total) bytes of the data disk; injectable for tests.
+    disk: Arc<dyn Fn() -> (u64, u64) + Send + Sync>,
     http: reqwest::Client,
     /// Serialises metadata read-modify-write (create, finalize, block list, the commit of a blob). Blob bytes stream
     /// outside it. Async, so it can be held while the filesystem work runs on a blocking thread.
@@ -69,13 +73,24 @@ struct Inner {
 type St = Arc<Inner>;
 
 pub fn router(root: PathBuf, resolve: Resolver, upstream: String, budget: Arc<dyn Fn() -> u64 + Send + Sync>) -> Router {
+    let disk_root = root.clone();
+    router_with(root, resolve, upstream, budget, Arc::new(move || disk_space(&disk_root)))
+}
+
+fn router_with(
+    root: PathBuf,
+    resolve: Resolver,
+    upstream: String,
+    budget: Arc<dyn Fn() -> u64 + Send + Sync>,
+    disk: Arc<dyn Fn() -> (u64, u64) + Send + Sync>,
+) -> Router {
     let http = reqwest::Client::builder()
         .user_agent("kiln-ci")
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("http client");
-    let st: St = Arc::new(Inner { root, resolve, upstream, budget, http, lock: Arc::new(tokio::sync::Mutex::new(())) });
+    let st: St = Arc::new(Inner { root, resolve, upstream, budget, disk, http, lock: Arc::new(tokio::sync::Mutex::new(())) });
     Router::new()
         .route("/_kiln/ping", get(|| async { StatusCode::NO_CONTENT }))
         .route("/twirp/github.actions.results.api.v1.CacheService/{method}", post(twirp))
@@ -155,11 +170,10 @@ pub fn discard_dead(root: &FsPath, live: &[String]) {
 
 // ---------------------------------------------------------------- byte accounting
 
-/// What the store holds, kept in memory so a PUT never walks the disk: all bytes (trusted and staged, reservations
-/// of uploads in flight included) and the staged bytes per VM (keyed by `stem`).
+/// The staged bytes per VM (keyed by `stem`; reservations of uploads in flight included), kept in memory so a PUT never
+/// walks the disk. Trusted entries are not counted here: their budget is enforced by `evict` at promotion.
 #[derive(Default)]
 struct Acct {
-    used: u64,
     staged: HashMap<String, u64>,
 }
 
@@ -177,16 +191,15 @@ fn acct<R>(root: &FsPath, f: impl FnOnce(&mut Acct) -> R) -> R {
             .flatten()
             .map(|e| (e.file_name().to_string_lossy().into_owned(), dir_size(&e.path())))
             .collect();
-        Acct { used: dir_size(root), staged }
+        Acct { staged }
     });
     let mut g = ACCT.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_default().entry(root.to_path_buf()).or_insert_with(|| seed.unwrap_or_default()))
 }
 
-/// Give back `n` bytes (of `vm`'s staged ones, when it is one's).
+/// Give back `n` of `vm`'s staged bytes (nothing to do for a trusted one).
 fn sub(root: &FsPath, vm: Option<&str>, n: u64) {
     acct(root, |a| {
-        a.used = a.used.saturating_sub(n);
         if let Some(s) = vm.and_then(|v| a.staged.get_mut(&stem(v))) {
             *s = s.saturating_sub(n);
         }
@@ -227,19 +240,37 @@ impl Drop for Reservation {
     }
 }
 
-/// Reserve `len` bytes for a PUT by `vm`, or say why not: 413 over the VM's staged cap, 507 over the store's budget.
-/// Never evicts: staged bytes must not push trusted entries out.
-fn reserve(root: &FsPath, vm: &str, len: u64, budget: u64) -> Result<Reservation, StatusCode> {
+/// (free, total) bytes of the filesystem holding `root`; (u64::MAX, 0) where it cannot be read (no floor then).
+fn disk_space(root: &FsPath) -> (u64, u64) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(p) = std::ffi::CString::new(root.as_os_str().as_bytes()) else { return (u64::MAX, 0) };
+    let mut v: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `p` is a valid C string and `v` a valid out-pointer.
+    if unsafe { libc::statvfs(p.as_ptr(), &mut v) } != 0 {
+        return (u64::MAX, 0);
+    }
+    let bs = v.f_frsize as u64;
+    (v.f_bavail as u64 * bs, v.f_blocks as u64 * bs)
+}
+
+/// Would `len` more bytes leave the disk at least max(2 GB, 5%) free?
+fn disk_allows((free, total): (u64, u64), len: u64) -> bool {
+    free.saturating_sub(len) >= DISK_FLOOR.max(total / 20)
+}
+
+/// Reserve `len` bytes for a PUT by `vm`, or say why not: 413 over the VM's staged cap, 507 over the total staged cap
+/// (`budget`, all VMs) or the disk floor. Never evicts: staged bytes must not push trusted entries out.
+fn reserve(root: &FsPath, vm: &str, len: u64, budget: u64, disk: (u64, u64)) -> Result<Reservation, StatusCode> {
     acct(root, |a| {
+        let total: u64 = a.staged.values().sum();
         let staged = a.staged.entry(stem(vm)).or_default();
         if staged.saturating_add(len) > STAGED_CAP {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
-        if a.used.saturating_add(len) > budget {
+        if total.saturating_add(len) > budget || !disk_allows(disk, len) {
             return Err(StatusCode::INSUFFICIENT_STORAGE);
         }
         *staged += len;
-        a.used += len;
         Ok(Reservation { root: root.to_path_buf(), vm: vm.to_string(), n: len })
     })
 }
@@ -401,14 +432,15 @@ fn lookup(root: &FsPath, c: &Caller, key: &str, restore: &[String], version: &st
 static PROMOTE: Mutex<()> = Mutex::new(());
 
 /// Move the VM's finished staged entries into their repo's trusted scope, skipping keys that already exist there
-/// (first writer wins). Returns (promoted, dropped). Unfinished uploads are dropped.
-pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
+/// (first writer wins), then evicts least recently used trusted entries to fit `budget`. Returns (promoted, dropped).
+/// Unfinished uploads and entries bigger than the whole budget are dropped.
+pub fn promote(root: &FsPath, vm_id: &str, budget: u64) -> Result<(usize, usize)> {
     let _g = PROMOTE.lock().unwrap_or_else(|e| e.into_inner());
     let (mut ok, mut dropped) = (0, 0);
     for (dir, m) in entries_in(&staged_dir(root, vm_id)) {
         let dest = trusted_dir(root, &m.repo);
         let dup = entries_in(&dest).iter().any(|(_, t)| t.finished && t.repo == m.repo && t.key == m.key && t.version == m.version);
-        if !m.finished || dup {
+        if !m.finished || dup || dir_size(&dir) > budget {
             remove_counted(root, &dir, Some(vm_id))?;
             dropped += 1;
             continue;
@@ -422,6 +454,7 @@ pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
         ok += 1;
     }
     discard(root, vm_id);
+    evict(root, budget);
     Ok((ok, dropped))
 }
 
@@ -438,7 +471,6 @@ pub fn discard(root: &FsPath, vm_id: &str) {
 /// Delete trusted entries, least recently used first, until the trusted entries fit the budget. Staged uploads are
 /// never a reason to evict (they are refused at the PUT instead). Returns bytes freed.
 pub fn evict(root: &FsPath, budget: u64) -> u64 {
-    acct(root, |_| ()); // seed before anything goes
     let mut all: Vec<_> = std::fs::read_dir(root.join("repos"))
         .into_iter()
         .flatten()
@@ -458,7 +490,6 @@ pub fn evict(root: &FsPath, budget: u64) -> u64 {
             Err(e) => tracing::warn!("actions cache: cannot evict {}: {e}", dir.display()),
         }
     }
-    sub(root, None, freed);
     freed
 }
 
@@ -579,7 +610,11 @@ fn create(st: &Inner, c: &Caller, r: &TwirpReq, host: &str) -> Response {
     let uploading =
         || entries_in(&staged_dir(&st.root, &c.vm_id)).iter().any(|(_, m)| !m.finished && m.key == r.key && m.version == r.version);
     // Already at a cap: say "skip saving" now (clients accept that), rather than failing the export at the PUT.
-    let full = acct(&st.root, |a| a.used >= (st.budget)() || a.staged.get(&stem(&c.vm_id)).is_some_and(|s| *s >= STAGED_CAP));
+    let full = acct(&st.root, |a| {
+        a.staged.get(&stem(&c.vm_id)).is_some_and(|s| *s >= STAGED_CAP)
+            || a.staged.values().sum::<u64>() >= (st.budget)()
+            || !disk_allows((st.disk)(), 0)
+    });
     if !c.can_write || full || visible(&st.root, c).iter().any(|(_, m)| m.key == r.key && m.version == r.version) || uploading() {
         return json_resp(StatusCode::OK, json!({ "ok": false }));
     }
@@ -803,7 +838,7 @@ async fn put_blob(
     }
     let dest = dir.join(&name);
     // Refused, not made room for: staged bytes never evict trusted entries. Released again if the PUT fails.
-    let rsv = match reserve(&st.root, &c.vm_id, len, (st.budget)()) {
+    let rsv = match reserve(&st.root, &c.vm_id, len, (st.budget)(), (st.disk)()) {
         Ok(r) => r,
         Err(e) => return status(e),
     };
@@ -1045,7 +1080,7 @@ pub(crate) mod tests {
         assert!(visible(&root, &b).is_empty() && visible(&root, &a).is_empty());
         // ...and so is promoting under the wrong identity: promote files an entry by the identity it carries.
         let s = seed(&root, "staged", &a, "p", "v", 2, b"p");
-        assert_eq!(promote(&root, "vm-a").unwrap(), (1, 0));
+        assert_eq!(promote(&root, "vm-a", u64::MAX).unwrap(), (1, 0));
         assert!(!s.exists());
         assert!(lookup(&root, &a, "p", &[], "v").is_some() && lookup(&root, &b, "p", &[], "v").is_none());
         clear_repo(&root, &b.repo).unwrap();
@@ -1112,7 +1147,7 @@ pub(crate) mod tests {
         let mut m = read_meta(&half).unwrap();
         m.finished = false;
         write_meta(&half, &m).unwrap();
-        assert_eq!(promote(&root, "vm1").unwrap(), (1, 2), "fresh promoted; the duplicate and the unfinished upload dropped");
+        assert_eq!(promote(&root, "vm1", u64::MAX).unwrap(), (1, 2), "fresh promoted; the duplicate and the unfinished upload dropped");
         let t = entries_in(&trusted_dir(&root, "acme/demo"));
         assert_eq!(t.len(), 2);
         assert!(t.iter().all(|(_, m)| m.scope == "trusted"));
@@ -1205,6 +1240,13 @@ pub(crate) mod tests {
 
     /// kiln's router on 127.0.0.1:0, plus a mock "Results service" that records what it was sent.
     async fn rig(budget: u64) -> (Rig, Seen) {
+        rig_disk(budget, ROOMY).await
+    }
+
+    /// Plenty of free disk, whatever the test machine has.
+    const ROOMY: (u64, u64) = (u64::MAX, 0);
+
+    async fn rig_disk(budget: u64, disk: (u64, u64)) -> (Rig, Seen) {
         let seen: Seen = Arc::default();
         let s2 = seen.clone();
         let mock = Router::new().fallback(move |req: Request| {
@@ -1221,7 +1263,13 @@ pub(crate) mod tests {
         let root = tmp();
         let who: Who = Arc::new(Mutex::new(Some(caller("vm-a", "acme/demo"))));
         let w = who.clone();
-        let r = router(root.clone(), Arc::new(move |_, _| w.lock().unwrap().clone()), up, Arc::new(move || budget));
+        let r = router_with(
+            root.clone(),
+            Arc::new(move |_, _| w.lock().unwrap().clone()),
+            up,
+            Arc::new(move || budget),
+            Arc::new(move || disk),
+        );
         let (base, t2) = listen(r).await;
         (Rig { base, root, who, http: reqwest::Client::new(), _tasks: vec![t1, t2] }, seen)
     }
@@ -1371,7 +1419,7 @@ pub(crate) mod tests {
         rig.as_caller(None);
         assert_eq!(rig.http.get(&dl).send().await.unwrap().status(), StatusCode::FORBIDDEN);
         // After promotion any VM of the repo reads it with the same URL; another repo does not.
-        promote(&rig.root, "vm-a").unwrap();
+        promote(&rig.root, "vm-a", u64::MAX).unwrap();
         rig.as_caller(Some(caller("vm-b", "acme/demo")));
         assert_eq!(rig.http.get(&dl).send().await.unwrap().status(), StatusCode::OK);
         rig.as_caller(Some(caller("vm-c", "acme/other")));
@@ -1434,48 +1482,100 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn ping_is_204_and_a_put_over_the_budget_is_refused_not_made_room_for() {
+    async fn ping_is_204_and_a_full_trusted_store_still_takes_an_upload_and_rotates_on_promotion() {
         let (rig, _) = rig(100_000).await;
         assert_eq!(rig.http.get(format!("{}/_kiln/ping", rig.base)).send().await.unwrap().status(), StatusCode::NO_CONTENT);
-        seed(&rig.root, "trusted", &caller("vm-z", "acme/demo"), "old", "v", 1, &[0u8; 80_000]);
+        let other = caller("vm-z", "acme/demo");
+        for (k, t) in [("old", 1), ("mid", 2)] {
+            seed(&rig.root, "trusted", &other, k, "v", t, &[0u8; 40_000]);
+        }
+        // 80 of 100 kB trusted: a 55 kB save is staged, not refused.
         let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
         let url = j["signed_upload_url"].as_str().unwrap().to_string();
         let r = rig.http.put(&url).body(vec![0u8; 150_000]).send().await.unwrap();
-        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        // Staged bytes never evict a trusted entry; the refused PUT released its reservation, so a smaller one fits.
-        let r = rig.http.put(&url).body(vec![0u8; 60_000]).send().await.unwrap();
-        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
-        assert_eq!(entries_in(&trusted_dir(&rig.root, "acme/demo")).len(), 1, "the trusted entry stays");
-        let r = rig.http.put(&url).body(vec![0u8; 15_000]).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE, "over the total staged cap");
+        let r = rig.http.put(&url).body(vec![0u8; 55_000]).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::CREATED);
-        // Only a promotion (or the sweep) evicts, and only trusted entries.
-        assert_eq!(evict(&rig.root, 100_000), 0);
-        assert!(evict(&rig.root, 10_000) > 0);
-        assert!(entries_in(&trusted_dir(&rig.root, "acme/demo")).is_empty());
-        assert!(!entries_in(&staged_dir(&rig.root, "vm-a")).is_empty(), "staged uploads are not evicted");
+        assert_eq!(entries_in(&trusted_dir(&rig.root, "acme/demo")).len(), 2, "staging evicts nothing");
+        let (_, j) = rig.twirp("FinalizeCacheEntryUpload", json!({ "key": "k", "version": "v", "size_bytes": "55000" })).await;
+        assert_eq!(j["ok"], true);
+        // Promotion makes room: the least recently used entry goes, and the new one is trusted.
+        assert_eq!(promote(&rig.root, "vm-a", 100_000).unwrap(), (1, 0));
+        let mut k: Vec<_> = entries_in(&trusted_dir(&rig.root, "acme/demo")).into_iter().map(|(_, m)| m.key).collect();
+        k.sort();
+        assert_eq!(k, ["k", "mid"]);
     }
 
     #[test]
-    fn reservations_enforce_the_vm_cap_and_the_budget_and_are_released() {
+    fn an_untrusted_vms_staged_upload_never_evicts_and_its_discard_frees_the_counter() {
         let root = tmp();
-        let r = reserve(&root, "vm-a", STAGED_CAP - 10, u64::MAX).unwrap();
-        assert_eq!(reserve(&root, "vm-a", 11, u64::MAX).err(), Some(StatusCode::PAYLOAD_TOO_LARGE), "over the VM's staged cap");
-        assert!(reserve(&root, "vm-b", 11, u64::MAX).is_ok(), "another VM has its own cap");
-        drop(r);
-        assert!(reserve(&root, "vm-a", STAGED_CAP, u64::MAX).is_ok(), "released on drop");
-        let root = tmp();
-        std::fs::create_dir_all(staged_dir(&root, "vm-a")).unwrap();
-        std::fs::write(staged_dir(&root, "vm-a").join("blob"), [0u8; 600]).unwrap(); // seeds the account
-        assert_eq!(reserve(&root, "vm-b", 401, 1000).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "over the store budget");
-        let r = reserve(&root, "vm-b", 400, 1000).unwrap();
+        let c = caller("vm-z", "acme/demo");
+        seed(&root, "trusted", &c, "t", "v", 1, &[0u8; 1000]);
+        let r = reserve(&root, "vm-a", 800, 1000, ROOMY).unwrap();
         r.commit(0);
-        assert_eq!(reserve(&root, "vm-b", 1, 1000).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "committed bytes stay counted");
+        assert_eq!(evict(&root, 1500), 0);
+        assert_eq!(entries_in(&trusted_dir(&root, "acme/demo")).len(), 1);
+        assert_eq!(reserve(&root, "vm-b", 201, 1000, ROOMY).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "total staged cap");
         discard(&root, "vm-a");
-        assert!(reserve(&root, "vm-c", 600, 1000).is_ok(), "a discard gives the bytes back");
+        assert_eq!(used(&root), 0);
+        assert!(reserve(&root, "vm-b", 1000, 1000, ROOMY).is_ok(), "the discard freed it");
+        assert_eq!(entries_in(&trusted_dir(&root, "acme/demo")).len(), 1);
+    }
+
+    #[test]
+    fn an_entry_bigger_than_the_budget_is_dropped_at_promotion() {
+        let root = tmp();
+        let c = caller("vm-a", "acme/demo");
+        seed(&root, "staged", &c, "big", "v", 1, &[0u8; 5000]);
+        seed(&root, "staged", &c, "small", "v", 2, &[0u8; 100]);
+        assert_eq!(promote(&root, "vm-a", 2000).unwrap(), (1, 1));
+        let k: Vec<_> = entries_in(&trusted_dir(&root, "acme/demo")).into_iter().map(|(_, m)| m.key).collect();
+        assert_eq!(k, ["small"]);
+    }
+
+    #[test]
+    fn the_disk_floor_is_the_larger_of_2_gb_and_5_percent() {
+        let (gb, tb) = (1u64 << 30, 1u64 << 40);
+        assert!(disk_allows((10 * gb, 100 * gb), 3 * gb), "7 GB left of 100 GB: above 5 GB");
+        assert!(!disk_allows((10 * gb, 100 * gb), 6 * gb), "4 GB left: below 5% of 100 GB");
+        assert!(!disk_allows((3 * gb, 20 * gb), 2 * gb), "1 GB left: below the 2 GB floor");
+        assert!(disk_allows((3 * gb, 20 * gb), gb), "exactly 2 GB left");
+        assert!(!disk_allows((40 * gb, tb), 0), "5% of 1 TB is 51 GB");
+        assert!(disk_allows((u64::MAX, 0), 5 * gb), "unreadable disk: no floor");
+        let (free, total) = disk_space(&tmp());
+        assert!(total > 0 && free <= total, "statvfs works");
+    }
+
+    #[tokio::test]
+    async fn the_disk_floor_refuses_at_create_and_at_put() {
+        let (rig, _) = rig_disk(1 << 30, (1 << 30, 0)).await; // 1 GB free: under the 2 GB floor
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        assert_eq!(j, json!({ "ok": false }));
+        let (rig, _) = rig_disk(1 << 30, (2 << 30 | 100, 0)).await; // 2 GB + 100 B free
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        let url = j["signed_upload_url"].as_str().unwrap().to_string();
+        assert_eq!(rig.http.put(&url).body(vec![0u8; 200]).send().await.unwrap().status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(rig.http.put(&url).body(vec![0u8; 50]).send().await.unwrap().status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn reservations_enforce_the_vm_cap_and_the_total_cap_and_are_released() {
+        let root = tmp();
+        let r = reserve(&root, "vm-a", STAGED_CAP - 10, u64::MAX, ROOMY).unwrap();
+        assert_eq!(reserve(&root, "vm-a", 11, u64::MAX, ROOMY).err(), Some(StatusCode::PAYLOAD_TOO_LARGE), "over the VM's staged cap");
+        assert!(reserve(&root, "vm-b", 11, u64::MAX, ROOMY).is_ok(), "another VM has its own cap");
+        drop(r);
+        assert!(reserve(&root, "vm-a", STAGED_CAP, u64::MAX, ROOMY).is_ok(), "released on drop");
+        let root = tmp();
+        let r = reserve(&root, "vm-a", 600, 1000, ROOMY).unwrap();
+        r.commit(0);
+        assert_eq!(reserve(&root, "vm-b", 401, 1000, ROOMY).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "over the total staged cap");
+        assert!(reserve(&root, "vm-b", 400, 1000, ROOMY).is_ok());
+        assert_eq!(reserve(&root, "vm-c", 1, 1000, (1 << 20, 0)).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "disk floor");
     }
 
     fn used(root: &FsPath) -> u64 {
-        acct(root, |a| a.used)
+        acct(root, |a| a.staged.values().sum())
     }
 
     #[tokio::test]
@@ -1536,10 +1636,13 @@ pub(crate) mod tests {
     async fn create_says_skip_when_a_cap_is_already_reached() {
         let (full, _) = rig(1000).await;
         seed(&full.root, "trusted", &caller("vm-z", "acme/demo"), "old", "v", 1, &[0u8; 1000]);
-        let (code, j) = full.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
-        assert_eq!((code, j), (StatusCode::OK, json!({ "ok": false })), "store full: skip saving, no export error later");
+        let (_, j) = full.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        assert_eq!(j["ok"], true, "a full trusted store does not stop staging");
+        let _held = reserve(&full.root, "vm-b", 1000, 1000, ROOMY).unwrap();
+        let (code, j) = full.twirp("CreateCacheEntry", json!({ "key": "k2", "version": "v" })).await;
+        assert_eq!((code, j), (StatusCode::OK, json!({ "ok": false })), "total staged cap reached: skip saving");
         let (capped, _) = rig(u64::MAX).await;
-        let _held = reserve(&capped.root, "vm-a", STAGED_CAP, u64::MAX).unwrap();
+        let _held = reserve(&capped.root, "vm-a", STAGED_CAP, u64::MAX, ROOMY).unwrap();
         let (_, j) = capped.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
         assert_eq!(j, json!({ "ok": false }), "the VM's staged cap reached");
     }
@@ -1588,7 +1691,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_vm_over_its_staged_cap_is_refused_with_413() {
         let (rig, _) = rig(u64::MAX).await;
-        let _held = reserve(&rig.root, "vm-a", STAGED_CAP - 10, u64::MAX).unwrap();
+        let _held = reserve(&rig.root, "vm-a", STAGED_CAP - 10, u64::MAX, ROOMY).unwrap();
         let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
         let r = rig.http.put(j["signed_upload_url"].as_str().unwrap()).body(vec![0u8; 100]).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1634,7 +1737,7 @@ pub(crate) mod tests {
                     let (root, gate) = (root.clone(), gate.clone());
                     std::thread::spawn(move || {
                         gate.wait();
-                        promote(&root, vm).unwrap()
+                        promote(&root, vm, u64::MAX).unwrap()
                     })
                 })
                 .collect();
