@@ -198,6 +198,7 @@ mod tests {
     }
 
     /// The test process plays the VM: it connects to a listener, and its own socket resolves to its own pid.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_peer_resolves_to_its_owner_through_the_kernel() {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

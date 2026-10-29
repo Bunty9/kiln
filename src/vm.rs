@@ -6614,6 +6614,7 @@ print("ok")
 
     /// The real resolver end to end: this process plays the VM (its pid is the one kiln "started"), and a request whose
     /// token names another runner is not identified.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn gha_resolver_identifies_a_connection_from_the_kernel() {
         let app = App::for_tests();
