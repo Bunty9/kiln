@@ -40,6 +40,8 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Security
 
+- rustls-webpki 0.103.16 and webpki-roots 1.0.11 stop trusting the distrusted emSign intermediates (RUSTSEC-2026-0382, RUSTSEC-2026-0381); tokio is 1.54.1 for the `AsyncFd` I/O-safety advisory (RUSTSEC-2026-0386, kiln does not build `AsyncFd` from raw descriptors). libc is 0.2.191.
+
 - rustls is 0.23.46 (was 0.23.45), fixing RUSTSEC-2026-0346 and three other rustls advisories. kiln was not exposed to most of them (no custom session store, no ECH, no brotli certificate compression); the remaining one could downgrade later TLS connections from hybrid post-quantum to classical key exchange.
 
 ## [0.2.6] - 2026-10-14
