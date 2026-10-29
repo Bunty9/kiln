@@ -24,6 +24,8 @@
   "cache_gb": 30,
   "repo_cache_gb": {},
   "mirror_gb": 20,
+  "gha_cache": false,
+  "gha_cache_gb": 20,
   "debug_hold_mins": 0,
   "debug_ssh_keys": [],
   "egress": "open",

@@ -5,6 +5,7 @@ mod confine;
 mod forge;
 #[cfg(test)]
 mod forge_test_mock;
+mod ghacache;
 mod github;
 mod history;
 mod host;
@@ -74,6 +75,10 @@ pub struct Config {
     pub repo_cache_gb: BTreeMap<String, u32>,
     /// Docker mirror storage cap; over it (checked every 10 min) the cache is wiped.
     pub mirror_gb: u32,
+    /// Serve `actions/cache` and friends from the host (src/ghacache.rs). Off: every job uses GitHub's cache.
+    pub gha_cache: bool,
+    /// Storage cap of the Actions cache; the least recently used entries are evicted over it.
+    pub gha_cache_gb: u64,
     /// Keep a failed job's VM this long for SSH debugging. 0 = off.
     pub debug_hold_mins: u64,
     /// Public keys allowed into a held VM (one authorized_keys line each).
@@ -130,6 +135,8 @@ impl Default for Config {
             cache_gb: 30,
             repo_cache_gb: BTreeMap::new(),
             mirror_gb: 20,
+            gha_cache: false,
+            gha_cache_gb: 20,
             debug_hold_mins: 0,
             debug_ssh_keys: vec![],
             egress: "open".into(),
@@ -248,6 +255,9 @@ impl Config {
         }
         if !(1..=500).contains(&self.mirror_gb) {
             bail!("mirror_gb must be 1..=500");
+        }
+        if !(1..=500).contains(&self.gha_cache_gb) {
+            bail!("gha_cache_gb must be 1..=500");
         }
         if self.notify_rules.len() > 50 {
             bail!("notify_rules: at most 50");
@@ -756,6 +766,7 @@ async fn run() -> Result<()> {
             }
             let sched = tokio::spawn(scheduler(app.clone()));
             tokio::spawn(mirror::supervise(app.clone()));
+            tokio::spawn(ghacache::serve(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
             tokio::spawn(telemetry::supervise(app.clone()));
             // In its own task: the dashboard keeps serving while a stop drains.
@@ -2183,6 +2194,9 @@ mod tests {
         assert!(ok(|c| c.mirror_gb = 500));
         assert!(!ok(|c| c.mirror_gb = 0));
         assert!(!ok(|c| c.mirror_gb = 501));
+        assert!(ok(|c| c.gha_cache_gb = 500));
+        assert!(!ok(|c| c.gha_cache_gb = 0));
+        assert!(!ok(|c| c.gha_cache_gb = 501));
         assert!(ok(|c| c.debug_hold_mins = 120));
         assert!(!ok(|c| c.debug_hold_mins = 121));
         assert!(ok(|c| c.debug_ssh_keys = vec!["ssh-ed25519 AAAA me@x".into()]));
