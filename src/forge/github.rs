@@ -240,6 +240,8 @@ fn job_summary(repo: &str, run: u64, j: &Value) -> Option<JobSummary> {
             name: s["name"].as_str().unwrap_or("").into(),
             status: status(s["status"].as_str().unwrap_or("")),
             outcome: outcome(&s["conclusion"]),
+            started_at: s["started_at"].as_str().map(String::from),
+            completed_at: s["completed_at"].as_str().map(String::from),
         })
         .collect();
     Some(JobSummary {

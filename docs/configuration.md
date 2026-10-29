@@ -256,6 +256,16 @@ A settings save cannot add or remove a forge, or change an existing forge's addr
 
 **Rolling back.** A kiln release that has the `extra` catch-all keeps `forges` it does not understand when it saves settings, so a downgrade still starts and the entry comes back on the next upgrade. Remove `notify_rules` that name a `<id>:<path>` repo before downgrading: an older kiln refuses them. Releases before that one drop `forges` on a settings save.
 
+### Scripting the API
+
+Every `/api/` call needs the dashboard key, in the `x-kiln-key` header, from a process on the kiln host. Over the unix socket:
+
+```sh
+curl --unix-socket <data>/serve.sock -H "x-kiln-key: $(cat <data>/dashboard.key)" http://localhost/api/state
+```
+
+or over TCP: `curl -H "x-kiln-key: $(cat <data>/dashboard.key)" http://127.0.0.1:<port>/api/state`. Writes (`POST`, `DELETE`) also need `x-kiln: 1`. The socket is not keyless on purpose: job VMs' QEMU runs as the same user, so a socket anyone on the host could use would be open to a guest that escapes.
+
 ### From the dashboard
 
 Settings › Forges › **Add a forge** takes the kind (GitLab or Gitea), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab or Gitea is chosen. Then the forge's card takes its token and projects:

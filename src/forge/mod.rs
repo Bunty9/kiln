@@ -427,6 +427,10 @@ pub struct StepSummary {
     pub name: String,
     pub status: RunStatus,
     pub outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]
