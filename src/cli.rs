@@ -1,6 +1,6 @@
 //! `kiln status|jobs|logs|wait|rerun`: a thin client for the running kiln's own API, so scripts and
-//! agents need no curl. It talks to `<data>/serve.sock` (TCP on a local `listen` address if the socket
-//! is unusable) with the dashboard key, and never starts a daemon or touches a forge itself.
+//! agents need no curl. It talks only to `<data>/serve.sock` (mode 0600; the key never goes over TCP)
+//! with the dashboard key, and never starts a daemon or touches a forge itself.
 //!
 //! Exit codes (a contract, see docs/cli.md): 0 success or skipped, 1 failure (kiln's job timeout
 //! included), 2 cancelled, 3 infrastructure loss (VM lost, killed, oom, no result), 4 refused by kiln,
@@ -12,6 +12,13 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+macro_rules! say {
+    ($($a:tt)*) => { println!("{}", plain(&format!($($a)*))) };
+}
+macro_rules! esay {
+    ($($a:tt)*) => { eprintln!("{}", plain(&format!($($a)*))) };
+}
 
 pub const OK: i32 = 0;
 pub const FAILED: i32 = 1;
@@ -32,7 +39,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
     Some(match run(cmd, &args[1..]) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("kiln {cmd}: {e:#}");
+            esay!("kiln {cmd}: {e:#}");
             ERROR
         }
     })
@@ -100,8 +107,6 @@ impl Args {
 struct Conn {
     data: PathBuf,
     key: String,
-    /// Where the TCP fallback goes, if the config's `listen` is a local address.
-    tcp: Option<String>,
 }
 
 fn now() -> u64 {
@@ -116,17 +121,6 @@ fn data_dir() -> Result<PathBuf> {
     Ok(std::path::absolute(d)?)
 }
 
-/// The `listen` address as a loopback address to dial: a wildcard becomes 127.0.0.1, anything not local is refused.
-fn local_listen(listen: &str) -> Option<String> {
-    let a: std::net::SocketAddr = listen.parse().ok()?;
-    let ip = match a.ip() {
-        ip if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
-        ip if ip.is_loopback() => ip,
-        _ => return None,
-    };
-    Some(std::net::SocketAddr::new(ip, a.port()).to_string())
-}
-
 impl Conn {
     fn open(data: &Path) -> Result<Conn> {
         let kp = data.join("dashboard.key");
@@ -139,30 +133,22 @@ impl Conn {
             })?
             .trim()
             .to_string();
-        let tcp = std::fs::read_to_string(data.join("config.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|c| c["listen"].as_str().map(String::from))
-            .or_else(|| Some("0.0.0.0:7878".into()))
-            .and_then(|l| local_listen(&l));
-        Ok(Conn { data: data.into(), key, tcp })
+        Ok(Conn { data: data.into(), key })
     }
 
     /// (status, body) of one HTTP/1.0 request: no chunked bodies to decode.
     fn request(&self, method: &str, target: &str) -> Result<(u16, Vec<u8>)> {
         use std::os::unix::net::UnixStream;
         let sock = self.data.join("serve.sock");
-        match UnixStream::connect(&sock) {
-            Ok(s) => exchange(s, "localhost", method, target, &self.key),
-            Err(e) => {
-                let Some(addr) = &self.tcp else {
-                    bail!("cannot connect to {} ({e}); is kiln serve running, and is KILN_DATA right?", sock.display());
-                };
-                let s = std::net::TcpStream::connect(addr)
-                    .with_context(|| format!("cannot connect to kiln: no socket at {} ({e}) and nothing on {addr}", sock.display()))?;
-                exchange(s, "localhost", method, target, &self.key)
-            }
-        }
+        // The key goes only over this 0600 socket: a TCP port can be bound by another local user while kiln is down.
+        let s = UnixStream::connect(&sock).map_err(|e| {
+            anyhow!(
+                "cannot connect to {} ({e}): kiln is not running, or KILN_DATA is too long for a unix socket. \
+                 If you accept sending the key over TCP, use curl with x-kiln-key against the listen address",
+                sock.display()
+            )
+        })?;
+        exchange(s, "localhost", method, target, &self.key)
     }
 
     fn call(&self, method: &str, target: &str) -> Result<Vec<u8>> {
@@ -191,12 +177,6 @@ impl Stream for std::os::unix::net::UnixStream {
         let _ = self.set_read_timeout(Some(Duration::from_secs(60)));
     }
 }
-impl Stream for std::net::TcpStream {
-    fn timeout(&self) {
-        let _ = self.set_read_timeout(Some(Duration::from_secs(60)));
-    }
-}
-
 fn exchange(mut s: impl Stream, host: &str, method: &str, target: &str, key: &str) -> Result<(u16, Vec<u8>)> {
     s.timeout();
     let post = if method == "GET" { "" } else { "x-kiln: 1\r\nContent-Length: 0\r\n" };
@@ -294,6 +274,58 @@ fn ago(secs: u64) -> String {
     }
 }
 
+/// Untrusted text (notes, titles, branch and job names, messages) for a terminal: no escapes or control characters but \n and \t.
+fn plain(text: &str) -> String {
+    clean(text).chars().filter(|&c| c == '\n' || c == '\t' || !c.is_control()).collect()
+}
+
+/// Log text for a terminal: keeps \n, \t, \r\n and SGR colours; drops every other escape sequence
+/// (OSC 52 clipboard writes, titles, hyperlinks, cursor moves) and control character. Piped output is not filtered.
+fn tty_filter(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut it = text.chars().peekable();
+    while let Some(ch) = it.next() {
+        match ch {
+            '\n' | '\t' => out.push(ch),
+            '\r' if it.peek() == Some(&'\n') => out.push(ch),
+            '\x1b' => match it.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    for c in it.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            if c == 'm' && params.chars().all(|p| p.is_ascii_digit() || p == ';') {
+                                out.push_str(&format!("\x1b[{params}m"));
+                            }
+                            break;
+                        }
+                        params.push(c);
+                    }
+                }
+                // OSC, DCS, SOS, PM, APC: a string up to BEL or ST.
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    while let Some(c) = it.next() {
+                        if c == '\x07' || (c == '\x1b' && it.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Writes log text: filtered when stdout is a terminal, raw otherwise.
+fn emit(text: &str) {
+    use std::io::IsTerminal;
+    let mut o = std::io::stdout();
+    let _ = if o.is_terminal() { o.write_all(tty_filter(text).as_bytes()) } else { o.write_all(text.as_bytes()) };
+    let _ = o.flush();
+}
+
 fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
 }
@@ -313,42 +345,42 @@ fn status(a: &Args) -> Result<i32> {
     }
     let poll = &st["poll"];
     let health: Vec<&Value> = poll["health"].as_array().into_iter().flatten().collect();
-    println!("kiln {} ({})", s(&st, "version"), if health.is_empty() && poll["error"].is_null() { "healthy" } else { "needs attention" });
+    say!("kiln {} ({})", s(&st, "version"), if health.is_empty() && poll["error"].is_null() { "healthy" } else { "needs attention" });
     match poll["last_ok"].as_u64() {
-        Some(t) => println!("polled {} ago", ago(now().saturating_sub(t))),
-        None => println!("not polled yet"),
+        Some(t) => say!("polled {} ago", ago(now().saturating_sub(t))),
+        None => say!("not polled yet"),
     }
     if let Some(e) = poll["error"].as_str() {
-        println!("poll error: {e}");
+        say!("poll error: {e}");
     }
     let all = vms(&st);
     let active: Vec<&Value> = all.iter().filter(|v| is_active(v)).collect();
     let max = st["config"]["max_vms"].as_u64().unwrap_or(0);
-    println!("slots: {}/{max}{}", active.len(), if max == 0 { " (paused)" } else { "" });
+    say!("slots: {}/{max}{}", active.len(), if max == 0 { " (paused)" } else { "" });
     for v in &active {
-        println!("  {}", vm_line(v));
+        say!("  {}", vm_line(v));
     }
     let queued: Vec<String> =
         poll["queued"].as_object().into_iter().flatten().filter(|(_, n)| n.as_u64() > Some(0)).map(|(r, n)| format!("{r}: {n}")).collect();
-    println!("queued: {}", if queued.is_empty() { "none".into() } else { queued.join(", ") });
+    say!("queued: {}", if queued.is_empty() { "none".into() } else { queued.join(", ") });
     if let Some(b) = poll["blocked"].as_str() {
-        println!("blocked ({}): {b}", s(poll, "blocked_kind"));
+        say!("blocked ({}): {b}", s(poll, "blocked_kind"));
     }
     for (r, b) in poll["backoff"].as_object().into_iter().flatten() {
-        println!("backoff {r}: {} failure(s), retry in {}", b["fails"], ago(b["retry_at"].as_u64().unwrap_or(0).saturating_sub(now())));
+        say!("backoff {r}: {} failure(s), retry in {}", b["fails"], ago(b["retry_at"].as_u64().unwrap_or(0).saturating_sub(now())));
     }
     // Added by a newer kiln (poll.waiting): optional, shown as it comes.
     for (r, w) in poll["waiting"].as_object().into_iter().flatten() {
         let why = w.as_str().map(String::from).unwrap_or_else(|| w.to_string());
-        println!("waiting {r}: {why}");
+        say!("waiting {r}: {why}");
     }
     for h in health {
-        println!("health [{}]: {}", h[0].as_str().unwrap_or("?"), h[1].as_str().unwrap_or(""));
+        say!("health [{}]: {}", h[0].as_str().unwrap_or("?"), h[1].as_str().unwrap_or(""));
     }
     if let Some(d) = doctor {
-        println!("doctor:");
+        say!("doctor:");
         for ch in d["checks"].as_array().into_iter().flatten() {
-            println!("  {} {}: {}", if ch["ok"].as_bool() == Some(true) { "ok  " } else { "FAIL" }, s(ch, "name"), s(ch, "detail"));
+            say!("  {} {}: {}", if ch["ok"].as_bool() == Some(true) { "ok  " } else { "FAIL" }, s(ch, "name"), s(ch, "detail"));
         }
     }
     Ok(OK)
@@ -394,7 +426,7 @@ fn jobs(a: &Args) -> Result<i32> {
         let note: String = s(v, "note").chars().take(60).collect();
         let end = v["ended"].as_u64().unwrap_or_else(now);
         let state = v["result"].as_str().map_or(s(v, "state").to_string(), |r| format!("{}/{r}", s(v, "state")));
-        println!(
+        say!(
             "{} {state} {} {} {} {} {} {note}",
             s(v, "id"),
             s(v, "repo"),
@@ -489,8 +521,7 @@ fn logs(a: &Args) -> Result<i32> {
         if a.flag("failed") {
             text.push_str(data);
         } else if !a.flag("json") {
-            print!("{data}");
-            let _ = std::io::stdout().flush();
+            emit(data);
         } else {
             text.push_str(data);
         }
@@ -507,7 +538,7 @@ fn logs(a: &Args) -> Result<i32> {
         if !now_active {
             // One last drain, then done.
             let p = page(from)?;
-            print!("{}", s(&p, "data"));
+            emit(s(&p, "data"));
             break;
         }
         std::thread::sleep(Duration::from_secs(2));
@@ -519,9 +550,9 @@ fn logs(a: &Args) -> Result<i32> {
             print_json(&json!({ "vm": id, "failed_step": step, "excerpt": ex }));
         } else {
             if let Some(st) = step {
-                println!("failed step: {st}");
+                say!("failed step: {st}");
             }
-            print!("{ex}");
+            print!("{}", plain(&ex));
         }
     } else if a.flag("json") {
         print_json(&json!({ "vm": id, "file": file, "text": text, "next": from }));
@@ -559,7 +590,7 @@ fn rerun(a: &Args) -> Result<i32> {
     if a.flag("json") {
         print_json(&json!({ "ok": true, "run": id, "repo": repo, "failed": failed }));
     } else {
-        println!("rerun requested: {repo} run {id}{}", if failed { " (failed jobs only)" } else { "" });
+        say!("rerun requested: {repo} run {id}{}", if failed { " (failed jobs only)" } else { "" });
     }
     Ok(OK)
 }
@@ -657,12 +688,12 @@ fn wait(a: &Args) -> Result<i32> {
             // kiln restarting mid-wait is expected; a dead kiln is not.
             Err(e) if fails < 6 => {
                 fails += 1;
-                eprintln!("kiln wait: {e:#} (retrying)");
+                esay!("kiln wait: {e:#} (retrying)");
             }
             Err(e) => return Err(e),
         }
         if start.elapsed() >= timeout {
-            eprintln!("kiln wait: timed out after {} minute(s)", timeout.as_secs() / 60);
+            esay!("kiln wait: timed out after {} minute(s)", timeout.as_secs() / 60);
             report(a, &details, &BTreeMap::new(), TIMED_OUT);
             return Ok(TIMED_OUT);
         }
@@ -683,7 +714,7 @@ fn report(a: &Args, details: &BTreeMap<u64, Value>, codes: &BTreeMap<u64, i32>, 
     }
     for (id, d) in details {
         let rc = codes.get(id).copied();
-        println!(
+        say!(
             "run {id} ({}) attempt {}: {}{}",
             s(d, "name"),
             d["attempt"],
@@ -691,10 +722,10 @@ fn report(a: &Args, details: &BTreeMap<u64, Value>, codes: &BTreeMap<u64, i32>, 
             d["links"]["run"].as_str().map(|u| format!("  {u}")).unwrap_or_default()
         );
         for j in d["jobs"].as_array().into_iter().flatten() {
-            println!("  {}: {}", s(j, "name"), j["outcome"].as_str().unwrap_or_else(|| s(j, "status")));
+            say!("  {}: {}", s(j, "name"), j["outcome"].as_str().unwrap_or_else(|| s(j, "status")));
         }
     }
-    println!("{} (exit {code})", exit_name(code));
+    say!("{} (exit {code})", exit_name(code));
 }
 
 fn exit_name(code: i32) -> &'static str {
@@ -731,11 +762,13 @@ mod tests {
     }
 
     #[test]
-    fn only_local_listen_addresses_fall_back() {
-        assert_eq!(local_listen("0.0.0.0:7878").as_deref(), Some("127.0.0.1:7878"));
-        assert_eq!(local_listen("127.0.0.1:9").as_deref(), Some("127.0.0.1:9"));
-        assert_eq!(local_listen("100.64.0.7:7878"), None);
-        assert_eq!(local_listen("nope"), None);
+    fn terminal_filter_keeps_only_safe_output() {
+        assert_eq!(tty_filter("a\x1b]52;c;ZXZpbA==\x07b"), "ab");
+        assert_eq!(tty_filter("a\x1b]0;title\x1b\\b\x1b]8;;http://x\x07link\x1b]8;;\x07"), "ablink");
+        assert_eq!(tty_filter("\x1b[1;31mred\x1b[0m"), "\x1b[1;31mred\x1b[0m");
+        assert_eq!(tty_filter("a\x1b[2Jb\x1b[10;5Hc\x1b[?25ld"), "abcd");
+        assert_eq!(tty_filter("a\r\nb\rc\x08\x07\u{9b}d\tz\x1bPdcs\x1b\\e"), "a\r\nbcd\tze");
+        assert_eq!(plain("br\x1b]52;c;x\x07anch\r\x07"), "branch");
     }
 
     #[test]
@@ -749,6 +782,7 @@ mod tests {
         let ex = failure_excerpt(log, 1);
         assert_eq!(ex, "d\n##[error]boom\ne\n--\nk\nFAIL x\nl\n");
         assert_eq!(failure_excerpt("all fine", 3), "");
+        assert_eq!(failure_excerpt("x\n\x1b[31;1mFAIL\x1b[0m t\ny", 0), "FAIL t\n");
     }
 
     fn vm(run: u64, state: &str, result: Option<&str>, note: &str) -> Value {
@@ -816,9 +850,14 @@ mod tests {
             let mut seen = vec![];
             for body in ["{\"ok\":1}", ""] {
                 let (mut s, _) = l.accept().unwrap();
-                let mut buf = [0u8; 2048];
-                let n = s.read(&mut buf).unwrap();
-                seen.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                // The request arrives in pieces: read all of it, or closing early resets the connection.
+                let mut req = vec![];
+                while !req.ends_with(b"\r\n\r\n") {
+                    let mut b = [0u8; 1];
+                    s.read_exact(&mut b).unwrap();
+                    req.push(b[0]);
+                }
+                seen.push(String::from_utf8_lossy(&req).to_string());
                 let status = if body.is_empty() { "204 No Content" } else { "200 OK" };
                 write!(s, "HTTP/1.0 {status}\r\ncontent-length: {}\r\n\r\n{body}", body.len()).unwrap();
             }

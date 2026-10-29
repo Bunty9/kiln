@@ -1,6 +1,10 @@
 # Command line
 
-`kiln status`, `jobs`, `logs`, `wait` and `rerun` talk to the running `kiln serve` on the same machine. They read the dashboard key from `<data>/dashboard.key`, so run them as the user kiln runs as (set `KILN_DATA` if the data directory is not the default). They connect to `<data>/serve.sock`, or to `127.0.0.1:<port>` of `listen` when the socket is unusable (never to a non-local address). They start no second kiln and never contact a forge themselves. The socket is not keyless on purpose; see [Scripting the API](configuration.md#scripting-the-api).
+`kiln status`, `jobs`, `logs`, `wait` and `rerun` talk to the running `kiln serve` on the same machine. They read the dashboard key from `<data>/dashboard.key`, so run them as the user kiln runs as (set `KILN_DATA` if the data directory is not the default). They connect only to `<data>/serve.sock` (mode 0600). They start no second kiln and never contact a forge themselves. The socket is not keyless on purpose; see [Scripting the API](configuration.md#scripting-the-api).
+
+There is no TCP fallback: the key is sent only over the 0600 socket, because another local user could bind kiln's port while kiln is down. If the socket is missing the command exits 6 (kiln is not running, or `KILN_DATA` is too long for a unix socket); use curl against the `listen` address if you accept sending the key over TCP.
+
+Job logs are untrusted. On a terminal, `logs` drops every escape sequence except SGR colours, and every control character but newline and tab; piped to a file or another program it writes the bytes unchanged. Names, notes and messages in the other commands always lose control characters.
 
 Every command takes `--json`, which prints the API's JSON and nothing else on stdout.
 
