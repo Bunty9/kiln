@@ -327,3 +327,12 @@ console.log('dashboard analytics ok');
   setHTML(el, 'a'); assert.equal(el.innerHTML, 'a');
   el.innerHTML = 'b'; setHTML(el, 'a'); assert.equal(el.innerHTML, 'b', 'unchanged html is skipped');
 }
+
+// Actions cache line of the job page and hover card: counts, the outcome, the reason escaped.
+const ghaInfo = new Function('esc', grab('ghaInfo') + '\nreturn ghaInfo;')(esc);
+assert.equal(ghaInfo({}), '', 'a job that never used it says nothing');
+assert.equal(ghaInfo({ gha: { restored: 2, saved: 1, outcome: 'promoted', reason: '1 promoted, 0 dropped' } }), '2 restored, 1 saved, promoted');
+assert.equal(ghaInfo({ gha: { restored: 0, saved: 3, outcome: 'discarded', reason: 'pull_request event' } }), '0 restored, 3 saved, discarded: pull_request event');
+assert.equal(ghaInfo({ gha: { restored: '1<b>', saved: 1, outcome: 'discarded', reason: '<img src=x onerror=alert(1)>' } }),
+  '0 restored, 1 saved, discarded: &lt;img src=x onerror=alert(1)&gt;', 'the reason is escaped, a non-numeric count is not markup');
+assert.equal(ghaInfo({ gha: { restored: 1, saved: 0, outcome: 'discarded', reason: '' } }), '1 restored, 0 saved, discarded');

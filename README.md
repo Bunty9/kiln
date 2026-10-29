@@ -102,7 +102,7 @@ kiln serves Gitea repos on your own server: **1.25 or newer** (1.26.3 or newer r
 - **Your hardware, no metered minutes.** An always-on Linux box replaces hosted runner minutes, and kiln costs nothing to run per job.
 - **Fast start.** Direct kernel boot takes a fresh VM to a listening runner in seconds, and an opt-in warm pool of pre-booted VMs shortens job start-up further. See [Performance](#performance) for measured numbers.
 - **Hosted-runner feel.** Real Docker, `services:`, `sudo apt install`, nested KVM and the usual `setup-*` actions work, because it is a real VM and not a container.
-- **Warm caches that pull requests cannot poison.** A per-repo cache disk keeps Docker layers and package caches between jobs. Any job reads it; only a successful push to the default branch writes it.
+- **Warm caches that pull requests cannot poison.** A per-repo cache disk keeps Docker layers and package caches between jobs, and (opt-in, GitHub repos on Linux) `actions/cache` itself is served from the box. Any job reads them; only a successful push to the default branch writes them.
 
 ## Performance
 
@@ -128,7 +128,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - **[actuated](https://actuated.com/).** A Firecracker microVM per job on your own servers, managed by a closed-source hosted control plane with a paid per-server subscription. The better choice if you want a supported commercial product, Arm builds or a fleet of servers. kiln is open source and free, has no external control plane, and uses full QEMU VMs.
 - **[RunsOn](https://runs-on.com/).** Ephemeral runners in your own AWS account, deployed as one CloudFormation stack, source-available under a commercial license (free for non-commercial use). The better choice if your compute lives in AWS and you want to scale out. kiln needs no cloud account and runs on hardware you already have.
 - **[Ubicloud](https://www.ubicloud.com/).** An open-source (AGPL) cloud that sells managed GitHub runners, x64 and arm64, billed per minute. The better choice if you want cheaper hosted runners and no machine to look after. With kiln, code and secrets stay on your own box.
-- **GitHub-hosted runners.** A fresh VM per job with zero maintenance, plus macOS, Windows and arm64, billed per minute on private repos. The better choice if you have no always-on box, need those platforms, or need more capacity than one host. kiln gives the same fresh-VM model on your own hardware, with persistent per-repo caches and no per-minute bill.
+- **GitHub-hosted runners.** A fresh VM per job with zero maintenance, plus macOS, Windows and arm64, billed per minute on private repos. The better choice if you have no always-on box, need those platforms, or need more capacity than one host. kiln gives the same fresh-VM model on your own hardware, with persistent per-repo caches, an `actions/cache` served from your own box that a pull request can't poison, and no per-minute bill.
 
 ## Features
 
@@ -138,6 +138,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - VM sizes chosen by label: `kiln`, `kiln-2cpu`, `kiln-4cpu`, `kiln-8cpu`, `kiln-16cpu`.
 - Demand-based scheduling by queued-job count, with memory, vCPU and disk gates and per-repo failure backoff.
 - Per-repo persistent cache disk (Docker layers, npm, cargo, pip, Go, Gradle, Maven) with a trust rule: any job reads it, only a successful push to the default branch (or a configured cache branch such as `dev`) writes it. Tag and release builds run without it.
+- Optional local Actions cache (`gha_cache`, Linux, GitHub repos): `actions/cache`, the `setup-*` caches and rust-cache are served from the host instead of GitHub with no workflow change, and only trusted pushes can write them. See [docs/configuration.md](docs/configuration.md#actions-cache).
 - Built-in Docker Hub pull-through mirror, so fresh VMs do not hit Docker Hub rate limits.
 - Optional filtered egress: job VMs reach the internet and the mirror only, not your LAN or tailnet.
 - Debug hold: a failed job's VM stays up for SSH for a while.
