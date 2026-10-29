@@ -2207,8 +2207,8 @@ fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> C
 /// nftables ruleset (the mirror's DNAT and accept only when `mirror`) loaded inside a filtered job VM's network namespace.
 /// Guest traffic leaves QEMU's slirp as ordinary sockets of the qemu process, so it
 /// hits this OUTPUT chain. The guest's 10.0.2.2 is the namespace loopback; the DNAT
-/// rewrites the mirror's port to slirp4netns's host-loopback alias 10.0.2.2, which
-/// reaches the host's 127.0.0.1:5000. Every other host loopback port, the LAN, the
+/// rewrites the mirror's port (5000) and the Actions cache's (5001) to slirp4netns's host-loopback alias 10.0.2.2, which
+/// reaches the host's 127.0.0.1:5000 and :5001. Every other host loopback port, the LAN, the
 /// tailnet, metadata and the host's own IPs are dropped; IPv6 is off entirely and
 /// outbound SMTP is dropped. Replies to the debug-SSH port driver are `ct established`.
 ///
@@ -2217,16 +2217,15 @@ fn qemu(g: &Guest, cpus: u32, mem_mb: u32, disk: &Path, netdev_extra: &str) -> C
 /// site behind it (a reverse proxy's vhosts).
 fn egress_nft(mirror: bool, forge: &[std::net::SocketAddr]) -> String {
     let forge: String = forge.iter().map(|a| format!("\n    ip daddr {} tcp dport {} accept", a.ip(), a.port())).collect();
+    // Port 5001 (kiln's Actions cache listener) is always open: the listener is always on.
     let (dnat, accept) = if mirror {
-        (
-            "\n    chain out  { type nat hook output priority -100; ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; }",
-            "\n    ip daddr 10.0.2.2 tcp dport 5000 accept",
-        )
+        ("ip daddr 127.0.0.1 tcp dport 5000 dnat to 10.0.2.2:5000; ", "\n    ip daddr 10.0.2.2 tcp dport 5000 accept")
     } else {
         ("", "")
     };
     format!(
-        r#"table ip kilnnat {{{dnat}
+        r#"table ip kilnnat {{
+  chain out  {{ type nat hook output priority -100; {dnat}ip daddr 127.0.0.1 tcp dport 5001 dnat to 10.0.2.2:5001; }}
   chain post {{ type nat hook postrouting priority 100; oifname "tap0" masquerade; }}
 }}
 table inet kiln {{
@@ -2234,7 +2233,8 @@ table inet kiln {{
     type filter hook output priority 0; policy drop;
     ct state established,related accept
     oifname "lo" accept
-    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}{forge}
+    ip daddr 10.0.2.3 meta l4proto {{ tcp, udp }} th dport 53 accept{accept}
+    ip daddr 10.0.2.2 tcp dport 5001 accept{forge}
     ip daddr {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
                172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} drop
     tcp dport 25 drop
@@ -2724,12 +2724,31 @@ async fn bake_inner(app: &App) -> Result<()> {
         "node_versions": node,
         "node_wanted": cfg.bake_node_versions,
         "apt_wanted": cfg.bake_apt_packages,
+        "gha_cache": gha_cache_fact(&console_text),
     });
     tokio::fs::write(img.join("base.json.tmp"), meta.to_string()).await?;
     tokio::fs::rename(img.join("base.json.tmp"), img.join("base.json")).await?;
     let _ = tokio::fs::remove_dir_all(&work).await;
     say("base image ready".into()).await?;
     Ok(())
+}
+
+/// The bake's `kiln: gha-cache patched|unsupported <version> <detail>` line (kiln-patch-runner) as the image metadata
+/// value: "patched", or "unsupported: <reason>" (also when the line is missing). Console trace lines start with "+ ".
+fn gha_cache_fact(console: &str) -> String {
+    let line = console.lines().rev().find_map(|l| l.trim().strip_prefix("kiln: gha-cache "));
+    match line.map(|l| l.splitn(3, ' ').collect::<Vec<_>>()).as_deref() {
+        Some(["patched", ..]) => "patched".into(),
+        Some(["unsupported", _, why]) => format!("unsupported: {why}"),
+        _ => "unsupported: no report from the bake".into(),
+    }
+}
+
+/// Whether the image at `base` (base.json) has the patched runner, so kiln's Actions cache can serve its jobs.
+/// `None` is an image baked before the patch existed. For the launch gates and doctor (C-5).
+#[allow(dead_code)]
+pub fn image_gha_cache(base: &serde_json::Value) -> Option<&str> {
+    base["gha_cache"].as_str()
 }
 
 /// The actions/runner version in a release tag ("v2.338.0"). It is templated into the
@@ -2762,7 +2781,9 @@ fn runner_version(tag: &str) -> Result<String> {
 /// dockerd before the prejob hook, the cache disk mounts as ext4 with nosuid,nodev, planted symlinks on it are removed.
 /// 14: the guest prints `kiln: cache scrub ok` after scrubbing login tokens off the cache disk; the host
 ///     commits the cache only after that line.
-const RECIPE: u64 = 14;
+/// 15: the bake patches Runner.Worker.dll (`kiln-patch-runner`) and the job hook points the Results/cache URLs at kiln's
+///     Actions cache listener (10.0.2.2:5001); the bake reports `kiln: gha-cache ...`.
+const RECIPE: u64 = 15;
 
 /// A runner release baked into the image: version (strict N.N.N) and the SHA-256 of each
 /// architecture's binary. Pinned here, bumped with kiln releases; never "latest".
@@ -4041,7 +4062,12 @@ mod tests {
         let on = egress_nft(true, &[]);
         assert!(on.contains("ct state established,related accept") && on.contains("tcp dport 25 drop"));
         assert!(on.contains("dnat to 10.0.2.2:5000") && on.contains("ip daddr 10.0.2.2 tcp dport 5000 accept"));
+        assert!(on.contains("dnat to 10.0.2.2:5001") && on.contains("ip daddr 10.0.2.2 tcp dport 5001 accept"));
         let off = egress_nft(false, &[]);
+        assert!(
+            off.contains("dnat to 10.0.2.2:5001") && off.contains("ip daddr 10.0.2.2 tcp dport 5001 accept"),
+            "cache port is unconditional"
+        );
         assert!(!off.contains("5000") && off.contains("tcp dport 25 drop") && off.contains("masquerade"));
     }
 
@@ -4267,6 +4293,130 @@ mod tests {
         let ev = |f: &str| Some(serde_json::from_str(&crate::forge_test_mock::fixture(f)).unwrap());
         assert!(!run(ev("event_workflow_run_fork.json")), "recorded workflow_run from a fork");
         assert!(!run(None), "missing payload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gha_cache_bake_fact() {
+        let c = "+ echo x\nkiln: gha-cache patched 2.338.2 abc\n";
+        assert_eq!(gha_cache_fact(c), "patched");
+        let u = "kiln: gha-cache unsupported 2.340.0 CacheServerUrl utf-16-le x2, ResultsServiceUrl utf-8 x1\n";
+        assert_eq!(gha_cache_fact(u), "unsupported: CacheServerUrl utf-16-le x2, ResultsServiceUrl utf-8 x1");
+        assert!(gha_cache_fact("+ echo 'kiln: gha-cache patched 1 x'\n").starts_with("unsupported"));
+        assert_eq!(image_gha_cache(&serde_json::json!({ "gha_cache": "patched" })), Some("patched"));
+        assert_eq!(image_gha_cache(&serde_json::json!({ "recipe": 14 })), None);
+    }
+
+    /// kiln-patch-runner against fake Runner.Worker.dll files. Skipped without python3.
+    #[test]
+    fn patch_runner_is_exact_or_untouched() {
+        if !need(&["python3"]) {
+            return;
+        }
+        let dir = crate::forge_test_mock::scratch("patch-runner");
+        let marker = dir.join("gha-cache");
+        let script = guest_script("/usr/local/sbin/kiln-patch-runner", &dir)
+            .replace("/etc/kiln/gha-cache", &marker.to_string_lossy())
+            .replace("os.makedirs('/etc/kiln', exist_ok=True)", "pass")
+            .replace("#!/usr/bin/python3 -I", "");
+        let sp = dir.join("patch.py");
+        std::fs::write(&sp, script).unwrap();
+        let u16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        let dll = |parts: &[Vec<u8>]| [b"MZ\0junk".to_vec(), parts.concat(), b"\0tail".to_vec()].concat();
+        let (rs, ca) = (u16("ResultsServiceUrl"), u16("CacheServerUrl"));
+        let run = |bytes: &[u8]| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin/Runner.Worker.dll"), bytes).unwrap();
+            let o = std::process::Command::new("python3").arg("-I").arg(&sp).arg(&dir).arg("2.338.2").output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            (
+                std::fs::read(dir.join("bin/Runner.Worker.dll")).unwrap(),
+                std::fs::read_to_string(&marker).unwrap(),
+                String::from_utf8(o.stdout).unwrap(),
+            )
+        };
+        let ok = dll(&[rs.clone(), ca.clone()]);
+        let (after, m, out) = run(&ok);
+        assert_eq!(after.len(), ok.len());
+        assert_eq!(after, dll(&[u16("ResultsServiceUrX"), u16("CacheServerUrX")]));
+        assert!(m.starts_with("patched 2.338.2 ") && out == format!("kiln: gha-cache {m}"), "{m}");
+        for (name, bytes, why) in [
+            ("twice", dll(&[rs.clone(), rs.clone(), ca.clone()]), "ResultsServiceUrl utf-16-le x2"),
+            ("missing", dll(std::slice::from_ref(&rs)), "CacheServerUrl utf-16-le x0"),
+            ("utf8", dll(&[rs.clone(), ca.clone(), b"CacheServerUrl".to_vec()]), "CacheServerUrl utf-8 x1"),
+        ] {
+            let (after, m, _) = run(&bytes);
+            assert_eq!(after, bytes, "{name}: file untouched");
+            assert!(m.starts_with("unsupported 2.338.2 ") && m.contains(why), "{name}: {m}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Actions-cache half of kiln-prejob.sh: fake curl, marker file and $GITHUB_ENV.
+    #[test]
+    fn prejob_hook_points_a_patched_runner_at_kiln() {
+        let bash4 = || std::process::Command::new("bash").args(["-c", "((BASH_VERSINFO[0] >= 4))"]).status().is_ok_and(|s| s.success());
+        if !need(&["bash", "jq"]) || !bash4() {
+            return;
+        }
+        let dir = crate::forge_test_mock::scratch("prejob-ghacache");
+        let marker = dir.join("gha-cache");
+        let script = guest_script("/usr/local/sbin/kiln-prejob.sh", &dir).replace("/etc/kiln/gha-cache", &marker.to_string_lossy());
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let curl = bin.join("curl");
+        std::fs::write(&curl, format!("#!/bin/bash\necho \"$@\" >> {0}/curl.log\ncat {0}/ping-code\n", dir.display())).unwrap();
+        std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        // (marker content, ping answer, event, expected exit ok) -> $GITHUB_ENV text and stdout
+        let run = |state: Option<&str>, ping: &str, event: serde_json::Value| {
+            for f in ["env", "curl.log"] {
+                let _ = std::fs::remove_file(dir.join(f));
+            }
+            match state {
+                Some(m) => std::fs::write(&marker, m).unwrap(),
+                None => drop(std::fs::remove_file(&marker)),
+            }
+            std::fs::write(dir.join("ping-code"), ping).unwrap();
+            std::fs::write(dir.join("event.json"), event.to_string()).unwrap();
+            let o = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .env("PATH", &path)
+                .env("GITHUB_EVENT_PATH", dir.join("event.json"))
+                .env("GITHUB_REPOSITORY", "acme/demo")
+                .env("GITHUB_ENV", dir.join("env"))
+                .output()
+                .unwrap();
+            (
+                o.status.success(),
+                std::fs::read_to_string(dir.join("env")).unwrap_or_default(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            )
+        };
+        let push = serde_json::json!({ "ref": "refs/heads/main" });
+        let (ok, env, _) = run(Some("patched 2.338.2 abc\n"), "204", push.clone());
+        assert!(ok);
+        assert_eq!(
+            env,
+            "ACTIONS_RESULTS_URL=http://10.0.2.2:5001/\nACTIONS_CACHE_URL=http://10.0.2.2:5001/\nACTIONS_CACHE_SERVICE_V2=true\n"
+        );
+        let log = std::fs::read_to_string(dir.join("curl.log")).unwrap();
+        assert!(log.contains("-m 2") && log.contains("http://10.0.2.2:5001/_kiln/ping"), "{log}");
+        for code in ["000", "500", "200"] {
+            let (ok, env, out) = run(Some("patched 2.338.2 abc\n"), code, push.clone());
+            assert!(ok, "an unreachable cache never fails the job");
+            assert_eq!(env, "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n");
+            assert!(out.contains("::warning::") && out.contains("unreachable"), "{out}");
+        }
+        for state in [Some("unsupported 2.340.0 CacheServerUrl utf-16-le x2\n"), Some(""), None] {
+            let (ok, env, out) = run(state, "204", push.clone());
+            assert!(ok && env.is_empty() && !out.contains("::warning::"), "unpatched image: stock behaviour ({state:?})");
+            assert!(!dir.join("curl.log").exists());
+        }
+        // A fork is refused before any of it.
+        let fork = serde_json::json!({ "pull_request": { "head": { "repo": { "full_name": "evil/demo" } } } });
+        let (ok, env, _) = run(Some("patched 2.338.2 abc\n"), "204", fork);
+        assert!(!ok && env.is_empty() && !dir.join("curl.log").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5735,7 +5885,7 @@ print("ok")
 
     #[test]
     fn recipe_pins_runners() {
-        assert_eq!(RECIPE, 14);
+        assert_eq!(RECIPE, 15);
         for (g, deb) in [(&X64, "amd64"), (&ARM64, "arm64")] {
             let r = recipe(g, "2.338.0", "24.2.0", "");
             assert!(!r.contains("{{"));
