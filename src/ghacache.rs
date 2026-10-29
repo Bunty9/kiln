@@ -39,7 +39,8 @@ const SMALL_BODY: usize = 1 << 20;
 #[derive(Clone, Debug)]
 pub struct Caller {
     pub vm_id: String,
-    /// "owner/name" (or any stable repo string); only used to pick the trusted scope directory.
+    /// The repo's canonical identity (forge kind, host and full path, see `vm::repo_identity`). It picks the trusted
+    /// scope directory (by hash) and is stored in, and checked against, every entry's metadata.
     pub repo: String,
     /// The local cache is on for this VM; otherwise CacheService is proxied too.
     pub local: bool,
@@ -47,8 +48,8 @@ pub struct Caller {
     pub can_write: bool,
 }
 
-/// Peer address -> caller. `None` = unknown: proxy everything.
-pub type Resolver = Arc<dyn Fn(SocketAddr) -> Option<Caller> + Send + Sync>;
+/// Peer address (and the request headers, for the identity cross-check only) -> caller. `None` = unknown: proxy everything.
+pub type Resolver = Arc<dyn Fn(SocketAddr, &HeaderMap) -> Option<Caller> + Send + Sync>;
 
 struct Inner {
     root: PathBuf,
@@ -79,21 +80,48 @@ pub fn router(root: PathBuf, resolve: Resolver, upstream: String, budget: Arc<dy
         .with_state(st)
 }
 
-/// Serve on 127.0.0.1:5001 (Linux only). Always on: until C-3 identifies callers it proxies everything.
+/// Serve on 127.0.0.1:5001 (Linux only). Always on: a peer that is not a live kiln VM is proxied to GitHub untouched.
 pub async fn serve(app: Arc<crate::App>) {
     if !cfg!(target_os = "linux") {
         return;
     }
     let root = app.data.join("gha-cache");
+    // Uploads staged by VMs that are gone (a crash, a restart) never earned a promotion.
+    let live: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
+    discard_dead(&root, &live);
     let a = app.clone();
     let budget: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || a.cfg().gha_cache_gb << 30);
-    let r = router(root, Arc::new(|_| None), UPSTREAM.into(), budget);
+    let r = router(root, crate::vm::gha_resolver(app.clone(), SocketAddr::from(([127, 0, 0, 1], PORT))), UPSTREAM.into(), budget);
     let l = match tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await {
         Ok(l) => l,
         Err(e) => return tracing::warn!("actions cache: cannot listen on 127.0.0.1:{PORT}: {e}"),
     };
     if let Err(e) = axum::serve(l, r.into_make_service_with_connect_info::<SocketAddr>()).await {
         tracing::warn!("actions cache listener ended: {e}");
+    }
+}
+
+/// What a VM's job did with the cache, counted as it happens: (restored, saved). Taken by `finish_cache`.
+// ponytail: process-wide map keyed by VM id; an observer in `router` if a second consumer ever needs events.
+static STATS: Mutex<Option<HashMap<String, (u32, u32)>>> = Mutex::new(None);
+
+pub(crate) fn count(vm: &str, restored: u32, saved: u32) {
+    let mut g = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let e = g.get_or_insert_default().entry(vm.to_string()).or_default();
+    (e.0, e.1) = (e.0 + restored, e.1 + saved);
+}
+
+pub fn take_stats(vm: &str) -> (u32, u32) {
+    STATS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(vm)).unwrap_or_default()
+}
+
+/// Delete the staged dirs of every VM not in `live`.
+pub fn discard_dead(root: &FsPath, live: &[String]) {
+    let keep: Vec<String> = live.iter().map(|v| stem(v)).collect();
+    for e in std::fs::read_dir(root.join("staged")).into_iter().flatten().flatten() {
+        if !keep.contains(&e.file_name().to_string_lossy().into_owned()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 
@@ -112,7 +140,8 @@ struct Meta {
     blocks: Vec<String>,
     /// "staged" or "trusted".
     scope: String,
-    /// Directory stem of the repo the entry belongs to (where `promote` puts it).
+    /// Full identity of the repo the entry belongs to (where `promote` puts it). Checked on every read, download and
+    /// promote: an entry whose identity differs from the caller's does not exist for it.
     repo: String,
     /// Random token every blob/download URL must carry.
     sig: String,
@@ -155,8 +184,23 @@ fn staged_dir(root: &FsPath, vm: &str) -> PathBuf {
     root.join("staged").join(stem(vm))
 }
 
+/// Directory of a repo's trusted scope: a short readable slug plus the hex SHA-256 of the identity. The hash makes
+/// the mapping injective (the slug is decoration), so no two repos share a directory.
+fn repo_dir(root: &FsPath, identity: &str) -> PathBuf {
+    let slug: String = stem(identity).chars().take(32).collect();
+    root.join("repos").join(format!("{slug}-{}", hex(ring::digest::digest(&ring::digest::SHA256, identity.as_bytes()).as_ref())))
+}
+
 fn trusted_dir(root: &FsPath, repo: &str) -> PathBuf {
-    root.join("repos").join(stem(repo)).join("entries")
+    repo_dir(root, repo).join("entries")
+}
+
+/// Delete a repo's trusted entries (dashboard "clear cache").
+pub fn clear_repo(root: &FsPath, identity: &str) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(repo_dir(root, identity)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 fn read_meta(dir: &FsPath) -> Option<Meta> {
@@ -189,7 +233,7 @@ fn dir_size(p: &FsPath) -> u64 {
 fn visible(root: &FsPath, c: &Caller) -> Vec<(PathBuf, Meta)> {
     let mut v = entries_in(&trusted_dir(root, &c.repo));
     v.extend(entries_in(&staged_dir(root, &c.vm_id)));
-    v.retain(|(_, m)| m.finished);
+    v.retain(|(_, m)| m.finished && m.repo == c.repo);
     v
 }
 
@@ -210,12 +254,11 @@ fn lookup(root: &FsPath, c: &Caller, key: &str, restore: &[String], version: &st
 
 /// Move the VM's finished staged entries into their repo's trusted scope, skipping keys that already exist there
 /// (first writer wins). Returns (promoted, dropped). Unfinished uploads are dropped.
-#[allow(dead_code)] // C-3 calls it from finish_cache
 pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
     let (mut ok, mut dropped) = (0, 0);
     for (dir, m) in entries_in(&staged_dir(root, vm_id)) {
         let dest = trusted_dir(root, &m.repo);
-        let dup = entries_in(&dest).iter().any(|(_, t)| t.finished && t.key == m.key && t.version == m.version);
+        let dup = entries_in(&dest).iter().any(|(_, t)| t.finished && t.repo == m.repo && t.key == m.key && t.version == m.version);
         if !m.finished || dup {
             std::fs::remove_dir_all(&dir)?;
             dropped += 1;
@@ -232,7 +275,6 @@ pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
 }
 
 /// Delete everything the VM staged (also uploads still in progress).
-#[allow(dead_code)] // C-3
 pub fn discard(root: &FsPath, vm_id: &str) {
     let _ = std::fs::remove_dir_all(staged_dir(root, vm_id));
 }
@@ -255,6 +297,12 @@ pub fn evict(root: &FsPath, budget: u64) -> u64 {
         }
     }
     freed
+}
+
+/// Does `c` see a finished entry for exactly `key` (tests of other modules).
+#[cfg(test)]
+pub(crate) fn lookup_for_tests(root: &FsPath, c: &Caller, key: &str) -> bool {
+    visible(root, c).iter().any(|(_, m)| m.key == key)
 }
 
 fn valid_id(id: &str) -> bool {
@@ -327,7 +375,7 @@ async fn twirp(State(st): State<St>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.to_ascii_lowercase().starts_with("application/json"));
     let known = matches!(method.as_str(), "CreateCacheEntry" | "FinalizeCacheEntryUpload" | "GetCacheEntryDownloadURL");
-    let Some(c) = (st.resolve)(peer).filter(|c| c.local && json && known) else { return proxy(State(st), req).await };
+    let Some(c) = (st.resolve)(peer, req.headers()).filter(|c| c.local && json && known) else { return proxy(State(st), req).await };
     let host = host_of(req.headers());
     let Ok(body) = axum::body::to_bytes(req.into_body(), SMALL_BODY).await else {
         return twirp_err(StatusCode::BAD_REQUEST, "invalid_argument", "unreadable body");
@@ -366,7 +414,7 @@ fn create(st: &Inner, c: &Caller, r: &TwirpReq, host: &str) -> Response {
         last_used: now_ms(),
         blocks: vec![],
         scope: "staged".into(),
-        repo: stem(&c.repo),
+        repo: c.repo.clone(),
         sig: sig.clone(),
         finished: false,
     };
@@ -400,6 +448,7 @@ fn finalize(st: &Inner, c: &Caller, r: &TwirpReq) -> Response {
     if write_meta(&dir, &m).is_err() {
         return twirp_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "cannot save the entry");
     }
+    count(&c.vm_id, 0, 1);
     let n = dir.file_name().and_then(|f| f.to_str()).and_then(|f| u64::from_str_radix(&f[..15], 16).ok()).unwrap_or(0);
     json_resp(StatusCode::OK, json!({ "ok": true, "entry_id": n.to_string() }))
 }
@@ -414,6 +463,7 @@ fn get_url(st: &Inner, c: &Caller, r: &TwirpReq, host: &str) -> Response {
     }
     m.last_used = now_ms();
     let _ = write_meta(&dir, &m);
+    count(&c.vm_id, 1, 0);
     let id = dir.file_name().and_then(|f| f.to_str()).unwrap_or_default();
     json_resp(
         StatusCode::OK,
@@ -428,8 +478,14 @@ fn status(c: StatusCode) -> Response {
 }
 
 /// Identified caller + the entry dir for `id` (own staged upload first, else the repo's trusted scope) + sig checked.
-fn entry_for(st: &Inner, peer: SocketAddr, id: &str, q: &HashMap<String, String>) -> Result<(Caller, PathBuf, Meta), StatusCode> {
-    let c = (st.resolve)(peer).filter(|c| c.local).ok_or(StatusCode::FORBIDDEN)?;
+fn entry_for(
+    st: &Inner,
+    peer: SocketAddr,
+    h: &HeaderMap,
+    id: &str,
+    q: &HashMap<String, String>,
+) -> Result<(Caller, PathBuf, Meta), StatusCode> {
+    let c = (st.resolve)(peer, h).filter(|c| c.local).ok_or(StatusCode::FORBIDDEN)?;
     if !valid_id(id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -437,6 +493,9 @@ fn entry_for(st: &Inner, peer: SocketAddr, id: &str, q: &HashMap<String, String>
         .into_iter()
         .find_map(|d| Some((d.clone(), read_meta(&d)?)))
         .ok_or(StatusCode::NOT_FOUND)?;
+    if m.repo != c.repo {
+        return Err(StatusCode::NOT_FOUND);
+    }
     if !ct_eq(q.get("sig").map_or("", String::as_str), &m.sig) {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -489,7 +548,7 @@ async fn put_blob(
     Query(q): Query<HashMap<String, String>>,
     req: Request,
 ) -> Response {
-    let (c, dir, mut m) = match entry_for(&st, peer, &id, &q) {
+    let (c, dir, mut m) = match entry_for(&st, peer, req.headers(), &id, &q) {
         Ok(x) => x,
         Err(e) => return status(e),
     };
@@ -578,7 +637,7 @@ async fn download(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    let (_, dir, m) = match entry_for(&st, peer, &id, &q) {
+    let (_, dir, m) = match entry_for(&st, peer, &headers, &id, &q) {
         Ok(x) => x,
         Err(e) => return status(e),
     };
@@ -668,7 +727,7 @@ async fn proxy(State(st): State<St>, req: Request) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -680,12 +739,12 @@ mod tests {
         d
     }
 
-    fn caller(vm: &str, repo: &str) -> Caller {
+    pub(crate) fn caller(vm: &str, repo: &str) -> Caller {
         Caller { vm_id: vm.into(), repo: repo.into(), local: true, can_write: true }
     }
 
     /// A finished entry written straight to disk.
-    fn seed(root: &FsPath, scope: &str, c: &Caller, key: &str, version: &str, created: u64, data: &[u8]) -> PathBuf {
+    pub(crate) fn seed(root: &FsPath, scope: &str, c: &Caller, key: &str, version: &str, created: u64, data: &[u8]) -> PathBuf {
         let id = random_hex(16);
         let dir = if scope == "staged" { staged_dir(root, &c.vm_id) } else { trusted_dir(root, &c.repo) }.join(&id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -698,12 +757,51 @@ mod tests {
             last_used: created,
             blocks: vec!["blob".into()],
             scope: scope.into(),
-            repo: stem(&c.repo),
+            repo: c.repo.clone(),
             sig: random_hex(32),
             finished: true,
         };
         write_meta(&dir, &m).unwrap();
         dir
+    }
+
+    /// `stem` is not injective ("my.repo" and "my_repo" collide); the storage key must be.
+    #[test]
+    fn repos_whose_stems_collide_never_see_each_other() {
+        let root = tmp();
+        let (a, b) = (caller("vm-a", "github|github.com|acme/my.repo"), caller("vm-b", "github|github.com|acme/my_repo"));
+        assert_eq!(stem(&a.repo), stem(&b.repo), "the old key collides");
+        assert_ne!(trusted_dir(&root, &a.repo), trusted_dir(&root, &b.repo));
+        let dir = seed(&root, "trusted", &a, "k", "v", 1, b"a's");
+        assert!(lookup(&root, &b, "k", &[], "v").is_none());
+        assert!(lookup(&root, &a, "k", &[], "v").is_some());
+        // Even an entry copied into the other repo's directory is refused: its stored identity is checked.
+        let planted = trusted_dir(&root, &b.repo).join("0".repeat(32));
+        std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &planted).unwrap();
+        assert!(visible(&root, &b).is_empty() && visible(&root, &a).is_empty());
+        // ...and so is promoting under the wrong identity: promote files an entry by the identity it carries.
+        let s = seed(&root, "staged", &a, "p", "v", 2, b"p");
+        assert_eq!(promote(&root, "vm-a").unwrap(), (1, 0));
+        assert!(!s.exists());
+        assert!(lookup(&root, &a, "p", &[], "v").is_some() && lookup(&root, &b, "p", &[], "v").is_none());
+        clear_repo(&root, &b.repo).unwrap();
+        assert!(lookup(&root, &a, "p", &[], "v").is_some(), "clearing one repo leaves the other");
+        clear_repo(&root, &a.repo).unwrap();
+        assert!(lookup(&root, &a, "p", &[], "v").is_none());
+    }
+
+    #[test]
+    fn dead_vms_staged_dirs_are_discarded_and_stats_are_taken_once() {
+        let root = tmp();
+        let (live, dead) = (caller("vm-live", "r"), caller("vm-dead", "r"));
+        let (l, d) = (seed(&root, "staged", &live, "k", "v", 1, b"x"), seed(&root, "staged", &dead, "k", "v", 1, b"x"));
+        discard_dead(&root, &["vm-live".into()]);
+        assert!(l.exists() && !d.exists());
+        count("vm-stat", 2, 0);
+        count("vm-stat", 1, 1);
+        assert_eq!(take_stats("vm-stat"), (3, 1));
+        assert_eq!(take_stats("vm-stat"), (0, 0));
     }
 
     #[test]
@@ -860,7 +958,7 @@ mod tests {
         let root = tmp();
         let who: Who = Arc::new(Mutex::new(Some(caller("vm-a", "acme/demo"))));
         let w = who.clone();
-        let r = router(root.clone(), Arc::new(move |_| w.lock().unwrap().clone()), up, Arc::new(move || budget));
+        let r = router(root.clone(), Arc::new(move |_, _| w.lock().unwrap().clone()), up, Arc::new(move || budget));
         let (base, t2) = listen(r).await;
         (Rig { base, root, who, http: reqwest::Client::new(), _tasks: vec![t1, t2] }, seen)
     }
@@ -1068,7 +1166,7 @@ mod tests {
         assert_eq!(seen.lock().unwrap()[3].3, vec![0x12, 1, b'k'], "protobuf body intact");
         assert!(!rig.root.join("staged").exists());
         // A dead upstream is a 502, not a hang or a panic.
-        let (dead, _t) = listen(router(tmp(), Arc::new(|_| None), "http://127.0.0.1:1".into(), Arc::new(|| 1 << 30))).await;
+        let (dead, _t) = listen(router(tmp(), Arc::new(|_, _| None), "http://127.0.0.1:1".into(), Arc::new(|| 1 << 30))).await;
         assert_eq!(reqwest::get(format!("{dead}/x")).await.unwrap().status(), StatusCode::BAD_GATEWAY);
     }
 

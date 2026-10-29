@@ -57,8 +57,10 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `gha_cache` | bool | `false` | | not wired yet | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; until jobs are identified, everything is proxied to GitHub unchanged. |
+| `gha_cache` | bool | `false` | | live (new connections) | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; a connection that is not a live kiln VM, a VM whose image is not patched, a repo with `cache` off and every tag or release build is proxied to GitHub unchanged. |
 | `gha_cache_gb` | integer | `20` | `1` to `500` | live | Storage cap of the Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted. |
+
+**Trust.** kiln learns which VM a request comes from from the kernel (the socket's owning process and its `kiln-vm-<id>.scope` cgroup, or the process kiln started for the VM), never from the request; the job's token is only cross-checked against the VM's runner id. A job's saves are staged privately and visible to that job alone; they are promoted into the repo's shared cache only under the verdict that commits the repo cache disk (a successful `push` to the default branch or a `cache_branches` branch, one job on the VM, and the forge's own check where it applies) and deleted otherwise. Entries are stored per repo under a hash of the forge kind, host and full repo path, and that identity is checked on every read. "Clear cache" on a repo clears its Actions cache as well.
 
 ### Repo cache
 

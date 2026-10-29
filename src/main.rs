@@ -6,6 +6,7 @@ mod forge;
 #[cfg(test)]
 mod forge_test_mock;
 mod ghacache;
+mod ghapeer;
 mod github;
 mod history;
 mod host;
@@ -1170,6 +1171,7 @@ async fn scheduler(app: Arc<App>) {
         if now() >= swept + SWEEP_EVERY {
             swept = now();
             sweep_fails = if sweep_runners(&app, true, sweep_fails).await { 0 } else { sweep_fails + 1 };
+            ghacache::evict(&app.data.join("gha-cache"), app.cfg().gha_cache_gb << 30);
         }
         let cfg = app.cfg();
         let res = tick(&app, &cfg).await;
