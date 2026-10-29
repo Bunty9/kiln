@@ -1529,6 +1529,8 @@ function hostWire() {
     e.preventDefault(); const w = c.getBoundingClientRect().width; at(c, Math.max(0, Math.min(w - 1, HV.hover.x + (e.key === 'ArrowLeft' ? -w / 20 : w / 20))));
   });
 }
+const WAIT = { repo_backoff: 'repo paused after failures', host_hold: 'host memory or io_uring hold', old_image: 'base image needs a rebake', launch_gate: 'low memory or disk', egress: 'egress filter not ready', draining: 'restart pending', github_api: 'GitHub registration failing', slots_full: 'all slots busy', held: 'slots held for debugging', budget: 'cpu or memory budget' };
+const waitLine = () => (S.poll.waiting || []).length ? `<div class="sm fg2">${S.poll.waiting.map(w => `${+w.jobs}× ${+w.cpus} cpu in ${repoLabel(F, w.repo)} waiting: ${esc(WAIT[w.reason] || w.reason)}`).join(' · ')}</div>` : '';
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.notfound = {
   mount() { $('#app').innerHTML = `<div class="ph"><h1>Page not found</h1></div><div class="empty">${ic('jobs')}<p>There is no page at this address.</p><a class="btn" href="#/">Back to the Overview</a></div>`; },
@@ -1553,7 +1555,7 @@ pages.overview = {
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
-    setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>${waitLine()}`);
     // Pin the burn loops to page time so a re-render continues them instead of restarting.
     for (const a of $('#ov-now').getAnimations({ subtree: true })) if (a.animationName) a.startTime = 0;
     setHTML($('#ov-stats'), stats());
