@@ -360,6 +360,9 @@ async fn max_vms_is_shared_across_forges() {
     }
     t.tick().await.unwrap();
     assert_eq!(t.launched(GH_REPO), 0, "GitHub's two queued jobs wait for a slot the other forges hold");
+    let w = t.app.poll.lock().unwrap().waiting.clone();
+    assert!(w.iter().any(|w| w.repo == GH_REPO && w.jobs == 2 && w.reason == "slots_full"), "{w:?}");
+    assert!(t.app.poll.lock().unwrap().blocked_kind.is_none(), "a full house is no banner");
     // One slot frees up in the shared cap: GitHub gets exactly one of its two.
     let cfg = Config { max_vms: 4, ..t.cfg.clone() };
     tick(&t.app, &cfg).await.unwrap();

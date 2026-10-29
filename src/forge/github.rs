@@ -36,8 +36,8 @@ impl GitHub {
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        let (by_size, claimed, refused_forks) = self.gh.queued_jobs(&repo.path, label, default_cpus).await?;
-        Ok(Demand { by_size, claimed, refused_forks, ..Default::default() })
+        let (by_size, claimed, refused_forks, pending) = self.gh.queued_jobs(&repo.path, label, default_cpus).await?;
+        Ok(Demand { by_size, claimed, refused_forks, pending, ..Default::default() })
     }
 
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
@@ -240,6 +240,8 @@ fn job_summary(repo: &str, run: u64, j: &Value) -> Option<JobSummary> {
             name: s["name"].as_str().unwrap_or("").into(),
             status: status(s["status"].as_str().unwrap_or("")),
             outcome: outcome(&s["conclusion"]),
+            started_at: s["started_at"].as_str().map(String::from),
+            completed_at: s["completed_at"].as_str().map(String::from),
         })
         .collect();
     Some(JobSummary {
