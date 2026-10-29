@@ -792,19 +792,22 @@ write_files:
       # Tag pushes and releases build what gets shipped: run them on a clean slate, not on
       # the repo cache that every default-branch job writes (a dependency compromised in one
       # of those could otherwise plant a toolchain in ~/.cargo or ~/.rustup for the release).
+      cold=
       if [ "${GITHUB_REF_TYPE:-}" = tag ] || [ "${GITHUB_EVENT_NAME:-}" = release ]; then
+        cold=1
         sudo /usr/local/sbin/kiln-cache detach || { echo "::error::kiln could not detach the cache for a release build"; exit 1; }
       fi
       # Patched runner (kiln-patch-runner): it no longer sets the Results/cache URLs, so this hook does, for every job.
       # kiln's listener on the host loopback (10.0.2.2:5001) serves the Actions cache; if it is down the cache reports
       # unavailable (artifacts still go to GitHub). Unpatched image: stock behaviour. Never fails the job.
+      # A cold job (tag, release) gets GitHub's URL: no local cache for what gets shipped.
       read -r gha_state _ < /etc/kiln/gha-cache 2>/dev/null || gha_state=
       if [ "$gha_state" = patched ]; then
-        if [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://10.0.2.2:5001/_kiln/ping 2>/dev/null)" = 204 ]; then
+        if [ -z "$cold" ] && [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://10.0.2.2:5001/_kiln/ping 2>/dev/null)" = 204 ]; then
           printf '%s\n' ACTIONS_RESULTS_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
         else
           printf '%s\n' ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
-          echo "::warning::kiln's local Actions cache is unreachable: the cache is unavailable for this job"
+          [ -n "$cold" ] || echo "::warning::kiln's local Actions cache is unreachable: the cache is unavailable for this job"
         fi
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf

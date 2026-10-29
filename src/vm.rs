@@ -72,6 +72,17 @@ pub enum CacheUse {
     Discarded,
 }
 
+/// What a VM's job did with the local Actions cache: entries restored and saved, and whether the saved ones were
+/// promoted to the repo's trusted scope or discarded, with a short reason.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct GhaUse {
+    pub restored: u32,
+    pub saved: u32,
+    /// "promoted" or "discarded".
+    pub outcome: String,
+    pub reason: String,
+}
+
 /// VMs `load_history` found still active (kiln died under them): alerted once notify starts.
 static NEWLY_LOST: std::sync::Mutex<Vec<Vm>> = std::sync::Mutex::new(Vec::new());
 
@@ -218,6 +229,13 @@ pub struct Vm {
     /// The job came from a fork pull request, which kiln refuses to run.
     #[serde(default)]
     pub fork: bool,
+    /// Pid of the process kiln started for this VM (rootlesskit, or QEMU): the Actions cache's fallback for finding a
+    /// connection's VM without cgroup scopes. Memory only.
+    #[serde(skip)]
+    pub pid: Option<u32>,
+    /// The local Actions cache's account of this VM's job (none when it never used it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gha: Option<GhaUse>,
 }
 
 impl Vm {
@@ -513,6 +531,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         mint_failed: false,
         run: None,
         fork: false,
+        pid: None,
+        gha: None,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -957,6 +977,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
     let steps = tokio::fs::File::create(dir.join("steps.log")).await?;
     let mut child =
         cmd.spawn().with_context(|| if filtered { "spawning rootlesskit".into() } else { format!("spawning {}", GUEST.qemu) })?;
+    update(app, id, |v| v.pid = child.id());
     if let Some(err) = child.stderr.take() {
         // rootlesskit warns on every start that we keep host loopback; we do on purpose
         // (the mirror), and nft blocks every other loopback port. Keep the rest.
@@ -1625,13 +1646,45 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
 }
 
 /// After QEMU exited: commit the overlay into the repo cache if the job earned
-/// it, else just drop it.
+/// it, else just drop it. The Actions cache entries the VM staged follow the same verdict: promoted when the
+/// overlay would commit, deleted otherwise. Every VM end goes through here (`launch`, `io_uring_hit`).
 async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
+    let verdict = finish_cache_disk(app, id, repo, dir, done).await;
+    gha_settle(app, id, verdict);
+}
+
+/// Promote or discard what VM `id` staged in the Actions cache, and record the outcome on the VM.
+fn gha_settle(app: &App, id: &str, verdict: Result<(), String>) {
+    let root = app.data.join("gha-cache");
+    let (restored, saved) = crate::ghacache::take_stats(id);
+    let (outcome, reason) = match verdict {
+        Ok(()) => match crate::ghacache::promote(&root, id) {
+            Ok((ok, dropped)) => {
+                crate::ghacache::evict(&root, app.cfg().gha_cache_gb << 30);
+                ("promoted", format!("{ok} promoted, {dropped} dropped"))
+            }
+            Err(e) => {
+                crate::ghacache::discard(&root, id);
+                ("discarded", format!("promotion failed: {e}"))
+            }
+        },
+        Err(why) => {
+            crate::ghacache::discard(&root, id);
+            ("discarded", why)
+        }
+    };
+    if restored + saved > 0 {
+        update(app, id, |v| v.gha = Some(GhaUse { restored, saved, outcome: outcome.into(), reason }));
+    }
+}
+
+/// The cache disk's half of `finish_cache`. Ok = the job earned the commit (and so the Actions cache promotion).
+async fn finish_cache_disk(app: &App, id: &str, repo: &str, dir: &Path, done: bool) -> Result<(), String> {
     let ov = qemu_dir(dir).join("cache.qcow2");
-    let Some(v) = update(app, id, |_| {}) else { return };
+    let Some(v) = update(app, id, |_| {}) else { return Err("VM gone".into()) };
     if v.cache != CacheUse::Read {
         let _ = tokio::fs::remove_file(&ov).await;
-        return;
+        return Err("no cache disk was attached".into());
     }
     let cfg = app.cfg();
     let writers = cfg.cache_branches(repo);
@@ -1686,6 +1739,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
         Ok(()) => overlay_header(app, &ov, &cache_file(&app.data, repo)).await,
         e => e,
     };
+    let mut earned = verdict.clone();
     let (state, note) = match verdict {
         Err(why) => {
             let _ = tokio::fs::remove_file(&ov).await;
@@ -1705,6 +1759,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
                     let _ = tokio::fs::remove_file(&ov).await;
                     tracing::warn!("{repo}: cache overlay not queued: {e}");
                     app.notice(&format!("cache:{}", repo.to_ascii_lowercase()), "cache", format!("cache not saved for {repo}: {e}"));
+                    earned = Err(format!("could not queue the overlay: {e}"));
                     (CacheUse::Discarded, Some(format!("cache not saved: could not queue the overlay: {e}")))
                 }
             }
@@ -1718,6 +1773,7 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     if let Some((_, Some(why))) = commit_pending(app, repo, id).await {
         tracing::info!("{repo}: parked cache commit: {why}");
     }
+    earned
 }
 
 /// Commit the repo's parked trusted overlay if nothing else reads the cache.
@@ -1873,10 +1929,62 @@ pub fn clear_cache(app: &App, repo: &str) -> Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).context("removing the pending cache overlay"),
         _ => {}
     }
+    crate::ghacache::clear_repo(&app.data.join("gha-cache"), &repo_identity(&app.cfg(), repo)).context("clearing the Actions cache")?;
     match std::fs::remove_file(cache_file(&app.data, repo)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+// ---------------------------------------------------------------- Actions cache identity and policy
+
+/// The canonical identity of a repo across forges: kind, host and full lowercase path. The Actions cache keys its
+/// storage by the hash of this string and stores it in every entry, so no two repos can share or spoof a scope.
+pub fn repo_identity(cfg: &crate::Config, repo: &str) -> String {
+    let Ok(rr) = RepoRef::parse(repo) else { return format!("unparsed|{}", repo.to_ascii_lowercase()) };
+    let fc = cfg.forges.iter().flatten().find(|f| f.id == rr.forge);
+    let kind = fc.map_or(crate::forge::Kind::GitHub, |f| f.kind);
+    let host = fc.and_then(|f| f.url.as_deref()).map_or("github.com".to_string(), |u| {
+        reqwest::Url::parse(u)
+            .ok()
+            .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)))
+            .unwrap_or_else(|| u.to_ascii_lowercase())
+    });
+    format!("{}|{}|{}", format!("{kind:?}").to_ascii_lowercase(), host.to_ascii_lowercase(), rr.path.to_ascii_lowercase())
+}
+
+/// Per-VM policy of the Actions cache. Err = treat the caller as unidentified (proxied): the VM is not live, or the
+/// request's JWT names another runner. `jwt_runner` is the unverified claim, a cross-check and never a scope.
+fn gha_caller(cfg: &crate::Config, v: &Vm, image: Option<&str>, jwt_runner: Option<u64>) -> Result<crate::ghacache::Caller, &'static str> {
+    if !matches!(v.state, State::Booting | State::Idle | State::Busy) {
+        return Err("the VM is not live");
+    }
+    if jwt_runner.is_some_and(|r| Some(r) != v.runner_id) {
+        return Err("the token names another runner");
+    }
+    let local = cfg.gha_cache && cfg.cache && image == Some("patched");
+    Ok(crate::ghacache::Caller { vm_id: v.id.clone(), repo: repo_identity(cfg, &v.repo), local, can_write: local })
+}
+
+/// The listener's resolver: peer socket -> VM through the kernel, then the VM's policy. `server`: the listener's address.
+pub fn gha_resolver(app: Arc<App>, server: std::net::SocketAddr) -> crate::ghacache::Resolver {
+    let peers = crate::ghapeer::Peers::default();
+    Arc::new(move |peer, headers| {
+        let tracked: Vec<_> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| (v.id.clone(), v.pid)).collect();
+        let id = peers.vm_for_peer(peer, server, &|pid| crate::ghapeer::vm_of_pid(pid, &tracked))?;
+        let v = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned()?;
+        let image =
+            std::fs::read(images(&app.data).join("base.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        match gha_caller(&app.cfg(), &v, image.as_ref().and_then(image_gha_cache), crate::ghapeer::bearer_runner_id(headers)) {
+            Ok(c) => Some(c),
+            Err(why) => {
+                if why.contains("runner") && peers.warned.lock().unwrap().insert(id.clone()) {
+                    tracing::warn!("{id}: actions cache request ignored: {why}");
+                }
+                None
+            }
+        }
+    })
 }
 
 fn note(app: &App, id: &str, msg: &str) {
@@ -2746,7 +2854,6 @@ fn gha_cache_fact(console: &str) -> String {
 
 /// Whether the image at `base` (base.json) has the patched runner, so kiln's Actions cache can serve its jobs.
 /// `None` is an image baked before the patch existed. For the launch gates and doctor (C-5).
-#[allow(dead_code)]
 pub fn image_gha_cache(base: &serde_json::Value) -> Option<&str> {
     base["gha_cache"].as_str()
 }
@@ -4027,6 +4134,8 @@ mod tests {
             mint_failed: false,
             run: None,
             fork: false,
+            pid: None,
+            gha: None,
         }
     }
 
@@ -4367,7 +4476,11 @@ mod tests {
         let curl = bin.join("curl");
         std::fs::write(&curl, format!("#!/bin/bash\necho \"$@\" >> {0}/curl.log\ncat {0}/ping-code\n", dir.display())).unwrap();
         std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(&sudo, "#!/bin/bash\nexit 0\n").unwrap();
+        std::fs::set_permissions(&sudo, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let ref_type = std::cell::Cell::new("branch");
         // (marker content, ping answer, event, expected exit ok) -> $GITHUB_ENV text and stdout
         let run = |state: Option<&str>, ping: &str, event: serde_json::Value| {
             for f in ["env", "curl.log"] {
@@ -4384,6 +4497,7 @@ mod tests {
                 .env("PATH", &path)
                 .env("GITHUB_EVENT_PATH", dir.join("event.json"))
                 .env("GITHUB_REPOSITORY", "acme/demo")
+                .env("GITHUB_REF_TYPE", ref_type.get())
                 .env("GITHUB_ENV", dir.join("env"))
                 .output()
                 .unwrap();
@@ -4413,6 +4527,12 @@ mod tests {
             assert!(ok && env.is_empty() && !out.contains("::warning::"), "unpatched image: stock behaviour ({state:?})");
             assert!(!dir.join("curl.log").exists());
         }
+        // A cold job (tag) gets GitHub's URL and never asks the local cache, quietly.
+        ref_type.set("tag");
+        let (ok, env, out) = run(Some("patched 2.338.2 abc\n"), "204", push.clone());
+        assert!(ok && !out.contains("::warning::") && !dir.join("curl.log").exists());
+        assert_eq!(env, "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n");
+        ref_type.set("branch");
         // A fork is refused before any of it.
         let fork = serde_json::json!({ "pull_request": { "head": { "repo": { "full_name": "evil/demo" } } } });
         let (ok, env, _) = run(Some("patched 2.338.2 abc\n"), "204", fork);
@@ -6026,6 +6146,8 @@ print("ok")
                 ..Default::default()
             }),
             fork: false,
+            pid: None,
+            gha: None,
         }
     }
 
@@ -6353,5 +6475,170 @@ print("ok")
                 && n.starts_with("cache not saved: could not verify the trigger (GET repos/acme/demo/actions/jobs/6001: 500"),
             "{n}"
         );
+    }
+
+    #[test]
+    fn repo_identity_is_forge_kind_host_and_path() {
+        use crate::forge::{ForgeCfg, ForgeId, Kind};
+        let f = |id: &str, kind, url: &str| ForgeCfg {
+            id: ForgeId::new(id).unwrap(),
+            kind,
+            url: Some(url.into()),
+            credential: None,
+            network: None,
+            repos: vec![],
+            extra: Default::default(),
+        };
+        let cfg = crate::Config {
+            forges: Some(vec![
+                f("gl", Kind::GitLab, "https://GitLab.example.org"),
+                f("g2", Kind::GitLab, "https://other.example.org:8443/x"),
+            ]),
+            ..crate::Config::default()
+        };
+        assert_eq!(repo_identity(&cfg, "Acme/My.Repo"), "github|github.com|acme/my.repo");
+        assert_eq!(repo_identity(&cfg, "gl:Grp/Sub/P"), "gitlab|gitlab.example.org:443|grp/sub/p");
+        assert_eq!(repo_identity(&cfg, "g2:grp/p"), "gitlab|other.example.org:8443|grp/p");
+        assert_eq!(repo_identity(&cfg, "acme/my_repo"), "github|github.com|acme/my_repo");
+        assert_eq!(repo_identity(&cfg, "bad repo"), "unparsed|bad repo");
+        // The same path on two forges, and a re-added id for another host, are different repos.
+        assert_ne!(repo_identity(&cfg, "gl:a/b"), repo_identity(&cfg, "g2:a/b"));
+        assert_ne!(repo_identity(&cfg, "gl:a/b"), repo_identity(&crate::Config::default(), "gl:a/b"));
+    }
+
+    #[test]
+    fn gha_policy_table() {
+        let on = crate::Config { gha_cache: true, cache: true, ..crate::Config::default() };
+        let v = |s| Vm { runner_id: Some(7), repo: "Acme/Demo".into(), ..vm("kiln-1-0", s, None) };
+        let p =
+            |cfg: &crate::Config, v: &Vm, image: Option<&str>, jwt| gha_caller(cfg, v, image, jwt).map(|c| (c.local, c.can_write, c.repo));
+        let ident = "github|github.com|acme/demo".to_string();
+        for s in [State::Booting, State::Idle, State::Busy] {
+            assert_eq!(p(&on, &v(s), Some("patched"), None), Ok((true, true, ident.clone())), "{s:?}");
+        }
+        assert_eq!(p(&on, &v(State::Busy), Some("patched"), Some(7)), Ok((true, true, ident.clone())), "a matching runner_id");
+        let off = |c: crate::Config| p(&c, &v(State::Busy), Some("patched"), None).map(|x| (x.0, x.1));
+        assert_eq!(off(crate::Config { gha_cache: false, ..on.clone() }), Ok((false, false)), "gha_cache off: proxied");
+        assert_eq!(off(crate::Config { cache: false, ..on.clone() }), Ok((false, false)), "repo cache off");
+        for image in [Some("unsupported: no report"), None] {
+            assert_eq!(p(&on, &v(State::Busy), image, None).map(|x| x.0), Ok(false), "image {image:?}");
+        }
+        for s in [State::Done, State::Failed, State::Killed, State::Lost, State::Held] {
+            assert!(p(&on, &v(s), Some("patched"), None).is_err(), "{s:?} is not live");
+        }
+        assert!(p(&on, &v(State::Busy), Some("patched"), Some(8)).is_err(), "a token for another runner");
+        assert!(p(&on, &Vm { runner_id: None, ..v(State::Busy) }, Some("patched"), Some(8)).is_err());
+    }
+
+    /// An app whose qemu-img is the fake with a valid overlay header for `id`, so a trusted job reaches the commit.
+    fn gha_vm(app: &App, d: &Path, id: &str, jid: u64, rid: u64, key: &str) -> PathBuf {
+        cache_vm(app, id, jid, rid);
+        let dir = app.data.join("vms").join(id);
+        std::fs::create_dir_all(qemu_dir(&dir)).unwrap();
+        std::fs::write(qemu_dir(&dir).join("cache.qcow2"), "overlay").unwrap();
+        let info = serde_json::json!({ "format": "qcow2", "format-specific": { "type": "qcow2", "data": { "corrupt": false } },
+            "backing-filename": cache_file(&app.data, "acme/demo"), "backing-filename-format": "qcow2" });
+        std::fs::write(d.join("info.json"), info.to_string()).unwrap();
+        let c = crate::ghacache::tests::caller(id, &repo_identity(&app.cfg(), "acme/demo"));
+        crate::ghacache::tests::seed(&app.data.join("gha-cache"), "staged", &c, key, "v", 1, b"data");
+        crate::ghacache::count(id, 2, 1);
+        dir
+    }
+
+    /// The Actions cache's staged entries follow the cache disk's verdict: promoted for the one trusted job, deleted
+    /// for a pull request, a failed job, a VM that never had the disk and a VM that ended before it ran.
+    #[tokio::test]
+    async fn finish_cache_promotes_or_discards_staged_actions_cache_entries() {
+        let m = Mock::github().await;
+        let mut app = mock::app("gha-promote", &m, crate::Config::default());
+        let d = std::env::temp_dir().join(format!("kiln-test-gha-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        Arc::get_mut(&mut app).unwrap().qemu_img = fake_qemu(&d);
+        std::fs::create_dir_all(app.data.join("cache")).unwrap();
+        let root = app.data.join("gha-cache");
+        let ident = repo_identity(&app.cfg(), "acme/demo");
+        let reader = crate::ghacache::tests::caller("reader", &ident);
+        let trusted = |key: &str| crate::ghacache::lookup_for_tests(&root, &reader, key);
+        let settle = |id: &'static str, done: bool| {
+            let (app, dir) = (app.clone(), app.data.join("vms").join(id));
+            async move {
+                finish_cache(&app, id, "acme/demo", &dir, done).await;
+                app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned().unwrap()
+            }
+        };
+        gha_vm(&app, &d, "g1", 6001, 2001, "k-trusted");
+        let v = settle("g1", true).await;
+        assert_eq!(v.cache, CacheUse::Committed, "{:?}", v.cache_note);
+        let g = v.gha.unwrap();
+        assert_eq!((g.restored, g.saved, g.outcome.as_str(), g.reason.as_str()), (2, 1, "promoted", "1 promoted, 0 dropped"));
+        assert!(trusted("k-trusted") && !root.join("staged").join("g1").exists());
+        // A pull request, a console that said failure, a missing cache disk, and an unfinished job: all deleted.
+        gha_vm(&app, &d, "g2", 6002, 2002, "k-pr");
+        let g = settle("g2", true).await.gha.unwrap();
+        assert_eq!((g.outcome.as_str(), g.reason.as_str()), ("discarded", "pull_request event"));
+        gha_vm(&app, &d, "g3", 6001, 2001, "k-failed");
+        let g = settle("g3", false).await.gha.unwrap();
+        assert_eq!((g.outcome.as_str(), g.reason.as_str()), ("discarded", "job did not succeed"));
+        gha_vm(&app, &d, "g4", 6001, 2001, "k-nodisk");
+        app.vms.lock().unwrap().iter_mut().find(|v| v.id == "g4").unwrap().cache = CacheUse::None;
+        let g = settle("g4", true).await.gha.unwrap();
+        assert_eq!((g.outcome.as_str(), g.reason.as_str()), ("discarded", "no cache disk was attached"));
+        gha_vm(&app, &d, "g5", 6001, 2001, "k-nojob");
+        app.vms.lock().unwrap().iter_mut().find(|v| v.id == "g5").unwrap().job = None;
+        assert_eq!(settle("g5", false).await.gha.unwrap().outcome, "discarded");
+        for k in ["k-pr", "k-failed", "k-nodisk", "k-nojob"] {
+            assert!(!trusted(k), "{k}");
+        }
+        assert!(["g2", "g3", "g4", "g5"].iter().all(|i| !root.join("staged").join(i).exists()));
+        // A VM the record of which is gone is discarded too.
+        crate::ghacache::tests::seed(&root, "staged", &crate::ghacache::tests::caller("g6", &ident), "k-gone", "v", 1, b"x");
+        finish_cache(&app, "g6", "acme/demo", &app.data.join("vms/g6"), false).await;
+        assert!(!root.join("staged").join("g6").exists());
+    }
+
+    /// "Clear cache" clears the repo's Actions cache entries along with its cache disk, and only that repo's.
+    #[test]
+    fn clear_cache_clears_the_actions_cache_too() {
+        let (app, d) = cache_app("clear-gha");
+        let root = app.data.join("gha-cache");
+        let (id, other) = (repo_identity(&app.cfg(), "acme/demo"), repo_identity(&app.cfg(), "acme/other"));
+        let (c, o) = (crate::ghacache::tests::caller("v", &id), crate::ghacache::tests::caller("v", &other));
+        crate::ghacache::tests::seed(&root, "trusted", &c, "k", "v", 1, b"x");
+        crate::ghacache::tests::seed(&root, "trusted", &o, "k", "v", 1, b"x");
+        std::fs::write(cache_file(&app.data, "acme/demo"), "disk").unwrap();
+        clear_cache(&app, "acme/demo").unwrap();
+        assert!(!crate::ghacache::lookup_for_tests(&root, &c, "k") && !cache_file(&app.data, "acme/demo").exists());
+        assert!(crate::ghacache::lookup_for_tests(&root, &o, "k"), "another repo is untouched");
+        let _ = d;
+    }
+
+    /// The real resolver end to end: this process plays the VM (its pid is the one kiln "started"), and a request whose
+    /// token names another runner is not identified.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn gha_resolver_identifies_a_connection_from_the_kernel() {
+        let app = App::for_tests();
+        *app.cfg.write().unwrap() = crate::Config { gha_cache: true, ..crate::Config::default() };
+        std::fs::create_dir_all(images(&app.data)).unwrap();
+        std::fs::write(images(&app.data).join("base.json"), r#"{"gha_cache":"patched"}"#).unwrap();
+        app.vms.lock().unwrap().push(Vm { pid: Some(std::process::id()), runner_id: Some(7), ..vm("kiln-1-0", State::Busy, None) });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = l.local_addr().unwrap();
+        let c = tokio::net::TcpStream::connect(server).await.unwrap();
+        let (_s, _) = l.accept().await.unwrap();
+        let peer = c.local_addr().unwrap();
+        let resolve = gha_resolver(app.clone(), server);
+        let c1 = resolve(peer, &axum::http::HeaderMap::new()).expect("identified");
+        assert_eq!((c1.vm_id.as_str(), c1.local, c1.repo.as_str()), ("kiln-1-0", true, "github|github.com|o/n"));
+        let jwt = |rid: u64| {
+            let p = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, format!(r#"{{"runner_id":{rid}}}"#));
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("authorization", format!("Bearer e30.{p}.x").parse().unwrap());
+            h
+        };
+        assert!(resolve(peer, &jwt(7)).is_some());
+        assert!(resolve(peer, &jwt(8)).is_none(), "a token for another runner is unidentified");
+        app.vms.lock().unwrap()[0].state = State::Done;
+        assert!(resolve(peer, &axum::http::HeaderMap::new()).is_none(), "a finished VM is unidentified");
     }
 }
