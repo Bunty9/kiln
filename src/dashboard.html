@@ -268,6 +268,8 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .rr .qn{text-align:right;color:var(--queued)}
 @media(max-width:719px){.rr{grid-template-areas:"n n" "r l";grid-template-columns:auto auto;justify-content:start;gap:4px 12px}.rr .nm{grid-area:n}.rr .rt{grid-area:r}.rr .lr{grid-area:l}.rr .qn{display:none}}
 .sn{padding:0 16px 16px}
+@media(max-width:359px){.row.flat.bf>.rx{grid-column:1/-1!important;flex-wrap:wrap;margin-top:8px}}
+.row .id{overflow-wrap:anywhere}.row .t{min-width:0}
 @media(max-width:719px){.row.flat{grid-template-areas:none!important}.row.flat>*{grid-area:auto!important}.row.flat .id{display:block}.row.flat.bf{grid-template-columns:auto minmax(0,1fr) auto!important}.row.flat.bf>.ra{grid-column:1/-1!important;flex-wrap:wrap;margin-top:8px}}
 .pr{grid-template-columns:minmax(0,1fr) 190px 90px 80px;grid-template-areas:"n c s p" "g g g g"}
 .pr .pc{grid-area:c}.pr .ps{grid-area:s}
@@ -539,6 +541,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .top>div,main{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
 #conn{top:calc(64px + env(safe-area-inset-top))}
 @media(display-mode:standalone){html{overscroll-behavior-y:none}.inst{display:none!important}}
+@media(pointer:coarse){.btn,.btn.sm,.seg button,.lnk,summary,.logo,.chip button,.ftl label{min-height:32px}.btn.ic,.chip button,.logo,.lnk{min-width:32px}.hh{min-height:32px}.hq{width:32px;height:32px}.lnk,a.nm,.empty a,.pop.help a,a.sm.fg2{display:inline-flex;align-items:center;min-height:32px}}
 </style>
 </head>
 <body>
@@ -1908,7 +1911,7 @@ function runHTML(run, f) {
   const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
   return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
     <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${evIcon({ kind: run.event, event: run.event })} ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
-    <span class="${rf ? 'ra' : ''}" style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
+    <span class="rx ${rf ? 'ra' : ''}" style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
 async function loadLast(r) {
   try { const x = (await api(fq('runs', r))).runs[0]; lastRun[r] = x ? runStatus(x) : 'none'; if (lastRun[r] === 'none') lastRun[r] = 'err'; } catch { lastRun[r] = 'err'; }
@@ -2176,9 +2179,9 @@ const G = {
       <div id="gha-note"></div></div>`}
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
-      const c = S.caches || {}, repos = REPOS(), ga = S.gha_caches || { bytes: 0, repos: {} }, gsz = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : Math.max(1, Math.round(b / (1 << 20))) + ' MB', im = S.image && S.image.gha_cache;
+      const c = S.caches || {}, repos = REPOS(), ga = S.gha_caches || { bytes: 0, repos: {} }, gsz = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : (b ? Math.max(1, Math.round(b / (1 << 20))) : 0) + ' MB', im = S.image && S.image.gha_cache;
       const gn = $('#gha-note');
-      if (gn) gn.innerHTML = `<p class="sm fg2" style="margin:12px 0 0">Using ${gsz(ga.bytes || 0)} of ${+(S.config.gha_cache_gb || 20)} GB.</p>` +
+      if (gn) gn.innerHTML = (S.config.gha_cache ? `<p class="sm fg2" style="margin:12px 0 0">Using ${gsz(ga.bytes || 0)} of ${+(S.config.gha_cache_gb || 20)} GB.</p>` : '') +
         (S.config.gha_cache && S.image_ready && im !== 'patched' ? `<p class="sm fg2" style="margin:8px 0 0">${im ? `This image can't serve it (${esc(im)}), so jobs use GitHub's cache.` : "This image was baked before the Actions cache, so jobs use GitHub's cache. Rebake the image to switch it on."}</p>` : '');
       setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r], g = ga.repos[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${repoLabel(F, r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : g ? '' : 'No cache yet. A successful push to the default branch creates it.'}${g ? `${x ? ' · ' : ''}Actions cache: ${+g.entries} ${g.entries === 1 ? 'entry' : 'entries'}, ${gsz(g.bytes)}` : ''}</span></span>${x || g ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this repo\'s cache disk and Actions cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : `<div class="empty">${ic('cache')}<p>Add a repo first. Each repo gets its own cache, created by the first successful push to its default branch.</p><a href="#/guides/cache-trust">Who may write the cache</a></div>`);
     },
@@ -2230,7 +2233,7 @@ const G = {
     html: () => `<div class="card"><h2>Diagnostics${hq('doctor')} <button class="btn" data-act="doctor" style="margin-left:auto">${ic('refresh')}Run checks</button></h2><div id="doc"></div></div>`,
     open() { runDoctor(); },
     live() {
-      setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
+      setHTML($('#doc'), doctor?.err ? `<div class="cal">${esc(doctor.err)}</div>` : doctor?.checks?.length ? `<ul class="list">${doctor.checks.map(c => `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr)"><span>${c.ok && /^warning:/i.test(c.detail) ? badge('warning', 'warn', '') : badge(c.ok ? 'ok' : 'failing', c.ok ? 'passed' : 'failed')}</span><span class="t"><span class="tt">${esc(c.name)}</span><span class="id" style="font-family:var(--sans);white-space:normal;color:var(--fg-2)">${esc(c.detail)}</span></span></div></li>`).join('')}</ul>` : '<p class="fg2">Running checks…</p>');
     },
   },
   updates: {
@@ -2994,7 +2997,7 @@ const ACT = {
   copyssh: b => copy(b.dataset.id, 'ssh command copied').then(() => copied(b)),
   async clearcache(b) {
     const r = b.dataset.id;
-    if (!await ask({ title: 'Clear cache?', body: `Delete the cache of <b>${esc(repoText(F, r))}</b>? The next job starts cold and rebuilds it.`, action: 'Clear cache', danger: 1 })) return;
+    if (!await ask({ title: 'Clear cache?', body: `Delete the cache of <b>${esc(repoText(F, r))}</b>? The next job starts cold and rebuilds it.${S.config.gha_cache || (S.gha_caches?.repos || {})[r] ? ' This also deletes its Actions cache.' : ''}`, action: 'Clear cache', danger: 1 })) return;
     await post('/api/cache/clear', { repo: r }); toast('Cache cleared'); await poll();
   },
   help(b) {
