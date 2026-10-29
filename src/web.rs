@@ -941,6 +941,11 @@ async fn state(State(app): S) -> R<Json<Value>> {
         poll["rates"] = app.gh.rates().into_iter().map(|(i, r)| (i.to_string(), rate(r))).collect::<serde_json::Map<_, _>>().into();
     }
     poll["paused_until"] = json!(app.gh.paused_until());
+    // Walks the Actions cache store when its minute-old answer is stale: off the async runtime.
+    let gha_caches = {
+        let a = app.clone();
+        tokio::task::spawn_blocking(move || vm::gha_stats(&a)).await.unwrap_or_default()
+    };
     Ok(Json(json!({
         "config": app.cfg(),
         // `runs-on` label for the default size: `label`, or `<label>-arm64` on an arm64 host.
@@ -967,7 +972,7 @@ async fn state(State(app): S) -> R<Json<Value>> {
         "build": *BUILD,
         "mirror": mirror::status_json(&app).await,
         "caches": vm::cache_stats(&app.data, &app.all_repos()),
-        "gha_caches": vm::gha_stats(&app),
+        "gha_caches": gha_caches,
         "update": update::compact(&app),
         "restart": update::restart_json(&app, running_listen().as_deref()),
         "serve_socket": SERVE_SOCKET.get() == Some(&true),
@@ -1130,7 +1135,8 @@ struct RepoBody {
     repo: String,
 }
 async fn cache_clear(State(app): S, Json(b): Json<RepoBody>) -> R<(StatusCode, Extension<crate::audit::Note>)> {
-    vm::clear_cache(&app, &b.repo)?;
+    let (a, repo) = (app.clone(), b.repo.clone());
+    tokio::task::spawn_blocking(move || vm::clear_cache(&a, &repo)).await.map_err(anyhow::Error::from)??;
     Ok((StatusCode::NO_CONTENT, Extension(crate::audit::Note(b.repo))))
 }
 

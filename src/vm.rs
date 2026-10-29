@@ -230,7 +230,7 @@ pub struct Vm {
     #[serde(default)]
     pub fork: bool,
     /// Pid of the process kiln started for this VM (rootlesskit, or QEMU): the Actions cache's fallback for finding a
-    /// connection's VM without cgroup scopes. Memory only.
+    /// connection's VM without cgroup scopes (identification only; such a VM never gets the local cache). Memory only.
     #[serde(skip)]
     pub pid: Option<u32>,
     /// The local Actions cache's account of this VM's job (none when it never used it).
@@ -543,6 +543,8 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     tokio::spawn(async move {
         let dir = app.data.join("vms").join(&id);
         let outcome = run(&app, &id, &repo, &dir, &kill, &release).await;
+        // The process is gone: its pid may be reused, and must not identify another process's connections as this VM.
+        update(&app, &id, |v| v.pid = None);
         // Whatever is left in the VM's scope would hold the cache's write lock below.
         crate::resil::stop_scope(&id).await;
         let uring = outcome.as_ref().err().is_some_and(|e| crate::resil::io_uring_exhausted(&format!("{e:#}")));
@@ -1664,29 +1666,33 @@ async fn setup_cache(app: &App, id: &str, repo: &str, dir: &Path, gb: u32) -> Op
 /// overlay would commit, deleted otherwise. Every VM end goes through here (`launch`, `io_uring_hit`).
 async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     let verdict = finish_cache_disk(app, id, repo, dir, done).await;
-    gha_settle(app, id, verdict);
+    gha_settle(app, id, verdict).await;
 }
 
 /// Promote or discard what VM `id` staged in the Actions cache, and record the outcome on the VM.
-fn gha_settle(app: &App, id: &str, verdict: Result<(), String>) {
-    let root = app.data.join("gha-cache");
+async fn gha_settle(app: &App, id: &str, verdict: Result<(), String>) {
+    let (root, budget, vm) = (app.data.join("gha-cache"), app.cfg().gha_cache_gb << 30, id.to_string());
     let (restored, saved) = crate::ghacache::take_stats(id);
-    let (outcome, reason) = match verdict {
-        Ok(()) => match crate::ghacache::promote(&root, id) {
+    // The filesystem work (moving, deleting, sizing entries) stays off the async runtime.
+    let settled = tokio::task::spawn_blocking(move || match verdict {
+        Ok(()) => match crate::ghacache::promote(&root, &vm) {
             Ok((ok, dropped)) => {
-                crate::ghacache::evict(&root, app.cfg().gha_cache_gb << 30);
+                crate::ghacache::evict(&root, budget);
                 ("promoted", format!("{ok} promoted, {dropped} dropped"))
             }
             Err(e) => {
-                crate::ghacache::discard(&root, id);
+                tracing::warn!("{vm}: actions cache promotion failed: {e:#}");
+                crate::ghacache::discard(&root, &vm);
                 ("discarded", format!("promotion failed: {e}"))
             }
         },
         Err(why) => {
-            crate::ghacache::discard(&root, id);
+            crate::ghacache::discard(&root, &vm);
             ("discarded", why)
         }
-    };
+    })
+    .await;
+    let (outcome, reason) = settled.unwrap_or(("discarded", "the settle task failed".into()));
     if restored + saved > 0 {
         update(app, id, |v| v.gha = Some(GhaUse { restored, saved, outcome: outcome.into(), reason }));
     }
@@ -1982,14 +1988,32 @@ fn gha_caller(cfg: &crate::Config, v: &Vm, image: Option<&str>, jwt_runner: Opti
 
 /// The listener's resolver: peer socket -> VM through the kernel, then the VM's policy. `server`: the listener's address.
 pub fn gha_resolver(app: Arc<App>, server: std::net::SocketAddr) -> crate::ghacache::Resolver {
+    gha_resolver_with(app, server, crate::resil::scopes_ok)
+}
+
+fn gha_resolver_with(app: Arc<App>, server: std::net::SocketAddr, scoped: fn() -> bool) -> crate::ghacache::Resolver {
     let peers = crate::ghapeer::Peers::default();
     Arc::new(move |peer, headers| {
         let tracked: Vec<_> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| (v.id.clone(), v.pid)).collect();
-        let id = peers.vm_for_peer(peer, server, &|pid| crate::ghapeer::vm_of_pid(pid, &tracked))?;
+        let Some(id) = peers.vm_for_peer(peer, server, &|pid| crate::ghapeer::vm_of_pid(pid, &tracked)) else {
+            // Once: /proc/net/tcp unreadable, or a connection from something that is not a kiln VM (proxied as is).
+            if peers.warned.lock().unwrap().insert("unresolved".into()) {
+                tracing::warn!("actions cache: a connection from {peer} resolved to no VM (it is proxied to GitHub as is)");
+            }
+            return None;
+        };
         let v = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned()?;
         let image =
             std::fs::read(images(&app.data).join("base.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
         match gha_caller(&app.cfg(), &v, image.as_ref().and_then(image_gha_cache), crate::ghapeer::bearer_runner_id(headers)) {
+            // Without working systemd scopes the VM was found by its pid (or an ancestor's), which a process the guest
+            // cannot influence but a pid reuse could: that identifies proxy traffic, never staged writes.
+            Ok(c) if !scoped() => {
+                if c.local && peers.warned.lock().unwrap().insert("noscope".into()) {
+                    tracing::warn!("actions cache: systemd scopes do not work, so jobs use GitHub's cache (see Diagnostics)");
+                }
+                Some(crate::ghacache::Caller { local: false, can_write: false, ..c })
+            }
             Ok(c) => Some(c),
             Err(why) => {
                 if why.contains("runner") && peers.warned.lock().unwrap().insert(id.clone()) {
@@ -3438,13 +3462,17 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 /// (ok, detail) of the doctor's `actions cache` row. `image` is base.json's `gha_cache` (None: baked before RECIPE 15);
 /// an unsupported image is a warning, not a failure: jobs on it use GitHub's cache as before.
 fn gha_doctor(on: bool, listening: bool, image: Option<&str>, runner: &str) -> (bool, String) {
-    if !on {
-        return (true, "off".into());
-    }
+    // The listener is also the Results proxy of every patched image (artifacts), so it matters with the cache off too.
     if !listening {
-        return (false, format!("nothing answers on 127.0.0.1:{} (starts with `kiln serve`)", crate::ghacache::PORT));
+        return (
+            false,
+            format!("nothing answers on 127.0.0.1:{} (starts with `kiln serve`; patched images' artifacts need it)", crate::ghacache::PORT),
+        );
     }
     let l = format!("listener on 127.0.0.1:{} answering", crate::ghacache::PORT);
+    if !on {
+        return (true, format!("{l}; local cache off (jobs use GitHub's cache)"));
+    }
     match image {
         Some("patched") => (true, format!("{l}; image patched for runner {runner}")),
         Some(why) => (true, format!("warning: {l}, but the image is {why}: jobs use GitHub's cache")),
@@ -3453,7 +3481,7 @@ fn gha_doctor(on: bool, listening: bool, image: Option<&str>, runner: &str) -> (
 }
 
 async fn gha_doctor_row(cfg: &crate::Config, info: &serde_json::Value) -> Check {
-    let listening = cfg.gha_cache && {
+    let listening = {
         let url = format!("http://127.0.0.1:{}/_kiln/ping", crate::ghacache::PORT);
         let c = reqwest::Client::builder().timeout(Duration::from_secs(2)).build();
         match c {
@@ -4463,8 +4491,22 @@ mod tests {
     }
 
     #[test]
+    fn history_rows_carry_the_actions_cache_outcome() {
+        let g = GhaUse { restored: 2, saved: 1, outcome: "promoted".into(), reason: "1 promoted, 0 dropped".into() };
+        let v = Vm { busy_since: Some(5), ended: Some(9), gha: Some(g.clone()), ..vm("h1", State::Done, None) };
+        let row = crate::history::Row::of(&v).unwrap();
+        assert_eq!(row.gha, Some(g));
+        assert!(serde_json::to_string(&row).unwrap().contains("\"gha\""));
+        let plain = crate::history::Row::of(&Vm { gha: None, ..v }).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("gha"), "absent when the cache was not used");
+    }
+
+    #[test]
     fn gha_doctor_row_text() {
-        assert_eq!(gha_doctor(false, false, None, "2.338.2"), (true, "off".into()));
+        let (ok, d) = gha_doctor(false, false, None, "2.338.2");
+        assert!(!ok && d.contains("127.0.0.1:5001"), "the listener is checked with the cache off too: {d}");
+        let (ok, d) = gha_doctor(false, true, None, "2.338.2");
+        assert!(ok && d.contains("local cache off"), "{d}");
         let (ok, d) = gha_doctor(true, false, Some("patched"), "2.338.2");
         assert!(!ok && d.contains("127.0.0.1:5001"), "{d}");
         let (ok, d) = gha_doctor(true, true, Some("patched"), "2.338.2");
@@ -4522,6 +4564,9 @@ mod tests {
         assert_eq!(after.len(), ok.len());
         assert_eq!(after, dll(&[u16("ResultsServiceUrX"), u16("CacheServerUrX")]));
         assert!(m.starts_with("patched 2.338.2 ") && out == format!("kiln: gha-cache {m}"), "{m}");
+        // A second run on the patched file reports patched (same hash), not "unsupported x0".
+        let (again, m2, _) = run(&after);
+        assert_eq!((again, m2.as_str()), (after.clone(), m.as_str()));
         for (name, bytes, why) in [
             ("twice", dll(&[rs.clone(), rs.clone(), ca.clone()]), "ResultsServiceUrl utf-16-le x2"),
             ("missing", dll(std::slice::from_ref(&rs)), "CacheServerUrl utf-16-le x0"),
@@ -4531,6 +4576,12 @@ mod tests {
             assert_eq!(after, bytes, "{name}: file untouched");
             assert!(m.starts_with("unsupported 2.338.2 ") && m.contains(why), "{name}: {m}");
         }
+        // An exception names itself and its cause.
+        std::fs::remove_file(dir.join("bin/Runner.Worker.dll")).unwrap();
+        let o = std::process::Command::new("python3").arg("-I").arg(&sp).arg(&dir).arg("2.338.2").output().unwrap();
+        let m = std::fs::read_to_string(&marker).unwrap();
+        assert!(o.status.success() && m.starts_with("unsupported 2.338.2 FileNotFoundError: ") && m.contains("Runner.Worker.dll"), "{m}");
+        assert_eq!(m.trim_end().lines().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6700,7 +6751,7 @@ print("ok")
         let c = tokio::net::TcpStream::connect(server).await.unwrap();
         let (_s, _) = l.accept().await.unwrap();
         let peer = c.local_addr().unwrap();
-        let resolve = gha_resolver(app.clone(), server);
+        let resolve = gha_resolver_with(app.clone(), server, || true);
         let c1 = resolve(peer, &axum::http::HeaderMap::new()).expect("identified");
         assert_eq!((c1.vm_id.as_str(), c1.local, c1.repo.as_str()), ("kiln-1-0", true, "github|github.com|o/n"));
         let jwt = |rid: u64| {
@@ -6711,6 +6762,9 @@ print("ok")
         };
         assert!(resolve(peer, &jwt(7)).is_some());
         assert!(resolve(peer, &jwt(8)).is_none(), "a token for another runner is unidentified");
+        // Without working scopes the pid fallback identifies the VM but never grants the local cache.
+        let c2 = gha_resolver_with(app.clone(), server, || false)(peer, &axum::http::HeaderMap::new()).expect("still identified");
+        assert_eq!((c2.vm_id.as_str(), c2.local, c2.can_write), ("kiln-1-0", false, false));
         app.vms.lock().unwrap()[0].state = State::Done;
         assert!(resolve(peer, &axum::http::HeaderMap::new()).is_none(), "a finished VM is unidentified");
     }

@@ -185,7 +185,11 @@ write_files:
           b = open(p, 'rb').read()
           bad = [f'{o} {e} x{b.count(o.encode(e))}' for o, _ in names for e, want in (('utf-16-le', 1), ('utf-8', 0))
                  if b.count(o.encode(e)) != want]
-          if bad:
+          # A re-run on a file this script already patched: the new names once, the old ones gone.
+          done = all(b.count(n.encode('utf-16-le')) == 1 and b.count(o.encode('utf-16-le')) == 0 for o, n in names)
+          if done:
+              res = f'patched {ver} {hashlib.sha256(b).hexdigest()}'
+          elif bad:
               res = 'unsupported ' + ver + ' ' + ', '.join(bad)
           else:
               for o, n in names:
@@ -195,7 +199,7 @@ write_files:
               os.replace(p + '.tmp', p)
               res = f'patched {ver} {hashlib.sha256(b).hexdigest()}'
       except Exception as e:
-          res = f'unsupported {ver} {type(e).__name__}'
+          res = f'unsupported {ver} {type(e).__name__}: {e}'.replace('\n', ' ')
       os.makedirs('/etc/kiln', exist_ok=True)
       open('/etc/kiln/gha-cache', 'w').write(res + '\n')
       print('kiln: gha-cache ' + res)

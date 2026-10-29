@@ -676,6 +676,7 @@ async fn run() -> Result<()> {
     }
     tracing_subscriber::fmt().with_target(false).init();
     resil::lower_memlock();
+    resil::raise_nofile();
     let data = std::env::var_os("KILN_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".local/share/kiln"));
@@ -1171,7 +1172,15 @@ async fn scheduler(app: Arc<App>) {
         if now() >= swept + SWEEP_EVERY {
             swept = now();
             sweep_fails = if sweep_runners(&app, true, sweep_fails).await { 0 } else { sweep_fails + 1 };
-            ghacache::evict(&app.data.join("gha-cache"), app.cfg().gha_cache_gb << 30);
+            // Staged uploads of a VM that never reached finish_cache go too; one still settling (no end yet) stays.
+            let live: Vec<String> =
+                app.vms.lock().unwrap().iter().filter(|v| v.state.is_active() || v.ended.is_none()).map(|v| v.id.clone()).collect();
+            let (root, budget) = (app.data.join("gha-cache"), app.cfg().gha_cache_gb << 30);
+            let _ = tokio::task::spawn_blocking(move || {
+                ghacache::discard_dead(&root, &live);
+                ghacache::evict(&root, budget);
+            })
+            .await;
         }
         let cfg = app.cfg();
         let res = tick(&app, &cfg).await;
