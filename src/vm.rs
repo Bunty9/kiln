@@ -2856,9 +2856,14 @@ async fn bake_inner(app: &App) -> Result<()> {
 }
 
 /// The bake's `kiln: gha-cache patched|unsupported <version> <detail>` line (kiln-patch-runner) as the image metadata
-/// value: "patched", or "unsupported: <reason>" (also when the line is missing). Console trace lines start with "+ ".
+/// value: "patched", or "unsupported: <reason>" (also when the line is missing). Console trace lines start with "+ ";
+/// cloud-init output reaches the console as `[  187.03] cloud-init[1062]: kiln: gha-cache ...`.
 fn gha_cache_fact(console: &str) -> String {
-    let line = console.lines().rev().find_map(|l| l.trim().strip_prefix("kiln: gha-cache "));
+    let line = console.lines().rev().find_map(|l| {
+        let l = l.trim();
+        let l = if l.starts_with('[') { l.split_once("]: ").map_or(l, |(_, r)| r) } else { l };
+        l.strip_prefix("kiln: gha-cache ")
+    });
     match line.map(|l| l.splitn(3, ' ').collect::<Vec<_>>()).as_deref() {
         Some(["patched", ..]) => "patched".into(),
         Some(["unsupported", _, why]) => format!("unsupported: {why}"),
@@ -4474,6 +4479,9 @@ mod tests {
     fn gha_cache_bake_fact() {
         let c = "+ echo x\nkiln: gha-cache patched 2.338.2 abc\n";
         assert_eq!(gha_cache_fact(c), "patched");
+        // As the real bake console shows it (2.338.2 on Ubuntu 24.04).
+        assert_eq!(gha_cache_fact("[  187.034349] cloud-init[1062]: kiln: gha-cache patched 2.338.2 24e4\n"), "patched");
+        assert!(gha_cache_fact("[  1.0] cloud-init[1]: + echo 'kiln: gha-cache patched 1 x'\n").starts_with("unsupported"));
         let u = "kiln: gha-cache unsupported 2.340.0 CacheServerUrl utf-16-le x2, ResultsServiceUrl utf-8 x1\n";
         assert_eq!(gha_cache_fact(u), "unsupported: CacheServerUrl utf-16-le x2, ResultsServiceUrl utf-8 x1");
         assert!(gha_cache_fact("+ echo 'kiln: gha-cache patched 1 x'\n").starts_with("unsupported"));
