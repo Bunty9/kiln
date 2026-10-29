@@ -4643,7 +4643,10 @@ mod tests {
         for code in ["000", "500", "200"] {
             let (ok, env, out) = run(Some("patched 2.338.2 abc\n"), code, push.clone());
             assert!(ok, "an unreachable cache never fails the job");
-            assert_eq!(env, "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n");
+            assert_eq!(
+                env,
+                "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n"
+            );
             assert!(out.contains("::warning::") && out.contains("unreachable"), "{out}");
         }
         for state in [Some("unsupported 2.340.0 CacheServerUrl utf-16-le x2\n"), Some(""), None] {
@@ -4655,7 +4658,10 @@ mod tests {
         ref_type.set("tag");
         let (ok, env, out) = run(Some("patched 2.338.2 abc\n"), "204", push.clone());
         assert!(ok && !out.contains("::warning::") && !dir.join("curl.log").exists());
-        assert_eq!(env, "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n");
+        assert_eq!(
+            env,
+            "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_URL=https://results-receiver.actions.githubusercontent.com/\nACTIONS_CACHE_SERVICE_V2=true\n"
+        );
         ref_type.set("branch");
         // A fork is refused before any of it.
         let fork = serde_json::json!({ "pull_request": { "head": { "repo": { "full_name": "evil/demo" } } } });
