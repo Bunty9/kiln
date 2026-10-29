@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-29
+
+Reliability release: VM launches no longer fail when other programs of the same user hold io_uring memory, a VM that runs out of memory takes only itself, a scheduler panic restarts kiln instead of leaving it idle, and only one `kiln serve` runs per data directory. GitHub jobs kiln loses (a crash or restart under them, a shutdown, a dashboard kill) no longer hang their run: kiln force-cancels it and removes the runner. A new command line (`kiln status`, `jobs`, `logs`, `wait`, `rerun`) gives scripts and agents the real outcome as an exit code, `/api/state` says why queued jobs wait, and runs GitHub holds as pending are flagged. The Overview gains job hover cards that stay current, synced host graphs and event icons; burning cards now show on phones; notification messages can link to the dashboard; usage statistics count why jobs did not pass. rustls, rustls-webpki, webpki-roots and tokio are updated for RustSec advisories. The base image recipe is unchanged (`RECIPE` 14): no rebake.
+
 ### Added
 
 - **A command line for the running kiln.** `kiln status`, `jobs`, `logs`, `wait` and `rerun` (all with `--json`) use the unix socket and the dashboard key, so scripts and agents need no curl. `kiln wait <run-id|sha>` exits 0 success, 1 failure or job timeout, 2 cancelled, 3 infrastructure loss (VM lost, killed, oom), 4 refused by kiln, 5 wait timed out, 6 error, and reports a lost VM that GitHub still shows as in progress. `kiln logs <vm> --failed` prints the failing step and the lines around errors. See `docs/cli.md`.
@@ -311,7 +315,8 @@ First release.
 - Idle VMs booted under older security settings (egress mode, debug keys) are recycled before they can take a job.
 - Mirror binary is pinned and verified by checksum; the mirror is pull-only on host loopback.
 
-[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/Bunty9/kiln/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/Bunty9/kiln/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Bunty9/kiln/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/Bunty9/kiln/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Bunty9/kiln/compare/v0.2.3...v0.2.4
