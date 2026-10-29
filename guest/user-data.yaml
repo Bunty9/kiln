@@ -802,16 +802,17 @@ write_files:
         sudo /usr/local/sbin/kiln-cache detach || { echo "::error::kiln could not detach the cache for a release build"; exit 1; }
       fi
       # Patched runner (kiln-patch-runner): it no longer sets the Results/cache URLs, so this hook does, for every job.
-      # kiln's listener on the host loopback (10.0.2.2:5001) serves the Actions cache; if it is down the cache reports
-      # unavailable (artifacts still go to GitHub). Unpatched image: stock behaviour. Never fails the job.
-      # A cold job (tag, release) gets GitHub's URL: no local cache for what gets shipped.
+      # kiln's listener on the host loopback (10.0.2.2:5001) serves the Actions cache; if it is down, or the job is cold
+      # (tag, release: no local cache for what gets shipped), both URLs point at GitHub, so the job uses GitHub's cache as
+      # on a stock runner (setup-node v4's cache 4.0.3 checks ACTIONS_CACHE_URL before using the v2 Results service).
+      # Unpatched image: stock behaviour. Never fails the job.
       read -r gha_state _ < /etc/kiln/gha-cache 2>/dev/null || gha_state=
       if [ "$gha_state" = patched ]; then
         if [ -z "$cold" ] && [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://10.0.2.2:5001/_kiln/ping 2>/dev/null)" = 204 ]; then
           printf '%s\n' ACTIONS_RESULTS_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
         else
-          printf '%s\n' ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
-          [ -n "$cold" ] || echo "::warning::kiln's local Actions cache is unreachable: the cache is unavailable for this job"
+          printf '%s\n' ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/ ACTIONS_CACHE_URL=https://results-receiver.actions.githubusercontent.com/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
+          [ -n "$cold" ] || echo "::warning::kiln's local Actions cache is unreachable: this job uses GitHub's cache"
         fi
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf
