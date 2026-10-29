@@ -2968,7 +2968,7 @@ const ACT = {
   },
   async kill() {
     const v = S.vms.find(x => x.id === pages.job.id);
-    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The VM stops now. ${fname(forgeOf(F, v.repo))} marks the job failed or cancelled once its runner times out, which can take several minutes. A VM killed while booting leaves the job queued, so kiln may start another VM for it.`, action: 'Kill VM', danger: 1 })) return;
+    if (!await ask({ title: 'Kill VM?', body: `Kill VM running <b>${esc(repoText(F, v.repo))} / ${esc(v.job || 'no job')}</b>? The VM stops now. On GitHub, kiln then cancels the job's whole run when <span class="mono">reclaim_lost_jobs</span> is on; otherwise the job stays in progress there until its timeout. Other forges mark the job failed once its runner times out, which can take several minutes. A VM killed while booting leaves the job queued, so kiln may start another VM for it.`, action: 'Kill VM', danger: 1 })) return;
     await post(`/api/vms/${encodeURIComponent(v.id)}/kill`); toast('Kill sent'); await poll(); const h = $('#jd h1'); if (h) { h.tabIndex = -1; h.focus(); }
   },
   async release() {

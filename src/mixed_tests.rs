@@ -695,7 +695,7 @@ async fn nothing_is_cancelled_unless_the_job_runs_on_that_runner() {
 }
 
 #[tokio::test]
-async fn a_run_another_active_vm_holds_is_not_cancelled() {
+async fn a_run_another_active_vm_holds_is_cancelled_only_after_it_ends() {
     let t = Trio::new("mixed-reclaim-shared", 99, |_| {}).await;
     t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
     gh_job(&t, 7001, "in_progress", "seed-a");
@@ -704,9 +704,95 @@ async fn a_run_another_active_vm_holds_is_not_cancelled() {
     seed(&t.app, "seed-b", GH_REPO, "busy", 12, 1, 64);
     t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-b").unwrap().job_url =
         Some("https://github.com/acme/demo/actions/runs/9001/job/7002".into());
-    assert!(vm::retire_ended(&t.app).await);
+    assert!(!vm::retire_ended(&t.app).await, "retried later");
     assert_eq!(forced(&t), 0);
     assert!(!t.gh.requests().iter().any(|r| r.contains("/jobs/")), "not even asked");
+    // The sibling ends: the next try cancels.
+    t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-b").unwrap().state = vm::State::Done;
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 1);
+}
+
+/// A VM kiln ended while the job ran: the record `launch` leaves after a shutdown or dashboard kill.
+fn killed_gh(t: &Trio, id: &str, note: &str) {
+    lost_gh(t, id, 9001, 7001);
+    let mut vms = t.app.vms.lock().unwrap();
+    let v = vms.iter_mut().find(|v| v.id == id).unwrap();
+    (v.state, v.note) = (vm::State::Killed, Some(note.into()));
+}
+
+fn cause(t: &Trio, id: &str) -> Option<&'static str> {
+    t.app.vms.lock().unwrap().iter().find(|v| v.id == id).unwrap().fail_cause()
+}
+
+#[tokio::test]
+async fn a_reclaim_appends_to_the_note_and_keeps_the_failure_cause() {
+    for (note, state, want) in [
+        ("kiln shutting down", vm::State::Killed, "killed"),
+        ("killed from dashboard", vm::State::Killed, "killed"),
+        ("", vm::State::Lost, "lost"),
+    ] {
+        let t = Trio::new("mixed-reclaim-note", 99, |_| {}).await;
+        t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+        gh_job(&t, 7001, "in_progress", "seed-a");
+        t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+        killed_gh(&t, "seed-a", note);
+        t.app.vms.lock().unwrap().iter_mut().find(|v| v.id == "seed-a").unwrap().state = state;
+        assert_eq!(cause(&t, "seed-a"), Some(want));
+        assert!(!vm::retire_ended(&t.app).await, "{note}");
+        assert_eq!(forced(&t), 1, "{note}");
+        let n = gh_note(&t, "seed-a").unwrap();
+        assert!(n.starts_with(note) && n.contains("kiln force-cancelled run 9001"), "{n}");
+        assert_eq!(cause(&t, "seed-a"), Some(want), "{n}");
+        // The cancel is not repeated on the next start, even though the note changed.
+        vm::retire_ended(&t.app).await;
+        assert_eq!(forced(&t), 1, "{note}");
+    }
+}
+
+#[tokio::test]
+async fn a_job_timeout_kill_is_not_reclaimed() {
+    let t = Trio::new("mixed-reclaim-timeout", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    killed_gh(&t, "seed-a", "job timeout after 60 min");
+    assert!(vm::retire_ended(&t.app).await);
+    assert!(t.gh.requests().is_empty(), "today's behaviour: not even retired at start: {:?}", t.gh.requests());
+}
+
+#[tokio::test]
+async fn a_rate_limited_force_cancel_is_retried() {
+    let t = Trio::new("mixed-reclaim-rate", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.fail("POST", &format!("{GH}/runs/9001/force-cancel"), 403, "API rate limit exceeded for installation");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(gh_note(&t, "seed-a"), None, "not final");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 2);
+    assert!(gh_note(&t, "seed-a").unwrap().starts_with("kiln force-cancelled"));
+}
+
+/// Without a VM scope a kill -9 of kiln leaves QEMU running: the job is healthy, nothing is cancelled.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_vm_whose_qemu_still_runs_is_not_reclaimed() {
+    let t = Trio::new("mixed-reclaim-qemu", 99, |_| {}).await;
+    t.gh.fail("DELETE", &format!("{GH}/runners/11"), 422, "busy");
+    gh_job(&t, 7001, "in_progress", "seed-a");
+    t.gh.route("POST", &format!("{GH}/runs/9001/force-cancel"), 202, "{}");
+    lost_gh(&t, "seed-a", 9001, 7001);
+    let q = format!("{}/vms/seed-a/q/disk", t.app.data.display());
+    let mut qemu = std::process::Command::new("bash").args(["-c", "exec -a \"qemu-system-x86_64 $0\" sleep 30", &q]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!vm::retire_ended(&t.app).await, "retried later");
+    assert_eq!(forced(&t), 0);
+    qemu.kill().unwrap();
+    qemu.wait().unwrap();
+    assert!(!vm::retire_ended(&t.app).await);
+    assert_eq!(forced(&t), 1);
 }
 
 #[tokio::test]

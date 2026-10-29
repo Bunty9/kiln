@@ -134,7 +134,7 @@ impl Vm {
             None if note.starts_with("job timeout") => "timeout",
             None if note.starts_with("killed: the pipeline was cancelled") => "cancelled",
             None if note == crate::resil::OOM_NOTE => "oom",
-            None if note.starts_with("killed") || note == "kiln shutting down" => "killed",
+            None if note.starts_with("killed") || note.starts_with("kiln shutting down") => "killed",
             None if self.state == State::Failed => "no_result",
             None => "other",
         })
@@ -726,15 +726,17 @@ fn kill_idle(app: &App, id: &str, reason: Reason, why: &str) {
 }
 
 /// Why this VM's job is gone without a result, when kiln itself ended it: it died with a crash or restart,
-/// or kiln killed it on the job timeout or at shutdown. None for every other end (the runner reports those).
+/// or kiln killed it at shutdown, or the operator killed it from the dashboard. None for every other end
+/// (the runner reports those). Not the job timeout: a job that hung in its own code is a real failure,
+/// and a cancelled run would read as a pass to merge automation.
 fn lost_when(v: &Vm) -> Option<&'static str> {
     if v.result.is_some() {
         return None;
     }
     match (v.state, v.note.as_deref().unwrap_or_default()) {
         (State::Lost, _) => Some("kiln stopped under it"),
-        (State::Killed, n) if n.starts_with("job timeout") => Some("kiln killed it on the job timeout"),
-        (State::Killed, "kiln shutting down") => Some("kiln shut down"),
+        (State::Killed, n) if n.starts_with("kiln shutting down") => Some("kiln shut down"),
+        (State::Killed, n) if n.starts_with("killed from dashboard") => Some("you killed it from the dashboard"),
         _ => None,
     }
 }
@@ -754,8 +756,8 @@ async fn reclaim(app: &App, repo: &str, id: &str, forge: &crate::forge::Forge, r
     let Some(v) = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned() else { return false };
     let Some(why) = lost_when(&v) else { return false };
     match v.note.as_deref() {
-        Some(n) if n.starts_with(CANCELLED) => return true,
-        Some(n) if n.starts_with(NOT_CANCELLED) => return false,
+        Some(n) if n.contains(CANCELLED) => return true,
+        Some(n) if n.contains(NOT_CANCELLED) => return false,
         _ => {}
     }
     let Some(url) = v.job_url.as_deref() else {
@@ -767,8 +769,14 @@ async fn reclaim(app: &App, repo: &str, id: &str, forge: &crate::forge::Forge, r
         o.id != id && o.state.is_active() && o.repo.eq_ignore_ascii_case(repo) && o.job_url.as_deref().and_then(run_id) == Some(run)
     };
     if app.vms.lock().unwrap().iter().any(shared) {
-        tracing::info!("{id}: run {run} is also held by another VM, not cancelling it");
-        return false;
+        tracing::info!("{id}: run {run} is also held by another VM, not cancelling it yet");
+        return true;
+    }
+    // Without a VM scope a kill -9 of kiln leaves QEMU running: the job is then still healthy.
+    let vms_dir = format!("{}/", app.data.join("vms").display());
+    if qemu_alive(&crate::platform::process_cmdlines(), &vms_dir, id) {
+        tracing::info!("{id}: its QEMU still runs, the job is not lost; not cancelling run {run} yet");
+        return true;
     }
     match forge.job_held_by(rr, job, id).await {
         Ok(true) => {}
@@ -795,7 +803,9 @@ async fn reclaim(app: &App, repo: &str, id: &str, forge: &crate::forge::Forge, r
         }
     };
     tracing::warn!("{repo}: {msg} ({link})");
-    if let Some(v) = update(app, id, |v| v.note = Some(msg)) {
+    // Appended: the original reason (`fail_cause`) stays readable.
+    let add = |v: &mut Vm| v.note = Some(v.note.as_deref().filter(|n| !n.is_empty()).map_or(msg.clone(), |n| format!("{n}; {msg}")));
+    if let Some(v) = update(app, id, add) {
         persist(app, &v);
     }
     done
@@ -808,11 +818,12 @@ async fn reclaim(app: &App, repo: &str, id: &str, forge: &crate::forge::Forge, r
 /// 404 is as good as a delete. False when a delete failed (no network yet): the caller tries again.
 pub async fn retire_ended(app: &App) -> bool {
     let t = now();
+    let reclaim = app.cfg().reclaim_lost_jobs;
     let mut by_repo: std::collections::HashMap<String, Vec<(String, u64)>> = Default::default();
     for v in app.vms.lock().unwrap().iter().filter(|v| v.ended.is_some_and(|e| e + 86400 > t)) {
         if let Some(rid) = v.runner_id {
             let gated = forge_for(app, &v.repo).is_ok_and(|(f, _)| f.gated());
-            if gated || v.state == State::Lost {
+            if gated || v.state == State::Lost || (reclaim && lost_when(v).is_some()) {
                 by_repo.entry(v.repo.clone()).or_default().push((v.id.clone(), rid));
             }
         }
@@ -3367,6 +3378,14 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     out
 }
 
+/// Does a QEMU process still run from VM `id`'s directory (see `count_qemus`)?
+fn qemu_alive(cmdlines: &[String], vms_dir: &str, id: &str) -> bool {
+    let mine = format!("{vms_dir}{id}/q/");
+    cmdlines
+        .iter()
+        .any(|c| c.split(['\0', ' ']).next().unwrap_or("").rsplit('/').next().unwrap_or("").starts_with("qemu-system") && c.contains(&mine))
+}
+
 /// (qemu processes under `vms_dir`, those whose `<id>/q/` path is no active VM's). Only argv[0]
 /// `qemu-system*` counts: rootlesskit and its `/proc/self/exe` helper carry QEMU's command line as arguments.
 fn count_qemus(cmdlines: &[String], vms_dir: &str, active: &[String]) -> (usize, usize) {
@@ -3666,6 +3685,16 @@ mod tests {
     }
 
     #[test]
+    fn a_vms_own_qemu_is_found_by_its_directory() {
+        let d = "/data/vms/";
+        let c = |s: &str| vec![s.to_string()];
+        assert!(qemu_alive(&c("/usr/bin/qemu-system-x86_64 -drive file=/data/vms/kiln-1-0/q/disk.qcow2"), d, "kiln-1-0"));
+        assert!(!qemu_alive(&c("/usr/bin/qemu-system-x86_64 -drive file=/data/vms/kiln-1-00/q/disk.qcow2"), d, "kiln-1-0"));
+        assert!(!qemu_alive(&c("rootlesskit /usr/bin/qemu-system-x86_64 /data/vms/kiln-1-0/q/disk"), d, "kiln-1-0"));
+        assert!(!qemu_alive(&[], d, "kiln-1-0"));
+    }
+
+    #[test]
     fn only_a_job_kiln_itself_ended_is_lost() {
         let url = "https://github.com/o/n/actions/runs/12/job/34";
         assert_eq!((run_id(url), job_id(url)), (Some(12), Some(34)));
@@ -3675,9 +3704,11 @@ mod tests {
         v.result = Some("success".into());
         assert!(lost_when(&v).is_none(), "the runner reported a result");
         for (note, lost) in [
-            ("job timeout after 60 min", true),
+            ("job timeout after 60 min", false),
             ("kiln shutting down", true),
-            ("killed from dashboard", false),
+            ("kiln shutting down; kiln force-cancelled run 1: x", true),
+            ("killed from dashboard", true),
+            ("killed: the pipeline was cancelled", false),
             ("idle timeout: no job arrived", false),
         ] {
             let mut v = vm("a", State::Killed, None);

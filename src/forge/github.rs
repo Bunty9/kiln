@@ -141,8 +141,11 @@ impl GitHub {
     }
 
     /// `force-cancel` ends a run whose job lost its runner, which the plain cancel leaves waiting. The HTTP status.
+    /// A 403 that is GitHub's rate limit is reported as 429: it passes, the others are final.
     pub async fn force_cancel(&self, repo: &RepoRef, id: u64) -> Result<u16> {
-        Ok(self.gh.raw(reqwest::Method::POST, &format!("repos/{}/actions/runs/{id}/force-cancel", repo.path), None).await?.status)
+        let r = self.gh.raw(reqwest::Method::POST, &format!("repos/{}/actions/runs/{id}/force-cancel", repo.path), None).await?;
+        let limited = r.status == 403 && String::from_utf8_lossy(&r.body).to_ascii_lowercase().contains("rate limit");
+        Ok(if limited { 429 } else { r.status })
     }
 
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
