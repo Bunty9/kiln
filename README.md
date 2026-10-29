@@ -145,6 +145,7 @@ Measured on the reference box, a Ryzen 7 that also runs kiln's own CI. Method, h
 - GitHub, GitLab and Gitea in one kiln, each with its own token, projects and trust rules.
 - Embedded dashboard: setup stepper, live console and step logs, job timelines, repo and workflow views, settings, diagnostics.
 - Installable as an app (PWA) over Tailscale HTTPS, with its own window, icon and shortcuts. See [Install as an app](docs/configuration.md#install-as-an-app).
+- A command line for scripts and agents: `kiln status`, `jobs`, `logs`, `wait <run-id|sha>` (exit codes tell a failed run from a cancelled one or a lost VM) and `rerun`. See [docs/cli.md](docs/cli.md).
 - Auto-rebake of the base image when the GitHub runner version or image age goes stale, or the baked Node versions change.
 - Fork pull requests refused by kiln itself, before any of their code runs.
 - Signed self-updates that roll back if the new version fails to start.

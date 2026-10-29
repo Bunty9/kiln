@@ -1,6 +1,7 @@
 mod app_auth;
 mod audit;
 mod boot;
+mod cli;
 mod confine;
 mod forge;
 #[cfg(test)]
@@ -663,6 +664,10 @@ async fn run() -> Result<()> {
         println!("kiln {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    // Before logging, telemetry and the token: a CLI call only talks to the running kiln.
+    if let Some(code) = cli::dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
     tracing_subscriber::fmt().with_target(false).init();
     resil::lower_memlock();
     let data = std::env::var_os("KILN_DATA")
@@ -785,7 +790,7 @@ async fn run() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: kiln [serve|bake|doctor|--version]\n  serve      run scheduler + dashboard (default)\n  bake       build the base VM image\n  doctor     check host prerequisites\n  --version  print the version"
+                "usage: kiln [serve|bake|doctor|status|jobs|logs|wait|rerun|--version]\n  serve      run scheduler + dashboard (default)\n  bake       build the base VM image\n  doctor     check host prerequisites\n  status     the running kiln's state (--json, --doctor)\n  jobs       recent jobs (--repo --pr --sha --branch --limit)\n  logs <vm>  a VM's log (--console --failed --follow)\n  wait <run-id|sha>  block until the run(s) finish; exit code says how\n  rerun <run-id>     rerun a run (--failed)\n  --version  print the version"
             );
             std::process::exit(2)
         }
@@ -2151,7 +2156,7 @@ mod tests {
     fn only_serve_counts_update_boots() {
         assert!(is_serve(None));
         assert!(is_serve(Some("serve")));
-        for a in ["bake", "doctor", "--version", "-V", "version", "help", ""] {
+        for a in ["bake", "doctor", "status", "wait", "--version", "-V", "version", "help", ""] {
             assert!(!is_serve(Some(a)), "{a}");
         }
     }
