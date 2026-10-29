@@ -64,6 +64,8 @@ write_files:
       curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-{{ARCH}}-$V.tar.gz" \
         | tar -xz -C /home/runner/actions-runner
       /home/runner/actions-runner/bin/installdependencies.sh
+      # Lets kiln serve the Actions cache: see kiln-patch-runner. Never fails the bake; the host reads its report line.
+      /usr/local/sbin/kiln-patch-runner /home/runner/actions-runner "$V"
       # GitLab and Gitea runners: versions and checksums are pinned in kiln, never "latest".
       # A mismatch fails sha256sum, and so the bake. /usr/local/bin is on every user's PATH (sudo's too).
       for P in gitlab-runner:https://gitlab-runner-downloads.s3.amazonaws.com/v{{GITLAB_RUNNER_VERSION}}/binaries/gitlab-runner-linux-{{DEB_ARCH}}:{{GITLAB_RUNNER_SHA256}} \
@@ -166,6 +168,37 @@ write_files:
       touch /etc/cloud/cloud-init.disabled
       cloud-init clean --logs --machine-id
       echo KILN_BAKE_OK > /dev/{{CONSOLE}}
+  - path: /usr/local/sbin/kiln-patch-runner
+    permissions: "0755"
+    content: |
+      #!/usr/bin/python3 -I
+      # Same-length patch of bin/Runner.Worker.dll so the runner stops overwriting ACTIONS_RESULTS_URL and
+      # ACTIONS_CACHE_URL for actions (the job-started hook sets them instead). Usage: kiln-patch-runner <runner dir> <version>.
+      # Patches only if each name is in the file exactly once as UTF-16LE (.NET metadata) and never as UTF-8; otherwise the
+      # file is left untouched. Always exits 0. Records `patched <ver> <sha256>` or `unsupported <ver> <reason>` in
+      # /etc/kiln/gha-cache (root-owned) and prints it as a `kiln: gha-cache` line, which the host reads from the bake log.
+      import hashlib, os, sys
+      d, ver = sys.argv[1], sys.argv[2]
+      p = d.rstrip('/') + '/bin/Runner.Worker.dll'
+      names = [('ResultsServiceUrl', 'ResultsServiceUrX'), ('CacheServerUrl', 'CacheServerUrX')]
+      try:
+          b = open(p, 'rb').read()
+          bad = [f'{o} {e} x{b.count(o.encode(e))}' for o, _ in names for e, want in (('utf-16-le', 1), ('utf-8', 0))
+                 if b.count(o.encode(e)) != want]
+          if bad:
+              res = 'unsupported ' + ver + ' ' + ', '.join(bad)
+          else:
+              for o, n in names:
+                  assert len(o) == len(n)
+                  b = b.replace(o.encode('utf-16-le'), n.encode('utf-16-le'))
+              open(p + '.tmp', 'wb').write(b)
+              os.replace(p + '.tmp', p)
+              res = f'patched {ver} {hashlib.sha256(b).hexdigest()}'
+      except Exception as e:
+          res = f'unsupported {ver} {type(e).__name__}'
+      os.makedirs('/etc/kiln', exist_ok=True)
+      open('/etc/kiln/gha-cache', 'w').write(res + '\n')
+      print('kiln: gha-cache ' + res)
   - path: /usr/local/sbin/kiln-job
     permissions: "0755"
     content: |
@@ -761,6 +794,18 @@ write_files:
       # of those could otherwise plant a toolchain in ~/.cargo or ~/.rustup for the release).
       if [ "${GITHUB_REF_TYPE:-}" = tag ] || [ "${GITHUB_EVENT_NAME:-}" = release ]; then
         sudo /usr/local/sbin/kiln-cache detach || { echo "::error::kiln could not detach the cache for a release build"; exit 1; }
+      fi
+      # Patched runner (kiln-patch-runner): it no longer sets the Results/cache URLs, so this hook does, for every job.
+      # kiln's listener on the host loopback (10.0.2.2:5001) serves the Actions cache; if it is down the cache reports
+      # unavailable (artifacts still go to GitHub). Unpatched image: stock behaviour. Never fails the job.
+      read -r gha_state _ < /etc/kiln/gha-cache 2>/dev/null || gha_state=
+      if [ "$gha_state" = patched ]; then
+        if [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' http://10.0.2.2:5001/_kiln/ping 2>/dev/null)" = 204 ]; then
+          printf '%s\n' ACTIONS_RESULTS_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_URL=http://10.0.2.2:5001/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
+        else
+          printf '%s\n' ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/ ACTIONS_CACHE_SERVICE_V2=true >> "$GITHUB_ENV"
+          echo "::warning::kiln's local Actions cache is unreachable: the cache is unavailable for this job"
+        fi
       fi
   - path: /etc/ssh/sshd_config.d/00-kiln.conf
     content: |
