@@ -260,6 +260,11 @@ fn repo_of(c: &Conn, a: &Args) -> Result<String> {
     }
 }
 
+/// The runs in a `/api/runs` page (`{"runs": [...], "next": ...}`; a bare array is accepted too).
+fn runs_of(page: &Value) -> impl Iterator<Item = &Value> {
+    page.get("runs").unwrap_or(page).as_array().into_iter().flatten()
+}
+
 /// `kiln wait`'s target: digits are a run id (GitHub's are 11 digits and growing), `sha:<hex>` or any
 /// other hex is a commit.
 fn wait_target(t: &str) -> (bool, String) {
@@ -657,7 +662,7 @@ fn wait(a: &Args) -> Result<i32> {
         let polled = (|| -> Result<Vec<(u64, Option<i32>)>> {
             let st = c.get("/api/state")?;
             if !by_id {
-                for r in c.get(&format!("/api/runs?{}", q("")))?.as_array().into_iter().flatten() {
+                for r in runs_of(&c.get(&format!("/api/runs?{}", q("")))?) {
                     let rs = s(r, "sha").to_lowercase();
                     if !rs.is_empty() && (rs.starts_with(&sha) || sha.starts_with(&rs)) {
                         seen.entry(r["id"].as_u64().unwrap_or(0)).or_insert((0, 0));
@@ -885,5 +890,12 @@ mod tests {
         assert_eq!(wait_target("7"), (true, "7".into()));
         assert_eq!(wait_target("4B0B413"), (false, "4b0b413".into()));
         assert_eq!(wait_target("sha:1234567"), (false, "1234567".into()));
+    }
+
+    #[test]
+    fn runs_come_from_the_page_object() {
+        let page = json!({ "runs": [{ "id": 1 }, { "id": 2 }], "next": null });
+        assert_eq!(runs_of(&page).count(), 2);
+        assert_eq!(runs_of(&json!([{ "id": 3 }])).count(), 1);
     }
 }
