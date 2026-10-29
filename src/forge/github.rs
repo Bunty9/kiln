@@ -36,8 +36,8 @@ impl GitHub {
     }
 
     pub async fn demand(&self, repo: &RepoRef, label: &str, default_cpus: u32) -> Result<Demand> {
-        let (by_size, claimed, refused_forks) = self.gh.queued_jobs(&repo.path, label, default_cpus).await?;
-        Ok(Demand { by_size, claimed, refused_forks, ..Default::default() })
+        let (by_size, claimed, refused_forks, pending) = self.gh.queued_jobs(&repo.path, label, default_cpus).await?;
+        Ok(Demand { by_size, claimed, refused_forks, pending, ..Default::default() })
     }
 
     pub async fn register(&self, repo: &RepoRef, name: &str, labels: &[String]) -> Result<RunnerReg> {
@@ -131,6 +131,21 @@ impl GitHub {
 
     pub async fn cancel(&self, repo: &RepoRef, id: u64) -> Result<()> {
         self.post(&format!("repos/{}/actions/runs/{id}/cancel", repo.path), None).await
+    }
+
+    /// Whether job `job_id` is still queued or running on the runner named `runner`: the proof that a run
+    /// is held by a VM kiln lost. Anything else (done, another runner, no runner yet) is false.
+    pub async fn job_held_by(&self, repo: &RepoRef, job_id: u64, runner: &str) -> Result<bool> {
+        let j = self.gh.get(&format!("repos/{}/actions/jobs/{job_id}", repo.path)).await?;
+        Ok(matches!(j["status"].as_str(), Some("in_progress" | "queued")) && j["runner_name"].as_str() == Some(runner))
+    }
+
+    /// `force-cancel` ends a run whose job lost its runner, which the plain cancel leaves waiting. The HTTP status.
+    /// A 403 that is GitHub's rate limit is reported as 429: it passes, the others are final.
+    pub async fn force_cancel(&self, repo: &RepoRef, id: u64) -> Result<u16> {
+        let r = self.gh.raw(reqwest::Method::POST, &format!("repos/{}/actions/runs/{id}/force-cancel", repo.path), None).await?;
+        let limited = r.status == 403 && String::from_utf8_lossy(&r.body).to_ascii_lowercase().contains("rate limit");
+        Ok(if limited { 429 } else { r.status })
     }
 
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {

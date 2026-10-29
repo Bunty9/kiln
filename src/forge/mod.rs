@@ -382,6 +382,17 @@ pub struct Demand {
     pub fork_queued: bool,
     /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
     pub lookup_error: Option<String>,
+    /// GitHub: runs held as `pending` (concurrency group or approval wait). Informational.
+    pub pending: Vec<PendingRun>,
+}
+
+/// A workflow run the forge holds as pending.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingRun {
+    pub workflow: String,
+    pub number: u64,
+    /// Unix time the run was created.
+    pub since: u64,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.
@@ -608,6 +619,20 @@ impl Forge {
             Self::GitHub(g) => g.cancel(repo, id).await,
             Self::GitLab(g) => g.cancel(repo, id).await,
             Self::Gitea(g) => g.cancel(repo, id).await,
+        }
+    }
+    /// GitHub only (the others bail): is job `job_id` still queued or running on the runner `runner`?
+    pub async fn job_held_by(&self, repo: &RepoRef, job_id: u64, runner: &str) -> Result<bool> {
+        match self {
+            Self::GitHub(g) => g.job_held_by(repo, job_id, runner).await,
+            _ => bail!("not supported on this forge"),
+        }
+    }
+    /// GitHub only (the others bail): force-cancel run `id`; the HTTP status (202 = accepted).
+    pub async fn force_cancel(&self, repo: &RepoRef, id: u64) -> Result<u16> {
+        match self {
+            Self::GitHub(g) => g.force_cancel(repo, id).await,
+            _ => bail!("not supported on this forge"),
         }
     }
     /// GitLab only: the job ids of pipeline `id`; empty elsewhere.

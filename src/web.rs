@@ -1971,7 +1971,8 @@ mod tests {
                 "queued_by_size",
                 "rate",
                 "refused_forks",
-                "repo_errors"
+                "repo_errors",
+                "waiting"
             ]
         );
         assert_eq!(

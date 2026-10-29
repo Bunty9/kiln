@@ -257,6 +257,8 @@ assert.equal(X.labelHint(FF, 'kiln'), 'Jobs opt in with GitHub: runs-on: [self-h
     for (const x of [long, title, 'a'.repeat(40), 'Pull request', 'CI #413', '#212', '4 cpu · 8 GB', 'Warm', 'attached', 'failed', 'Queue', 'Boot', 'Wait', 'Job', 'Done', '#/jobs/kiln-9']) assert(h.includes(x), `card shows ${x}`);
     assert(!/Console|Steps|<pre/.test(h), 'no console, step or forge log in the card');
     assert(!/tabindex/.test(h), 'the card adds no tab stops');
+    const live = K.jobCard({ ...pr, state: 'busy', ended: null, done_at: null }), tk = x => x.match(/data-t="/g)?.length || 0;
+    assert.equal(tk(live), 1, 'an open card ticks its active phase only'); assert.equal(tk(h), 0, 'a finished job has nothing to tick');
     const rf = K.jobCard(vms[1]);
     assert(rf.includes('Refused') && rf.includes('pull request from a fork') , 'a refused job with no run record shows why');
   }
