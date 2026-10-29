@@ -606,6 +606,20 @@ impl Forge {
             Self::Gitea(g) => g.cancel(repo, id).await,
         }
     }
+    /// GitHub only (the others bail): is job `job_id` still queued or running on the runner `runner`?
+    pub async fn job_held_by(&self, repo: &RepoRef, job_id: u64, runner: &str) -> Result<bool> {
+        match self {
+            Self::GitHub(g) => g.job_held_by(repo, job_id, runner).await,
+            _ => bail!("not supported on this forge"),
+        }
+    }
+    /// GitHub only (the others bail): force-cancel run `id`; the HTTP status (202 = accepted).
+    pub async fn force_cancel(&self, repo: &RepoRef, id: u64) -> Result<u16> {
+        match self {
+            Self::GitHub(g) => g.force_cancel(repo, id).await,
+            _ => bail!("not supported on this forge"),
+        }
+    }
     /// GitLab only: the job ids of pipeline `id`; empty elsewhere.
     pub async fn pipeline_job_ids(&self, repo: &RepoRef, id: u64) -> Result<Vec<String>> {
         match self {

@@ -590,7 +590,9 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             // A JIT runner that never ran a job stays registered (offline) on GitHub. A gated forge's
             // runner never removes itself, so it goes whatever the VM did; the VM is over.
             if let Some(rid) = v.runner_id
-                && (v.job.is_none() || forge_for(&app, &v.repo).is_ok_and(|(f, _)| f.gated()))
+                && (v.job.is_none()
+                    || forge_for(&app, &v.repo).is_ok_and(|(f, _)| f.gated())
+                    || (app.cfg().reclaim_lost_jobs && lost_when(&v).is_some()))
             {
                 retire(&app, &v.repo, vec![(v.id.clone(), rid)], Reason::Unused).await;
             }
@@ -681,6 +683,8 @@ async fn retire(app: &App, repo: &str, c: Vec<(String, u64)>, reason: Reason) ->
             Dereg::Busy if reason != Reason::Unused => continue,
             Dereg::Busy => {
                 tracing::warn!("{id}: runner {rid} still has a job");
+                // True once the run was cancelled: the delete is tried again (Cleanup's backoff).
+                ok &= !reclaim(app, repo, &id, &forge, &rr).await;
                 continue;
             }
             Dereg::Err(e) => {
@@ -719,6 +723,82 @@ fn kill_idle(app: &App, id: &str, reason: Reason, why: &str) {
             k.notify_one();
         }
     }
+}
+
+/// Why this VM's job is gone without a result, when kiln itself ended it: it died with a crash or restart,
+/// or kiln killed it on the job timeout or at shutdown. None for every other end (the runner reports those).
+fn lost_when(v: &Vm) -> Option<&'static str> {
+    if v.result.is_some() {
+        return None;
+    }
+    match (v.state, v.note.as_deref().unwrap_or_default()) {
+        (State::Lost, _) => Some("kiln stopped under it"),
+        (State::Killed, n) if n.starts_with("job timeout") => Some("kiln killed it on the job timeout"),
+        (State::Killed, "kiln shutting down") => Some("kiln shut down"),
+        _ => None,
+    }
+}
+
+/// Whether kiln already tried to force-cancel for this VM (it never tries twice).
+const CANCELLED: &str = "kiln force-cancelled run ";
+const NOT_CANCELLED: &str = "kiln could not force-cancel run ";
+
+/// A GitHub runner that still has a job after its VM was lost or killed by kiln holds the run in progress
+/// until GitHub gives up on it (hours). Cancels that run, but only once GitHub confirms that the job is
+/// still running on this very runner and no other VM of kiln works on the same run. True when the runner
+/// delete should be tried again; false when there is nothing (more) to do for this VM.
+async fn reclaim(app: &App, repo: &str, id: &str, forge: &crate::forge::Forge, rr: &RepoRef) -> bool {
+    if !app.cfg().reclaim_lost_jobs || forge.kind() != crate::forge::Kind::GitHub {
+        return false;
+    }
+    let Some(v) = app.vms.lock().unwrap().iter().find(|v| v.id == id).cloned() else { return false };
+    let Some(why) = lost_when(&v) else { return false };
+    match v.note.as_deref() {
+        Some(n) if n.starts_with(CANCELLED) => return true,
+        Some(n) if n.starts_with(NOT_CANCELLED) => return false,
+        _ => {}
+    }
+    let Some(url) = v.job_url.as_deref() else {
+        // `attach_jobs` fills it on the first poll after a restart.
+        return v.job.is_some() || v.busy_since.is_some();
+    };
+    let (Some(run), Some(job)) = (run_id(url), job_id(url)) else { return false };
+    let shared = |o: &Vm| {
+        o.id != id && o.state.is_active() && o.repo.eq_ignore_ascii_case(repo) && o.job_url.as_deref().and_then(run_id) == Some(run)
+    };
+    if app.vms.lock().unwrap().iter().any(shared) {
+        tracing::info!("{id}: run {run} is also held by another VM, not cancelling it");
+        return false;
+    }
+    match forge.job_held_by(rr, job, id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!("{id}: job {job} is not running on this runner, not cancelling run {run}");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("{id}: cannot confirm job {job}, not cancelling run {run} yet: {e:#}");
+            return true;
+        }
+    }
+    let link = url.split("/job/").next().unwrap_or(url);
+    let (done, msg) = match forge.force_cancel(rr, run).await {
+        Ok(200..300) => (true, format!("{CANCELLED}{run}: its job was lost when {why}")),
+        Ok(s @ (403 | 404 | 409)) => (false, format!("{NOT_CANCELLED}{run}: GitHub answered {s}")),
+        Ok(s) => {
+            tracing::warn!("{id}: force-cancel of run {run} answered {s}, will try again");
+            return true;
+        }
+        Err(e) => {
+            tracing::warn!("{id}: force-cancel of run {run} failed, will try again: {e:#}");
+            return true;
+        }
+    };
+    tracing::warn!("{repo}: {msg} ({link})");
+    if let Some(v) = update(app, id, |v| v.note = Some(msg)) {
+        persist(app, &v);
+    }
+    done
 }
 
 /// Startup: deletes the forge runners of saved records that have ended, for every gated forge,
@@ -1542,6 +1622,11 @@ pub fn cache_stats(data: &Path, repos: &[String]) -> serde_json::Value {
 /// Job id from `https://github.com/o/n/actions/runs/1/job/2`.
 fn job_id(url: &str) -> Option<u64> {
     url.rsplit_once("/job/")?.1.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// Run id from `https://github.com/o/n/actions/runs/1/job/2`.
+fn run_id(url: &str) -> Option<u64> {
+    url.split_once("/actions/runs/")?.1.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
 }
 
 /// May this job's cache overlay be committed? Err = the reason it is not.
@@ -3578,6 +3663,28 @@ mod tests {
         bad.job_id = Some("7".into());
         apply_verdict(&mut bad, "7", &Verdict { failure: true, ..say(Call::Refuse, "verdict timed out") });
         assert!(bad.refused_by_failure(), "a timeout is kiln failing closed");
+    }
+
+    #[test]
+    fn only_a_job_kiln_itself_ended_is_lost() {
+        let url = "https://github.com/o/n/actions/runs/12/job/34";
+        assert_eq!((run_id(url), job_id(url)), (Some(12), Some(34)));
+        assert_eq!(run_id("https://github.com/o/n/actions/runs/x"), None);
+        let mut v = vm("a", State::Lost, None);
+        assert!(lost_when(&v).is_some());
+        v.result = Some("success".into());
+        assert!(lost_when(&v).is_none(), "the runner reported a result");
+        for (note, lost) in [
+            ("job timeout after 60 min", true),
+            ("kiln shutting down", true),
+            ("killed from dashboard", false),
+            ("idle timeout: no job arrived", false),
+        ] {
+            let mut v = vm("a", State::Killed, None);
+            v.note = Some(note.into());
+            assert_eq!(lost_when(&v).is_some(), lost, "{note}");
+        }
+        assert!(lost_when(&vm("a", State::Failed, None)).is_none());
     }
 
     #[test]

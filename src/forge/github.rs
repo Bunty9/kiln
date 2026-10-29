@@ -133,6 +133,18 @@ impl GitHub {
         self.post(&format!("repos/{}/actions/runs/{id}/cancel", repo.path), None).await
     }
 
+    /// Whether job `job_id` is still queued or running on the runner named `runner`: the proof that a run
+    /// is held by a VM kiln lost. Anything else (done, another runner, no runner yet) is false.
+    pub async fn job_held_by(&self, repo: &RepoRef, job_id: u64, runner: &str) -> Result<bool> {
+        let j = self.gh.get(&format!("repos/{}/actions/jobs/{job_id}", repo.path)).await?;
+        Ok(matches!(j["status"].as_str(), Some("in_progress" | "queued")) && j["runner_name"].as_str() == Some(runner))
+    }
+
+    /// `force-cancel` ends a run whose job lost its runner, which the plain cancel leaves waiting. The HTTP status.
+    pub async fn force_cancel(&self, repo: &RepoRef, id: u64) -> Result<u16> {
+        Ok(self.gh.raw(reqwest::Method::POST, &format!("repos/{}/actions/runs/{id}/force-cancel", repo.path), None).await?.status)
+    }
+
     pub async fn dispatch(&self, repo: &RepoRef, workflow: Option<&str>, git_ref: &str, inputs: &HashMap<String, String>) -> Result<()> {
         let wf = workflow.context("GitHub needs a workflow (file name or id) to dispatch")?;
         let mut body = json!({ "ref": git_ref });

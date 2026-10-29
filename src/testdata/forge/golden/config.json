@@ -15,6 +15,7 @@
   "app_accounts": [],
   "docker_mirror": true,
   "auto_rebake": true,
+  "reclaim_lost_jobs": true,
   "bake_node_versions": [
     "24"
   ],
