@@ -23,6 +23,7 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- The Docker mirror no longer logs a failed trace export every few seconds.
 - **VM launches no longer fail with `Failed to initialize io_uring: Cannot allocate memory`** when other programs of the same user (editors and agent tools) hold io_uring memory. kiln lowers its own soft locked-memory limit (`RLIMIT_MEMLOCK`) to 0 at start, which QEMU and `qemu-img` inherit, so they use threads instead of exiting. There is nothing to configure: the unit no longer sets `LimitMEMLOCK`, and `kiln doctor`'s `io_uring` check passes. As a backstop, if a launch still hits the error, kiln pauses launches with a doubling delay (1 minute up to 15), keeps only the first failed VM instead of creating one every minute, probes with one launch, and shows the cause on the Overview. `kiln doctor` has new `io_uring` and `memory pressure` checks.
 - **Time stamps with a zone offset parse correctly** (`+05:30`). A Gitea server not on UTC no longer shifts job wait times by hours, and an unreadable Gitea time no longer shows 1970. (Fractional seconds were already ignored.)
 - **Repo page on a phone: a failed run's buttons ran off the screen.** Rerun failed, Rerun and Open now wrap onto their own line.

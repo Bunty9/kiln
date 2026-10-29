@@ -143,6 +143,8 @@ async fn start(app: &App) -> Result<tokio::process::Child> {
     Command::new(app.data.join("bin/registry"))
         .arg("serve")
         .arg(dir.join("config.yml"))
+        // Nothing listens on the default OTLP port 4318, so each failed export was logged.
+        .env("OTEL_TRACES_EXPORTER", "none")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
