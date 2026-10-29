@@ -268,8 +268,8 @@ a.row:hover,li:hover>.row{background:var(--hover)}
 .rr .qn{text-align:right;color:var(--queued)}
 @media(max-width:719px){.rr{grid-template-areas:"n n" "r l";grid-template-columns:auto auto;justify-content:start;gap:4px 12px}.rr .nm{grid-area:n}.rr .rt{grid-area:r}.rr .lr{grid-area:l}.rr .qn{display:none}}
 .sn{padding:0 16px 16px}
-@media(max-width:359px){.row.flat.bf>.rx{grid-column:1/-1!important;flex-wrap:wrap;margin-top:8px}}
-.row .id{overflow-wrap:anywhere}.row .t{min-width:0}
+@media(max-width:479px){.row.flat.rn{grid-template-columns:auto minmax(0,1fr)!important}.row.flat.rn>.bd{grid-area:1/1!important}.rn>.t{display:contents}.row.flat.rn .tt{grid-area:1/2!important}.row.flat.rn .id{grid-area:2/1/auto/-1!important;margin-top:4px}.row.flat.rn>.rx{grid-area:3/1/auto/-1!important;flex-wrap:wrap;margin-top:8px}.rn>.t:focus-visible .tt{outline:2px solid var(--ring);outline-offset:2px}}
+.row .id{overflow-wrap:break-word}.row .t{min-width:0}
 @media(max-width:719px){.row.flat{grid-template-areas:none!important}.row.flat>*{grid-area:auto!important}.row.flat .id{display:block}.row.flat.bf{grid-template-columns:auto minmax(0,1fr) auto!important}.row.flat.bf>.ra{grid-column:1/-1!important;flex-wrap:wrap;margin-top:8px}}
 .pr{grid-template-columns:minmax(0,1fr) 190px 90px 80px;grid-template-areas:"n c s p" "g g g g"}
 .pr .pc{grid-area:c}.pr .ps{grid-area:s}
@@ -541,7 +541,7 @@ main{overflow-x:clip} /* the swipe slide-in moves main's children 32px off to th
 .top>div,main{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
 #conn{top:calc(64px + env(safe-area-inset-top))}
 @media(display-mode:standalone){html{overscroll-behavior-y:none}.inst{display:none!important}}
-@media(pointer:coarse){.btn,.btn.sm,.seg button,.lnk,summary,.logo,.chip button,.ftl label{min-height:32px}.btn.ic,.chip button,.logo,.lnk{min-width:32px}.hh{min-height:32px}.hq{width:32px;height:32px}.lnk,a.nm,.empty a,.pop.help a,a.sm.fg2{display:inline-flex;align-items:center;min-height:32px}}
+@media(pointer:coarse){.btn,.btn.sm,.seg button,.lnk,summary,.logo,.chip button,.ftl label{min-height:32px}.btn.ic,.chip button,.logo,.lnk{min-width:32px}.hh{min-height:32px}.hq{width:32px;height:32px}.lnk,a.nm,.empty a,.pop.help a,.tip a,a.sm.fg2{display:inline-flex;align-items:center;min-height:32px}}
 </style>
 </head>
 <body>
@@ -1891,7 +1891,7 @@ pages.repos = {
       : `<div class="card"><h2>Danger zone</h2><p class="fg2" style="margin-bottom:12px">Stop picking up jobs from this repo. Running jobs finish.</p><button class="btn dng" data-act="rmrepo" data-id="${esc(this.r)}">${ic('trash')}Remove ${esc(this.r)}</button></div>`);
     setHTML($('#rd-ext'), f ? `<a class="btn" href="${esc(f.url)}/${esc(this.r.replace(/^[^:/]+:/, ''))}" target="_blank" rel="noopener"${tip('Open this repo on ' + fname(f))}>${fname(f)}${ic('ext')}</a>` : '');
     const runBtn = w => can(f, 'dispatch') ? `<button class="btn" data-act="runwf" data-id="${esc(w)}"${tip(f.kind === 'gitlab' ? 'Start a pipeline on a branch.' : 'Start this workflow on a branch. It needs a workflow_dispatch trigger.')}>${ic('play')}Run</button>` : '';
-    setHTML($('#rd-wf'), can(f, 'workflows') ? `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.file)}</span></span>${runBtn(w.file)}</div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>')
+    setHTML($('#rd-wf'), can(f, 'workflows') ? `<h2>Workflows</h2>` + (rd.wfs ? rd.wfs.length ? `<ul class="list">${rd.wfs.map(w => `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${esc(w.name)}</span><span class="id">${esc(w.file).replace(/\//g, '/<wbr>')}</span></span>${runBtn(w.file)}</div></li>`).join('')}</ul>` : `<div class="empty">${ic('jobs')}<p>No workflows in this repository.</p></div>` : '<div class="sk" style="height:48px"></div>')
       : can(f, 'dispatch') ? `<h2>Pipelines</h2><div class="card">${runBtn('')}</div>` : '');
     setHTML($('#rd-runs'), `<h2>Recent runs</h2>` + (rd.runs ? rd.runs.length ? `<ul class="list">${rd.runs.map(x => runHTML(x, f)).join('')}</ul>` : `<div class="empty">${ic('clock')}<p>No runs yet. Run a workflow or push a commit.</p></div>` : '<div class="sk" style="height:48px"></div>'));
   },
@@ -1909,7 +1909,7 @@ function runHTML(run, f) {
     cancel: `<button class="btn dng" data-act="cancel" data-id="${+run.id}"${tip(`Ask ${fn} to cancel this run`)}>${ic('cancel')}Cancel</button>`,
   };
   const rf = done && st === 'failed' && can(f, 'rerun_failed') ? `<button class="btn" data-act="rerun" data-failed="1" data-id="${+run.id}"${tip(`Ask ${fn} to run only the failed jobs again`)}>${ic('rerun')}Rerun failed</button>` : '';
-  return `<li><div class="row flat bf" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
+  return `<li><div class="row flat bf rn" style="grid-template-columns:104px minmax(0,1fr) auto"><span class="bd">${badge(st)}</span>
     <button class="lnk t" style="text-align:left;text-decoration:none" data-act="run" data-id="${+run.id}" aria-expanded="${open}"${tip(open ? 'Hide jobs' : 'Show the jobs of this run and which VM ran each')}><span class="tt">${esc(run.title)}</span><span class="id" style="font-family:var(--sans)">#${+run.number} · ${evIcon({ kind: run.event, event: run.event })} ${esc(run.branch)} · ${relH(iso(run.created_at))}</span></button>
     <span class="rx ${rf ? 'ra' : ''}" style="display:flex;gap:8px"><a class="btn ic" href="${forgeUrl(f, run.links.run)}" target="_blank" rel="noopener" aria-label="Open on ${fn}"${tip('Open this run on ' + fn)}>${ic('ext')}</a>${rf}${runActs(done, f).map(a => btn[a]).join('')}</span></div>${jh}</li>`;
 }
