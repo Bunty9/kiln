@@ -245,24 +245,27 @@ fn fail_cause(vm: &Value) -> Option<&'static str> {
     })
 }
 
-/// Which repo a run command is about: `--repo`, else the one repo kiln serves.
+/// Which repo a run command is about: `--repo`, else the one repo kiln serves (`config.repos`, not
+/// every repo the GitHub App can see).
 fn repo_of(c: &Conn, a: &Args) -> Result<String> {
     if let Some(r) = a.val("repo") {
         return Ok(r.into());
     }
-    let mut repos: Vec<String> = c
-        .get("/api/forges")?
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|f| f["repos"].as_array().cloned().unwrap_or_default())
-        .filter_map(|r| r.as_str().map(String::from))
-        .collect();
-    repos.dedup();
+    let st = c.get("/api/state")?;
+    let repos: Vec<&str> = st["config"]["repos"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     match repos.as_slice() {
-        [one] => Ok(one.clone()),
+        [one] => Ok((*one).into()),
         [] => bail!("kiln serves no repos"),
         _ => bail!("kiln serves several repos ({}): pass --repo", repos.join(", ")),
+    }
+}
+
+/// `kiln wait`'s target: digits are a run id (GitHub's are 11 digits and growing), `sha:<hex>` or any
+/// other hex is a commit.
+fn wait_target(t: &str) -> (bool, String) {
+    match t.strip_prefix("sha:") {
+        Some(h) => (false, h.to_lowercase()),
+        None => (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()), t.to_lowercase()),
     }
 }
 
@@ -641,8 +644,7 @@ fn wait(a: &Args) -> Result<i32> {
     let repo = repo_of(&c, a)?;
     let target = a.pos[0].clone();
     let (timeout, interval) = (Duration::from_secs(a.num("timeout", 60)? * 60), Duration::from_secs(a.num("interval", 10)?.max(1)));
-    let by_id = target.len() <= 10 && target.bytes().all(|b| b.is_ascii_digit());
-    let sha = target.to_lowercase();
+    let (by_id, sha) = wait_target(&target);
     let q = |s: &str| enc(&[("repo", &repo)]) + s;
     let start = Instant::now();
     // run id -> (attempt, when this attempt was first seen)
@@ -875,5 +877,13 @@ mod tests {
     #[test]
     fn unreadable_key_is_an_error() {
         assert!(Conn::open(Path::new("/nonexistent-kiln-dir")).is_err());
+    }
+
+    #[test]
+    fn wait_targets_run_ids_of_any_length_and_shas() {
+        assert_eq!(wait_target("40855697510"), (true, "40855697510".into()));
+        assert_eq!(wait_target("7"), (true, "7".into()));
+        assert_eq!(wait_target("4B0B413"), (false, "4b0b413".into()));
+        assert_eq!(wait_target("sha:1234567"), (false, "1234567".into()));
     }
 }
