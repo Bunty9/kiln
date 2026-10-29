@@ -16,7 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -32,6 +32,8 @@ const UPSTREAM: &str = "https://results-receiver.actions.githubusercontent.com";
 const CACHE_SVC: &str = "/twirp/github.actions.results.api.v1.CacheService/";
 /// Largest single entry.
 const ENTRY_CAP: u64 = 10 << 30;
+/// Most one VM may have staged (uploads in progress plus finished, not yet promoted).
+const STAGED_CAP: u64 = 10 << 30;
 /// Twirp and block-list bodies are tiny; anything bigger is a mistake.
 const SMALL_BODY: usize = 1 << 20;
 
@@ -57,9 +59,10 @@ struct Inner {
     upstream: String,
     budget: Arc<dyn Fn() -> u64 + Send + Sync>,
     http: reqwest::Client,
-    /// Serialises metadata read-modify-write (create, finalize, block list, promote). Blob bytes stream outside it.
+    /// Serialises metadata read-modify-write (create, finalize, block list, the commit of a blob). Blob bytes stream
+    /// outside it. Async, so it can be held while the filesystem work runs on a blocking thread.
     // ponytail: one global lock; per-VM locks if metadata calls ever show up in a profile.
-    lock: Mutex<()>,
+    lock: tokio::sync::Mutex<()>,
 }
 type St = Arc<Inner>;
 
@@ -70,7 +73,7 @@ pub fn router(root: PathBuf, resolve: Resolver, upstream: String, budget: Arc<dy
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("http client");
-    let st: St = Arc::new(Inner { root, resolve, upstream, budget, http, lock: Mutex::new(()) });
+    let st: St = Arc::new(Inner { root, resolve, upstream, budget, http, lock: tokio::sync::Mutex::new(()) });
     Router::new()
         .route("/_kiln/ping", get(|| async { StatusCode::NO_CONTENT }))
         .route("/twirp/github.actions.results.api.v1.CacheService/{method}", post(twirp))
@@ -88,16 +91,33 @@ pub async fn serve(app: Arc<crate::App>) {
     let root = app.data.join("gha-cache");
     // Uploads staged by VMs that are gone (a crash, a restart) never earned a promotion.
     let live: Vec<String> = app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).map(|v| v.id.clone()).collect();
-    discard_dead(&root, &live);
+    let r = root.clone();
+    // Also seeds the byte accounting from disk, once.
+    let _ = tokio::task::spawn_blocking(move || discard_dead(&r, &live)).await;
     let a = app.clone();
     let budget: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(move || a.cfg().gha_cache_gb << 30);
     let r = router(root, crate::vm::gha_resolver(app.clone(), SocketAddr::from(([127, 0, 0, 1], PORT))), UPSTREAM.into(), budget);
-    let l = match tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await {
-        Ok(l) => l,
-        Err(e) => return tracing::warn!("actions cache: cannot listen on 127.0.0.1:{PORT}: {e}"),
-    };
-    if let Err(e) = axum::serve(l, r.into_make_service_with_connect_info::<SocketAddr>()).await {
-        tracing::warn!("actions cache listener ended: {e}");
+    // Retried with a doubling delay, like the registry mirror: a port another process holds for a minute at boot
+    // must not leave patched images without their Results proxy until the next restart.
+    let (mut wait, mut warned) = (1u64, false);
+    while !app.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+        match tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await {
+            Ok(l) => {
+                (wait, warned) = (1, false);
+                if let Err(e) = axum::serve(l, r.clone().into_make_service_with_connect_info::<SocketAddr>()).await {
+                    tracing::warn!("actions cache listener ended: {e}");
+                }
+            }
+            Err(e) if !warned => {
+                warned = true;
+                tracing::warn!(
+                    "actions cache: cannot listen on 127.0.0.1:{PORT}: {e}; jobs on patched images lose the Results proxy (artifacts) until it binds, retrying"
+                );
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        wait = (wait * 2).min(60);
     }
 }
 
@@ -119,10 +139,103 @@ pub fn take_stats(vm: &str) -> (u32, u32) {
 pub fn discard_dead(root: &FsPath, live: &[String]) {
     let keep: Vec<String> = live.iter().map(|v| stem(v)).collect();
     for e in std::fs::read_dir(root.join("staged")).into_iter().flatten().flatten() {
-        if !keep.contains(&e.file_name().to_string_lossy().into_owned()) {
-            let _ = std::fs::remove_dir_all(e.path());
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !keep.contains(&name) {
+            let _ = remove_counted(root, &e.path(), Some(&name));
+            acct(root, |a| a.staged.remove(&name));
         }
     }
+}
+
+// ---------------------------------------------------------------- byte accounting
+
+/// What the store holds, kept in memory so a PUT never walks the disk: all bytes (trusted and staged, reservations
+/// of uploads in flight included) and the staged bytes per VM (keyed by `stem`).
+#[derive(Default)]
+struct Acct {
+    used: u64,
+    staged: HashMap<String, u64>,
+}
+
+static ACCT: Mutex<Option<HashMap<PathBuf, Acct>>> = Mutex::new(None);
+
+/// Run `f` on the store's account; the first time for a root it is seeded from disk (outside the lock).
+// ponytail: counts drift a little (a block replaced while its bytes are in flight); the hourly evict only subtracts what it
+// frees, a restart re-seeds. Re-walk in the sweep if the drift ever matters.
+fn acct<R>(root: &FsPath, f: impl FnOnce(&mut Acct) -> R) -> R {
+    let known = ACCT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().contains_key(root);
+    let seed = (!known).then(|| {
+        let staged: HashMap<String, u64> = std::fs::read_dir(root.join("staged"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), dir_size(&e.path())))
+            .collect();
+        Acct { used: dir_size(root), staged }
+    });
+    let mut g = ACCT.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_default().entry(root.to_path_buf()).or_insert_with(|| seed.unwrap_or_default()))
+}
+
+/// Give back `n` bytes (of `vm`'s staged ones, when it is one's).
+fn sub(root: &FsPath, vm: Option<&str>, n: u64) {
+    acct(root, |a| {
+        a.used = a.used.saturating_sub(n);
+        if let Some(s) = vm.and_then(|v| a.staged.get_mut(&stem(v))) {
+            *s = s.saturating_sub(n);
+        }
+    });
+}
+
+/// `remove_dir_all` that keeps the account right.
+fn remove_counted(root: &FsPath, dir: &FsPath, vm: Option<&str>) -> std::io::Result<()> {
+    acct(root, |_| ()); // seed before the bytes go
+    let n = dir_size(dir);
+    let r = std::fs::remove_dir_all(dir);
+    if r.is_ok() {
+        sub(root, vm, n);
+    }
+    r
+}
+
+/// Bytes set aside for one upload; released when dropped unless committed.
+struct Reservation {
+    root: PathBuf,
+    vm: String,
+    n: u64,
+}
+
+impl Reservation {
+    /// The bytes are on disk now; `replaced` is what the file they overwrote held.
+    fn commit(mut self, replaced: u64) {
+        sub(&self.root, Some(&self.vm), replaced);
+        self.n = 0;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.n > 0 {
+            sub(&self.root, Some(&self.vm), self.n);
+        }
+    }
+}
+
+/// Reserve `len` bytes for a PUT by `vm`, or say why not: 413 over the VM's staged cap, 507 over the store's budget.
+/// Never evicts: staged bytes must not push trusted entries out.
+fn reserve(root: &FsPath, vm: &str, len: u64, budget: u64) -> Result<Reservation, StatusCode> {
+    acct(root, |a| {
+        let staged = a.staged.entry(stem(vm)).or_default();
+        if staged.saturating_add(len) > STAGED_CAP {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        if a.used.saturating_add(len) > budget {
+            return Err(StatusCode::INSUFFICIENT_STORAGE);
+        }
+        *staged += len;
+        a.used += len;
+        Ok(Reservation { root: root.to_path_buf(), vm: vm.to_string(), n: len })
+    })
 }
 
 // ---------------------------------------------------------------- storage (pure, tested)
@@ -202,8 +315,7 @@ static USAGE: Mutex<Option<(PathBuf, std::time::Instant, Usage)>> = Mutex::new(N
 /// (the dashboard polls /api/state); a clear forgets it so the list is right at once.
 // ponytail: one cached walk keyed by root; an incremental index if a store ever has so many entries the walk shows up.
 pub fn usage(root: &FsPath) -> Usage {
-    let mut g = USAGE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((r, at, u)) = &*g
+    if let Some((r, at, u)) = &*USAGE.lock().unwrap_or_else(|e| e.into_inner())
         && r == root
         && at.elapsed().as_secs() < 60
     {
@@ -217,14 +329,14 @@ pub fn usage(root: &FsPath) -> Usage {
         }
     }
     let u = (per.values().map(|e| e.1).sum(), per);
-    *g = Some((root.to_path_buf(), std::time::Instant::now(), u.clone()));
+    *USAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some((root.to_path_buf(), std::time::Instant::now(), u.clone()));
     u
 }
 
 /// Delete a repo's trusted entries (dashboard "clear cache").
 pub fn clear_repo(root: &FsPath, identity: &str) -> std::io::Result<()> {
     *USAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    match std::fs::remove_dir_all(repo_dir(root, identity)) {
+    match remove_counted(root, &repo_dir(root, identity), None) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -279,15 +391,19 @@ fn lookup(root: &FsPath, c: &Caller, key: &str, restore: &[String], version: &st
     None
 }
 
+/// Serialises promotions: two VMs promoting the same key must leave exactly one entry (first writer wins).
+static PROMOTE: Mutex<()> = Mutex::new(());
+
 /// Move the VM's finished staged entries into their repo's trusted scope, skipping keys that already exist there
 /// (first writer wins). Returns (promoted, dropped). Unfinished uploads are dropped.
 pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
+    let _g = PROMOTE.lock().unwrap_or_else(|e| e.into_inner());
     let (mut ok, mut dropped) = (0, 0);
     for (dir, m) in entries_in(&staged_dir(root, vm_id)) {
         let dest = trusted_dir(root, &m.repo);
         let dup = entries_in(&dest).iter().any(|(_, t)| t.finished && t.repo == m.repo && t.key == m.key && t.version == m.version);
         if !m.finished || dup {
-            std::fs::remove_dir_all(&dir)?;
+            remove_counted(root, &dir, Some(vm_id))?;
             dropped += 1;
             continue;
         }
@@ -303,26 +419,38 @@ pub fn promote(root: &FsPath, vm_id: &str) -> Result<(usize, usize)> {
 
 /// Delete everything the VM staged (also uploads still in progress).
 pub fn discard(root: &FsPath, vm_id: &str) {
-    let _ = std::fs::remove_dir_all(staged_dir(root, vm_id));
+    if let Err(e) = remove_counted(root, &staged_dir(root, vm_id), Some(vm_id))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("actions cache: cannot delete {vm_id}'s staged uploads: {e}");
+    }
+    acct(root, |a| a.staged.remove(&stem(vm_id)));
 }
 
-/// Delete trusted entries, least recently used first, until the whole store fits the budget. Returns bytes freed.
+/// Delete trusted entries, least recently used first, until the trusted entries fit the budget. Staged uploads are
+/// never a reason to evict (they are refused at the PUT instead). Returns bytes freed.
 pub fn evict(root: &FsPath, budget: u64) -> u64 {
-    let mut used = dir_size(root);
-    let mut all: Vec<_> =
-        std::fs::read_dir(root.join("repos")).into_iter().flatten().flatten().flat_map(|r| entries_in(&r.path().join("entries"))).collect();
-    all.sort_by_key(|(_, m)| m.last_used);
+    acct(root, |_| ()); // seed before anything goes
+    let mut all: Vec<_> = std::fs::read_dir(root.join("repos"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|r| entries_in(&r.path().join("entries")))
+        .map(|(d, m)| (dir_size(&d), d, m.last_used))
+        .collect();
+    let mut used: u64 = all.iter().map(|e| e.0).sum();
+    all.sort_by_key(|e| e.2);
     let mut freed = 0;
-    for (dir, _) in all {
+    for (s, dir, _) in all {
         if used <= budget {
             break;
         }
-        let s = dir_size(&dir);
-        if std::fs::remove_dir_all(&dir).is_ok() {
-            used = used.saturating_sub(s);
-            freed += s;
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => (used, freed) = (used.saturating_sub(s), freed + s),
+            Err(e) => tracing::warn!("actions cache: cannot evict {}: {e}", dir.display()),
         }
     }
+    sub(root, None, freed);
     freed
 }
 
@@ -402,7 +530,13 @@ async fn twirp(State(st): State<St>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.to_ascii_lowercase().starts_with("application/json"));
     let known = matches!(method.as_str(), "CreateCacheEntry" | "FinalizeCacheEntryUpload" | "GetCacheEntryDownloadURL");
-    let Some(c) = (st.resolve)(peer, req.headers()).filter(|c| c.local && json && known) else { return proxy(State(st), req).await };
+    let c = if json && known {
+        let (s2, h) = (st.clone(), req.headers().clone());
+        blocking(move || (s2.resolve)(peer, &h)).await.flatten().filter(|c| c.local)
+    } else {
+        None
+    };
+    let Some(c) = c else { return proxy(State(st), req).await };
     let host = host_of(req.headers());
     let Ok(body) = axum::body::to_bytes(req.into_body(), SMALL_BODY).await else {
         return twirp_err(StatusCode::BAD_REQUEST, "invalid_argument", "unreadable body");
@@ -413,23 +547,28 @@ async fn twirp(State(st): State<St>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
     if r.key.is_empty() || r.version.is_empty() {
         return twirp_err(StatusCode::BAD_REQUEST, "invalid_argument", "key and version are required");
     }
-    let _g = st.lock.lock().unwrap_or_else(|e| e.into_inner());
-    match method.as_str() {
-        "CreateCacheEntry" => create(&st, &c, &r, &host),
-        "FinalizeCacheEntryUpload" => finalize(&st, &c, &r),
-        _ => get_url(&st, &c, &r, &host),
-    }
+    let _g = st.lock.lock().await;
+    let s2 = st.clone();
+    blocking(move || match method.as_str() {
+        "CreateCacheEntry" => create(&s2, &c, &r, &host),
+        "FinalizeCacheEntryUpload" => finalize(&s2, &c, &r),
+        _ => get_url(&s2, &c, &r, &host),
+    })
+    .await
+    .unwrap_or_else(|| twirp_err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "the cache task failed"))
+}
+
+/// Filesystem work runs here, never on the async runtime's threads. None = the task panicked.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(f).await.ok()
 }
 
 fn create(st: &Inner, c: &Caller, r: &TwirpReq, host: &str) -> Response {
-    if !c.can_write || visible(&st.root, c).iter().any(|(_, m)| m.key == r.key && m.version == r.version) {
+    // Also refused: a second create for a key this VM is still uploading, which would replace the first reservation.
+    let uploading =
+        || entries_in(&staged_dir(&st.root, &c.vm_id)).iter().any(|(_, m)| !m.finished && m.key == r.key && m.version == r.version);
+    if !c.can_write || visible(&st.root, c).iter().any(|(_, m)| m.key == r.key && m.version == r.version) || uploading() {
         return json_resp(StatusCode::OK, json!({ "ok": false }));
-    }
-    // A retry of an unfinished upload replaces the old reservation.
-    for (d, m) in entries_in(&staged_dir(&st.root, &c.vm_id)) {
-        if !m.finished && m.key == r.key && m.version == r.version {
-            let _ = std::fs::remove_dir_all(d);
-        }
     }
     let (id, sig) = (random_hex(16), random_hex(32));
     let dir = staged_dir(&st.root, &c.vm_id).join(&id);
@@ -464,7 +603,7 @@ fn finalize(st: &Inner, c: &Caller, r: &TwirpReq) -> Response {
     };
     let got: Option<u64> = m.blocks.iter().map(|b| std::fs::metadata(dir.join(b)).ok().map(|x| x.len())).sum();
     let fail = |msg: String| {
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = remove_counted(&st.root, &dir, Some(&c.vm_id));
         json_resp(StatusCode::OK, json!({ "ok": false, "message": msg }))
     };
     let Some(got) = got.filter(|_| !m.blocks.is_empty()) else { return fail("the upload is incomplete".into()) };
@@ -489,7 +628,9 @@ fn get_url(st: &Inner, c: &Caller, r: &TwirpReq, host: &str) -> Response {
         return json_resp(StatusCode::OK, json!({ "ok": false }));
     }
     m.last_used = now_ms();
-    let _ = write_meta(&dir, &m);
+    if let Err(e) = write_meta(&dir, &m) {
+        tracing::debug!("actions cache: cannot record last use of {}: {e}", m.key);
+    }
     count(&c.vm_id, 1, 0);
     let id = dir.file_name().and_then(|f| f.to_str()).unwrap_or_default();
     json_resp(
@@ -505,7 +646,18 @@ fn status(c: StatusCode) -> Response {
 }
 
 /// Identified caller + the entry dir for `id` (own staged upload first, else the repo's trusted scope) + sig checked.
-fn entry_for(
+async fn entry_for(
+    st: &St,
+    peer: SocketAddr,
+    h: &HeaderMap,
+    id: &str,
+    q: &HashMap<String, String>,
+) -> Result<(Caller, PathBuf, Meta), StatusCode> {
+    let (st, h, id, q) = (st.clone(), h.clone(), id.to_string(), q.clone());
+    blocking(move || entry_for_blocking(&st, peer, &h, &id, &q)).await.unwrap_or(Err(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn entry_for_blocking(
     st: &Inner,
     peer: SocketAddr,
     h: &HeaderMap,
@@ -538,9 +690,11 @@ fn azure_ok() -> Response {
     r
 }
 
-/// Stream `body` to `dest` (via a .part file); exactly `len` bytes or an error.
-async fn save(body: Body, dest: &FsPath, len: u64) -> Result<(), StatusCode> {
-    let tmp = dest.with_extension("part");
+/// Stream `body` into a fresh temp file next to `dest`; exactly `len` bytes or an error. The caller renames it into
+/// place once it has checked, under the lock, that the entry still takes writes.
+async fn save(body: Body, dest: &FsPath, len: u64) -> Result<PathBuf, StatusCode> {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dest.with_file_name(format!("{name}.{}.part", random_hex(6)));
     let r: Result<(), StatusCode> = async {
         let mut f = tokio::fs::File::create(&tmp).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let (mut s, mut n) = (body.into_data_stream(), 0u64);
@@ -560,7 +714,7 @@ async fn save(body: Body, dest: &FsPath, len: u64) -> Result<(), StatusCode> {
     }
     .await;
     match r {
-        Ok(()) => tokio::fs::rename(&tmp, dest).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(()) => Ok(tmp),
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             Err(e)
@@ -575,7 +729,7 @@ async fn put_blob(
     Query(q): Query<HashMap<String, String>>,
     req: Request,
 ) -> Response {
-    let (c, dir, mut m) = match entry_for(&st, peer, req.headers(), &id, &q) {
+    let (c, dir, m) = match entry_for(&st, peer, req.headers(), &id, &q).await {
         Ok(x) => x,
         Err(e) => return status(e),
     };
@@ -583,27 +737,35 @@ async fn put_blob(
     if m.finished || m.scope != "staged" || !c.can_write || dir != staged_dir(&st.root, &c.vm_id).join(&id) {
         return status(StatusCode::FORBIDDEN);
     }
-    let Some(len) = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) else {
-        return status(StatusCode::LENGTH_REQUIRED);
-    };
     let comp = q.get("comp").map_or("", String::as_str);
     if comp == "blocklist" {
         let Ok(body) = axum::body::to_bytes(req.into_body(), SMALL_BODY).await else { return status(StatusCode::BAD_REQUEST) };
         let blocks: Vec<String> = block_ids(&String::from_utf8_lossy(&body)).iter().map(|b| block_file(b)).collect();
-        if blocks.is_empty() || blocks.iter().any(|b| !dir.join(b).is_file()) {
-            return status(StatusCode::BAD_REQUEST);
-        }
-        let _g = st.lock.lock().unwrap_or_else(|e| e.into_inner());
-        // Blocks the list does not name are dropped; the list's order is the serving order.
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n != "meta.json" && !blocks.contains(&n) {
-                let _ = std::fs::remove_file(e.path());
+        let _g = st.lock.lock().await;
+        let (root, vm) = (st.root.clone(), c.vm_id.clone());
+        return blocking(move || {
+            let Some(mut m) = read_meta(&dir).filter(|m| !m.finished) else { return status(StatusCode::FORBIDDEN) };
+            if blocks.is_empty() || blocks.iter().any(|b| !dir.join(b).is_file()) {
+                return status(StatusCode::BAD_REQUEST);
             }
-        }
-        m.blocks = blocks;
-        return if write_meta(&dir, &m).is_ok() { azure_ok() } else { status(StatusCode::INTERNAL_SERVER_ERROR) };
+            // Blocks the list does not name are dropped; the list's order is the serving order.
+            let mut freed = 0;
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n != "meta.json" && !blocks.contains(&n) && std::fs::remove_file(e.path()).is_ok() && !n.ends_with(".part") {
+                    freed += e.metadata().map_or(0, |m| m.len());
+                }
+            }
+            sub(&root, Some(&vm), freed);
+            m.blocks = blocks;
+            if write_meta(&dir, &m).is_ok() { azure_ok() } else { status(StatusCode::INTERNAL_SERVER_ERROR) }
+        })
+        .await
+        .unwrap_or_else(|| status(StatusCode::INTERNAL_SERVER_ERROR));
     }
+    let Some(len) = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) else {
+        return status(StatusCode::LENGTH_REQUIRED);
+    };
     let name = match comp {
         "" => "blob".to_string(),
         "block" => match q.get("blockid") {
@@ -612,28 +774,48 @@ async fn put_blob(
         },
         _ => return status(StatusCode::NOT_IMPLEMENTED),
     };
-    if len > ENTRY_CAP || dir_size(&dir) + len > ENTRY_CAP {
+    if len > ENTRY_CAP {
         return status(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    let budget = (st.budget)();
-    if dir_size(&st.root) + len > budget {
-        evict(&st.root, budget.saturating_sub(len));
-        if dir_size(&st.root) + len > budget {
-            return status(StatusCode::INSUFFICIENT_STORAGE);
+    let dest = dir.join(&name);
+    let replaced = tokio::fs::metadata(&dest).await.map_or(0, |m| m.len());
+    // Refused, not made room for: staged bytes never evict trusted entries. Released again if the PUT fails.
+    let rsv = match reserve(&st.root, &c.vm_id, len, (st.budget)()) {
+        Ok(r) => r,
+        Err(e) => return status(e),
+    };
+    let tmp = match save(req.into_body(), &dest, len).await {
+        Ok(t) => t,
+        Err(e) => return status(e),
+    };
+    // Re-check under the lock: a finalize, a discard or a promotion may have happened while the bytes streamed in.
+    let (_g, whole) = (st.lock.lock().await, comp.is_empty());
+    let done = blocking(move || {
+        let r = match read_meta(&dir) {
+            Some(mut m) if !m.finished => std::fs::rename(&tmp, &dest).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR).and_then(|_| {
+                if whole {
+                    // Put Blob is the whole entry; it replaces anything earlier.
+                    m.blocks = vec![name];
+                    write_meta(&dir, &m).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                }
+                Ok(())
+            }),
+            _ => Err(StatusCode::FORBIDDEN),
+        };
+        if r.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-    }
-    if let Err(e) = save(req.into_body(), &dir.join(&name), len).await {
-        return status(e);
-    }
-    if comp.is_empty() {
-        // Put Blob is the whole entry; it replaces anything earlier.
-        let _g = st.lock.lock().unwrap_or_else(|e| e.into_inner());
-        m.blocks = vec![name];
-        if write_meta(&dir, &m).is_err() {
-            return status(StatusCode::INTERNAL_SERVER_ERROR);
+        r
+    })
+    .await;
+    match done {
+        Some(Ok(())) => {
+            rsv.commit(replaced);
+            azure_ok()
         }
+        Some(Err(e)) => status(e),
+        None => status(StatusCode::INTERNAL_SERVER_ERROR),
     }
-    azure_ok()
 }
 
 enum Span {
@@ -664,7 +846,7 @@ async fn download(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    let (_, dir, m) = match entry_for(&st, peer, &headers, &id, &q) {
+    let (_, dir, m) = match entry_for(&st, peer, &headers, &id, &q).await {
         Ok(x) => x,
         Err(e) => return status(e),
     };
@@ -680,7 +862,7 @@ async fn download(
     // (file, offset, length) for the part of each block inside [a, b].
     let (mut segs, mut at) = (vec![], 0u64);
     for blk in &m.blocks {
-        let Ok(md) = std::fs::metadata(dir.join(blk)) else { return status(StatusCode::NOT_FOUND) };
+        let Ok(md) = tokio::fs::metadata(dir.join(blk)).await else { return status(StatusCode::NOT_FOUND) };
         let (lo, hi) = (at, at + md.len());
         at = hi;
         if len > 0 && lo <= b && hi > a {
@@ -691,14 +873,19 @@ async fn download(
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
-        let s = futures_util::stream::iter(segs)
-            .then(|(p, off, n)| async move {
-                let mut f = tokio::fs::File::open(p).await?;
-                f.seek(SeekFrom::Start(off)).await?;
-                std::io::Result::Ok(tokio_util::io::ReaderStream::with_capacity(f.take(n), 256 << 10))
-            })
-            .try_flatten();
-        Body::from_stream(s)
+        // Every segment is opened before the response starts: an eviction or a clear that unlinks a file mid-download
+        // cannot cut the body short (the open descriptors keep the bytes).
+        let mut files = vec![];
+        for (p, off, n) in segs {
+            let Ok(mut f) = tokio::fs::File::open(p).await else { return status(StatusCode::NOT_FOUND) };
+            if f.seek(SeekFrom::Start(off)).await.is_err() {
+                return status(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            files.push((f, n));
+        }
+        Body::from_stream(
+            futures_util::stream::iter(files).map(|(f, n)| tokio_util::io::ReaderStream::with_capacity(f.take(n), 256 << 10)).flatten(),
+        )
     };
     let mut r = Response::new(body);
     *r.status_mut() = code;
@@ -721,6 +908,14 @@ fn forwardable(n: &HeaderName) -> bool {
     !HOP.contains(&n.as_str()) && n != header::EXPECT
 }
 
+/// Proxy failures are logged at most once a minute: a dead upstream would otherwise fill the log with every request.
+fn proxy_warn_due() -> bool {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = now_ms();
+    now.saturating_sub(LAST.load(std::sync::atomic::Ordering::Relaxed)) >= 60_000
+        && LAST.swap(now, std::sync::atomic::Ordering::Relaxed) != now
+}
+
 /// Stream the request to the fixed upstream (same method, path, query, headers, body) and stream the answer back.
 /// Authorization passes through and is never logged.
 async fn proxy(State(st): State<St>, req: Request) -> Response {
@@ -738,7 +933,9 @@ async fn proxy(State(st): State<St>, req: Request) -> Response {
     let resp = match up.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::debug!("actions cache proxy {} {}: {}", parts.method, parts.uri.path(), e.without_url());
+            if proxy_warn_due() {
+                tracing::warn!("actions cache proxy {} {}: {}", parts.method, parts.uri.path(), e.without_url());
+            }
             return status(StatusCode::BAD_GATEWAY);
         }
     };
@@ -1213,17 +1410,201 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn ping_is_204_and_quota_is_enforced_with_lru_eviction() {
+    async fn ping_is_204_and_a_put_over_the_budget_is_refused_not_made_room_for() {
         let (rig, _) = rig(100_000).await;
         assert_eq!(rig.http.get(format!("{}/_kiln/ping", rig.base)).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+        seed(&rig.root, "trusted", &caller("vm-z", "acme/demo"), "old", "v", 1, &[0u8; 80_000]);
         let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
         let url = j["signed_upload_url"].as_str().unwrap().to_string();
         let r = rig.http.put(&url).body(vec![0u8; 150_000]).send().await.unwrap();
-        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE, "over the quota with nothing to evict");
-        // Over the quota, least recently used trusted entries make room.
-        seed(&rig.root, "trusted", &caller("vm-z", "acme/demo"), "old", "v", 1, &[0u8; 80_000]);
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
+        // Staged bytes never evict a trusted entry; the refused PUT released its reservation, so a smaller one fits.
         let r = rig.http.put(&url).body(vec![0u8; 60_000]).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
+        assert_eq!(entries_in(&trusted_dir(&rig.root, "acme/demo")).len(), 1, "the trusted entry stays");
+        let r = rig.http.put(&url).body(vec![0u8; 15_000]).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::CREATED);
-        assert!(entries_in(&trusted_dir(&rig.root, "acme/demo")).is_empty(), "evicted");
+        // Only a promotion (or the sweep) evicts, and only trusted entries.
+        assert_eq!(evict(&rig.root, 100_000), 0);
+        assert!(evict(&rig.root, 10_000) > 0);
+        assert!(entries_in(&trusted_dir(&rig.root, "acme/demo")).is_empty());
+        assert!(!entries_in(&staged_dir(&rig.root, "vm-a")).is_empty(), "staged uploads are not evicted");
+    }
+
+    #[test]
+    fn reservations_enforce_the_vm_cap_and_the_budget_and_are_released() {
+        let root = tmp();
+        let r = reserve(&root, "vm-a", STAGED_CAP - 10, u64::MAX).unwrap();
+        assert_eq!(reserve(&root, "vm-a", 11, u64::MAX).err(), Some(StatusCode::PAYLOAD_TOO_LARGE), "over the VM's staged cap");
+        assert!(reserve(&root, "vm-b", 11, u64::MAX).is_ok(), "another VM has its own cap");
+        drop(r);
+        assert!(reserve(&root, "vm-a", STAGED_CAP, u64::MAX).is_ok(), "released on drop");
+        let root = tmp();
+        std::fs::create_dir_all(staged_dir(&root, "vm-a")).unwrap();
+        std::fs::write(staged_dir(&root, "vm-a").join("blob"), [0u8; 600]).unwrap(); // seeds the account
+        assert_eq!(reserve(&root, "vm-b", 401, 1000).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "over the store budget");
+        let r = reserve(&root, "vm-b", 400, 1000).unwrap();
+        r.commit(0);
+        assert_eq!(reserve(&root, "vm-b", 1, 1000).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "committed bytes stay counted");
+        discard(&root, "vm-a");
+        assert!(reserve(&root, "vm-c", 600, 1000).is_ok(), "a discard gives the bytes back");
+    }
+
+    #[tokio::test]
+    async fn a_vm_over_its_staged_cap_is_refused_with_413() {
+        let (rig, _) = rig(u64::MAX).await;
+        let _held = reserve(&rig.root, "vm-a", STAGED_CAP - 10, u64::MAX).unwrap();
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        let r = rig.http.put(j["signed_upload_url"].as_str().unwrap()).body(vec![0u8; 100]).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn evict_while_a_download_streams_still_delivers() {
+        let (rig, _) = rig(u64::MAX).await;
+        let c = caller("vm-a", "acme/demo");
+        let dir = seed(&rig.root, "trusted", &c, "big", "v", 1, b"");
+        let (blk, n) = (vec![7u8; 6 << 20], 3);
+        let mut m = read_meta(&dir).unwrap();
+        m.blocks = (0..n).map(|i| format!("b{i}")).collect();
+        m.size = (blk.len() * n) as u64;
+        for b in &m.blocks {
+            std::fs::write(dir.join(b), &blk).unwrap();
+        }
+        write_meta(&dir, &m).unwrap();
+        let (_, j) = rig.twirp("GetCacheEntryDownloadURL", json!({ "key": "big", "version": "v" })).await;
+        let mut r = rig.http.get(j["signed_download_url"].as_str().unwrap()).send().await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        // The headers are in; the body is not read yet. The eviction (and a clear) take the files away.
+        assert!(evict(&rig.root, 0) > 0 && !dir.exists());
+        let mut got = 0;
+        while let Some(chunk) = r.chunk().await.unwrap() {
+            got += chunk.len();
+        }
+        assert_eq!(got, blk.len() * n, "the whole entry still arrives");
+    }
+
+    #[test]
+    fn concurrent_promotes_of_one_key_keep_one_entry() {
+        let root = tmp();
+        for round in 0..20 {
+            let key = format!("k{round}");
+            let (a, b) = (caller("vm-a", "acme/demo"), caller("vm-b", "acme/demo"));
+            seed(&root, "staged", &a, &key, "v", 1, b"from a");
+            seed(&root, "staged", &b, &key, "v", 2, b"from b");
+            let gate = Arc::new(std::sync::Barrier::new(2));
+            let hs: Vec<_> = ["vm-a", "vm-b"]
+                .into_iter()
+                .map(|vm| {
+                    let (root, gate) = (root.clone(), gate.clone());
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        promote(&root, vm).unwrap()
+                    })
+                })
+                .collect();
+            let got: Vec<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+            assert_eq!(got.iter().map(|g| g.0).sum::<usize>(), 1, "exactly one promoted: {got:?}");
+            let same = entries_in(&trusted_dir(&root, "acme/demo")).into_iter().filter(|(_, m)| m.key == key).count();
+            assert_eq!(same, 1, "round {round}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_create_for_a_key_being_uploaded_is_refused() {
+        let (rig, _) = rig(1 << 30).await;
+        let (_, first) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        assert_eq!(first["ok"], true);
+        let (_, second) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        assert_eq!(second, json!({ "ok": false }));
+        assert_eq!(entries_in(&staged_dir(&rig.root, "vm-a")).len(), 1, "the first reservation stays");
+        let url = first["signed_upload_url"].as_str().unwrap();
+        assert_eq!(rig.http.put(url).body("x").send().await.unwrap().status(), StatusCode::CREATED, "and still takes the upload");
+        let (_, other) = rig.twirp("CreateCacheEntry", json!({ "key": "k2", "version": "v" })).await;
+        assert_eq!(other["ok"], true, "another key is unaffected");
+    }
+
+    #[tokio::test]
+    async fn a_bad_block_list_is_400_and_the_entry_cannot_be_finalized() {
+        let (rig, _) = rig(1 << 30).await;
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        let url = j["signed_upload_url"].as_str().unwrap().to_string();
+        let put = |q: &str, b: &str| rig.http.put(format!("{url}&{q}")).body(b.to_string()).send();
+        assert_eq!(put("comp=block&blockid=QQ%3D%3D", "data").await.unwrap().status(), StatusCode::CREATED);
+        for (what, xml) in [
+            ("unknown id", "<BlockList><Latest>nope</Latest></BlockList>"),
+            ("known and unknown", "<BlockList><Latest>QQ==</Latest><Latest>nope</Latest></BlockList>"),
+            ("empty", ""),
+            ("garbage", "\u{0}<<>>not xml at all"),
+            ("no ids", "<BlockList></BlockList>"),
+        ] {
+            assert_eq!(put("comp=blocklist", xml).await.unwrap().status(), StatusCode::BAD_REQUEST, "{what}");
+        }
+        let (_, f) = rig.twirp("FinalizeCacheEntryUpload", json!({ "key": "k", "version": "v", "size_bytes": "4" })).await;
+        assert_eq!(f["ok"], false, "no block list was accepted");
+        assert!(visible(&rig.root, &caller("vm-a", "acme/demo")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_read_only_caller_cannot_put() {
+        let (rig, _) = rig(1 << 30).await;
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        let url = j["signed_upload_url"].as_str().unwrap().to_string();
+        rig.as_caller(Some(Caller { can_write: false, ..caller("vm-a", "acme/demo") }));
+        assert_eq!(rig.http.put(&url).body("x").send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            rig.http.put(format!("{url}&comp=blocklist")).body("<BlockList/>").send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn size_bytes_as_a_number_works_and_a_missing_one_fails_the_upload() {
+        let (rig, _) = rig(1 << 30).await;
+        for (key, size, ok) in
+            [("num", Some(json!(5)), true), ("str", Some(json!("5")), true), ("none", None, false), ("junk", Some(json!("5x")), false)]
+        {
+            let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": key, "version": "v" })).await;
+            rig.http.put(j["signed_upload_url"].as_str().unwrap()).body("hello").send().await.unwrap();
+            let mut body = json!({ "key": key, "version": "v" });
+            if let Some(s) = size {
+                body["size_bytes"] = s;
+            }
+            let (code, f) = rig.twirp("FinalizeCacheEntryUpload", body).await;
+            assert_eq!((code, f["ok"].clone()), (StatusCode::OK, json!(ok)), "{key}: {f}");
+        }
+    }
+
+    /// A PUT that was streaming while the entry was finalized must not add to, or change, the finished entry.
+    #[tokio::test]
+    async fn a_put_that_finishes_after_finalize_is_dropped() {
+        let (rig, _) = rig(1 << 30).await;
+        let (_, j) = rig.twirp("CreateCacheEntry", json!({ "key": "k", "version": "v" })).await;
+        let url = j["signed_upload_url"].as_str().unwrap().to_string();
+        let b = |id: &str| format!("{url}&comp=block&blockid={id}");
+        assert_eq!(rig.http.put(b("QQ%3D%3D")).body("data").send().await.unwrap().status(), StatusCode::CREATED);
+        // A second block, announced as 4 bytes, with the body held back.
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Vec<u8>>>(2);
+        let late =
+            {
+                let req = rig.http.put(b("Qg%3D%3D")).header("content-length", "4").body(reqwest::Body::wrap_stream(
+                    futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|x| (x, rx)) }),
+                ));
+                tokio::spawn(async move { req.send().await.unwrap().status() })
+            };
+        tx.send(Ok(b"la".to_vec())).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let list = "<BlockList><Latest>QQ==</Latest></BlockList>";
+        assert_eq!(rig.http.put(format!("{url}&comp=blocklist")).body(list).send().await.unwrap().status(), StatusCode::CREATED);
+        let (_, f) = rig.twirp("FinalizeCacheEntryUpload", json!({ "key": "k", "version": "v", "size_bytes": "4" })).await;
+        assert_eq!(f["ok"], true, "{f}");
+        tx.send(Ok(b"te".to_vec())).await.unwrap();
+        drop(tx);
+        assert_eq!(late.await.unwrap(), StatusCode::FORBIDDEN, "the late PUT is refused");
+        let (dir, m) = visible(&rig.root, &caller("vm-a", "acme/demo")).remove(0);
+        assert!(m.finished && m.size == 4 && m.blocks.len() == 1);
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "meta.json and the one listed block, no stray block or .part: {files:?}");
     }
 }

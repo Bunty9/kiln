@@ -57,10 +57,10 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
-| `gha_cache` | bool | `false` | | live (new connections) | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; a connection that is not a live kiln VM, a VM whose image is not patched, a repo with `cache` off and every tag or release build is proxied to GitHub unchanged. |
-| `gha_cache_gb` | integer | `20` | `1` to `500` | live | Storage cap of the Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted. |
+| `gha_cache` | bool | `false` | | live (new connections) | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; a connection that is not a live kiln VM, a VM whose image is not patched, the `cache` setting off and every tag or release build is proxied to GitHub unchanged. |
+| `gha_cache_gb` | integer | `20` | `1` to `500` | live | Storage cap of the Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted after each promotion and hourly. A job's uploads are never made room for: a PUT that would push the store over the cap, or one VM over 10 GB of staged uploads, is refused. |
 
-**Trust.** kiln learns which VM a request comes from from the kernel (the socket's owning process and its `kiln-vm-<id>.scope` cgroup, or the process kiln started for the VM), never from the request; the job's token is only cross-checked against the VM's runner id. A job's saves are staged privately and visible to that job alone; they are promoted into the repo's shared cache only under the verdict that commits the repo cache disk (a successful `push` to the default branch or a `cache_branches` branch, one job on the VM, and the forge's own check where it applies) and deleted otherwise. Entries are stored per repo under a hash of the forge kind, host and full repo path, and that identity is checked on every read. "Clear cache" on a repo clears its Actions cache as well.
+**Trust.** kiln learns which VM a request comes from from the kernel (the socket's owning process and its `kiln-vm-<id>.scope` cgroup; where systemd scopes do not work the local cache is off for every job, and the process kiln started for the VM only identifies traffic to proxy), never from the request; the job's token is only cross-checked against the VM's runner id. A job's saves are staged privately and visible to that job alone; they are promoted into the repo's shared cache only under the verdict that commits the repo cache disk (a successful `push` to the default branch or a `cache_branches` branch, one job on the VM, and the forge's own check where it applies) and deleted otherwise. Entries are stored per repo under a hash of the forge kind, host and full repo path, and that identity is checked on every read. "Clear cache" on a repo clears its Actions cache as well.
 
 **How it works.** Workflows are unchanged. On an image baked with the Actions cache patch (see below), `actions/cache`, the `setup-*` actions' caches and `Swatinem/rust-cache` talk to kiln on the host (`10.0.2.2:5001` from the VM) instead of GitHub's cache service. Restores come from the host's disk, and nothing is uploaded to GitHub. Everything else the runner sends to GitHub's Results service (artifacts, step summaries) is passed through to GitHub untouched.
 
@@ -70,14 +70,14 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 - A Linux host (the listener is not started on macOS).
 - GitHub repos. Gitea and GitLab jobs do not use it yet.
 - An image baked by a kiln that has this feature (it patches the Actions runner at bake). An older image keeps using GitHub's cache; rebake with `kiln bake` or Settings › Image. If the runner's layout changes in a release kiln does not understand, the bake leaves the runner unpatched and records why (shown in Settings › Cache and `kiln doctor`), and jobs use GitHub's cache as before.
-- The repo's `cache` setting on.
+- The global `cache` setting on (it is not per repo).
 
 **Trust rules.** The same as the cache disk: a job reads the repo's shared cache; only a successful `push` to the default branch (or a `cache_branches` branch) writes it. Pull requests read but never write, a failed job's saves are deleted, and tag and release builds skip the cache entirely. An existing key is never overwritten: the first trusted writer wins.
 
 **Limits.**
 - Clients that speak protobuf instead of JSON (sccache's GitHub Actions backend) are proxied to GitHub, not served locally.
 - A single entry can be up to 10 GB.
-- Over `gha_cache_gb`, the least recently used entries are evicted after each promotion and hourly. Entries are not expired by age.
+- Over `gha_cache_gb`, the least recently used shared entries are evicted after each promotion and hourly; staged uploads never evict them, a PUT over the cap is refused instead. Entries are not expired by age.
 - A re-run of a pull request starts from the shared cache, not from what an earlier run of that PR saved.
 - A guest that is not a live kiln VM, or a VM on an unpatched image, is proxied to GitHub as if kiln were not there.
 

@@ -1590,9 +1590,9 @@ pages.jobs = {
   unmount() { pages.job.unmount(); },
 };
 const fb = new Map();
-// What the cache did for a job, as the Details card says it ('' when nothing to say).
 // What the Actions cache did for a job ('' when it was not used). Everything from the record is escaped.
 const ghaInfo = v => { const g = v.gha; if (!g) return ''; const n = `${+g.restored || 0} restored, ${+g.saved || 0} saved`; return g.outcome === 'promoted' ? `${n}, promoted` : `${n}, discarded${g.reason ? ': ' + esc(g.reason) : ''}`; };
+// What the cache did for a job, as the Details card says it ('' when nothing to say).
 const cacheInfo = v => {
   if (refusedBy(v)) return '';
   if (v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '')) return 'not used. Release and tag builds always start clean, on purpose';

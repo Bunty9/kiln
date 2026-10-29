@@ -54,6 +54,12 @@ fn probe_fresh(p: &Probe) -> bool {
     p.as_ref().is_some_and(|(at, why)| why.is_none() || at.elapsed() < REPROBE)
 }
 
+/// Whether the last probe found scopes working (no probe, or a failed one, is false): the Actions cache trusts a
+/// VM's cgroup scope to tell its connections from everyone else's.
+pub fn scopes_ok() -> bool {
+    PROBE.lock().unwrap().as_ref().is_some_and(|(_, why)| why.is_none())
+}
+
 /// Whether VMs get scopes: Linux with a working `systemd-run`.
 async fn scopes_work() -> bool {
     scope_state().await.is_none()
