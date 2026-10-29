@@ -1675,11 +1675,8 @@ async fn gha_settle(app: &App, id: &str, verdict: Result<(), String>) {
     let (restored, saved) = crate::ghacache::take_stats(id);
     // The filesystem work (moving, deleting, sizing entries) stays off the async runtime.
     let settled = tokio::task::spawn_blocking(move || match verdict {
-        Ok(()) => match crate::ghacache::promote(&root, &vm) {
-            Ok((ok, dropped)) => {
-                crate::ghacache::evict(&root, budget);
-                ("promoted", format!("{ok} promoted, {dropped} dropped"))
-            }
+        Ok(()) => match crate::ghacache::promote(&root, &vm, budget) {
+            Ok((ok, dropped)) => ("promoted", format!("{ok} promoted, {dropped} dropped")),
             Err(e) => {
                 tracing::warn!("{vm}: actions cache promotion failed: {e:#}");
                 crate::ghacache::discard(&root, &vm);
