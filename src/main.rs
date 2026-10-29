@@ -361,6 +361,79 @@ pub struct PollStatus {
     pub fork_queued: Vec<String>,
     /// Every launch blocker active this tick, (kind, message), in priority order.
     pub health: Vec<(String, String)>,
+    /// Queued jobs that got no VM this tick, per repo and size, with why. Normal busyness (`slots_full`) is not in `blocked`.
+    pub waiting: Vec<Waiting>,
+}
+
+/// Queued jobs of one repo and VM size that could not get a VM this tick.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct Waiting {
+    pub repo: String,
+    pub jobs: usize,
+    pub cpus: u32,
+    /// `repo_backoff`, `host_hold`, `old_image`, `launch_gate`, `egress`, `draining`, `github_api`, `slots_full`, `held` or `budget`.
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Journal lines for what changed between two ticks' waiting lists, per repo: a new or changed reason, or none left.
+fn waiting_changes(old: &[Waiting], new: &[Waiting]) -> Vec<String> {
+    let reasons =
+        |w: &[Waiting]| -> std::collections::BTreeMap<String, &'static str> { w.iter().map(|w| (w.repo.clone(), w.reason)).collect() };
+    let (o, n) = (reasons(old), reasons(new));
+    let mut out = vec![];
+    for (repo, why) in &n {
+        if o.get(repo) != Some(why) {
+            let w = new.iter().find(|w| &w.repo == repo && w.reason == *why).unwrap();
+            let d = w.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default();
+            out.push(format!("{repo}: queued jobs are waiting ({why}){d}"));
+        }
+    }
+    out.extend(o.keys().filter(|r| !n.contains_key(*r)).map(|r| format!("{r}: no queued jobs are waiting any more")));
+    out
+}
+
+/// Why `jobs` queued jobs got no VM: the first gate that holds, in the order the launch gates run.
+#[derive(Default)]
+struct WaitCtx {
+    backed_off: bool,
+    host_hold: bool,
+    old_image: bool,
+    gate: Option<String>,
+    egress: Option<String>,
+    draining: bool,
+    api_cut: bool,
+    slots_full: bool,
+    holds: usize,
+    max_vms: usize,
+    budget: Option<String>,
+}
+
+impl WaitCtx {
+    fn reason(self) -> (&'static str, Option<String>) {
+        if self.backed_off {
+            ("repo_backoff", Some("the repo's launches failed and are retried after a pause".into()))
+        } else if self.host_hold {
+            ("host_hold", Some("memory stalls or the io_uring limit hold launches".into()))
+        } else if self.old_image {
+            ("old_image", Some("rebake the base image".into()))
+        } else if self.gate.is_some() {
+            ("launch_gate", self.gate)
+        } else if self.egress.is_some() {
+            ("egress", self.egress)
+        } else if self.draining {
+            ("draining", None)
+        } else if self.api_cut {
+            ("github_api", Some("the forge is rejecting runner registration".into()))
+        } else if self.slots_full && self.holds > 0 {
+            ("held", Some(format!("{} of {} slots held for debugging", self.holds, self.max_vms)))
+        } else if self.slots_full {
+            ("slots_full", Some(if self.max_vms == 0 { "paused (max_vms = 0)".into() } else { format!("all {} slots busy", self.max_vms) }))
+        } else {
+            ("budget", self.budget)
+        }
+    }
 }
 
 /// How a forge is named in messages: "GitHub", else its id.
@@ -1420,6 +1493,8 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
     let mut repo_errors = HashMap::new();
     let mut refused_forks = HashMap::new();
     let mut fork_queued = vec![];
+    let mut waiting_list: Vec<Waiting> = vec![];
+    let mut pending_msgs: Vec<String> = vec![];
     // Queued jobs this tick that found every slot taken while holds take some.
     let mut waiting_on_holds = 0;
     // Rotate the start so the first repo doesn't always win scarce slots.
@@ -1441,10 +1516,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             repo_errors.insert(repo.clone(), m);
             continue;
         }
-        let (by_size, runners, forks, fork_job, lookup_error) = match forge
+        let (by_size, runners, forks, fork_job, lookup_error, pending) = match forge
             .demand(rr, &cfg.label, cfg.vm_cpus)
             .await
-            .map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued, d.lookup_error))
+            .map(|d| (d.by_size, d.claimed, d.refused_forks, d.fork_queued, d.lookup_error, d.pending))
         {
             Ok(r) => r,
             Err(e) => {
@@ -1514,7 +1589,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 warm = 0;
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
-            let want = api.allow(now(), want, probing.contains(&forge.id()));
+            let room_short = cfg.max_vms.saturating_sub(active) < demand;
+            let allowed = api.allow(now(), want, probing.contains(&forge.id()));
+            let api_cut = allowed < want;
+            let want = allowed;
             // After an io_uring pause one launch tests whether the limit has cleared.
             let want = if uring_fails > 0 { want.min(1) } else { want };
             if want > 0 {
@@ -1532,13 +1610,49 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
             // QEMU allocates lazily, so MemAvailable alone lets a burst overcommit.
             let (want, limit) = budget.take(want, cfg.mem_mb(n), n);
             if blocked.is_none() {
-                blocked = limit.map(|m| ("budget", m));
+                blocked = limit.clone().map(|m| ("budget", m));
+            }
+            let short = demand.saturating_sub(want);
+            if short > 0 {
+                let (reason, detail) = WaitCtx {
+                    backed_off,
+                    host_hold: host_hold || uring_fails > 0,
+                    old_image,
+                    gate: gate.clone(),
+                    egress: egress_err.as_ref().map(|e| e.to_string()),
+                    draining: draining || app.stopping.load(Ordering::SeqCst),
+                    api_cut,
+                    slots_full: room_short,
+                    holds,
+                    max_vms: cfg.max_vms,
+                    budget: limit,
+                }
+                .reason();
+                waiting_list.push(Waiting { repo: repo.clone(), jobs: short, cpus: n, reason, detail });
             }
             for i in 0..want {
                 vm::launch(app.clone(), repo.clone(), n, i >= demand);
             }
         }
+        // GitHub holds a run as pending (a concurrency group or an approval) while kiln has free slots and nothing of
+        // this repo waits on kiln: say so, since only the user can cancel and re-run it.
+        let idle = blocked.is_none()
+            && cfg.max_vms > app.vms.lock().unwrap().iter().filter(|v| v.state.is_active()).count()
+            && !waiting_list.iter().any(|w| &w.repo == repo);
+        if let (true, Some(p)) = (idle, pending.iter().min_by_key(|p| p.since))
+            && now().saturating_sub(p.since) > 600
+        {
+            pending_msgs.push(format!(
+                "GitHub has held run {} #{} in {repo} as pending for {} min (a concurrency group or approval wait); kiln has free slots. Cancel and re-run it on GitHub if it should run.",
+                p.workflow,
+                p.number,
+                (now() - p.since) / 60
+            ));
+        }
         queued_by_repo.insert(repo.clone(), by_size);
+    }
+    if !pending_msgs.is_empty() {
+        problems.push(("github_pending", pending_msgs.join(" ")));
     }
     // Pause over: the banner stays only while a job waits on the probe, not indefinitely.
     if blocked.is_none() && any_queued {
@@ -1552,6 +1666,10 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         p.refused_forks = refused_forks;
         p.fork_queued = fork_queued;
         p.health = problems.iter().map(|(k, m)| (k.to_string(), m.clone())).collect();
+        for line in waiting_changes(&p.waiting, &waiting_list) {
+            tracing::info!("{line}");
+        }
+        p.waiting = waiting_list;
         p.blocked_kind = blocked.as_ref().map(|b| b.0.to_string());
         p.blocked = blocked.map(|b| b.1);
     }
@@ -1844,6 +1962,121 @@ mod tests {
         assert!(p.repo_errors.is_empty(), "{:?}", p.repo_errors);
         assert!(!p.health.iter().any(|(k, _)| k == "forge" || k == "github_api"), "{:?}", p.health);
         assert!(app.vms.lock().unwrap().is_empty());
+        // max_vms 0: every queued job waits on the slot cap, but that is no banner.
+        assert!(p.waiting.iter().all(|w| w.reason == "slots_full" && w.repo == "acme/demo"), "{:?}", p.waiting);
+        assert_eq!(p.waiting.iter().map(|w| w.jobs).sum::<usize>(), 3);
+        assert!(p.blocked_kind.as_deref() != Some("slots_full"));
+    }
+
+    /// One tick of the fixture (three queued jobs) with `f` applied to the app and config first: the waiting reasons.
+    async fn waiting_reasons(name: &str, f: impl FnOnce(&mut Arc<App>, &mut Config)) -> Vec<&'static str> {
+        let m = forge_test_mock::Mock::github().await;
+        let (mut app, mut cfg) = tick_app(name, &m, None);
+        f(&mut app, &mut cfg);
+        let _ = tick(&app, &cfg).await;
+        let w = app.poll.lock().unwrap().waiting.clone();
+        w.iter().map(|w| w.reason).collect()
+    }
+
+    #[tokio::test]
+    async fn waiting_reasons_follow_the_gates() {
+        let n = |r: &'static str| vec![r; 2];
+        assert_eq!(waiting_reasons("wait-slots", |_, _| {}).await, n("slots_full"));
+        assert_eq!(
+            waiting_reasons("wait-backoff", |a, c| {
+                c.max_vms = 4;
+                a.backoff.lock().unwrap().insert("acme/demo".into(), (1, now() + 600));
+            })
+            .await,
+            n("repo_backoff")
+        );
+        assert_eq!(
+            waiting_reasons("wait-drain", |a, c| {
+                c.max_vms = 4;
+                a.draining.store(true, Ordering::SeqCst);
+            })
+            .await,
+            n("draining")
+        );
+        assert_eq!(
+            waiting_reasons("wait-psi", |a, c| {
+                c.max_vms = 4;
+                Arc::get_mut(a).unwrap().host_fixed = Some(HostReadings { mem_psi: Some(45.0), ..HostReadings::TEST });
+            })
+            .await,
+            n("host_hold")
+        );
+        assert_eq!(
+            waiting_reasons("wait-mem", |a, c| {
+                c.max_vms = 4;
+                Arc::get_mut(a).unwrap().host_fixed = Some(HostReadings { mem_avail_mb: 10, ..HostReadings::TEST });
+            })
+            .await,
+            n("launch_gate")
+        );
+        assert_eq!(
+            waiting_reasons("wait-api", |a, c| {
+                c.max_vms = 4;
+                a.api_backoff.lock().unwrap().entry(forge::ForgeId::github()).or_default().fail(Some(503), now());
+            })
+            .await,
+            n("github_api")
+        );
+        assert_eq!(
+            waiting_reasons("wait-image", |a, c| {
+                c.max_vms = 4;
+                std::fs::write(a.data.join("images/base.json"), r#"{"recipe":1}"#).unwrap();
+            })
+            .await,
+            n("old_image")
+        );
+    }
+
+    #[test]
+    fn waiting_is_logged_on_change_only() {
+        let w = |repo: &str, reason| Waiting { repo: repo.into(), jobs: 1, cpus: 2, reason, detail: None };
+        let a = vec![w("a/b", "slots_full")];
+        assert_eq!(waiting_changes(&[], &a).len(), 1);
+        assert!(waiting_changes(&a, &a).is_empty());
+        // Another size or count of the same reason is no change.
+        assert!(waiting_changes(&a, &[Waiting { jobs: 5, cpus: 4, ..w("a/b", "slots_full") }]).is_empty());
+        let l = waiting_changes(&a, &[w("a/b", "budget")]);
+        assert!(l.len() == 1 && l[0].contains("budget"), "{l:?}");
+        let l = waiting_changes(&a, &[]);
+        assert!(l.len() == 1 && l[0].contains("no queued jobs are waiting"), "{l:?}");
+    }
+
+    #[test]
+    fn waiting_serializes_additively() {
+        let mut p = PollStatus::default();
+        p.waiting.push(Waiting { repo: "a/b".into(), jobs: 2, cpus: 4, reason: "budget", detail: None });
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["waiting"][0], serde_json::json!({"repo": "a/b", "jobs": 2, "cpus": 4, "reason": "budget"}));
+        assert!(v["queued"].is_object() && v["health"].is_array());
+    }
+
+    #[tokio::test]
+    async fn a_pending_run_is_raised_only_while_kiln_has_idle_slots() {
+        let empty = r#"{"workflow_runs":[]}"#;
+        let pending = |at: &str| format!(r#"{{"workflow_runs":[{{"id":9,"name":"Release","run_number":7,"created_at":"{at}"}}]}}"#);
+        let run = |name: &'static str, at: &'static str, slots: usize| async move {
+            let m = forge_test_mock::Mock::github().await;
+            let (app, mut cfg) = tick_app(name, &m, None);
+            cfg.max_vms = slots;
+            for s in ["queued", "in_progress"] {
+                m.route("GET", &format!("/repos/acme/demo/actions/runs?status={s}&per_page=30"), 200, empty);
+            }
+            m.route("GET", "/repos/acme/demo/actions/runs?status=pending&per_page=30", 200, pending(at));
+            tick(&app, &cfg).await.unwrap();
+            let h = app.poll.lock().unwrap().health.clone();
+            h.into_iter().find(|(k, _)| k == "github_pending").map(|h| h.1)
+        };
+        let msg = run("pend-old", "2026-01-01T00:00:00Z", 2).await.expect("raised");
+        assert!(msg.starts_with("GitHub has held run Release #7 in acme/demo as pending for "), "{msg}");
+        assert!(msg.contains("kiln has free slots"));
+        // Not yet 10 minutes old (a future timestamp), or kiln has no slot to give.
+        assert_eq!(run("pend-new", "2099-01-01T00:00:00Z", 2).await, None);
+        assert_eq!(run("pend-full", "2026-01-01T00:00:00Z", 0).await, None);
     }
 
     #[tokio::test]
@@ -1990,7 +2223,7 @@ mod tests {
             std::fs::create_dir_all(app.data.join("vms").join(id)).unwrap();
             app.vms.lock().unwrap().push(rec(id));
         }
-        let (by_size, runners, forks) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
+        let (by_size, runners, forks, _) = app.gh.queued_jobs("acme/demo", "kiln", 1).await.unwrap();
         assert_eq!((by_size.len(), forks), (2, 1));
         attach_jobs(&app, "acme/demo", &runners);
         let vms = app.vms.lock().unwrap().clone();
