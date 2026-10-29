@@ -1156,7 +1156,7 @@ function onState() {
     if (!onState.auto && r.page === 'overview' && !location.hash.replace('#', '').replace('/', '') && setupNeeded() && !lsGet('kiln-skip-setup')) { onState.auto = 1; location.hash = '#/setup'; return; }
     onState.auto = 1; return route();
   }
-  cur.update?.(); cur.live?.(); notifyState();
+  cur.update?.(); cur.live?.(); notifyState(); jcRefresh();
   LOGS.forEach(l => l.kick());
 }
 let lastHash = location.hash, guard = false;
@@ -1529,6 +1529,8 @@ function hostWire() {
     e.preventDefault(); const w = c.getBoundingClientRect().width; at(c, Math.max(0, Math.min(w - 1, HV.hover.x + (e.key === 'ArrowLeft' ? -w / 20 : w / 20))));
   });
 }
+const WAIT = { repo_backoff: 'repo paused after failures', host_hold: 'host memory or io_uring hold', old_image: 'base image needs a rebake', launch_gate: 'low memory or disk', egress: 'egress filter not ready', draining: 'restart pending', github_api: 'GitHub registration failing', slots_full: 'all slots busy', held: 'slots held for debugging', budget: 'cpu or memory budget' };
+const waitLine = () => (S.poll.waiting || []).length ? `<div class="sm fg2">${S.poll.waiting.map(w => `${+w.jobs}× ${+w.cpus} cpu in ${repoLabel(F, w.repo)} waiting: ${esc(WAIT[w.reason] || w.reason)}`).join(' · ')}</div>` : '';
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.notfound = {
   mount() { $('#app').innerHTML = `<div class="ph"><h1>Page not found</h1></div><div class="empty">${ic('jobs')}<p>There is no page at this address.</p><a class="btn" href="#/">Back to the Overview</a></div>`; },
@@ -1553,7 +1555,7 @@ pages.overview = {
     }
     if (total > act.length + 4) tiles.push(`<div class="ch">+${total - act.length - 4} idle</div>`);
     if (!tiles.length) tiles.push(`<div class="ch"${kt('Max VMs is 0: no new VMs start until you resume.')}>Paused</div>`);
-    setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>`);
+    setHTML($('#ov-now'), `<h2>Slots ${q ? `<span class="q sm" tabindex="0"${tip(ht('queued') + (qTip() ? '\n' + qTip() : ''))}>${q} queued</span>${hq('queued')}` : ''}</h2><div class="chs">${tiles.join('')}</div>${waitLine()}`);
     // Pin the burn loops to page time so a re-render continues them instead of restarting.
     for (const a of $('#ov-now').getAnimations({ subtree: true })) if (a.animationName) a.startTime = 0;
     setHTML($('#ov-stats'), stats());
@@ -1606,9 +1608,9 @@ function segs(v) {
 }
 // Timeline ("firing log"): one segment per phase. Tips reuse the HELP.timeline sentences.
 const tlDesc = n => n === 'Refused' ? 'Refused: kiln declined the job before any job code ran.' : HELP.timeline[1].split(/(?<=\.) /).find(x => x.startsWith(n + ':')) || '';
-const timeline = sg => { const tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1;
+const timeline = (sg, live) => { const tot = sg.reduce((a, s) => a + Math.max(s[1], 0), 0) || 1;
   return `<div class="tl">${sg.map(s => `<i class="${s[2]}" style="flex:${Math.max(s[1], 0) / tot} 1 0" tabindex="0" role="img" aria-label="${s[0]} ${dur(s[1])}"${tip(`${s[0]}: ${dur(s[1])}\n${tlDesc(s[0]).replace(/^\w+: /, '')}`)}></i>`).join('')}</div>
-  <div class="tll">${sg.map(s => `<span class="${s[2]}">${s[0]}<b>${dur(s[1])}</b></span>`).join('')}</div>`; };
+  <div class="tll">${sg.map(s => `<span class="${s[2]}">${s[0]}<b${live && s === sg[sg.length - 1] ? ` data-t="${Math.round(now() - s[1])}"` : ''}>${dur(s[1])}</b></span>`).join('')}</div>`; };
 // Hover card on Overview rows: what the job page shows above its log, from the VM record alone (no log, step or forge call).
 const hvPeak = id => { let c = 0, m = 0; for (const s of HV.buf) for (const x of s.vms) if (x[1] === id) { c = Math.max(c, x[2]); m = Math.max(m, x[3]); } return c || m ? { c, m } : null; };
 function jobCard(v) {
@@ -1620,7 +1622,7 @@ function jobCard(v) {
     ${row('Outcome', esc(st) + (v.result && String(v.result).toLowerCase() !== st ? ` <span class="fg2">(result: ${esc(v.result)})</span>` : ''))}${rfd ? row('Refused', esc(refusedWhy(v))) : row('Note', esc(v.note))}
     ${row('Size', v.cpus ? +v.cpus + ' cpu' + (v.mem_mb ? ' · ' + Math.round(v.mem_mb / 1024) + ' GB' : '') : '')}${row('Start', v.state === 'unneeded' ? '' : v.warm ? 'Warm: booted ahead of the job' : 'Cold: booted for this job')}${row('Cache', ci)}
     ${row('Peak use', pk ? `${fmtC(pk.c)} · ${fmtM(pk.m)} <span class="fg2">(sampled)</span>` : '')}</dl>
-    <div class="jc-t">${timeline(segs(v)).replace(/ tabindex="0"/g, '')}<div class="jc-ts">${T.map(([n, t]) => `<span>${n}<b data-tip="${esc(when(t))}">${new Date(t * 1000).toLocaleTimeString()}</b></span>`).join('')}</div></div>
+    <div class="jc-t">${timeline(segs(v), !v.ended).replace(/ tabindex="0"/g, '')}<div class="jc-ts">${T.map(([n, t]) => `<span>${n}<b data-tip="${esc(when(t))}">${new Date(t * 1000).toLocaleTimeString()}</b></span>`).join('')}</div></div>
     <div class="jc-f"><a href="#/jobs/${encodeURIComponent(v.id)}">Open job ${ic('next')}</a></div>`;
 }
 pages.job = {
@@ -1644,7 +1646,7 @@ pages.job = {
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), stTip(status(v), v), 1)}<h1>${repoLabel(F, v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. ' + fname(fg) + ' marks the job failed after a few minutes.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
-      <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
+      <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg, !v.ended)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<p class="sm" style="margin-top:4px">Needs your SSH key (Settings › Debugging) and a tailnet connection. Release now frees the slot.</p><div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
       <div class="card"><h2>Details</h2><dl class="kv"><dt>Size</dt><dd>${sz(v, 1) || '—'}${v.cpus ? hq('size') : ''}${wm(v, 1)}</dd><dt>Runner</dt><dd${kt('Runner id ' + fname(fg) + ' gave this VM')}>${esc(v.runner_id ?? '—')}</dd>${ci ? `<dt>Cache</dt><dd>${ci}${hq(v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '') ? 'cold' : 'cache')}</dd>` : ''}${v.egress ? `<dt>Network</dt><dd>${esc(v.egress)}${hq('network')}</dd>` : ''}</dl></div>
       ${rfd ? refusedBox(v, fg) : v.note && !(v.state === 'held' && /held for debugging/i.test(v.note)) ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
@@ -3343,13 +3345,30 @@ addEventListener('keydown', e => { if (e.key === 'Escape') { hideTip(); jcHide()
 /* ---------- job hover card: Overview rows, after a short rest of the pointer, or on keyboard focus ---------- */
 // Pointer devices only (touch: a tap opens the job). The card stays while the pointer is on it, so its text can be copied.
 const jcEl = $('#jcard'), jcRow = e => e.target.closest?.('[data-hc] a.row');
-let jcFor = null, jcT = 0;
+let jcFor = null, jcT = 0, jcSide = '', jcDown = 0;
+function jcPlace(side) { // side 'b' (below the row) or 'a' (above) is kept across refreshes; '' picks the one that fits
+  const r = jcFor.getBoundingClientRect(), w = jcEl.offsetWidth, h = jcEl.offsetHeight, cw = document.documentElement.clientWidth;
+  const s = side || (r.bottom + 4 + h <= innerHeight - 8 ? 'b' : r.top - 4 - h >= 8 ? 'a' : '');
+  const y = s === 'b' ? r.bottom + 4 : s === 'a' ? r.top - 4 - h : innerHeight - h - 8;
+  jcEl.style.transform = `translate(${Math.round(Math.max(8, Math.min(r.left + 100, cw - w - 8)))}px,${Math.round(Math.max(8, Math.min(y, innerHeight - h - 8)))}px)`;
+  return s;
+}
 function jcShow(row) {
   const v = S?.vms.find(x => x.id === row.dataset.vm); if (!v) return;
-  jcFor = row; jcEl.innerHTML = jobCard(v); jcEl.scrollTop = 0; jcEl.hidden = false; row.setAttribute('aria-describedby', 'jcard');
-  const r = row.getBoundingClientRect(), w = jcEl.offsetWidth, h = jcEl.offsetHeight, cw = document.documentElement.clientWidth;
-  const y = r.bottom + 4 + h <= innerHeight - 8 ? r.bottom + 4 : r.top - 4 - h >= 8 ? r.top - 4 - h : Math.max(8, innerHeight - h - 8);
-  jcEl.style.transform = `translate(${Math.round(Math.max(8, Math.min(r.left + 100, cw - w - 8)))}px,${Math.round(y)}px)`;
+  jcFor = row; jcEl.innerHTML = jobCard(v); jcEl._h = jcEl.innerHTML; jcEl.scrollTop = 0; jcEl.hidden = false; row.setAttribute('aria-describedby', 'jcard');
+  fillTimes(jcEl); jcSide = jcPlace();
+}
+// Every poll: an open card shows the VM's latest record. Never under a selection or a held pointer in it (retried next poll);
+// keeps scroll, focus and the side it opened on.
+function jcRefresh() {
+  jcFollow(); if (!jcFor) return;
+  const v = S.vms.find(x => x.id === jcFor.dataset.vm); if (!v) return jcHide();
+  const h = jobCard(v), sel = getSelection(); if (h === jcEl._h || jcDown || (!sel.isCollapsed && jcEl.contains(sel.anchorNode))) return;
+  const fl = $$('a', jcEl), idx = fl.indexOf(document.activeElement), st = jcEl.scrollTop;
+  jcEl.innerHTML = jcEl._h = h; fillTimes(jcEl); jcEl.scrollTop = st;
+  if (idx >= 0) $$('a', jcEl)[idx]?.focus({ preventScroll: true });
+  if (tipFor && !tipFor.isConnected) hideTip();
+  jcPlace(jcSide);
 }
 // A poll redrew the row under an open card: follow the new row, or close.
 function jcFollow() {
@@ -3374,7 +3393,8 @@ document.addEventListener('pointerout', e => {
 });
 document.addEventListener('focusin', e => { if (jcEl.contains(e.target)) return; const row = jcRow(e); jcHide(); if (row?.matches(':focus-visible')) jcShow(row); });
 document.addEventListener('focusout', e => { if (!jcEl.contains(e.relatedTarget) && !jcEl.matches(':hover')) jcHide(); });
-document.addEventListener('pointerdown', e => { if (!jcEl.contains(e.target)) jcHide(); });
+document.addEventListener('pointerdown', e => { if (!(jcDown = jcEl.contains(e.target))) jcHide(); });
+addEventListener('pointerup', () => (jcDown = 0), true);
 addEventListener('scroll', e => { if (!jcEl.contains(e.target)) jcHide(); }, true);
 
 /* ---------- phones: swipe sideways to move between the bottom tabs ---------- */

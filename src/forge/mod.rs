@@ -382,6 +382,17 @@ pub struct Demand {
     pub fork_queued: bool,
     /// A job whose origin could not be checked (an API error): it is neither demand nor a refused fork, and the repo shows an error.
     pub lookup_error: Option<String>,
+    /// GitHub: runs held as `pending` (concurrency group or approval wait). Informational.
+    pub pending: Vec<PendingRun>,
+}
+
+/// A workflow run the forge holds as pending.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingRun {
+    pub workflow: String,
+    pub number: u64,
+    /// Unix time the run was created.
+    pub since: u64,
 }
 
 /// What a forge can do from the dashboard; it hides the controls whose flag is false.
@@ -427,6 +438,10 @@ pub struct StepSummary {
     pub name: String,
     pub status: RunStatus,
     pub outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq, Debug)]

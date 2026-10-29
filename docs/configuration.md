@@ -257,6 +257,16 @@ A settings save cannot add or remove a forge, or change an existing forge's addr
 
 **Rolling back.** A kiln release that has the `extra` catch-all keeps `forges` it does not understand when it saves settings, so a downgrade still starts and the entry comes back on the next upgrade. Remove `notify_rules` that name a `<id>:<path>` repo before downgrading: an older kiln refuses them. Releases before that one drop `forges` on a settings save.
 
+### Scripting the API
+
+Every `/api/` call needs the dashboard key, in the `x-kiln-key` header, from a process on the kiln host. Over the unix socket:
+
+```sh
+curl --unix-socket <data>/serve.sock -H "x-kiln-key: $(cat <data>/dashboard.key)" http://localhost/api/state
+```
+
+or over TCP: `curl -H "x-kiln-key: $(cat <data>/dashboard.key)" http://127.0.0.1:<port>/api/state`. Writes (`POST`, `DELETE`) also need `x-kiln: 1`. The socket is not keyless on purpose: job VMs' QEMU runs as the same user, so a socket anyone on the host could use would be open to a guest that escapes.
+
 ### From the dashboard
 
 Settings › Forges › **Add a forge** takes the kind (GitLab or Gitea), an address, a name, the network and an optional first project. The same form is the first setup step when GitLab or Gitea is chosen. Then the forge's card takes its token and projects:
@@ -422,6 +432,8 @@ Use `webhook-id` to drop duplicates: a retry repeats the same id. Inbound GitHub
 ## Troubleshooting host resources
 
 **Every launch fails with `Failed to initialize io_uring: Cannot allocate memory`.** io_uring rings are charged to the user's shared locked-memory counter against `RLIMIT_MEMLOCK` (8 MiB by default). Other processes of the same user (Node.js opens rings, so editors and agent tools can hold hundreds) can use it up, and then `qemu-img` cannot create one. kiln recognises the message, pauses launches with a doubling delay (1 minute, up to 15), keeps only the first failed VM, tries one launch to see whether it has cleared, and shows "io_uring: locked-memory limit reached" on the Overview. `kiln doctor` reports the same in its `io_uring` check by creating and closing a ring. kiln avoids this by lowering its own soft `RLIMIT_MEMLOCK` to 0 at start (nothing kiln runs needs locked memory; the hard limit is untouched and QEMU and `qemu-img` inherit it). They then cannot get a ring and use threads, and `kiln doctor` reports "QEMU does not use io_uring". If kiln's soft limit is already unlimited it is left alone. There is nothing to configure: do not raise the limit (`LimitMEMLOCK`), kiln lowers its own. `grep locked /proc/$(pidof kiln)/limits` shows what applies.
+
+**Jobs are queued and nothing starts.** `poll.waiting` in `/api/state` (and a quiet line under Slots on the Overview) lists, per repo and VM size, how many queued jobs got no VM this tick and why: `repo_backoff`, `host_hold` (memory stalls or the io_uring limit), `old_image`, `launch_gate` (low memory or disk), `egress`, `draining`, `github_api`, `held` (debug holds fill the slots), `slots_full` (all `max_vms` slots busy; normal, no banner) or `budget`. The journal logs one line when a repo's reason changes or clears. A run GitHub itself holds as `pending` for over 10 minutes (a concurrency group or an approval wait) while kiln has free slots raises a `github_pending` health item naming the run; kiln does not cancel or re-run it, do that on GitHub.
 
 **The whole kiln service was killed under memory pressure** (`systemd-oomd killed N process(es) in this unit`). Job VMs now run in their own scopes (`systemctl --user list-units 'kiln-vm-*'`), so the killer's biggest candidate is one VM; the job shows as killed with "likely out of memory". The scope is capped at the VM's RAM plus 1.5 GB (`MemoryMax`, effective only if the memory controller is delegated to the user manager, the default). `kiln doctor` shows `vm cgroups`; without `systemd-run` (no systemd, a container) VMs stay in kiln's cgroup. kiln also holds launches while Linux's memory pressure (`/proc/pressure/memory`, `some avg10`) is above 20%, in addition to the free-memory check; there is no setting for it.
 

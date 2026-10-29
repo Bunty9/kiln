@@ -570,7 +570,12 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             match (mint, step) {
                 (Some((true, _)), Some(mins)) => tracing::warn!("{} {note}: all launches paused {mins} min", v.id),
                 (Some((false, _)), _) => tracing::warn!("{} {note}", v.id),
-                _ => tracing::info!("{} {:?} job={:?} result={:?}: {note}", v.id, v.state, v.job, v.result),
+                _ => {
+                    let at = v.run.as_ref().map_or(String::new(), |r| {
+                        format!(" {}{} run={}", v.repo, r.pr.map_or(format!(" branch={}", r.branch), |p| format!(" #{p}")), r.number)
+                    });
+                    tracing::info!("{} {:?} job={:?} result={:?}{at}: {note}", v.id, v.state, v.job, v.result)
+                }
             }
             if mint.is_none_or(|(wide, _)| !wide) {
                 let mut b = app.backoff.lock().unwrap();
@@ -1245,7 +1250,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     note(app, id, hold_expired_note(v.note.as_deref()));
                     return Ok(State::Killed);
                 } else if v.busy_since.is_some() {
-                    note(app, id, &format!("job timeout after {} min", cfg.job_timeout_mins));
+                    note(app, id, &format!("job timeout after {} min (kiln's job_timeout_mins)", cfg.job_timeout_mins));
                     return Ok(State::Killed);
                 } else if v.online_at.is_some() {
                     note(app, id, "idle timeout: no job arrived");
@@ -3215,6 +3220,15 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
 
     let (ok, detail) = platform::hypervisor();
     out.push(check(if platform::MACOS { "hvf" } else { "kvm" }, ok, detail));
+
+    // `kiln doctor` runs without app.notify filled, so read the file the service reads.
+    out.push(match crate::notify::load(&app.data) {
+        Ok(d) if d.is_empty() => {
+            check("notifications", true, "warning: no destinations: nobody is told when a job fails (Settings › Notifications)")
+        }
+        Ok(d) => check("notifications", true, format!("{} destination(s)", d.len())),
+        Err(e) => check("notifications", false, e),
+    });
 
     for bin in [GUEST.qemu, "qemu-img", "xorriso", "curl", platform::tailscale()] {
         // The macOS app's CLI is .../Tailscale.app/Contents/MacOS/Tailscale.
