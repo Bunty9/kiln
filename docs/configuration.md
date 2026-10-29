@@ -53,6 +53,13 @@ Every VM also has a hard lifetime cap of (idle timeout + job timeout + debug hol
 | `docker_mirror` | bool | `true` | | live (within seconds) | Run the Docker Hub pull-through cache (Linux only: ignored on macOS, where VMs pull from Docker Hub directly). On `serve` kiln downloads the pinned `registry` v3.1.2 into `<data>/bin` (SHA-256 verified, refused on a mismatch), writes `<data>/registry/config.yml` and supervises `registry serve` on `127.0.0.1:5000`. Images are cached for 7 days. If port 5000 is taken kiln leaves it alone and reports "port 5000 in use". VMs reach it at `10.0.2.2:5000` and dockerd falls back to Docker Hub when it is down. The registry contacts Docker Hub as it starts and crashes if the name does not resolve, so kiln starts it only once `registry-1.docker.io` resolves (at boot, before the network is up, it reports "does not resolve yet (waiting for the network)" and checks every 5 s). If it exits later, kiln restarts it with a backoff of 5 s growing to 60 s. |
 | `mirror_gb` | integer | `20` | `1` to `500` | live | Cap on the mirror's storage. Every 10 minutes kiln measures `<data>/registry/data`; over the cap it stops the registry, deletes the data and restarts it. There is no LRU, wiping is acceptable for a cache that refills. |
 
+### Actions cache
+
+| Field | Type | Default | Valid values | Applies | What it does |
+|---|---|---|---|---|---|
+| `gha_cache` | bool | `false` | | not wired yet | Serve `actions/cache` and the setup actions' caches from the host instead of GitHub (Linux only). The listener on `127.0.0.1:5001` is always up; until jobs are identified, everything is proxied to GitHub unchanged. |
+| `gha_cache_gb` | integer | `20` | `1` to `500` | live | Storage cap of the Actions cache under `<data>/gha-cache`; over it the least recently used entries are evicted. |
+
 ### Repo cache
 
 | Field | Type | Default | Valid values | Applies | What it does |
