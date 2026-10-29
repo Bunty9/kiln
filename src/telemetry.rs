@@ -190,6 +190,7 @@ fn usage(app: &App, id: &str) -> Value {
         "egress": if c.egress == "filtered" { "filtered" } else { "open" },
         "features": {
             "cache": c.cache,
+            "gha_cache": c.gha_cache,
             "docker_mirror": c.docker_mirror,
             "auto_rebake": c.auto_rebake,
             "auto_update": c.auto_update,
@@ -398,7 +399,7 @@ mod tests {
                 "warm_vms"
             ]
         );
-        assert_eq!(keys(&u["features"]), ["auto_rebake", "auto_update", "cache", "confined", "debug_hold", "docker_mirror"]);
+        assert_eq!(keys(&u["features"]), ["auto_rebake", "auto_update", "cache", "confined", "debug_hold", "docker_mirror", "gha_cache"]);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-const PORT: u16 = 5001;
+pub(crate) const PORT: u16 = 5001;
 const UPSTREAM: &str = "https://results-receiver.actions.githubusercontent.com";
 #[cfg(test)]
 const CACHE_SVC: &str = "/twirp/github.actions.results.api.v1.CacheService/";
@@ -195,8 +195,35 @@ fn trusted_dir(root: &FsPath, repo: &str) -> PathBuf {
     repo_dir(root, repo).join("entries")
 }
 
+type Usage = (u64, HashMap<String, (u32, u64)>);
+static USAGE: Mutex<Option<(PathBuf, std::time::Instant, Usage)>> = Mutex::new(None);
+
+/// What the trusted scopes hold: total bytes and, per repo identity, (entries, bytes). Walked at most once a minute
+/// (the dashboard polls /api/state); a clear forgets it so the list is right at once.
+// ponytail: one cached walk keyed by root; an incremental index if a store ever has so many entries the walk shows up.
+pub fn usage(root: &FsPath) -> Usage {
+    let mut g = USAGE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((r, at, u)) = &*g
+        && r == root
+        && at.elapsed().as_secs() < 60
+    {
+        return u.clone();
+    }
+    let mut per: HashMap<String, (u32, u64)> = HashMap::new();
+    for r in std::fs::read_dir(root.join("repos")).into_iter().flatten().flatten() {
+        for (dir, m) in entries_in(&r.path().join("entries")) {
+            let e = per.entry(m.repo).or_default();
+            (e.0, e.1) = (e.0 + 1, e.1 + dir_size(&dir));
+        }
+    }
+    let u = (per.values().map(|e| e.1).sum(), per);
+    *g = Some((root.to_path_buf(), std::time::Instant::now(), u.clone()));
+    u
+}
+
 /// Delete a repo's trusted entries (dashboard "clear cache").
 pub fn clear_repo(root: &FsPath, identity: &str) -> std::io::Result<()> {
+    *USAGE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     match std::fs::remove_dir_all(repo_dir(root, identity)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
@@ -763,6 +790,21 @@ pub(crate) mod tests {
         };
         write_meta(&dir, &m).unwrap();
         dir
+    }
+
+    #[test]
+    fn usage_counts_per_repo_and_a_clear_forgets_it() {
+        let root = tmp();
+        let (a, b) = (caller("v", "github|github.com|acme/a"), caller("v", "github|github.com|acme/b"));
+        seed(&root, "trusted", &a, "k1", "v", 1, b"12345");
+        seed(&root, "trusted", &a, "k2", "v", 2, b"123");
+        seed(&root, "trusted", &b, "k1", "v", 1, b"1");
+        seed(&root, "staged", &b, "k9", "v", 1, b"not counted");
+        let (total, per) = usage(&root);
+        assert_eq!((per[&a.repo].0, per[&b.repo].0), (2, 1));
+        assert!(per[&a.repo].1 > per[&b.repo].1 && total == per[&a.repo].1 + per[&b.repo].1 && !per.contains_key("nobody"));
+        clear_repo(&root, &a.repo).unwrap();
+        assert!(!usage(&root).1.contains_key(&a.repo), "cleared at once, not after a minute");
     }
 
     /// `stem` is not injective ("my.repo" and "my_repo" collide); the storage key must be.

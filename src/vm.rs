@@ -1560,6 +1560,20 @@ pub fn cache_stats(data: &Path, repos: &[String]) -> serde_json::Value {
     m.into()
 }
 
+/// `gha_caches` of /api/state: the Actions cache's total bytes and {"o/n": {"entries", "bytes"}} per configured repo.
+/// The store is walked at most once a minute (`ghacache::usage`).
+pub fn gha_stats(app: &App) -> serde_json::Value {
+    let cfg = app.cfg();
+    let (bytes, per) = crate::ghacache::usage(&app.data.join("gha-cache"));
+    let mut repos = serde_json::Map::new();
+    for r in app.all_repos() {
+        if let Some((n, b)) = per.get(&repo_identity(&cfg, &r)) {
+            repos.insert(r, serde_json::json!({ "entries": n, "bytes": b }));
+        }
+    }
+    serde_json::json!({ "bytes": bytes, "repos": repos })
+}
+
 /// Job id from `https://github.com/o/n/actions/runs/1/job/2`.
 fn job_id(url: &str) -> Option<u64> {
     url.rsplit_once("/job/")?.1.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
@@ -3345,6 +3359,12 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let last = out.len() - 1;
     soften(&mut out[last..], crate::boot::starting(), "the docker mirror");
 
+    if !platform::MACOS {
+        out.push(gha_doctor_row(&cfg, &info).await);
+        let last = out.len() - 1;
+        soften(&mut out[last..], crate::boot::starting(), "the Actions cache");
+    }
+
     // Cached unless run from the CLI; a failure only matters when jobs are filtered.
     out.push(match egress_ready(app, cli).await {
         Ok(()) => check("filtered egress", true, "jobs reach the internet and the mirror only"),
@@ -3408,6 +3428,38 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         check("stray qemu", true, "none")
     });
     out
+}
+
+/// (ok, detail) of the doctor's `actions cache` row. `image` is base.json's `gha_cache` (None: baked before RECIPE 15);
+/// an unsupported image is a warning, not a failure: jobs on it use GitHub's cache as before.
+fn gha_doctor(on: bool, listening: bool, image: Option<&str>, runner: &str) -> (bool, String) {
+    if !on {
+        return (true, "off".into());
+    }
+    if !listening {
+        return (false, format!("nothing answers on 127.0.0.1:{} (starts with `kiln serve`)", crate::ghacache::PORT));
+    }
+    let l = format!("listener on 127.0.0.1:{} answering", crate::ghacache::PORT);
+    match image {
+        Some("patched") => (true, format!("{l}; image patched for runner {runner}")),
+        Some(why) => (true, format!("warning: {l}, but the image is {why}: jobs use GitHub's cache")),
+        None => (true, format!("warning: {l}, but the image was baked before the Actions cache: rebake it (jobs use GitHub's cache)")),
+    }
+}
+
+async fn gha_doctor_row(cfg: &crate::Config, info: &serde_json::Value) -> Check {
+    let listening = cfg.gha_cache && {
+        let url = format!("http://127.0.0.1:{}/_kiln/ping", crate::ghacache::PORT);
+        let c = reqwest::Client::builder().timeout(Duration::from_secs(2)).build();
+        match c {
+            Ok(c) => c.get(url).send().await.is_ok_and(|r| r.status() == reqwest::StatusCode::NO_CONTENT),
+            Err(_) => false,
+        }
+    };
+    let runner = info["runner_version"].as_str().unwrap_or("?");
+    let (ok, detail) = gha_doctor(cfg.gha_cache, listening, image_gha_cache(info), runner);
+    // Not up yet while kiln starts: soft, like the docker mirror.
+    Check { soft: !ok, ..check("actions cache", ok, detail) }
 }
 
 /// (qemu processes under `vms_dir`, those whose `<id>/q/` path is no active VM's). Only argv[0]
@@ -4403,6 +4455,19 @@ mod tests {
         assert!(!run(ev("event_workflow_run_fork.json")), "recorded workflow_run from a fork");
         assert!(!run(None), "missing payload");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gha_doctor_row_text() {
+        assert_eq!(gha_doctor(false, false, None, "2.338.2"), (true, "off".into()));
+        let (ok, d) = gha_doctor(true, false, Some("patched"), "2.338.2");
+        assert!(!ok && d.contains("127.0.0.1:5001"), "{d}");
+        let (ok, d) = gha_doctor(true, true, Some("patched"), "2.338.2");
+        assert!(ok && d.contains("image patched for runner 2.338.2") && !d.starts_with("warning"), "{d}");
+        let (ok, d) = gha_doctor(true, true, Some("unsupported: CacheServerUrl x2"), "2.340.0");
+        assert!(ok && d.starts_with("warning:") && d.contains("unsupported: CacheServerUrl x2") && d.contains("GitHub's cache"), "{d}");
+        let (ok, d) = gha_doctor(true, true, None, "2.320.0");
+        assert!(ok && d.starts_with("warning:") && d.contains("rebake"), "{d}");
     }
 
     #[test]

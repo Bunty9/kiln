@@ -807,6 +807,7 @@ const HELP = {
   backoff: ["Launches paused", "VMs for this repo failed to start several times in a row, so kiln is waiting before it tries again. It retries by itself. Check Diagnostics and the last job's Console log.", "stuck"],
   size: ["VM size", "Set by the job's label: `kiln` gets the default size, `kiln-8cpu` gets 8 vCPU / 16 GB. Sizes above this box's CPU count are never served.", "move"],
   timeline: ["Timeline", "Queue: the forge waiting for a runner. Boot: VM start until the runner is online (about 4 s). Wait: runner online until the forge hands it the job. Job: your steps.", "stuck"],
+  ghacache: ["Actions cache", "Workflows keep using `actions/cache`, the setup actions' caches and rust-cache unchanged, but kiln serves them from this box instead of GitHub, so restores run at disk speed and nothing leaves the box. Only a successful push to the default branch (or a repo's cache branches) writes the shared cache; pull requests read it but can't change it, and release and tag builds skip it.", "cache-trust"],
   cache: ["Cache", "Each repo has a cache disk (Docker layers, npm, Cargo and the Rust toolchain, Go, Gradle, Maven). Every job reads it (apt downloads too), but only a successful push to the default branch (or a repo's cache branches) saves to it. Pull requests can't change it.", "cache"],
   network: ["Job network", "open: this job could reach anything this box can, including your LAN and tailnet. filtered: internet, DNS and kiln's Docker mirror only (Linux only). Use filtered for pull requests you don't trust. A forge set to Internal gets one extra exception: its own address and port.", "network"],
   held: ["Debug hold", "This failed job's VM is kept running so you can SSH in. It keeps its memory and VM slot until you release it or time runs out. Only failed jobs are held, never cancelled ones; holds never take the last free slot, and when jobs are queued and no slot is free kiln releases the oldest hold.", "debug"],
@@ -1590,6 +1591,8 @@ pages.jobs = {
 };
 const fb = new Map();
 // What the cache did for a job, as the Details card says it ('' when nothing to say).
+// What the Actions cache did for a job ('' when it was not used). Everything from the record is escaped.
+const ghaInfo = v => { const g = v.gha; if (!g) return ''; const n = `${+g.restored || 0} restored, ${+g.saved || 0} saved`; return g.outcome === 'promoted' ? `${n}, promoted` : `${n}, discarded${g.reason ? ': ' + esc(g.reason) : ''}`; };
 const cacheInfo = v => {
   if (refusedBy(v)) return '';
   if (v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '')) return 'not used. Release and tag builds always start clean, on purpose';
@@ -1618,7 +1621,7 @@ function jobCard(v) {
   return `<div class="jc-h">${badge(st)}<span>${repoLabel(F, v.repo)} / ${esc(jt(v))}</span></div><dl class="kv">
     ${r ? row('Event', `${evIcon(r, v)}${esc(EVI[k][1])}${r.event ? ` <span class="fg2">(${esc(r.event)})</span>` : ''}`) + row('Branch', esc(r.branch)) + row('Pull request', r.pr ? '#' + +r.pr : '') + row('Title', esc(r.title)) + row('Commit', r.sha ? `<span class="mono">${esc(r.sha)}</span>` : '') + row('Workflow', r.workflow ? esc(r.workflow) + (r.number ? ' #' + +r.number : '') : '') : ''}
     ${row('Outcome', esc(st) + (v.result && String(v.result).toLowerCase() !== st ? ` <span class="fg2">(result: ${esc(v.result)})</span>` : ''))}${rfd ? row('Refused', esc(refusedWhy(v))) : row('Note', esc(v.note))}
-    ${row('Size', v.cpus ? +v.cpus + ' cpu' + (v.mem_mb ? ' · ' + Math.round(v.mem_mb / 1024) + ' GB' : '') : '')}${row('Start', v.state === 'unneeded' ? '' : v.warm ? 'Warm: booted ahead of the job' : 'Cold: booted for this job')}${row('Cache', ci)}
+    ${row('Size', v.cpus ? +v.cpus + ' cpu' + (v.mem_mb ? ' · ' + Math.round(v.mem_mb / 1024) + ' GB' : '') : '')}${row('Start', v.state === 'unneeded' ? '' : v.warm ? 'Warm: booted ahead of the job' : 'Cold: booted for this job')}${row('Cache', ci)}${row('Actions cache', ghaInfo(v))}
     ${row('Peak use', pk ? `${fmtC(pk.c)} · ${fmtM(pk.m)} <span class="fg2">(sampled)</span>` : '')}</dl>
     <div class="jc-t">${timeline(segs(v)).replace(/ tabindex="0"/g, '')}<div class="jc-ts">${T.map(([n, t]) => `<span>${n}<b data-tip="${esc(when(t))}">${new Date(t * 1000).toLocaleTimeString()}</b></span>`).join('')}</div></div>
     <div class="jc-f"><a href="#/jobs/${encodeURIComponent(v.id)}">Open job ${ic('next')}</a></div>`;
@@ -1640,13 +1643,13 @@ pages.job = {
     const fg = forgeOf(F, v.repo), L = jl.get(v.id), jobUrl = L?.job || v.run?.links?.job || v.job_url;
     if (F && v.job_url && !jl.has(v.id)) loadLinks(v);
     const sg = segs(v), calm = v.state === 'unneeded' || (v.state === 'killed' && /idle timeout|no job left/i.test(v.note || ''));
-    const rfd = refusedBy(v), ci = cacheInfo(v);
+    const rfd = refusedBy(v), ci = cacheInfo(v), gi = ghaInfo(v);
     setHTML(box, `<div class="ph">${back}${badge(status(v), status(v), stTip(status(v), v), 1)}<h1>${repoLabel(F, v.repo)} / ${esc(v.job || 'no job')}</h1><span class="sp"></span>
       ${jobUrl ? `<a class="btn" href="${forgeUrl(fg, jobUrl)}" target="_blank" rel="noopener"${tip("Open this job's run on " + fname(fg))}>View on ${fname(fg)}${ic('ext')}</a>` : ''}${v.state === 'held' ? `<button class="btn" data-act="release"${tip('Stop holding this VM: it powers off and frees its memory and slot')}>${ic('release')}Release now</button>` : ''}${ACTIVE(v) ? `<button class="btn dng" data-act="kill"${tip('Stop this VM now. ' + fname(fg) + ' marks the job failed after a few minutes.')}>${ic('kill')}Kill VM</button>` : ''}</div>
       <div class="jm"><span class="mono"${kt('VM id, also the runner name on ' + fname(fg))}>${esc(v.id)}</span><span${kt('Started ' + when(v.started))}>started ${rel(v.started)}</span>${runMeta(v, fg, L)}${v.run ? hq('runinfo') : ''}</div>
       <div class="card"><div class="tlh"><span>Timeline</span><span class="sp"></span>${hq('timeline')}</div>${timeline(sg)}</div>
       ${v.state === 'held' && v.ssh ? `<div class="cal w"><b>Held for debugging until ${hhmm(v.hold_until)}</b>${hq('held')}<p class="sm" style="margin-top:4px">Needs your SSH key (Settings › Debugging) and a tailnet connection. Release now frees the slot.</p><div style="margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px"><code class="mono" id="ssh-cmd">${esc(v.ssh)}</code> <button class="btn" data-act="copyssh" data-id="${esc(v.ssh)}"${tip('Copy the ssh command')}>${ic('copy')}Copy</button></div>${(v.ssh_hostkeys || []).length ? `<div class="mono" style="margin-top:8px;font-size:11px">host keys:${v.ssh_hostkeys.map(k => `<div>${esc(k)}</div>`).join('')}</div>` : ''}</div>` : ''}
-      <div class="card"><h2>Details</h2><dl class="kv"><dt>Size</dt><dd>${sz(v, 1) || '—'}${v.cpus ? hq('size') : ''}${wm(v, 1)}</dd><dt>Runner</dt><dd${kt('Runner id ' + fname(fg) + ' gave this VM')}>${esc(v.runner_id ?? '—')}</dd>${ci ? `<dt>Cache</dt><dd>${ci}${hq(v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '') ? 'cold' : 'cache')}</dd>` : ''}${v.egress ? `<dt>Network</dt><dd>${esc(v.egress)}${hq('network')}</dd>` : ''}</dl></div>
+      <div class="card"><h2>Details</h2><dl class="kv"><dt>Size</dt><dd>${sz(v, 1) || '—'}${v.cpus ? hq('size') : ''}${wm(v, 1)}</dd><dt>Runner</dt><dd${kt('Runner id ' + fname(fg) + ' gave this VM')}>${esc(v.runner_id ?? '—')}</dd>${ci ? `<dt>Cache</dt><dd>${ci}${hq(v.verdict?.[0] === 'cold' || /cold run/.test(v.cache_note || '') ? 'cold' : 'cache')}</dd>` : ''}${gi ? `<dt>Actions cache</dt><dd>${gi}${hq('ghacache')}</dd>` : ''}${v.egress ? `<dt>Network</dt><dd>${esc(v.egress)}${hq('network')}</dd>` : ''}</dl></div>
       ${rfd ? refusedBox(v, fg) : v.note && !(v.state === 'held' && /held for debugging/i.test(v.note)) ? `<div class="cal ${calm ? 'neu' : ''}">${esc(v.note)}</div>` : ''}`);
     if (!this.lv && F) {
       const id = v.id;
@@ -1915,7 +1918,7 @@ async function loadLast(r) {
 /* ---------- privacy (opt-in usage stats and crash reports, telemetry.rs) ---------- */
 const consentUnset = () => S.config.usage_stats == null || S.config.crash_reports == null;
 const PRIV = {
-  usage_stats: ['Usage statistics', 'Once a day: kiln version, host CPU and memory size, how many repos and VMs, which features are on, and job counts and minutes for the last 24 hours.'],
+  usage_stats: ['Usage statistics', 'Once a day: kiln version, host CPU and memory size, how many repos and VMs, which features are on (including the Actions cache), and job counts and minutes for the last 24 hours.'],
   crash_reports: ['Crash reports', 'When kiln panics: the version and the line of code. Not the error message, which can quote a repo or a path.'],
 };
 const consentHTML = here =>  `<div class="card"><h2>${ic('shield', 20)} Help improve kiln?</h2>
@@ -2167,10 +2170,17 @@ const G = {
     html: () => `<div class="card"><h2>Repo cache</h2>
       <div class="fld"><span class="lb">Persistent cache</span><label class="sw"><input type="checkbox" role="switch" id="f-cache" data-k="cache" aria-label="Persistent cache" ${draft.cache !== false ? 'checked' : ''}><span class="fg2 sm">One cache disk per repo (Docker layers, apt downloads, npm, Cargo and the Rust toolchain, Go, Gradle, Maven, ~/.cache). Every job reads it; only a successful push to the default branch or a repo's cache branches saves to it.</span></label></div>
       ${fld('f-cache_gb', 'Size (GB)', `<input type="number" id="f-cache_gb" data-k="cache_gb" value="${esc(draft.cache_gb)}" min="5" max="500" step="1">`, 'Applies to caches created from now on. A cache that grows past 1.2x this is reset. Clear a cache to resize it.')}</div>
+      ${onMac() ? '' : `<div class="card"><h2>Actions cache</h2>
+      <div class="fld"><div><span class="lb">Serve from this box</span>${hq('ghacache')}</div><label class="sw"><input type="checkbox" role="switch" id="f-gha_cache" data-k="gha_cache" aria-label="Actions cache" ${draft.gha_cache === true ? 'checked' : ''}><span class="fg2 sm">Serves <span class="mono">actions/cache</span>, the setup-* caches and rust-cache from this box. Only trusted pushes to the default branch write; pull requests read only; release builds skip it. No workflow change. Applies to the next job, without a restart.</span></label></div>
+      ${fld('f-gha_cache_gb', 'Size (GB)', `<input type="number" id="f-gha_cache_gb" data-k="gha_cache_gb" value="${esc(draft.gha_cache_gb)}" min="1" max="500" step="1">`, 'Least recently used entries are evicted above this (1 to 500). Applies at once.')}
+      <div id="gha-note"></div></div>`}
       <div class="card"><h2>Caches</h2><div id="cache-list"></div></div>`,
     live() {
-      const c = S.caches || {}, repos = REPOS();
-      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${repoLabel(F, r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : 'No cache yet. A successful push to the default branch creates it.'}</span></span>${x ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : `<div class="empty">${ic('cache')}<p>Add a repo first. Each repo gets its own cache, created by the first successful push to its default branch.</p><a href="#/guides/cache-trust">Who may write the cache</a></div>`);
+      const c = S.caches || {}, repos = REPOS(), ga = S.gha_caches || { bytes: 0, repos: {} }, gsz = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : Math.max(1, Math.round(b / (1 << 20))) + ' MB', im = S.image && S.image.gha_cache;
+      const gn = $('#gha-note');
+      if (gn) gn.innerHTML = `<p class="sm fg2" style="margin:12px 0 0">Using ${gsz(ga.bytes || 0)} of ${+(S.config.gha_cache_gb || 20)} GB.</p>` +
+        (S.config.gha_cache && S.image_ready && im !== 'patched' ? `<p class="sm fg2" style="margin:8px 0 0">${im ? `This image can't serve it (${esc(im)}), so jobs use GitHub's cache.` : "This image was baked before the Actions cache, so jobs use GitHub's cache. Rebake the image to switch it on."}</p>` : '');
+      setHTML($('#cache-list'), repos.length ? `<ul class="list">${repos.map(r => { const x = c[r], g = ga.repos[r]; return `<li><div class="row flat" style="grid-template-columns:minmax(0,1fr) auto"><span class="t"><span class="tt">${repoLabel(F, r)}</span><span class="id" style="font-family:var(--sans)">${x ? `${x.size_mb >= 1024 ? (x.size_mb / 1024).toFixed(1) + ' GB' : x.size_mb + ' MB'}${x.updated ? ' · saved ' + rel(x.updated) : ''}` : g ? '' : 'No cache yet. A successful push to the default branch creates it.'}${g ? `${x ? ' · ' : ''}Actions cache: ${+g.entries} ${g.entries === 1 ? 'entry' : 'entries'}, ${gsz(g.bytes)}` : ''}</span></span>${x || g ? `<button class="btn dng" data-act="clearcache" data-id="${esc(r)}"${tip('Delete this repo\'s cache disk and Actions cache. The next job starts cold. Refused while the repo has jobs running.')}>${ic('trash')}Clear</button>` : ''}</div></li>`; }).join('')}</ul>` : `<div class="empty">${ic('cache')}<p>Add a repo first. Each repo gets its own cache, created by the first successful push to its default branch.</p><a href="#/guides/cache-trust">Who may write the cache</a></div>`);
     },
   },
   debug: {
@@ -2787,7 +2797,7 @@ const GUIDES = [
 
   ['privacy', 'Privacy & reports', () => `<h2>Privacy &amp; reports</h2>
     <p>kiln can send two kinds of anonymous report to its maintainers. Both are off until you choose; kiln asks once, during setup or with an Overview banner.</p>
-    <ul><li><b>Usage statistics:</b> at most once a day. The kiln version and build, CPU type, host thread count and memory size, how the box signs in (token, App or none), how many repos, Max VMs, default VM size and warm VMs, the network mode, which features are on (cache, Docker mirror, auto rebake, auto update, debug hold, QEMU confinement), uptime, and job counts, passes, minutes, sizes and a count of the jobs that did not pass by cause (failed, cancelled, timeout, killed, ran out of memory, lost, no result, refused by policy, refused because kiln or the forge failed closed, other) for the last 24 hours. It does not say which forges you use.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
+    <ul><li><b>Usage statistics:</b> at most once a day. The kiln version and build, CPU type, host thread count and memory size, how the box signs in (token, App or none), how many repos, Max VMs, default VM size and warm VMs, the network mode, which features are on (cache, Actions cache, Docker mirror, auto rebake, auto update, debug hold, QEMU confinement), uptime, and job counts, passes, minutes, sizes and a count of the jobs that did not pass by cause (failed, cancelled, timeout, killed, ran out of memory, lost, no result, refused by policy, refused because kiln or the forge failed closed, other) for the last 24 hours. It does not say which forges you use.</li><li><b>Crash reports:</b> when kiln panics, the version and the line of kiln's code. Not the error message, which could name a repo or a path.</li></ul>
     <p>Neither includes repo, account or host names, IPs, file paths on this box, tokens, job names or logs. This box sends them; your browser never does. Settings › Privacy shows the usage report exactly as it would be sent, and an example crash report.</p>
     <p><b>The random id.</b> Reports carry a random install id so one box's reports can be grouped. It is made at the first send, not when you look at Settings › Privacy. When both switches are off it is deleted, and turning them on again makes a new one.</p>
     <p>To turn both off for good, whatever the dashboard says, set <code>DO_NOT_TRACK=1</code> or <code>KILN_TELEMETRY=0</code> in kiln's environment. Under systemd, run <code>systemctl --user edit kiln</code>, add these lines, then restart kiln:${cb('[Service]\nEnvironment=DO_NOT_TRACK=1')}</p>`, 'Safety', ['network', 'stuck']],
@@ -3041,6 +3051,7 @@ const ACT = {
   async save() {
     const bad = ['vm_cpus', 'vm_mem_mb', 'vm_disk_gb', 'poll_secs', 'job_timeout_mins', 'idle_timeout_mins', 'cache_gb'].find(k => !(draft[k] > 0));
     if (bad) return toast(`${bad.replace(/_/g, ' ')} must be greater than 0`, true);
+    if (!(draft.gha_cache_gb >= 1 && draft.gha_cache_gb <= 500)) return toast('Actions cache size must be 1 to 500 GB', true);
     if (draft.warm_recycle_mins != null && !(draft.warm_recycle_mins >= 5 && draft.warm_recycle_mins <= 1440)) return toast('Warm VM recycle must be 5 to 1440 minutes', true);
     const typed = $('#f-adduser')?.value.trim().replace(/^@/, ''); if (typed && !draft.allowed_users.includes(typed)) draft.allowed_users.push(typed);
     if (!draft.listen || !draft.label) return toast('Listen address and label can\'t be empty', true);
