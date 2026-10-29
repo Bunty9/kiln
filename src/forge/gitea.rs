@@ -1020,6 +1020,8 @@ fn job_summary(web: &str, j: &Value) -> Option<JobSummary> {
             name: t(&s["name"]),
             status: status(s["status"].as_str().unwrap_or("")),
             outcome: outcome(&s["conclusion"]),
+            started_at: stamp(&s["started_at"]),
+            completed_at: stamp(&s["completed_at"]),
         })
         .collect();
     let job = j["html_url"].as_str().filter(|u| net::same_origin(web, u) && net::link_safe(u)).map(String::from);
