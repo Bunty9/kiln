@@ -1529,7 +1529,7 @@ function hostWire() {
     e.preventDefault(); const w = c.getBoundingClientRect().width; at(c, Math.max(0, Math.min(w - 1, HV.hover.x + (e.key === 'ArrowLeft' ? -w / 20 : w / 20))));
   });
 }
-const WAIT = { repo_backoff: 'repo paused after failures', host_hold: 'host memory or io_uring hold', old_image: 'base image needs a rebake', launch_gate: 'low memory or disk', egress: 'egress filter not ready', draining: 'restart pending', github_api: 'GitHub registration failing', slots_full: 'all slots busy', held: 'slots held for debugging', budget: 'cpu or memory budget' };
+const WAIT = { repo_backoff: 'repo paused after failures', host_hold: 'host memory, cpu, io or io_uring hold', old_image: 'base image needs a rebake', launch_gate: 'low memory or disk', egress: 'egress filter not ready', draining: 'restart pending', github_api: 'GitHub registration failing', repo_cap: 'repo at its VM limit', slots_full: 'all slots busy', held: 'slots held for debugging', budget: 'cpu or memory budget' };
 const waitLine = () => (S.poll.waiting || []).length ? `<div class="sm fg2">${S.poll.waiting.map(w => `${+w.jobs}× ${+w.cpus} cpu in ${repoLabel(F, w.repo)} waiting: ${esc(WAIT[w.reason] || w.reason)}`).join(' · ')}</div>` : '';
 const qTip = () => Object.entries(S.poll.queued_by_size || {}).map(([r, m]) => r + ': ' + Object.entries(m).map(([c, n]) => `${n}× ${c} cpu`).join(', ')).join('\n');
 pages.notfound = {

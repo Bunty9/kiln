@@ -3260,7 +3260,7 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
     let (ok, detail) = memory_check(platform::mem_avail_mb(), crate::host::vms_mb(), cfg.max_vms, cfg.vm_mem_mb);
     out.push(check("memory", ok, detail));
     let psi = crate::resil::memory_psi();
-    let held = crate::resil::pressure_gate(psi);
+    let held = crate::resil::pressure_gate("memory", psi, crate::resil::PSI_HOLD_PCT);
     out.push(match (psi, held) {
         (_, Some(m)) => check("memory pressure", false, m),
         (Some(p), None) => check(
@@ -3270,6 +3270,19 @@ pub async fn doctor(app: &App, cli: bool) -> Vec<Check> {
         ),
         (None, None) => check("memory pressure", true, "not measured (no /proc/pressure/memory)"),
     });
+    let running = app.vms.lock().unwrap().iter().filter(|v| v.state == State::Busy).count();
+    for (res, limit) in [("cpu", cfg.psi_hold_cpu), ("io", cfg.psi_hold_io)] {
+        let name = format!("{res} pressure");
+        let p = crate::resil::psi(res);
+        out.push(match (limit, p) {
+            (0, _) => check(&name, true, format!("hold off (psi_hold_{res} = 0)")),
+            (_, None) => check(&name, true, format!("not measured (no /proc/pressure/{res})")),
+            (l, Some(p)) => match crate::resil::load_gate(res, Some(p), l, running) {
+                Some(m) => check(&name, false, m),
+                None => check(&name, true, format!("{p:.0}% of the last 10 s stalled (launches hold above {l}% while a VM runs)")),
+            },
+        });
+    }
     let (ok, detail) = crate::resil::io_uring_check();
     out.push(check("io_uring", ok, detail));
     if !platform::MACOS {
