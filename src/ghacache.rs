@@ -50,9 +50,11 @@ const MAX_STAGED_ENTRIES: usize = 1000;
 const MIN_FILE: u64 = 4096;
 /// A PUT body that sends nothing for this long is aborted and its reservation released.
 const PUT_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
-/// Downloads in flight per VM, and the descriptors all downloads together may hold (one per segment, opened up front).
+/// Downloads in flight per VM, the descriptors one VM's downloads may hold (one per segment, opened up front: enough for
+/// one entry of `MAX_BLOCKS`), and what all downloads together may hold.
 const DL_PER_VM: u32 = 4;
-const DL_FDS: usize = 4096;
+const DL_VM_FDS: usize = MAX_BLOCKS;
+const DL_FDS: usize = 4 * DL_VM_FDS;
 
 /// Who is on the other end of a connection, as decided by the host (never by the job).
 #[derive(Clone, Debug)]
@@ -81,7 +83,8 @@ struct Inner {
     /// Descriptors the downloads in flight hold, one permit per segment.
     dl_fds: Arc<tokio::sync::Semaphore>,
     /// Downloads in flight per VM (`stem`).
-    dl_vm: Mutex<HashMap<String, u32>>,
+    /// VM -> (downloads, descriptors) in flight.
+    dl_vm: Mutex<HashMap<String, (u32, usize)>>,
     /// Serialises metadata read-modify-write (create, finalize, block list, the commit of a blob). Blob bytes stream
     /// outside it. Async, so it can be held while the filesystem work runs on a blocking thread.
     // ponytail: one global lock; per-VM locks if metadata calls ever show up in a profile.
@@ -985,33 +988,37 @@ fn parse_range(h: Option<&str>, size: u64) -> Span {
     if size == 0 || r.0 > r.1 || r.0 >= size { Span::Bad } else { Span::Part(r.0, r.1) }
 }
 
-/// The right to hold a download's descriptors: one of `DL_PER_VM` slots of the VM and one `DL_FDS` permit per segment.
-/// Given back when dropped, i.e. when the response body is.
+/// The right to hold a download's descriptors: one of the VM's `DL_PER_VM` slots, its share of `DL_VM_FDS` and one
+/// `DL_FDS` permit per segment. Given back when dropped, i.e. when the response body is.
+// ponytail: a body the guest stops reading holds its permit until the connection closes (nothing polls the stream to
+// time it out); the per-VM share keeps that to the VM's own downloads unless four VMs do it at once.
 struct DlPermit {
     st: St,
     vm: String,
+    n: usize,
     _fds: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl DlPermit {
     fn take(st: &St, vm: &str, segs: usize) -> Option<DlPermit> {
-        let vm = stem(vm);
-        let fds = st.dl_fds.clone().try_acquire_many_owned(segs.clamp(1, DL_FDS) as u32).ok()?;
+        let (vm, n) = (stem(vm), segs.clamp(1, DL_VM_FDS));
         let mut g = st.dl_vm.lock().unwrap_or_else(|e| e.into_inner());
-        if g.get(&vm).is_some_and(|n| *n >= DL_PER_VM) {
+        let (dl, fds) = g.get(&vm).copied().unwrap_or_default();
+        if dl >= DL_PER_VM || fds + n > DL_VM_FDS {
             return None;
         }
-        *g.entry(vm.clone()).or_default() += 1;
-        Some(DlPermit { st: st.clone(), vm, _fds: fds })
+        let permit = st.dl_fds.clone().try_acquire_many_owned(n as u32).ok()?;
+        g.insert(vm.clone(), (dl + 1, fds + n));
+        Some(DlPermit { st: st.clone(), vm, n, _fds: permit })
     }
 }
 
 impl Drop for DlPermit {
     fn drop(&mut self) {
         let mut g = self.st.dl_vm.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = g.get_mut(&self.vm) {
-            *n -= 1;
-            if *n == 0 {
+        if let Some((dl, fds)) = g.get_mut(&self.vm) {
+            (*dl, *fds) = (dl.saturating_sub(1), fds.saturating_sub(self.n));
+            if *dl == 0 {
                 g.remove(&self.vm);
             }
         }
@@ -2192,13 +2199,14 @@ pub(crate) mod tests {
             dl_vm: Mutex::default(),
             lock: Arc::new(tokio::sync::Mutex::new(())),
         });
-        let big = DlPermit::take(&st, "vm-a", DL_FDS - 10).unwrap();
-        assert!(DlPermit::take(&st, "vm-b", 11).is_none(), "the descriptors of all downloads together are bounded");
-        let small = DlPermit::take(&st, "vm-b", 10).unwrap();
-        assert!(DlPermit::take(&st, "vm-c", 1).is_none());
+        let big = DlPermit::take(&st, "vm-a", DL_VM_FDS).unwrap();
+        assert!(DlPermit::take(&st, "vm-a", 1).is_none(), "one VM holds at most its share");
+        let others: Vec<_> = ["vm-b", "vm-c"].iter().map(|v| DlPermit::take(&st, v, DL_VM_FDS).unwrap()).collect();
+        let small = DlPermit::take(&st, "vm-d", DL_VM_FDS - 10).unwrap();
+        assert!(DlPermit::take(&st, "vm-e", 11).is_none(), "the descriptors of all downloads together are bounded");
         drop(big);
-        assert!(DlPermit::take(&st, "vm-c", 1).is_some(), "freed on drop");
-        drop(small);
-        assert!(st.dl_vm.lock().unwrap().get("vm-b").is_none() && st.dl_fds.available_permits() == DL_FDS, "nothing leaks");
+        assert!(DlPermit::take(&st, "vm-e", 11).is_some(), "freed on drop");
+        drop((others, small));
+        assert!(st.dl_vm.lock().unwrap().is_empty() && st.dl_fds.available_permits() == DL_FDS, "nothing leaks");
     }
 }
