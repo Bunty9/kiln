@@ -1979,7 +1979,9 @@ fn gha_caller(cfg: &crate::Config, v: &Vm, image: Option<&str>, jwt_runner: Opti
     if jwt_runner.is_some_and(|r| Some(r) != v.runner_id) {
         return Err("the token names another runner");
     }
-    let local = cfg.gha_cache && cfg.cache && image == Some("patched");
+    // A cold run (tag, release, refusal) had its cache disk discarded and sets its own URL: the host serves it no local cache either.
+    let cold = v.cache == CacheUse::Discarded || v.verdict.as_ref().is_some_and(|(c, _)| c != "ok");
+    let local = cfg.gha_cache && cfg.cache && image == Some("patched") && !cold;
     Ok(crate::ghacache::Caller { vm_id: v.id.clone(), repo: repo_identity(cfg, &v.repo), local, can_write: local })
 }
 
@@ -6652,6 +6654,21 @@ print("ok")
         }
         for s in [State::Done, State::Failed, State::Killed, State::Lost, State::Held] {
             assert!(p(&on, &v(s), Some("patched"), None).is_err(), "{s:?} is not live");
+        }
+        // A cold run (tag, release) or a refusal had its cache disk discarded: whatever the job does, it gets no local cache.
+        let cold = |cache, verdict: Option<&str>| {
+            let v = Vm { cache, verdict: verdict.map(|c| (c.to_string(), "9".to_string())), ..v(State::Busy) };
+            p(&on, &v, Some("patched"), None).map(|x| (x.0, x.1))
+        };
+        assert_eq!(cold(CacheUse::Read, Some("ok")), Ok((true, true)));
+        assert_eq!(cold(CacheUse::Read, None), Ok((true, true)));
+        for (cache, verdict) in [
+            (CacheUse::Discarded, Some("cold")),
+            (CacheUse::Read, Some("cold")),
+            (CacheUse::Read, Some("refuse")),
+            (CacheUse::Discarded, None),
+        ] {
+            assert_eq!(cold(cache, verdict), Ok((false, false)), "{cache:?} {verdict:?}");
         }
         assert!(p(&on, &v(State::Busy), Some("patched"), Some(8)).is_err(), "a token for another runner");
         assert!(p(&on, &Vm { runner_id: None, ..v(State::Busy) }, Some("patched"), Some(8)).is_err());
