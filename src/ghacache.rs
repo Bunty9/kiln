@@ -175,13 +175,15 @@ pub fn discard_dead(root: &FsPath, live: &[String]) {
 #[derive(Default)]
 struct Acct {
     staged: HashMap<String, u64>,
+    /// Reserved bytes not yet written: statvfs doesn't see them, so the disk floor subtracts them.
+    inflight: u64,
 }
 
 static ACCT: Mutex<Option<HashMap<PathBuf, Acct>>> = Mutex::new(None);
 
 /// Run `f` on the store's account; the first time for a root it is seeded from disk (outside the lock).
-// ponytail: counts drift a little (a block replaced while its bytes are in flight); the hourly evict only subtracts what it
-// frees, a restart re-seeds. Re-walk in the sweep if the drift ever matters.
+// ponytail: counts drift a little (a block replaced while its bytes are in flight); removals only subtract what they
+// free, a restart re-seeds. Re-walk in the sweep if the drift ever matters.
 fn acct<R>(root: &FsPath, f: impl FnOnce(&mut Acct) -> R) -> R {
     let known = ACCT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().contains_key(root);
     let seed = (!known).then(|| {
@@ -191,7 +193,7 @@ fn acct<R>(root: &FsPath, f: impl FnOnce(&mut Acct) -> R) -> R {
             .flatten()
             .map(|e| (e.file_name().to_string_lossy().into_owned(), dir_size(&e.path())))
             .collect();
-        Acct { staged }
+        Acct { staged, inflight: 0 }
     });
     let mut g = ACCT.lock().unwrap_or_else(|e| e.into_inner());
     f(g.get_or_insert_default().entry(root.to_path_buf()).or_insert_with(|| seed.unwrap_or_default()))
@@ -228,6 +230,7 @@ impl Reservation {
     /// The bytes are on disk now; `replaced` is what the file they overwrote held.
     fn commit(mut self, replaced: u64) {
         sub(&self.root, Some(&self.vm), replaced);
+        landed(&self.root, self.n);
         self.n = 0;
     }
 }
@@ -236,8 +239,14 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         if self.n > 0 {
             sub(&self.root, Some(&self.vm), self.n);
+            landed(&self.root, self.n);
         }
     }
+}
+
+/// `n` reserved bytes are no longer in flight (written, or given back).
+fn landed(root: &FsPath, n: u64) {
+    acct(root, |a| a.inflight = a.inflight.saturating_sub(n));
 }
 
 /// (free, total) bytes of the filesystem holding `root`; (u64::MAX, 0) where it cannot be read (no floor then).
@@ -267,10 +276,11 @@ fn reserve(root: &FsPath, vm: &str, len: u64, budget: u64, disk: (u64, u64)) -> 
         if staged.saturating_add(len) > STAGED_CAP {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
-        if total.saturating_add(len) > budget || !disk_allows(disk, len) {
+        if total.saturating_add(len) > budget || !disk_allows((disk.0.saturating_sub(a.inflight), disk.1), len) {
             return Err(StatusCode::INSUFFICIENT_STORAGE);
         }
         *staged += len;
+        a.inflight += len;
         Ok(Reservation { root: root.to_path_buf(), vm: vm.to_string(), n: len })
     })
 }
@@ -449,8 +459,8 @@ pub fn promote(root: &FsPath, vm_id: &str, budget: u64) -> Result<(usize, usize)
         let target = dest.join(dir.file_name().unwrap_or_default());
         std::fs::rename(&dir, &target)?;
         // (A failure here skips the discard below; the entry is then in the trusted scope without its flag and the
-        // caller discards the rest.)
-        write_meta(&target, &Meta { scope: "trusted".into(), ..m })?;
+        // caller discards the rest.) Promotion counts as a use, so this save isn't the first thing `evict` drops.
+        write_meta(&target, &Meta { scope: "trusted".into(), last_used: now_ms(), ..m })?;
         ok += 1;
     }
     discard(root, vm_id);
@@ -1162,6 +1172,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_promoted_save_is_newer_than_what_was_used_during_its_job() {
+        let root = tmp();
+        let c = caller("vm1", "acme/demo");
+        let used = seed(&root, "trusted", &c, "used", "v", 5, &[0u8; 1000]);
+        seed(&root, "staged", &c, "saved", "v", 1, &[0u8; 1000]);
+        assert_eq!(promote(&root, "vm1", dir_size(&used) + 500).unwrap(), (1, 0), "room for one entry, not two");
+        let k: Vec<_> = entries_in(&trusted_dir(&root, "acme/demo")).into_iter().map(|(_, m)| m.key).collect();
+        assert_eq!(k, ["saved"], "the full cache rotates to the new save");
+    }
+
+    #[test]
     fn evict_removes_least_recently_used_until_it_fits() {
         let root = tmp();
         let c = caller("vm1", "acme/demo");
@@ -1572,6 +1593,13 @@ pub(crate) mod tests {
         assert_eq!(reserve(&root, "vm-b", 401, 1000, ROOMY).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "over the total staged cap");
         assert!(reserve(&root, "vm-b", 400, 1000, ROOMY).is_ok());
         assert_eq!(reserve(&root, "vm-c", 1, 1000, (1 << 20, 0)).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "disk floor");
+        // statvfs doesn't see bytes still streaming: two PUTs that each fit the floor alone must not both pass.
+        let root = tmp();
+        let disk = (DISK_FLOOR + (6 << 30), 0);
+        let a = reserve(&root, "vm-a", 5 << 30, u64::MAX, disk).unwrap();
+        assert_eq!(reserve(&root, "vm-b", 5 << 30, u64::MAX, disk).err(), Some(StatusCode::INSUFFICIENT_STORAGE), "in flight");
+        a.commit(0);
+        assert!(reserve(&root, "vm-b", 5 << 30, u64::MAX, disk).is_ok(), "landed: the next statvfs reading sees it");
     }
 
     fn used(root: &FsPath) -> u64 {
