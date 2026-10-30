@@ -159,20 +159,29 @@ pub const OOM_NOTE: &str = "killed: likely out of memory (host memory pressure o
 /// Launches hold while memory stalls tasks for more than this share of the last 10 s (PSI `some avg10`).
 pub const PSI_HOLD_PCT: f64 = 20.0;
 
-/// `some avg10` of `/proc/pressure/memory`.
+/// `some avg10` of a `/proc/pressure/<res>` file.
 pub fn parse_psi(s: &str) -> Option<f64> {
     s.lines().find_map(|l| l.strip_prefix("some "))?.split_whitespace().find_map(|f| f.strip_prefix("avg10=")?.parse().ok())
 }
 
-/// The host's memory pressure now; None where the kernel has no PSI (or it is off).
-pub fn memory_psi() -> Option<f64> {
-    parse_psi(&std::fs::read_to_string("/proc/pressure/memory").ok()?)
+/// The host's pressure on `res` ("memory", "cpu" or "io") now; None where the kernel has no PSI (or it is off).
+pub fn psi(res: &str) -> Option<f64> {
+    parse_psi(&std::fs::read_to_string(format!("/proc/pressure/{res}")).ok()?)
 }
 
-/// Why no VM may start under this pressure, if so.
-pub fn pressure_gate(psi: Option<f64>) -> Option<String> {
-    psi.filter(|&p| p > PSI_HOLD_PCT)
-        .map(|p| format!("host memory pressure: tasks stalled {p:.0}% of the last 10 s (limit {PSI_HOLD_PCT:.0}%); holding launches"))
+pub fn memory_psi() -> Option<f64> {
+    psi("memory")
+}
+
+/// Why no VM may start under this pressure on `res`, if so.
+pub fn pressure_gate(res: &str, psi: Option<f64>, limit: f64) -> Option<String> {
+    psi.filter(|&p| p > limit)
+        .map(|p| format!("host {res} pressure: tasks stalled {p:.0}% of the last 10 s (limit {limit:.0}%); holding launches"))
+}
+
+/// The optional CPU/IO hold (`limit` percent, 0 = off): only while `running` job VMs exist, so a busy desktop never holds kiln at zero VMs.
+pub fn load_gate(res: &str, psi: Option<f64>, limit: u32, running: usize) -> Option<String> {
+    if limit == 0 || running == 0 { None } else { pressure_gate(res, psi, limit as f64) }
 }
 
 // ---------------------------------------------------------------- io_uring
@@ -319,10 +328,20 @@ mod tests {
         assert_eq!(parse_psi(s), Some(34.5));
         assert_eq!(parse_psi("full avg10=1.00\n"), None);
         assert_eq!(parse_psi(""), None);
-        assert!(pressure_gate(Some(34.5)).unwrap().contains("holding launches"));
-        assert!(pressure_gate(Some(20.0)).is_none(), "the limit itself is fine");
-        assert!(pressure_gate(Some(3.0)).is_none());
-        assert!(pressure_gate(None).is_none(), "no PSI, no gate");
+        assert!(pressure_gate("memory", Some(34.5), PSI_HOLD_PCT).unwrap().contains("holding launches"));
+        assert!(pressure_gate("memory", Some(20.0), PSI_HOLD_PCT).is_none(), "the limit itself is fine");
+        assert!(pressure_gate("memory", Some(3.0), PSI_HOLD_PCT).is_none());
+        assert!(pressure_gate("memory", None, PSI_HOLD_PCT).is_none(), "no PSI, no gate");
+    }
+
+    #[test]
+    fn load_gate_needs_a_limit_and_a_running_vm() {
+        let m = load_gate("cpu", Some(60.0), 50, 1).unwrap();
+        assert!(m.starts_with("host cpu pressure") && m.contains("limit 50%") && m.contains("holding launches"));
+        assert!(load_gate("io", Some(60.0), 0, 3).is_none(), "0 = off");
+        assert!(load_gate("io", Some(60.0), 50, 0).is_none(), "no VM running: never hold");
+        assert!(load_gate("io", Some(50.0), 50, 2).is_none(), "the limit itself is fine");
+        assert!(load_gate("io", None, 50, 2).is_none());
     }
 
     #[test]

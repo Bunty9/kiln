@@ -38,6 +38,13 @@ pub struct Config {
     /// Jobs opt in with `runs-on: [self-hosted, <label>]`.
     pub label: String,
     pub max_vms: usize,
+    /// Most VMs of one repo at once (0 = unlimited). `repo_max_vms` overrides it per repo.
+    pub max_vms_per_repo: usize,
+    /// "owner/name" -> `max_vms_per_repo` for that repo (0 = unlimited).
+    pub repo_max_vms: BTreeMap<String, usize>,
+    /// Hold launches while CPU / IO pressure (PSI `some avg10`, percent) is above this and a job VM runs. 0 = off.
+    pub psi_hold_cpu: u32,
+    pub psi_hold_io: u32,
     pub vm_cpus: u32,
     pub vm_mem_mb: u32,
     pub vm_disk_gb: u32,
@@ -114,6 +121,10 @@ impl Default for Config {
             repos: vec![],
             label: "kiln".into(),
             max_vms: 2,
+            max_vms_per_repo: 0,
+            repo_max_vms: BTreeMap::new(),
+            psi_hold_cpu: 0,
+            psi_hold_io: 0,
             vm_cpus: 4,
             vm_mem_mb: 8192,
             vm_disk_gb: 40,
@@ -185,6 +196,12 @@ impl Config {
         self.cache_branches.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map(|(_, b)| b.clone()).unwrap_or_default()
     }
 
+    /// Most VMs `repo` may have at once: its `repo_max_vms` entry, else `max_vms_per_repo`; None = unlimited.
+    pub fn repo_cap(&self, repo: &str) -> Option<usize> {
+        let n = self.repo_max_vms.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map_or(self.max_vms_per_repo, |(_, &n)| n);
+        (n > 0).then_some(n)
+    }
+
     pub fn mem_mb(&self, cpus: u32) -> u32 {
         if cpus == self.vm_cpus { self.vm_mem_mb } else { self.size_mem_mb.get(&cpus).copied().unwrap_or_else(|| forge::size_mem_mb(cpus)) }
     }
@@ -231,6 +248,9 @@ impl Config {
         }
         if !(1..=1440).contains(&self.job_timeout_mins) || !(1..=1440).contains(&self.idle_timeout_mins) {
             bail!("job_timeout_mins and idle_timeout_mins must be 1..=1440");
+        }
+        if self.psi_hold_cpu > 100 || self.psi_hold_io > 100 {
+            bail!("psi_hold_cpu and psi_hold_io must be 0..=100 (0 = off)");
         }
         if !(5..=500).contains(&self.cache_gb) {
             bail!("cache_gb must be 5..=500");
@@ -357,7 +377,7 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
-    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "disk", "budget" or "held".
+    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "load", "disk", "budget" or "held".
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
@@ -375,7 +395,7 @@ pub struct Waiting {
     pub repo: String,
     pub jobs: usize,
     pub cpus: u32,
-    /// `repo_backoff`, `host_hold`, `old_image`, `launch_gate`, `egress`, `draining`, `github_api`, `slots_full`, `held` or `budget`.
+    /// `repo_backoff`, `host_hold`, `old_image`, `launch_gate`, `egress`, `draining`, `github_api`, `repo_cap`, `slots_full`, `held` or `budget`.
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -408,6 +428,7 @@ struct WaitCtx {
     egress: Option<String>,
     draining: bool,
     api_cut: bool,
+    repo_cap: Option<usize>,
     slots_full: bool,
     holds: usize,
     max_vms: usize,
@@ -419,7 +440,7 @@ impl WaitCtx {
         if self.backed_off {
             ("repo_backoff", Some("the repo's launches failed and are retried after a pause".into()))
         } else if self.host_hold {
-            ("host_hold", Some("memory stalls or the io_uring limit hold launches".into()))
+            ("host_hold", Some("memory, cpu or io pressure, or the io_uring limit, holds launches".into()))
         } else if self.old_image {
             ("old_image", Some("rebake the base image".into()))
         } else if self.gate.is_some() {
@@ -430,6 +451,8 @@ impl WaitCtx {
             ("draining", None)
         } else if self.api_cut {
             ("github_api", Some("the forge is rejecting runner registration".into()))
+        } else if let Some(n) = self.repo_cap {
+            ("repo_cap", Some(format!("the repo already has its limit of {n} VMs")))
         } else if self.slots_full && self.holds > 0 {
             ("held", Some(format!("{} of {} slots held for debugging", self.holds, self.max_vms)))
         } else if self.slots_full {
@@ -564,13 +587,23 @@ pub struct HostReadings {
     pub threads: u32,
     /// PSI `some avg10` of memory, in percent (Linux with PSI).
     pub mem_psi: Option<f64>,
+    /// PSI `some avg10` of CPU and IO, in percent.
+    pub cpu_psi: Option<f64>,
+    pub io_psi: Option<f64>,
 }
 
 impl HostReadings {
     /// A roomy, fixed host for tests: 8 threads, 64 GB of memory, 500 GB of disk.
     #[cfg(test)]
-    pub const TEST: HostReadings =
-        HostReadings { mem_total_mb: 65536, mem_avail_mb: 65536, disk_free_gb: Some(500), threads: 8, mem_psi: None };
+    pub const TEST: HostReadings = HostReadings {
+        mem_total_mb: 65536,
+        mem_avail_mb: 65536,
+        disk_free_gb: Some(500),
+        threads: 8,
+        mem_psi: None,
+        cpu_psi: None,
+        io_psi: None,
+    };
 }
 
 impl App {
@@ -638,6 +671,8 @@ impl App {
                 disk_free_gb: vm::disk_free_gb(&self.data).await,
                 threads: host_threads(),
                 mem_psi: resil::memory_psi(),
+                cpu_psi: resil::psi("cpu"),
+                io_psi: resil::psi("io"),
             },
         }
     }
@@ -1476,14 +1511,23 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
         problems.push(g);
     }
     // Memory stalls (PSI) and an exhausted io_uring limit hold launches host-wide, however much memory is free.
-    if let Some(m) = resil::pressure_gate(host.mem_psi) {
+    let mem_hold = resil::pressure_gate("memory", host.mem_psi, resil::PSI_HOLD_PCT);
+    if let Some(m) = mem_hold.clone() {
         problems.push(("memory", m));
+    }
+    // CPU/IO holds limit overlap, so they apply only while a job VM runs (a busy desktop can't hold kiln at zero VMs).
+    let running = app.vms.lock().unwrap().iter().filter(|v| v.state == vm::State::Busy).count();
+    let load_hold = [("cpu", host.cpu_psi, cfg.psi_hold_cpu), ("io", host.io_psi, cfg.psi_hold_io)]
+        .into_iter()
+        .find_map(|(res, p, limit)| resil::load_gate(res, p, limit, running));
+    if let Some(m) = load_hold.clone() {
+        problems.push(("load", m));
     }
     let (uring_fails, uring_at) = *app.io_uring.lock().unwrap();
     if uring_fails > 0 && uring_at > now() {
         problems.push(("io_uring", format!("{}; launches paused, retry in {} s", resil::io_uring_banner(), uring_at - now())));
     }
-    let host_hold = problems.iter().any(|(k, _)| matches!(*k, "io_uring")) || resil::pressure_gate(host.mem_psi).is_some();
+    let host_hold = problems.iter().any(|(k, _)| matches!(*k, "io_uring")) || mem_hold.is_some() || load_hold.is_some();
     let mut blocked = problems.first().cloned();
     // Background failures (cache saves, the startup cleanup), one health item per kind.
     for (kind, msgs) in notice_kinds(&app.notices.lock().unwrap()) {
@@ -1597,6 +1641,19 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 warm = 0;
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
+            // The per-repo cap counts the repo's active VMs (warm ones too), not debug holds: nothing would release them for it.
+            let repo_room = cfg.repo_cap(repo).map(|cap| {
+                let n = app
+                    .vms
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active() && v.state != vm::State::Held)
+                    .count();
+                (cap, cap.saturating_sub(n))
+            });
+            let want = repo_room.map_or(want, |(_, room)| want.min(room));
+            let cap_short = repo_room.filter(|&(_, room)| room < demand).map(|(cap, _)| cap);
             let room_short = cfg.max_vms.saturating_sub(active) < demand;
             let allowed = api.allow(now(), want, probing.contains(&forge.id()));
             let api_cut = allowed < want;
@@ -1630,6 +1687,7 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                     egress: egress_err.as_ref().map(|e| e.to_string()),
                     draining: draining || app.stopping.load(Ordering::SeqCst),
                     api_cut,
+                    repo_cap: cap_short,
                     slots_full: room_short,
                     holds,
                     max_vms: cfg.max_vms,
@@ -2014,6 +2072,30 @@ mod tests {
             .await,
             n("host_hold")
         );
+        assert_eq!(
+            waiting_reasons("wait-cap", |_, c| {
+                c.max_vms = 4;
+                c.max_vms_per_repo = 1;
+                c.repo_max_vms.insert("other/repo".into(), 9);
+            })
+            .await
+            .first(),
+            Some(&"repo_cap")
+        );
+        // A debug hold doesn't count against the cap: nothing would release it for the repo.
+        let held = waiting_reasons("wait-cap-held", |a, c| {
+            c.max_vms = 4;
+            c.max_vms_per_repo = 2;
+            let v: vm::Vm = serde_json::from_value(serde_json::json!({
+                "id": "kiln-7-0", "repo": "acme/demo", "runner_id": 1, "state": "held", "job": "j", "result": "Failed",
+                "started": 1, "busy_since": 1, "ended": null, "note": null
+            }))
+            .unwrap();
+            a.vms.lock().unwrap().push(v);
+        })
+        .await;
+        // Counted, the hold would leave room for one of the two small jobs: both sizes would wait.
+        assert_eq!(held, ["repo_cap"], "only the large job waits");
         assert_eq!(
             waiting_reasons("wait-mem", |a, c| {
                 c.max_vms = 4;
@@ -2552,6 +2634,17 @@ mod tests {
         c.repo_cache_gb.insert("Owner/Repo".into(), 80);
         assert_eq!((c.cache_gb_for("owner/repo"), c.cache_gb_for("other/repo")), (80, 30));
         assert_eq!(c.poll_secs, 5);
+    }
+
+    #[test]
+    fn repo_cap_rules() {
+        let mut c = Config { max_vms_per_repo: 2, ..Config::default() };
+        c.repo_max_vms.insert("Acme/Demo".into(), 1);
+        c.repo_max_vms.insert("acme/free".into(), 0);
+        assert_eq!(c.repo_cap("acme/demo"), Some(1), "override, case-insensitive");
+        assert_eq!(c.repo_cap("acme/free"), None, "an override of 0 lifts the cap");
+        assert_eq!(c.repo_cap("acme/other"), Some(2));
+        assert_eq!(Config::default().repo_cap("acme/demo"), None, "0 = unlimited");
     }
 
     #[test]

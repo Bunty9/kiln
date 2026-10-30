@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- **Optional load-aware launch gate and per-repo caps.** `psi_hold_cpu` and `psi_hold_io` (percent, default 0 = off) hold launches while the host's CPU or IO pressure (`some avg10` in `/proc/pressure/{cpu,io}`) is above the limit, but only while a job VM is running, so a busy desktop cannot hold kiln at zero VMs. They show like the memory hold (`host_hold`, Overview, `kiln doctor`). `max_vms_per_repo` (0 = unlimited) and the per-repo override `repo_max_vms` cap the VMs one repo may have; a job held by it waits with reason `repo_cap`. Config file only. Priority for `push` jobs over pull request jobs is not possible: GitHub, not kiln, chooses which queued job a just-in-time runner receives.
+
 ## [0.2.7] - 2026-10-29
 
 Reliability release: VM launches no longer fail when other programs of the same user hold io_uring memory, a VM that runs out of memory takes only itself, a scheduler panic restarts kiln instead of leaving it idle, and only one `kiln serve` runs per data directory. GitHub jobs kiln loses (a crash or restart under them, a shutdown, a dashboard kill) no longer hang their run: kiln force-cancels it and removes the runner. A new command line (`kiln status`, `jobs`, `logs`, `wait`, `rerun`) gives scripts and agents the real outcome as an exit code, `/api/state` says why queued jobs wait, and runs GitHub holds as pending are flagged. The Overview gains job hover cards that stay current, synced host graphs and event icons; burning cards now show on phones; notification messages can link to the dashboard; usage statistics count why jobs did not pass. rustls, rustls-webpki, webpki-roots and tokio are updated for RustSec advisories. The base image recipe is unchanged (`RECIPE` 14): no rebake.
