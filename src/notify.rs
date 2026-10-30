@@ -95,6 +95,11 @@ pub struct JobInfo {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class: Option<&'static str>,
+    /// `job.failed` only: the failing step and the first 3 error lines, each cleaned and short.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_step: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_lines: Vec<String>,
     #[serde(skip)]
     pub vm_id: String,
 }
@@ -206,6 +211,12 @@ fn summary(e: &Event, esc: &dyn Fn(&str) -> String) -> String {
             }
             if let Some(r) = &j.reason {
                 s += &format!(" ({})", esc(r));
+            }
+            if let Some(st) = &j.failure_step {
+                s += &format!("\nstep: {}", esc(st));
+            }
+            for l in &j.failure_lines {
+                s += &format!("\n{}", esc(l));
             }
             s
         }
@@ -1090,6 +1101,8 @@ pub fn job_ended(app: &crate::App, v: &crate::vm::Vm) {
         url: url.or(v.job_url.as_deref()).and_then(|u| forge_link(u, &origin)).map(String::from),
         reason: refusal.then(|| fixed_reason(v.note.as_deref().map_or("", |n| n.strip_prefix("refused: ").unwrap_or(n)))),
         class: refusal.then_some("failure"),
+        failure_step: v.failure.as_ref().and_then(|f| opt(&f.step)).filter(|_| oc == "failed"),
+        failure_lines: v.failure.iter().filter(|_| oc == "failed").flat_map(|f| f.lines.iter().take(3)).filter_map(|l| opt(l)).collect(),
         vm_id: v.id.clone(),
     };
     let (ty, class) = match (ok, refusal) {
@@ -2000,9 +2013,64 @@ mod tests {
                 url: Some("https://github.com/acme/kiln/actions/runs/1/job/2".into()),
                 reason: None,
                 class: None,
+                failure_step: None,
+                failure_lines: vec![],
                 vm_id: "kiln-1-0".into(),
             }),
         }
+    }
+
+    #[test]
+    fn failure_text_is_short_and_escaped_for_each_destination() {
+        let mut e = job("acme/kiln", "test", "main");
+        let Detail::Job(j) = &mut e.detail else { panic!() };
+        j.failure_step = Some("Run npm *test*".into());
+        j.failure_lines = ["##[error]<!channel> a.b".to_string(), "FAIL x".to_string()].into();
+        let text = |k, key: &str| {
+            let r = render(k, None, None, &e, "msg_1", 1, None, &go()).unwrap();
+            match k {
+                Kind::Ntfy => String::from_utf8(r.body).unwrap(),
+                _ => body(&r)[key].as_str().unwrap().to_string(),
+            }
+        };
+        let slack = text(Kind::Slack, "text");
+        assert!(slack.contains("\nstep: Run npm *test*\n##[error]&lt;!channel&gt; a.\u{200B}b\nFAIL x"), "{slack}");
+        let discord = text(Kind::Discord, "content");
+        assert!(discord.contains("step: Run npm \\*test\\*") && discord.contains("\\<!channel\\>"), "{discord}");
+        assert!(text(Kind::Ntfy, "").contains("\nstep: Run npm *test*\n##[error]<!channel> a.\u{200B}b"));
+        let g = render(Kind::Generic, None, None, &e, "msg_1", 1, None, &go());
+        assert!(g.is_err(), "unsigned generic still fails closed");
+    }
+
+    #[test]
+    fn job_ended_carries_three_clean_lines_of_a_failed_job_only() {
+        let (app, q) = gl_app();
+        let f = crate::failure::Failure { step: "Run t".into(), lines: (0..5).map(|i| format!("FAIL {i} {}", "y".repeat(200))).collect() };
+        job_ended(
+            &app,
+            &Vm { failure: Some(f.clone()), ..other_vm("gl:g/p", "kiln-9-1", "ci.yml", "https://gitlab.example.com/g/p/-/jobs/7") },
+        );
+        job_ended(
+            &app,
+            &Vm {
+                failure: Some(f),
+                state: crate::vm::State::Killed,
+                result: None,
+                ..other_vm("gl:g/p", "kiln-9-2", "ci.yml", "https://gitlab.example.com/g/p/-/jobs/8")
+            },
+        );
+        let got: Vec<JobInfo> =
+            q.q.lock()
+                .unwrap()
+                .iter()
+                .map(|e| match &e.detail {
+                    Detail::Job(j) => j.clone(),
+                    _ => panic!(),
+                })
+                .collect();
+        assert_eq!((got[0].failure_step.as_deref(), got[0].failure_lines.len()), (Some("Run t"), 3));
+        assert!(got[0].failure_lines.iter().all(|l| l.chars().count() <= 100));
+        assert!((got[1].failure_step.is_none() && got[1].failure_lines.is_empty()), "killed: no summary");
     }
 
     fn body(r: &Rendered) -> serde_json::Value {
