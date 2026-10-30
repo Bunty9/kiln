@@ -4,6 +4,11 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- **kiln warns when a workflow asks for a longer timeout than kiln allows.** At start and about once a day per GitHub repo, kiln reads `.github/workflows/*.yml` on the default branch (a line scan, no extra API beyond one directory listing and one read per file; files over 256 KB are skipped). A `timeout-minutes` above `job_timeout_mins` on a job that runs on kiln's label (or may, for a matrix or expression) raises a `workflow_timeout` health item naming the repo, file, job and both numbers (Overview banner, `health.raised`); it clears when fixed. When kiln kills such a job at the limit, the job's note says what the workflow asked for.
+- **Settings › Cache shows when each repo's cache disk was last used** (a job ran on it, not only when it was last saved), next to its size and the per-repo Clear button.
+
 ## [0.2.7] - 2026-10-29
 
 Reliability release: VM launches no longer fail when other programs of the same user hold io_uring memory, a VM that runs out of memory takes only itself, a scheduler panic restarts kiln instead of leaving it idle, and only one `kiln serve` runs per data directory. GitHub jobs kiln loses (a crash or restart under them, a shutdown, a dashboard kill) no longer hang their run: kiln force-cancels it and removes the runner. A new command line (`kiln status`, `jobs`, `logs`, `wait`, `rerun`) gives scripts and agents the real outcome as an exit code, `/api/state` says why queued jobs wait, and runs GitHub holds as pending are flagged. The Overview gains job hover cards that stay current, synced host graphs and event icons; burning cards now show on phones; notification messages can link to the dashboard; usage statistics count why jobs did not pass. rustls, rustls-webpki, webpki-roots and tokio are updated for RustSec advisories. The base image recipe is unchanged (`RECIPE` 14): no rebake.
