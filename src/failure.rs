@@ -63,6 +63,10 @@ pub fn summarize(lines: impl Iterator<Item = String>) -> Option<Failure> {
     let mut err_step = None::<(usize, String)>;
     let mut other: Vec<(usize, String, String)> = vec![]; // (run group, its title, line)
     for raw in lines {
+        // The runner echoes a step's script in cyan under its `Run ...` title: source, not output.
+        if raw.contains("\x1b[36;1m") {
+            continue;
+        }
         let l = clean(&raw);
         let l = l.trim_end_matches('\r');
         let body = match l.split_once(' ') {
@@ -160,6 +164,12 @@ mod tests {
         let f = sum(&log).unwrap();
         assert_eq!(f.lines.len(), 20);
         assert_eq!(f.lines[0], "##[error]real");
+    }
+
+    #[test]
+    fn the_echoed_script_is_not_output() {
+        let log = "##[group]Run echo \"FAIL x\"\n\x1b[36;1mecho \"FAIL x\"\x1b[0m\n##[endgroup]\nFAIL x\n##[error]Process completed with exit code 1.";
+        assert_eq!(sum(log).unwrap().lines, vec!["##[error]Process completed with exit code 1.", "FAIL x"]);
     }
 
     #[test]
