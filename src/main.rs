@@ -19,6 +19,7 @@ mod telemetry;
 mod update;
 mod vm;
 mod web;
+mod wfscan;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -549,6 +550,8 @@ pub struct App {
     /// Background problems nobody is waiting on (a cache that will not save, a cleanup that keeps failing), by what
     /// raised them: the tick adds them to the health list. Cleared by whoever raised them when it works again.
     pub notices: Mutex<std::collections::BTreeMap<String, (&'static str, String)>>,
+    /// repo (lowercase) -> (when scanned, `timeout-minutes` its workflow files ask for), see `wfscan`.
+    pub wf_asks: Mutex<HashMap<String, (u64, Vec<wfscan::Ask>)>>,
     /// The `qemu-img` binary; tests point it at a script or at nothing.
     pub qemu_img: PathBuf,
     /// Fixed machine readings for tests: a tick gates launches on them, and a loaded or small box must not change a result.
@@ -614,6 +617,7 @@ impl App {
             update: Mutex::new(update::Status::load(&data)),
             notify: Default::default(),
             notices: Mutex::default(),
+            wf_asks: Mutex::default(),
             qemu_img: "qemu-img".into(),
             host_fixed: None,
             data,
@@ -839,6 +843,7 @@ async fn run() -> Result<()> {
             tokio::spawn(mirror::supervise(app.clone()));
             tokio::spawn(update::supervise(app.clone()));
             tokio::spawn(telemetry::supervise(app.clone()));
+            tokio::spawn(wfscan::supervise(app.clone()));
             // In its own task: the dashboard keeps serving while a stop drains.
             let web = tokio::spawn(web::serve(app.clone()));
             tokio::select! {

@@ -1250,7 +1250,7 @@ async fn run(app: &Arc<App>, id: &str, repo: &str, dir: &Path, kill: &tokio::syn
                     note(app, id, hold_expired_note(v.note.as_deref()));
                     return Ok(State::Killed);
                 } else if v.busy_since.is_some() {
-                    note(app, id, &format!("job timeout after {} min (kiln's job_timeout_mins)", cfg.job_timeout_mins));
+                    note(app, id, &format!("job timeout after {} min (kiln's job_timeout_mins){}", cfg.job_timeout_mins, crate::wfscan::asked_note(app, &v.repo, v.job.as_deref())));
                     return Ok(State::Killed);
                 } else if v.online_at.is_some() {
                     note(app, id, "idle timeout: no job arrived");
@@ -1733,6 +1733,12 @@ async fn finish_cache(app: &App, id: &str, repo: &str, dir: &Path, done: bool) {
     if v.cache != CacheUse::Read {
         let _ = tokio::fs::remove_file(&ov).await;
         return;
+    }
+    // The disk's mtime is what Settings › Cache shows as "last used".
+    if v.starts > 0
+        && let Ok(f) = std::fs::OpenOptions::new().write(true).open(cache_file(&app.data, repo))
+    {
+        let _ = f.set_modified(std::time::SystemTime::now());
     }
     let cfg = app.cfg();
     let writers = cfg.cache_branches(repo);
