@@ -6,6 +6,7 @@
 //! included), 2 cancelled, 3 infrastructure loss (VM lost, killed, oom, no result), 4 refused by kiln,
 //! 5 `wait` timed out, 6 kiln, auth or usage error.
 
+use crate::failure::clean;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -456,40 +457,6 @@ fn job_matches(v: &Value, repo: Option<&str>, pr: Option<u64>, sha: Option<&str>
 
 // ---- logs
 
-/// Drops a byte order mark and ANSI escape sequences (colors, cursor moves, OSC).
-fn clean(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut it = text.chars().peekable();
-    while let Some(ch) = it.next() {
-        match ch {
-            '\u{feff}' => {}
-            '\x1b' => match it.peek() {
-                Some('[') => {
-                    it.next();
-                    for c in it.by_ref() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    it.next();
-                    while let Some(c) = it.next() {
-                        if c == '\x07' || (c == '\x1b' && it.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    it.next();
-                }
-            },
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// The lines around `##[error]` and `FAIL` markers (`ctx` before and after), runs of lines joined, gaps marked `--`.
 fn failure_excerpt(log: &str, ctx: usize) -> String {
     let log = clean(log);
@@ -521,6 +488,24 @@ fn logs(a: &Args) -> Result<i32> {
     let state = c.get("/api/state")?;
     let vm =
         vms(&state).iter().find(|v| s(v, "id") == id).cloned().ok_or_else(|| anyhow!("no VM {id} in kiln's last 100 (see `kiln jobs`)"))?;
+    // The summary kiln stored when the job ended; records without one fall back to reading the log.
+    if a.flag("failed")
+        && let Some(f) = vm["failure"].as_object()
+    {
+        let step = f.get("step").and_then(Value::as_str).filter(|s| !s.is_empty());
+        let lines: Vec<&str> = f.get("lines").and_then(Value::as_array).map_or(vec![], |l| l.iter().filter_map(Value::as_str).collect());
+        if a.flag("json") {
+            print_json(&json!({ "vm": id, "failed_step": step, "lines": lines }));
+        } else {
+            if let Some(st) = step {
+                say!("failed step: {st}");
+            }
+            for l in lines {
+                println!("{}", plain(l));
+            }
+        }
+        return Ok(OK);
+    }
     let (mut from, mut text) = (0u64, String::new());
     let page = |from: u64| c.get(&format!("/api/log?{}&from={from}", enc(&[("src", id), ("file", file)])));
     loop {
@@ -776,11 +761,6 @@ mod tests {
         assert_eq!(tty_filter("a\x1b[2Jb\x1b[10;5Hc\x1b[?25ld"), "abcd");
         assert_eq!(tty_filter("a\r\nb\rc\x08\x07\u{9b}d\tz\x1bPdcs\x1b\\e"), "a\r\nbcd\tze");
         assert_eq!(plain("br\x1b]52;c;x\x07anch\r\x07"), "branch");
-    }
-
-    #[test]
-    fn strips_bom_and_ansi() {
-        assert_eq!(clean("\u{feff}\x1b[31;1mred\x1b[0m ok \x1b]0;title\x07done"), "red ok done");
     }
 
     #[test]

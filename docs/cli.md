@@ -12,7 +12,7 @@ Every command takes `--json`, which prints the API's JSON and nothing else on st
 |---|---|
 | `kiln status [--doctor]` | Version and health, last poll, slots used, running VMs, queued jobs, backoff, wait reasons (when this kiln reports them) and health items. `--doctor` adds the doctor checks. |
 | `kiln jobs [--repo R] [--pr N] [--sha S] [--branch B] [--limit N]` | One line per VM from kiln's last 100, newest first: id, state/result, repo, job, `#pr` or branch, short sha, duration, note. `--sha` matches by prefix. Default limit 20. |
-| `kiln logs <vm> [--steps\|--console] [--failed] [--follow]` | The VM's steps log (default) or console log. `--follow` keeps reading while the VM is active. `--failed` prints the failing step's name and the lines around `##[error]` and `FAIL` markers, with BOM and ANSI escapes removed. |
+| `kiln logs <vm> [--steps\|--console] [--failed] [--follow]` | The VM's steps log (default) or console log. `--follow` keeps reading while the VM is active. `--failed` prints the failure summary kiln stored when the job ended (the failing step and its first error lines); a job without one (older records, GitLab) falls back to the lines around `##[error]` and `FAIL` markers in the log, with BOM and ANSI escapes removed. |
 | `kiln wait <run-id\|sha> [--repo R] [--timeout MIN] [--interval S]` | Blocks until the run, or every run of the commit, finishes (default 60 minutes, polling every 10 s). A sha is waited for up to 2 minutes to appear. A new attempt of a run is followed. Prints the run URL and each job's conclusion. All digits is a run id, anything else a sha; `sha:<hex>` forces a sha (for an all-digit prefix). |
 | `kiln rerun <run-id> [--repo R] [--failed]` | Reruns a run, or only its failed jobs. |
 

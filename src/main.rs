@@ -3,6 +3,7 @@ mod audit;
 mod boot;
 mod cli;
 mod confine;
+mod failure;
 mod forge;
 #[cfg(test)]
 mod forge_test_mock;

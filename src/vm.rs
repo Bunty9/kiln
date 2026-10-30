@@ -218,6 +218,9 @@ pub struct Vm {
     /// The job came from a fork pull request, which kiln refuses to run.
     #[serde(default)]
     pub fork: bool,
+    /// Why a failed job failed: its failing step and first error lines (older records have none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<crate::failure::Failure>,
 }
 
 impl Vm {
@@ -513,6 +516,7 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         mint_failed: false,
         run: None,
         fork: false,
+        failure: None,
     };
     // Registered before the task starts so Kill and shutdown also work during JIT/qemu-img.
     let kill = Arc::new(tokio::sync::Notify::new());
@@ -556,7 +560,20 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 v.state = State::Done;
             }
         });
-        if let Some(v) = v {
+        if let Some(mut v) = v {
+            // A failed job (not cancelled, refused or killed): its log says why. GitHub's steps.log is
+            // local; Gitea's log is read from the forge. GitLab has neither (kiln-steps runs for GitHub
+            // only), so its records carry no summary.
+            if crate::notify::outcome(&v) == Some("failed") && !v.refused() && !v.fork {
+                let log = dir.join("steps.log");
+                v.failure = tokio::task::spawn_blocking(move || crate::failure::from_file(&log)).await.ok().flatten();
+                if v.failure.is_none() {
+                    v.failure = forge_failure(&app, &v).await;
+                }
+                if v.failure.is_some() {
+                    update(&app, &id, |x| x.failure = v.failure.clone());
+                }
+            }
             let note = v.note.as_deref().unwrap_or("-");
             // GitHub-wide: one warning per backoff step, not one per VM or tick.
             let step = match mint {
@@ -609,6 +626,25 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
         app.kills.lock().unwrap().remove(&id);
         prune(&app);
     });
+}
+
+/// A Gitea job's failure summary, from the log the forge keeps (at most 16 pages, 10 s each).
+async fn forge_failure(app: &App, v: &Vm) -> Option<crate::failure::Failure> {
+    let (f, rr) = forge_for(app, &v.repo).ok()?;
+    if f.kind() != crate::forge::Kind::Gitea {
+        return None;
+    }
+    let id = v.job_id.as_deref().and_then(|j| j.parse().ok()).or_else(|| v.job_url.as_deref().and_then(job_id))?;
+    let (mut text, mut from) = (String::new(), 0);
+    for _ in 0..16 {
+        let p = tokio::time::timeout(Duration::from_secs(10), f.job_log(&rr, id, from)).await.ok()?.ok()?;
+        text += &p.text;
+        if p.complete || p.next <= from {
+            break;
+        }
+        from = p.next;
+    }
+    crate::failure::summarize(text.lines().map(String::from))
 }
 
 /// Idle VMs of `repo` and size `cpus` (online for 30s+, oldest first) that
@@ -4158,6 +4194,7 @@ mod tests {
             mint_failed: false,
             run: None,
             fork: false,
+            failure: None,
         }
     }
 
@@ -6028,6 +6065,7 @@ print("ok")
                 ..Default::default()
             }),
             fork: false,
+            failure: None,
         }
     }
 
