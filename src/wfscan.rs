@@ -133,21 +133,28 @@ fn due(app: &App, repo: &str) -> bool {
     app.wf_asks.lock().unwrap().get(&repo.to_ascii_lowercase()).is_none_or(|(at, _)| crate::now().saturating_sub(*at) >= DAY)
 }
 
-/// Reads and scans every workflow file of `repo`; Err = could not read the directory.
+/// GET through the client's uncached path (the shared ETag cache is the poller's); None = HTTP 404.
+async fn fetch(app: &App, path: &str) -> anyhow::Result<Option<serde_json::Value>> {
+    let r = app.gh.raw(reqwest::Method::GET, path, None).await?;
+    match r.status {
+        404 => Ok(None),
+        200..=299 => Ok(Some(serde_json::from_slice(&r.body)?)),
+        s => anyhow::bail!("GET {path}: {s} {}", String::from_utf8_lossy(&r.body)),
+    }
+}
+
+/// Reads and scans every workflow file of `repo`; Err = could not read the directory or a file.
 async fn scan_repo(app: &App, repo: &str, label: &str) -> anyhow::Result<Vec<Ask>> {
-    let dir = match app.gh.get(&format!("repos/{repo}/contents/.github/workflows")).await {
-        Ok(d) => d,
-        // No workflows directory: nothing to warn about.
-        Err(e) if e.to_string().contains("404") => return Ok(vec![]),
-        Err(e) => return Err(e),
-    };
+    // No workflows directory: nothing to warn about.
+    let Some(dir) = fetch(app, &format!("repos/{repo}/contents/.github/workflows")).await? else { return Ok(vec![]) };
     let mut out = vec![];
     for f in dir.as_array().into_iter().flatten() {
         let (Some(name), Some(path)) = (f["name"].as_str(), f["path"].as_str()) else { continue };
         if !(name.ends_with(".yml") || name.ends_with(".yaml")) || f["size"].as_u64().unwrap_or(0) > MAX_FILE {
             continue;
         }
-        let Ok(v) = app.gh.get(&format!("repos/{repo}/contents/{path}")).await else { continue };
+        // A failed read fails the whole scan: a partial result must not be kept for a day.
+        let Some(v) = fetch(app, &format!("repos/{repo}/contents/{path}")).await? else { anyhow::bail!("{path} disappeared") };
         let b64: String = v["content"].as_str().unwrap_or("").split_whitespace().collect();
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
             out.extend(scan(name, &String::from_utf8_lossy(&bytes), label));
@@ -185,8 +192,11 @@ pub fn asked_note(app: &App, repo: &str, job: Option<&str>) -> String {
     let m = app.wf_asks.lock().unwrap();
     let asks = m.get(&repo.to_ascii_lowercase()).map(|(_, a)| a.as_slice()).unwrap_or_default();
     let hit = asks.iter().filter(|a| a.minutes > limit && !a.step).filter(|a| {
-        let j = job.to_ascii_lowercase();
-        j.starts_with(&a.job.to_ascii_lowercase()) || a.name.as_ref().is_some_and(|n| j.starts_with(&n.to_ascii_lowercase()))
+        let m = |n: &str| {
+            let (n, j) = (n.to_ascii_lowercase(), job.to_ascii_lowercase());
+            !n.is_empty() && (j == n || j.strip_prefix(&n).is_some_and(|r| r.starts_with(" (")))
+        };
+        m(&a.job) || a.name.as_deref().is_some_and(m)
     });
     match hit.map(|a| a.minutes).max() {
         Some(m) => format!("; the workflow asked for timeout-minutes: {m}"),
@@ -196,6 +206,7 @@ pub fn asked_note(app: &App, repo: &str, job: Option<&str>) -> String {
 
 pub async fn supervise(app: Arc<App>) {
     tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut failing = std::collections::HashSet::new();
     loop {
         let label = app.cfg().label;
         let repos: HashMap<_, _> = app.repos().into_iter().map(|r| (r.to_ascii_lowercase(), r)).collect();
@@ -205,14 +216,19 @@ pub async fn supervise(app: Arc<App>) {
             }
             match scan_repo(&app, r, &label).await {
                 Ok(a) => {
+                    failing.remove(&r.to_ascii_lowercase());
                     app.wf_asks.lock().unwrap().insert(r.to_ascii_lowercase(), (crate::now(), a));
                 }
                 Err(e) => {
-                    tracing::debug!("workflow scan of {r}: {e}");
+                    let k = r.to_ascii_lowercase();
+                    // Once per failure streak; the hourly retries stay quiet until a scan succeeds.
+                    if failing.insert(k.clone()) {
+                        tracing::warn!("workflow scan of {r}: {e}");
+                    }
                     // Try again in about an hour rather than every round.
                     let mut m = app.wf_asks.lock().unwrap();
-                    let asks = m.remove(&r.to_ascii_lowercase()).map(|(_, a)| a).unwrap_or_default();
-                    m.insert(r.to_ascii_lowercase(), (crate::now().saturating_sub(DAY - 3600), asks));
+                    let asks = m.remove(&k).map(|(_, a)| a).unwrap_or_default();
+                    m.insert(k, (crate::now().saturating_sub(DAY - 3600), asks));
                 }
             }
         }
@@ -270,8 +286,31 @@ mod tests {
         );
         assert!(asked_note(&app, "Acme/Demo", Some("Build it (x)")).contains("120"));
         assert_eq!(asked_note(&app, "acme/demo", Some("test")), "");
+        assert!(asked_note(&app, "acme/demo", Some("Build it")).contains("120"));
+        assert_eq!(asked_note(&app, "acme/demo", Some("Build items")), "");
         app.wf_asks.lock().unwrap().clear();
         raise(&app);
         assert!(app.notices.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn asked_note_matches_exactly_and_takes_the_largest() {
+        let app = crate::test_app("wfscan-note");
+        let ask = |file: &str, job: &str, name: Option<&str>, minutes| Ask {
+            file: file.into(),
+            job: job.into(),
+            name: name.map(Into::into),
+            minutes,
+            step: false,
+            certain: true,
+        };
+        let asks = vec![ask("a.yml", "test", None, 90), ask("b.yml", "test", None, 150), ask("c.yml", "", Some(""), 500)];
+        app.wf_asks.lock().unwrap().insert("acme/demo".into(), (1, asks));
+        let n = |j: &str| asked_note(&app, "acme/demo", Some(j));
+        assert!(n("test").contains("150"));
+        assert!(n("Test (ubuntu, 1.80)").contains("150"));
+        assert_eq!(n("test-integration"), "");
+        assert_eq!(n(""), "");
+        assert_eq!(n("anything"), "");
     }
 }
