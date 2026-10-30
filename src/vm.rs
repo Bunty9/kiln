@@ -561,19 +561,6 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
             }
         });
         if let Some(mut v) = v {
-            // A failed job (not cancelled, refused or killed): its log says why. GitHub's steps.log is
-            // local; Gitea's log is read from the forge. GitLab has neither (kiln-steps runs for GitHub
-            // only), so its records carry no summary.
-            if crate::notify::outcome(&v) == Some("failed") && !v.refused() && !v.fork {
-                let log = dir.join("steps.log");
-                v.failure = tokio::task::spawn_blocking(move || crate::failure::from_file(&log)).await.ok().flatten();
-                if v.failure.is_none() {
-                    v.failure = forge_failure(&app, &v).await;
-                }
-                if v.failure.is_some() {
-                    update(&app, &id, |x| x.failure = v.failure.clone());
-                }
-            }
             let note = v.note.as_deref().unwrap_or("-");
             // GitHub-wide: one warning per backoff step, not one per VM or tick.
             let step = match mint {
@@ -619,6 +606,23 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
                 retire(&app, &v.repo, vec![(v.id.clone(), rid)], Reason::Unused).await;
             }
             record_usage(&app.data, &v);
+            // A failed job (not cancelled, refused or killed): its log says why. Read after the record is
+            // persisted and the runner retired, so the reads cannot delay them; the notification waits
+            // for the summary. GitHub's steps.log is local; Gitea's log is read from the forge. GitLab
+            // has neither (kiln-steps runs for GitHub only), so its records carry no summary.
+            if crate::notify::outcome(&v) == Some("failed") && !v.refused() && !v.fork {
+                let log = dir.join("steps.log");
+                v.failure = tokio::task::spawn_blocking(move || crate::failure::from_file(&log)).await.ok().flatten();
+                if v.failure.is_none() {
+                    v.failure = forge_failure(&app, &v).await;
+                }
+                if v.failure.is_some() {
+                    update(&app, &id, |x| x.failure = v.failure.clone());
+                    if dir.exists() {
+                        persist(&app, &v);
+                    }
+                }
+            }
             crate::notify::job_ended(&app, &v);
         }
         // Last: shutdown waits on `kills` to know cleanup is complete.
@@ -628,23 +632,16 @@ pub fn launch(app: Arc<App>, repo: String, cpus: u32, warm: bool) {
     });
 }
 
-/// A Gitea job's failure summary, from the log the forge keeps (at most 16 pages, 10 s each).
+/// A Gitea job's failure summary, from the log the forge keeps: one download (every page request
+/// fetches the whole log), 15 s at most.
 async fn forge_failure(app: &App, v: &Vm) -> Option<crate::failure::Failure> {
     let (f, rr) = forge_for(app, &v.repo).ok()?;
     if f.kind() != crate::forge::Kind::Gitea {
         return None;
     }
     let id = v.job_id.as_deref().and_then(|j| j.parse().ok()).or_else(|| v.job_url.as_deref().and_then(job_id))?;
-    let (mut text, mut from) = (String::new(), 0);
-    for _ in 0..16 {
-        let p = tokio::time::timeout(Duration::from_secs(10), f.job_log(&rr, id, from)).await.ok()?.ok()?;
-        text += &p.text;
-        if p.complete || p.next <= from {
-            break;
-        }
-        from = p.next;
-    }
-    crate::failure::summarize(text.lines().map(String::from))
+    let p = tokio::time::timeout(Duration::from_secs(15), f.job_log(&rr, id, 0)).await.ok()?.ok()?;
+    crate::failure::summarize(p.text.lines().map(String::from))
 }
 
 /// Idle VMs of `repo` and size `cpus` (online for 30s+, oldest first) that
