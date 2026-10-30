@@ -377,7 +377,7 @@ pub struct PollStatus {
     pub repo_errors: HashMap<String, String>,
     /// Why launching is held back this tick (low memory/disk).
     pub blocked: Option<String>,
-    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "disk", "budget" or "held".
+    /// What `blocked` is: "draining", "old_image", "github_api", "egress", "memory", "load", "disk", "budget" or "held".
     pub blocked_kind: Option<String>,
     /// repo -> queued fork pull request jobs kiln refuses to run.
     pub refused_forks: HashMap<String, usize>,
@@ -1641,9 +1641,15 @@ async fn tick(app: &Arc<App>, cfg: &Config) -> Result<HashMap<String, HashMap<u3
                 warm = 0;
             }
             let want = if held { 0 } else { (demand + warm).min(cfg.max_vms.saturating_sub(active)) };
-            // The per-repo cap counts every active VM of the repo (warm ones too).
+            // The per-repo cap counts the repo's active VMs (warm ones too), not debug holds: nothing would release them for it.
             let repo_room = cfg.repo_cap(repo).map(|cap| {
-                let n = app.vms.lock().unwrap().iter().filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active()).count();
+                let n = app
+                    .vms
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| v.repo.eq_ignore_ascii_case(repo) && v.state.is_active() && v.state != vm::State::Held)
+                    .count();
                 (cap, cap.saturating_sub(n))
             });
             let want = repo_room.map_or(want, |(_, room)| want.min(room));
@@ -2076,6 +2082,20 @@ mod tests {
             .first(),
             Some(&"repo_cap")
         );
+        // A debug hold doesn't count against the cap: nothing would release it for the repo.
+        let held = waiting_reasons("wait-cap-held", |a, c| {
+            c.max_vms = 4;
+            c.max_vms_per_repo = 2;
+            let v: vm::Vm = serde_json::from_value(serde_json::json!({
+                "id": "kiln-7-0", "repo": "acme/demo", "runner_id": 1, "state": "held", "job": "j", "result": "Failed",
+                "started": 1, "busy_since": 1, "ended": null, "note": null
+            }))
+            .unwrap();
+            a.vms.lock().unwrap().push(v);
+        })
+        .await;
+        // Counted, the hold would leave room for one of the two small jobs: both sizes would wait.
+        assert_eq!(held, ["repo_cap"], "only the large job waits");
         assert_eq!(
             waiting_reasons("wait-mem", |a, c| {
                 c.max_vms = 4;

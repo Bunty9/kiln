@@ -30,7 +30,7 @@ kiln keeps its settings in `config.json` inside its data directory. You normally
 | Field | Type | Default | Valid values | Applies | What it does |
 |---|---|---|---|---|---|
 | `max_vms` | integer | `2` | `0` to `64` | live | Maximum VMs at once (booting, idle, busy or held). `0` pauses launching; polling and everything else continues, and warm VMs are not kept. |
-| `max_vms_per_repo` | integer | `0` | `0` and up | live | Most VMs (booting, idle, busy or held, warm ones included) one repo may have at once, so a busy repo cannot take every slot. `0` = unlimited. A queued job held by it waits with reason `repo_cap`. Config file only. |
+| `max_vms_per_repo` | integer | `0` | `0` and up | live | Most VMs (booting, idle or busy, warm ones included; debug holds don't count) one repo may have at once, so a busy repo cannot take every slot. `0` = unlimited. A queued job held by it waits with reason `repo_cap`. Config file only. |
 | `repo_max_vms` | object | `{}` | `"owner/name"` (entries for repos kiln does not serve are ignored) to `0` and up | live | Per-repo override of `max_vms_per_repo`; `0` lifts the cap for that repo. |
 | `psi_hold_cpu` | integer | `0` | `0` to `100` | live | Hold launches while the host's CPU pressure (`/proc/pressure/cpu`, `some avg10`: the share of the last 10 s tasks stalled waiting for a CPU) is above this percent. `0` = off. Applies only while at least one job VM is running, so a busy desktop never holds kiln at zero VMs; it limits overlap, not the first job. Shows as `host_hold`, in `kiln doctor` and in the Overview banner. Config file only. |
 | `psi_hold_io` | integer | `0` | `0` to `100` | live | The same for IO pressure (`/proc/pressure/io`). |
