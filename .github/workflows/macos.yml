@@ -1,4 +1,4 @@
-# Lint and test kiln on Apple Silicon (GitHub-hosted macos-14). Runs on every pull request that
+# Lint and test kiln on Apple Silicon (GitHub-hosted macos-15). Runs on every pull request that
 # touches the code or the workflows (macOS minutes are free for public repos), and from the Actions
 # tab (workflow_dispatch). It only compiles and runs unit tests: it cannot boot VMs (no nested
 # virtualization on hosted runners); see docs/apple-silicon.md for the real-Mac checklist.
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-14 # Apple Silicon
+    runs-on: macos-15 # Apple Silicon
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
