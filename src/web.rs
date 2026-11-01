@@ -875,7 +875,11 @@ async fn admission(app: &App, via: Via, mut req: Request) -> (Result<Request, Re
     match user {
         None if api && !key_ok(key.as_deref()) => {
             who.actor = "local, without the key".into();
-            deny(StatusCode::UNAUTHORIZED, "dashboard key required (see ~/.local/share/kiln/dashboard.key on the CI box)", who)
+            deny(
+                StatusCode::UNAUTHORIZED,
+                "dashboard key required: send it as the x-kiln-key header (the key is in <data dir>/dashboard.key on the kiln host)",
+                who,
+            )
         }
         Some(login) if !login.as_deref().is_some_and(|l| peer_allowed(&app.cfg().allowed_users, me.owner.clone(), l)) => {
             deny(StatusCode::FORBIDDEN, "your tailnet identity is not allowed (allowed_users)", who)
@@ -1975,7 +1979,8 @@ mod tests {
                 "queued_by_size",
                 "rate",
                 "refused_forks",
-                "repo_errors"
+                "repo_errors",
+                "waiting"
             ]
         );
         assert_eq!(
