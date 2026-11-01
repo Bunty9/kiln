@@ -126,7 +126,7 @@ jobs:
           retention-days: 1
 
   build-macos:
-    runs-on: macos-14 # Apple Silicon
+    runs-on: macos-15 # Apple Silicon
     permissions:
       contents: read
     steps:

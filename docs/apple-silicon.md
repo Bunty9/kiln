@@ -1,6 +1,6 @@
 # kiln on Apple Silicon (macOS)
 
-> **Status: untested on a real Mac.** Lint and unit tests pass on a GitHub-hosted `macos-14` (Apple Silicon) runner, including real `sysctl`, `vm_stat` and `ps` readings. The arm64 guest path was run end to end on x86 Linux under emulation: the arm64 recipe baked under QEMU TCG, and an aarch64 kiln (under `qemu-user`, with a shim swapping `accel=kvm` for TCG) booted a warm VM from it that registered an `ARM64`/`kiln-arm64` runner, reached "Listening for Jobs" and was released over `ttyAMA0`; a hold with fw_cfg SSH keys worked too. But kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it.
+> **Status: untested on a real Mac.** Lint and unit tests pass on a GitHub-hosted `macos-15` (Apple Silicon) runner, including real `sysctl`, `vm_stat` and `ps` readings. The arm64 guest path was run end to end on x86 Linux under emulation: the arm64 recipe baked under QEMU TCG, and an aarch64 kiln (under `qemu-user`, with a shim swapping `accel=kvm` for TCG) booted a warm VM from it that registered an `ARM64`/`kiln-arm64` runner, reached "Listening for Jobs" and was released over `ttyAMA0`; a hold with fw_cfg SSH keys worked too. But kiln has not yet booted a VM with Hypervisor.framework. Work through the [test checklist](#test-checklist) before relying on it.
 
 On a Mac with Apple Silicon, kiln runs **native linux/arm64 job VMs**: one fresh Ubuntu 24.04 arm64 VM per job, booted by QEMU with Apple's Hypervisor.framework (HVF). It is the same kiln as on Linux, with the differences listed below.
 
@@ -92,9 +92,9 @@ The matching rules are the same as on x64 (exactly one kiln label, sizes 2, 4, 8
 
 ## Releases
 
-`release.yml` has a `build-macos` job on a GitHub-hosted `macos-14` (Apple Silicon) runner that tests, builds and packages `kiln-X.Y.Z-aarch64-macos.tar.gz` for every release; the `sign` job signs it with the same Ed25519 key as the Linux tarballs and publishes it. The job fails if the binary lacks the linker's ad-hoc code signature, which Apple Silicon requires to run it. There is no Apple Developer ID signature or notarization: a binary fetched with curl (or by kiln's own updater) is not quarantined, so it runs, but one downloaded in a browser needs `xattr -d com.apple.quarantine kiln`. A macOS kiln updates itself only from `aarch64-macos` tarballs. Intel Macs have no build.
+`release.yml` has a `build-macos` job on a GitHub-hosted `macos-15` (Apple Silicon) runner that tests, builds and packages `kiln-X.Y.Z-aarch64-macos.tar.gz` for every release; the `sign` job signs it with the same Ed25519 key as the Linux tarballs and publishes it. The job fails if the binary lacks the linker's ad-hoc code signature, which Apple Silicon requires to run it. There is no Apple Developer ID signature or notarization: a binary fetched with curl (or by kiln's own updater) is not quarantined, so it runs, but one downloaded in a browser needs `xattr -d com.apple.quarantine kiln`. A macOS kiln updates itself only from `aarch64-macos` tarballs. Intel Macs have no build.
 
-`.github/workflows/macos.yml` runs `cargo clippy` and `cargo test` on `macos-14`, from the Actions tab or on pull requests labelled `macos` (hosted macOS minutes are expensive). It cannot boot VMs: hosted runners have no nested virtualization.
+`.github/workflows/macos.yml` runs `cargo clippy` and `cargo test` on `macos-15`, from the Actions tab or on pull requests labelled `macos` (hosted macOS minutes are expensive). It cannot boot VMs: hosted runners have no nested virtualization.
 
 ## Test checklist
 
