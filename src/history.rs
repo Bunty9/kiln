@@ -53,6 +53,9 @@ pub struct Row {
     /// Run kind and event only (`{kind, event}`), as the Jobs list shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunKind>,
+    /// What the local Actions cache did for the job (restored, saved, promoted or discarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gha: Option<crate::vm::GhaUse>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -92,6 +95,7 @@ impl Row {
             warm: v.warm,
             cache: v.cache,
             run: v.run.as_ref().map(|r| RunKind { kind: r.kind, event: r.event.clone() }),
+            gha: v.gha.clone(),
         })
     }
     pub fn end(&self) -> u64 {
