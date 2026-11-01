@@ -51,16 +51,21 @@ pub fn hypervisor() -> (bool, String) {
     // in `id` but not in processes started by the old user manager.
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
-    let warn = match (kvm_gid(&group), proc_uid(&status)) {
-        (Some(g), uid) if !has_gid(&status, g) => format!(
+    let warn = kvm_warn(kvm.is_ok(), &group, &status);
+    match kvm {
+        Ok(_) => (true, format!("/dev/kvm opens read/write{warn}")),
+        Err(e) => (false, format!("/dev/kvm: {e}{warn}")),
+    }
+}
+
+/// The "group not active" hint, only when /dev/kvm failed to open: if it opened, the process has access.
+fn kvm_warn(opened: bool, group: &str, status: &str) -> String {
+    match (opened, kvm_gid(group), proc_uid(status)) {
+        (false, Some(g), uid) if !has_gid(status, g) => format!(
             " (kvm group not active for this process yet — restart the user manager (sudo systemctl restart user@{}) or reboot)",
             uid.map_or("<uid>".into(), |u| u.to_string())
         ),
         _ => String::new(),
-    };
-    match kvm {
-        Ok(_) => (true, format!("/dev/kvm opens read/write{warn}")),
-        Err(e) => (false, format!("/dev/kvm: {e}{warn}")),
     }
 }
 
@@ -186,6 +191,9 @@ mod tests {
         let st = "Name:\tkiln\nUid:\t1000\t1000\t1000\t1000\nGroups:\t4 27 993 1000\n";
         assert!(has_gid(st, 993) && !has_gid(st, 994));
         assert_eq!(proc_uid(st), Some(1000));
+        let g = "kvm:x:994:alice\n";
+        assert!(kvm_warn(false, g, st).contains("user@1000"));
+        assert_eq!(kvm_warn(true, g, st), "");
     }
 
     #[test]
