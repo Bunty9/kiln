@@ -94,7 +94,7 @@ The matching rules are the same as on x64 (exactly one kiln label, sizes 2, 4, 8
 
 `release.yml` has a `build-macos` job on a GitHub-hosted `macos-15` (Apple Silicon) runner that tests, builds and packages `kiln-X.Y.Z-aarch64-macos.tar.gz` for every release; the `sign` job signs it with the same Ed25519 key as the Linux tarballs and publishes it. The job fails if the binary lacks the linker's ad-hoc code signature, which Apple Silicon requires to run it. There is no Apple Developer ID signature or notarization: a binary fetched with curl (or by kiln's own updater) is not quarantined, so it runs, but one downloaded in a browser needs `xattr -d com.apple.quarantine kiln`. A macOS kiln updates itself only from `aarch64-macos` tarballs. Intel Macs have no build.
 
-`.github/workflows/macos.yml` runs `cargo clippy` and `cargo test` on `macos-15`, from the Actions tab or on pull requests labelled `macos` (hosted macOS minutes are expensive). It cannot boot VMs: hosted runners have no nested virtualization.
+`.github/workflows/macos.yml` runs `cargo clippy` and `cargo test` on `macos-15`, on pull requests that touch the code or the workflows, and from the Actions tab. It cannot boot VMs: hosted runners have no nested virtualization.
 
 ## Test checklist
 
