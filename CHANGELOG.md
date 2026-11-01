@@ -4,6 +4,10 @@ All notable changes to kiln are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kiln wait` refuses a target it cannot match exactly.** An empty sha (`kiln wait sha:`) or a short prefix matched every recent run whose sha started with it, so the exit code could come from unrelated runs, and a branch name waited 2 minutes for a run that never appears. A sha must now be 7 to 64 hex characters, otherwise `kiln wait` exits 6 at once. `kiln jobs --sha` matches in any case, as `kiln wait` already did.
+
 ## [0.2.7] - 2026-10-29
 
 Reliability release: VM launches no longer fail when other programs of the same user hold io_uring memory, a VM that runs out of memory takes only itself, a scheduler panic restarts kiln instead of leaving it idle, and only one `kiln serve` runs per data directory. GitHub jobs kiln loses (a crash or restart under them, a shutdown, a dashboard kill) no longer hang their run: kiln force-cancels it and removes the runner. A new command line (`kiln status`, `jobs`, `logs`, `wait`, `rerun`) gives scripts and agents the real outcome as an exit code, `/api/state` says why queued jobs wait, and runs GitHub holds as pending are flagged. The Overview gains job hover cards that stay current, synced host graphs and event icons; burning cards now show on phones; notification messages can link to the dashboard; usage statistics count why jobs did not pass. rustls, rustls-webpki, webpki-roots and tokio are updated for RustSec advisories. The base image recipe is unchanged (`RECIPE` 14): no rebake.
