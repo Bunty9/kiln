@@ -266,12 +266,18 @@ fn runs_of(page: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// `kiln wait`'s target: digits are a run id (GitHub's are 11 digits and growing), `sha:<hex>` or any
-/// other hex is a commit.
-fn wait_target(t: &str) -> (bool, String) {
-    match t.strip_prefix("sha:") {
-        Some(h) => (false, h.to_lowercase()),
-        None => (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()), t.to_lowercase()),
+/// other hex is a commit. A sha is matched by prefix, so an empty or short one would wait on unrelated
+/// runs, and a branch name would wait 2 minutes for nothing: both are usage errors.
+fn wait_target(t: &str) -> Result<(bool, String)> {
+    let hex = match t.strip_prefix("sha:") {
+        Some(h) => h,
+        None if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) => return Ok((true, t.into())),
+        None => t,
+    };
+    if !(7..=64).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("{t:?} is neither a run id nor a commit sha (7 to 64 hex characters)");
     }
+    Ok((false, hex.to_lowercase()))
 }
 
 fn ago(secs: u64) -> String {
@@ -450,7 +456,7 @@ fn jobs(a: &Args) -> Result<i32> {
 fn job_matches(v: &Value, repo: Option<&str>, pr: Option<u64>, sha: Option<&str>, branch: Option<&str>) -> bool {
     repo.is_none_or(|r| s(v, "repo") == r)
         && pr.is_none_or(|p| v["run"]["pr"].as_u64() == Some(p))
-        && sha.is_none_or(|x| !x.is_empty() && s(&v["run"], "sha").starts_with(x))
+        && sha.is_none_or(|x| !x.is_empty() && s(&v["run"], "sha").to_lowercase().starts_with(&x.to_lowercase()))
         && branch.is_none_or(|b| s(&v["run"], "branch") == b)
 }
 
@@ -645,11 +651,11 @@ fn worst(codes: &[i32]) -> i32 {
 }
 
 fn wait(a: &Args) -> Result<i32> {
+    let target = a.pos[0].clone();
+    let (by_id, sha) = wait_target(&target)?;
     let c = Conn::open(&data_dir()?)?;
     let repo = repo_of(&c, a)?;
-    let target = a.pos[0].clone();
     let (timeout, interval) = (Duration::from_secs(a.num("timeout", 60)? * 60), Duration::from_secs(a.num("interval", 10)?.max(1)));
-    let (by_id, sha) = wait_target(&target);
     let q = |s: &str| enc(&[("repo", &repo)]) + s;
     let start = Instant::now();
     // run id -> (attempt, when this attempt was first seen)
@@ -842,6 +848,7 @@ mod tests {
         assert!(job_matches(&v, Some("acme/demo"), Some(4), Some("abcd"), Some("feat")));
         assert!(!job_matches(&v, None, Some(5), None, None));
         assert!(!job_matches(&v, None, None, Some("bcd"), None));
+        assert!(job_matches(&v, None, None, Some("ABCDEF"), None));
         assert!(!job_matches(&v, Some("acme/other"), None, None, None));
     }
 
@@ -886,10 +893,16 @@ mod tests {
 
     #[test]
     fn wait_targets_run_ids_of_any_length_and_shas() {
-        assert_eq!(wait_target("40855697510"), (true, "40855697510".into()));
-        assert_eq!(wait_target("7"), (true, "7".into()));
-        assert_eq!(wait_target("4B0B413"), (false, "4b0b413".into()));
-        assert_eq!(wait_target("sha:1234567"), (false, "1234567".into()));
+        assert_eq!(wait_target("40855697510").unwrap(), (true, "40855697510".into()));
+        assert_eq!(wait_target("7").unwrap(), (true, "7".into()));
+        assert_eq!(wait_target("4B0B413").unwrap(), (false, "4b0b413".into()));
+        assert_eq!(wait_target("sha:1234567").unwrap(), (false, "1234567".into()));
+        let full = "4b0b4132a9c8e1f0d7b6a5c4e3d2f1a0b9c8d7e6";
+        assert_eq!(wait_target(full).unwrap(), (false, full.into()));
+        // Prefixes that would match every run, or several, and names that never match a sha.
+        for bad in ["", "sha:", "sha:abc", "abc123", "main", "feat/x", "sha:12345g7", &"a".repeat(65)] {
+            assert!(wait_target(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
